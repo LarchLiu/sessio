@@ -15,7 +15,7 @@ use agent_client_protocol::{
 };
 use anyhow::{Context, Result};
 use base64::Engine;
-use futures::future::{Either, select};
+use futures::future::{select, Either};
 use tokio::io::AsyncBufReadExt as _;
 use tokio::process::{Child as TokioChild, Command as TokioCommand};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
@@ -144,21 +144,27 @@ pub fn probe_capabilities(command: String, workspace_path: String) -> Result<Run
         agent_client_protocol::Client
             .builder()
             .name("sessio")
-            .connect_with(transport, |connection: ConnectionTo<AcpAgentRole>| async move {
-                let init = connection
-                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                    .block_task()
-                    .await?;
-                Ok::<RuntimeCapabilitySet, agent_client_protocol::Error>(
-                    runtime_capabilities_from_acp(&init.agent_capabilities),
-                )
-            })
+            .connect_with(
+                transport,
+                |connection: ConnectionTo<AcpAgentRole>| async move {
+                    let init = connection
+                        .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
+                    Ok::<RuntimeCapabilitySet, agent_client_protocol::Error>(
+                        runtime_capabilities_from_acp(&init.agent_capabilities),
+                    )
+                },
+            )
             .await
             .map_err(anyhow::Error::from)
     })
 }
 
-pub fn probe_initialize_response(command: String, workspace_path: String) -> Result<AcpInitializeProbe> {
+pub fn probe_initialize_response(
+    command: String,
+    workspace_path: String,
+) -> Result<AcpInitializeProbe> {
     tauri::async_runtime::block_on(async move {
         let transport = spawn_acp_transport(&command, &workspace_path).with_context(|| {
             format!("failed to spawn ACP command in workspace {workspace_path}")
@@ -166,26 +172,29 @@ pub fn probe_initialize_response(command: String, workspace_path: String) -> Res
         agent_client_protocol::Client
             .builder()
             .name("sessio")
-            .connect_with(transport, |connection: ConnectionTo<AcpAgentRole>| async move {
-                let init = connection
-                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                    .block_task()
-                    .await?;
-                let protocol_version = init.protocol_version.to_string();
-                let raw_initialize_response_json =
-                    serde_json::to_string(&init).map_err(|error| {
-                        agent_client_protocol::Error::internal_error().data(error.to_string())
-                    })?;
-                let raw_capabilities_json = serde_json::to_string(&init.agent_capabilities)
-                    .map_err(|error| {
-                        agent_client_protocol::Error::internal_error().data(error.to_string())
-                    })?;
-                Ok::<AcpInitializeProbe, agent_client_protocol::Error>(AcpInitializeProbe {
-                    protocol_version,
-                    raw_initialize_response_json,
-                    raw_capabilities_json,
-                })
-            })
+            .connect_with(
+                transport,
+                |connection: ConnectionTo<AcpAgentRole>| async move {
+                    let init = connection
+                        .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
+                    let protocol_version = init.protocol_version.to_string();
+                    let raw_initialize_response_json =
+                        serde_json::to_string(&init).map_err(|error| {
+                            agent_client_protocol::Error::internal_error().data(error.to_string())
+                        })?;
+                    let raw_capabilities_json = serde_json::to_string(&init.agent_capabilities)
+                        .map_err(|error| {
+                            agent_client_protocol::Error::internal_error().data(error.to_string())
+                        })?;
+                    Ok::<AcpInitializeProbe, agent_client_protocol::Error>(AcpInitializeProbe {
+                        protocol_version,
+                        raw_initialize_response_json,
+                        raw_capabilities_json,
+                    })
+                },
+            )
             .await
             .map_err(anyhow::Error::from)
     })
@@ -259,11 +268,19 @@ async fn run_session(
             async move |notification: SessionNotification, _connection| {
                 let update_type = session_update_type(&notification.update).to_string();
                 let Some(turn_id) = current_turn(&notification_turn_id) else {
-                    log::warn!(
-                        "[sessio-runtime:acp:notification:session-level] session={} update={:?}",
-                        notification_session_id,
-                        notification.update
-                    );
+                    if session_update_is_session_scoped(&notification.update) {
+                        log::debug!(
+                            "[sessio-runtime:acp:notification:session-level] session={} update={:?}",
+                            notification_session_id,
+                            notification.update
+                        );
+                    } else {
+                        log::warn!(
+                            "[sessio-runtime:acp:notification:session-level] session={} update={:?}",
+                            notification_session_id,
+                            notification.update
+                        );
+                    }
                     notification_manager
                         .emit(
                             acp_protocol_event(
@@ -717,9 +734,7 @@ fn kill_child_process_group(child: &mut TokioChild, group: &ChildProcessGroup) {
 fn spawn_acp_transport(command: &str, workspace_path: &str) -> Result<SpawnedAcpTransport> {
     let args = shell_words::split(command)
         .with_context(|| format!("failed to parse ACP command: {command}"))?;
-    let (program, rest) = args
-        .split_first()
-        .context("ACP command cannot be empty")?;
+    let (program, rest) = args.split_first().context("ACP command cannot be empty")?;
 
     let mut child = TokioCommand::new(program);
     configure_child_process_group(&mut child);
@@ -730,9 +745,9 @@ fn spawn_acp_transport(command: &str, workspace_path: &str) -> Result<SpawnedAcp
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let mut child = child.spawn().with_context(|| {
-        format!("spawn ACP command `{command}` with cwd `{workspace_path}`")
-    })?;
+    let mut child = child
+        .spawn()
+        .with_context(|| format!("spawn ACP command `{command}` with cwd `{workspace_path}`"))?;
     let group = child_process_group(&child);
     let outgoing = child.stdin.take().context("failed to open ACP stdin")?;
     let incoming = child.stdout.take().context("failed to open ACP stdout")?;
@@ -985,13 +1000,6 @@ fn session_config_message(
     value: serde_json::Value,
 ) -> Result<(&'static str, serde_json::Value), agent_client_protocol::Error> {
     match config_id {
-        "model" => Ok((
-            "session/set_model",
-            serde_json::json!({
-                "sessionId": acp_session_id.to_string(),
-                "modelId": json_id_to_string(value),
-            }),
-        )),
         "mode" | "permission_mode" | "permissionMode" => Ok((
             "session/set_mode",
             serde_json::json!({
@@ -1441,6 +1449,16 @@ fn session_update_extends_turn_quiet_period(update: &SessionUpdate) -> bool {
     )
 }
 
+fn session_update_is_session_scoped(update: &SessionUpdate) -> bool {
+    matches!(
+        update,
+        SessionUpdate::AvailableCommandsUpdate(_)
+            | SessionUpdate::CurrentModeUpdate(_)
+            | SessionUpdate::ConfigOptionUpdate(_)
+            | SessionUpdate::SessionInfoUpdate(_)
+    )
+}
+
 fn current_turn(current_turn_id: &Arc<Mutex<Option<String>>>) -> Option<String> {
     current_turn_id.lock().ok().and_then(|guard| guard.clone())
 }
@@ -1651,14 +1669,17 @@ mod tests {
 
     #[test]
     fn spawn_acp_transport_parses_npx_command_without_shell_wrapper() {
-        let args = shell_words::split("npx -y @zed-industries/codex-acp@latest")
-            .expect("split command");
+        let args =
+            shell_words::split("npx -y @zed-industries/codex-acp@latest").expect("split command");
         let (program, rest) = args.split_first().expect("program");
 
         assert_eq!(*program, "npx");
         assert_eq!(
             rest,
-            &["-y".to_string(), "@zed-industries/codex-acp@latest".to_string()]
+            &[
+                "-y".to_string(),
+                "@zed-industries/codex-acp@latest".to_string()
+            ]
         );
     }
 
@@ -1678,7 +1699,7 @@ mod tests {
     }
 
     #[test]
-    fn model_config_uses_session_set_model_params() {
+    fn model_config_uses_session_set_config_option_params() {
         let session_id = SessionId::new("session-123");
         let (method, request) = session_config_message(
             &session_id,
@@ -1687,12 +1708,13 @@ mod tests {
         )
         .expect("session config message");
 
-        assert_eq!(method, "session/set_model");
+        assert_eq!(method, "session/set_config_option");
         assert_eq!(
             request,
             serde_json::json!({
                 "sessionId": "session-123",
-                "modelId": "gpt-5-codex",
+                "configId": "model",
+                "value": "gpt-5-codex",
             })
         );
     }
@@ -1777,6 +1799,25 @@ mod tests {
         );
 
         assert!(!session_update_extends_turn_quiet_period(&update));
+    }
+
+    #[test]
+    fn config_updates_are_classified_as_session_scoped() {
+        let update = SessionUpdate::ConfigOptionUpdate(
+            agent_client_protocol::schema::ConfigOptionUpdate::new(vec![]),
+        );
+
+        assert!(session_update_is_session_scoped(&update));
+    }
+
+    #[test]
+    fn turn_content_updates_are_not_classified_as_session_scoped() {
+        let update =
+            SessionUpdate::AgentMessageChunk(agent_client_protocol::schema::ContentChunk::new(
+                ContentBlock::Text(TextContent::new("hello")),
+            ));
+
+        assert!(!session_update_is_session_scoped(&update));
     }
 
     #[test]

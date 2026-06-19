@@ -970,11 +970,6 @@ fn session_response_state(message: &AcpProtocolMessage) -> Option<SessionStatePa
     if let Some(model) = models {
         options.push(model);
     }
-    options.extend(
-        array_field(data, "configOptions")
-            .iter()
-            .map(normalize_session_config_option),
-    );
 
     let mut patch = SessionStatePatch::default();
     if !options.is_empty() {
