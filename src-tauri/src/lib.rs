@@ -31,15 +31,15 @@ use agents::runtime::types::{
     EnsureAgentRuntimeSession, RuntimeStatus, StartAgentSession,
 };
 use agents::runtime::RuntimeManager;
+use app_paths::{
+    app_home, cross_context_dir, db_path as default_db_path, paste_cache_dir, projects_dir,
+    removed_sessions_dir,
+};
 use astra::{AstraHandle, AstraService, CancelAstraRunRequest, CreateAstraRunRequest};
 use indexer::{IndexTask, IndexerHandle};
 use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
-use app_paths::{
-    app_home, cross_context_dir, db_path as default_db_path, paste_cache_dir, projects_dir,
-    removed_sessions_dir,
-};
 use models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
     AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
@@ -2079,7 +2079,10 @@ mod ancestor_tests {
         )
         .expect("write workspace file");
 
-        assert_eq!(std::fs::read_to_string(&path).expect("read saved file"), "new");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read saved file"),
+            "new"
+        );
         assert!(saved.mtime_ms >= loaded.mtime_ms);
         let _ = std::fs::remove_dir_all(workspace);
     }
@@ -2940,8 +2943,17 @@ fn list_project_files(path: String) -> Result<Vec<String>, String> {
 #[tauri::command]
 fn get_project_git_status(path: String) -> Result<Vec<GitStatusRow>, String> {
     let root = validate_project_dir(&path)?;
-    let output = run_git(&root, &["-c", "core.quotePath=false", "status", "--porcelain=v1", "-uall"])
-        .map_err(|e| format!("Failed to run git: {e}"))?;
+    let output = run_git(
+        &root,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "status",
+            "--porcelain=v1",
+            "-uall",
+        ],
+    )
+    .map_err(|e| format!("Failed to run git: {e}"))?;
     if !output.status.success() {
         // Not a git repo or git not available — return empty rather than error.
         return Ok(Vec::new());
@@ -2953,10 +2965,7 @@ fn get_project_git_status(path: String) -> Result<Vec<GitStatusRow>, String> {
     }
     let mut entries: Vec<GitStatusRow> = Vec::new();
     for (path, status) in by_path {
-        entries.push(GitStatusRow {
-            path,
-            status,
-        });
+        entries.push(GitStatusRow { path, status });
     }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(entries)
@@ -3123,7 +3132,10 @@ fn run_project_git_action_sync(
                 stdout: String::new(),
                 stderr: String::new(),
             };
-            append_git_action_result(&mut combined, run_git_action(&root, &["pull", "--ff-only"])?);
+            append_git_action_result(
+                &mut combined,
+                run_git_action(&root, &["pull", "--ff-only"])?,
+            );
             append_git_action_result(&mut combined, run_git_action(&root, &["push"])?);
             Ok(combined)
         }
@@ -3134,7 +3146,10 @@ fn run_project_git_action_sync(
                 stdout: String::new(),
                 stderr: String::new(),
             };
-            append_git_action_result(&mut combined, run_git_action(&root, &["restore", "--worktree", "."])?);
+            append_git_action_result(
+                &mut combined,
+                run_git_action(&root, &["restore", "--worktree", "."])?,
+            );
             Ok(combined)
         }
         "cleanAll" => run_git_action(&root, &["clean", "-fd", "--", "."]),
@@ -3146,7 +3161,11 @@ fn run_project_git_action_sync(
         }
         "unstage" => {
             let paths = validate_git_relative_paths(paths, true)?;
-            let mut args = vec!["restore".to_string(), "--staged".to_string(), "--".to_string()];
+            let mut args = vec![
+                "restore".to_string(),
+                "--staged".to_string(),
+                "--".to_string(),
+            ];
             args.extend(paths);
             run_git_action_owned(&root, &args)
         }
@@ -3229,7 +3248,11 @@ fn git_stdout_optional(root: &Path, args: &[&str]) -> Option<String> {
         return None;
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if value.is_empty() { None } else { Some(value) }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn git_output_error(output: &std::process::Output, fallback: &str) -> String {
@@ -3261,8 +3284,17 @@ fn empty_project_git_summary() -> ProjectGitSummary {
 }
 
 fn load_project_git_changes(root: &Path) -> Result<Vec<ProjectGitChange>, String> {
-    let output = run_git(root, &["-c", "core.quotePath=false", "status", "--porcelain=v1", "-uall"])
-        .map_err(|e| format!("Failed to run git status: {e}"))?;
+    let output = run_git(
+        root,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "status",
+            "--porcelain=v1",
+            "-uall",
+        ],
+    )
+    .map_err(|e| format!("Failed to run git status: {e}"))?;
     if !output.status.success() {
         return Err(git_output_error(&output, "Failed to load git status"));
     }
@@ -3273,16 +3305,22 @@ fn load_project_git_changes(root: &Path) -> Result<Vec<ProjectGitChange>, String
 fn build_project_git_summary(root: &Path, changes: &[ProjectGitChange]) -> ProjectGitSummary {
     let branch = git_stdout_optional(root, &["branch", "--show-current"]);
     let head = git_stdout_optional(root, &["rev-parse", "--short", "HEAD"]);
-    let upstream = git_stdout_optional(root, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+    let upstream = git_stdout_optional(
+        root,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    );
     let (ahead, behind) = if upstream.is_some() {
-        git_stdout_optional(root, &["rev-list", "--left-right", "--count", "HEAD...@{u}"])
-            .and_then(|value| {
-                let mut parts = value.split_whitespace();
-                let ahead = parts.next()?.parse::<i64>().ok()?;
-                let behind = parts.next()?.parse::<i64>().ok()?;
-                Some((ahead, behind))
-            })
-            .unwrap_or((0, 0))
+        git_stdout_optional(
+            root,
+            &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
+        )
+        .and_then(|value| {
+            let mut parts = value.split_whitespace();
+            let ahead = parts.next()?.parse::<i64>().ok()?;
+            let behind = parts.next()?.parse::<i64>().ok()?;
+            Some((ahead, behind))
+        })
+        .unwrap_or((0, 0))
     } else {
         (0, 0)
     };
@@ -3527,7 +3565,8 @@ fn discard_git_path(root: &Path, path: &str) -> Result<ProjectGitActionResult, S
         "--".to_string(),
         path.to_string(),
     ];
-    let output = run_git_owned(root, &status_args).map_err(|e| format!("Failed to run git status: {e}"))?;
+    let output =
+        run_git_owned(root, &status_args).map_err(|e| format!("Failed to run git status: {e}"))?;
     if !output.status.success() {
         return Err(git_output_error(&output, "Failed to inspect git path"));
     }
@@ -3634,7 +3673,14 @@ fn get_file_git_diff(workspace_path: String, file_path: String) -> Result<FileGi
     let diff_output = std::process::Command::new("git")
         .arg("-C")
         .arg(&workspace_path)
-        .args(["diff", "--no-ext-diff", "--no-color", "--unified=0", "HEAD", "--"])
+        .args([
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            "--unified=0",
+            "HEAD",
+            "--",
+        ])
         .arg(&relative_string)
         .output()
         .map_err(|e| format!("Failed to run git diff: {e}"))?;
@@ -3649,7 +3695,11 @@ fn get_file_git_diff(workspace_path: String, file_path: String) -> Result<FileGi
     let patch = String::from_utf8_lossy(&diff_output.stdout).to_string();
     Ok(FileGitDiff {
         status,
-        patch: if patch.trim().is_empty() { None } else { Some(patch) },
+        patch: if patch.trim().is_empty() {
+            None
+        } else {
+            Some(patch)
+        },
     })
 }
 
@@ -4643,6 +4693,7 @@ fn write_cli_shim_if_changed(path: &std::path::Path, content: &str) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())

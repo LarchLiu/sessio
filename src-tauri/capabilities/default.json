@@ -13,13 +13,18 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
     "core:window:allow-close",
+    "core:window:allow-set-badge-count",
+    "core:window:allow-set-badge-label",
     "updater:default",
     "process:allow-restart",
     {
       "identifier": "opener:allow-open-url",
       "allow": [
-        { "url": "https://github.com/LarchLiu/sessio/releases/*" }
+        {
+          "url": "https://github.com/LarchLiu/sessio/releases/*"
+        }
       ]
-    }
+    },
+    "notification:default"
   ]
 }

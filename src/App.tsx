@@ -41,6 +41,7 @@ import { usePendingNewChats } from "./hooks/usePendingNewChats";
 import { usePlanTaskRuntimeCompletion } from "./hooks/usePlanTaskRuntimeCompletion";
 import { useProjectGroups } from "./hooks/useProjectGroups";
 import { useRuntimeEventSubscription } from "./hooks/useRuntimeEventSubscription";
+import { useSystemNotifications } from "./hooks/useSystemNotifications";
 import { useSelectedSessionSync } from "./hooks/useSelectedSessionSync";
 import { useSessionAncestors } from "./hooks/useSessionAncestors";
 import { useUnreadSessions } from "./hooks/useUnreadSessions";
@@ -545,6 +546,19 @@ export default function App() {
     const thread = threadIndexItems.find((item) => item.threadId === selectedThreadId);
     if (thread) clearThreadUnread(thread);
   }, [clearThreadUnread, selectedThreadId, threadIndexItems, unreadSessionIds]);
+
+  useSystemNotifications({
+    t,
+    sessions,
+    threadIndexItems,
+    liveSessions: liveRuntimeState.sessions,
+    runtimeSessionAliases,
+    pendingNewChats,
+    unreadSessionIds,
+    selected,
+    selectedThreadId,
+    detailMode,
+  });
 
   useEffect(() => {
     syncTrayMenu(recentForMenu, {

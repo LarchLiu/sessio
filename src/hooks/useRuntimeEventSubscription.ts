@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef } from "react";
 import type { SessionInfo } from "../api";
 import type { LiveRuntimeAction, LiveRuntimeTurnSnapshotEvent } from "../runtimeChat";
@@ -25,6 +26,7 @@ export function useRuntimeEventSubscription({
 }) {
   const runtimeSessionAliasesRef = useRef<Record<string, string>>({});
   const selectedUnreadKeysRef = useRef<Set<string>>(new Set());
+  const windowFocusedRef = useRef(true);
   const pendingSnapshotsRef = useRef<Map<string, LiveRuntimeTurnSnapshotEvent>>(new Map());
   const snapshotFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -34,6 +36,28 @@ export function useRuntimeEventSubscription({
       selected ? sessionUnreadKeys(selected, runtimeSessionAliases) : [],
     );
   }, [runtimeSessionAliases, selected]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getCurrentWindow().isFocused()
+      .then((focused) => {
+        if (!cancelled) windowFocusedRef.current = focused;
+      })
+      .catch(() => {});
+    let unlistenFocus: (() => void) | null = null;
+    getCurrentWindow().onFocusChanged(({ payload }) => {
+      windowFocusedRef.current = Boolean(payload);
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlistenFocus = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlistenFocus?.();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -69,7 +93,7 @@ export function useRuntimeEventSubscription({
         runtimeSessionAliasesRef.current,
       );
       if (
-        !intersectsSet(unreadKeys, selectedUnreadKeysRef.current) &&
+        (!windowFocusedRef.current || !intersectsSet(unreadKeys, selectedUnreadKeysRef.current)) &&
         payload.kind !== "sessionEnded"
       ) {
         setUnreadSessionIds((prev) => {

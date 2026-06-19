@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Agent, SessionInfo } from "../api";
 import type { ActiveMessageMeta } from "../pages/ChatPage";
 import {
@@ -32,7 +33,30 @@ export function useUnreadSessions({
   const messageCountBySourceRef = useRef<Map<string, number>>(new Map());
   const runtimeSessionAliasesRef = useRef<Record<string, string>>({});
   const selectedUnreadKeysRef = useRef<Set<string>>(new Set());
+  const windowFocusedRef = useRef(true);
   const sessionsLoadedRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getCurrentWindow().isFocused()
+      .then((focused) => {
+        if (!cancelled) windowFocusedRef.current = focused;
+      })
+      .catch(() => {});
+    let unlisten: (() => void) | null = null;
+    getCurrentWindow().onFocusChanged(({ payload }) => {
+      windowFocusedRef.current = Boolean(payload);
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     runtimeSessionAliasesRef.current = runtimeSessionAliases;
@@ -76,7 +100,7 @@ export function useUnreadSessions({
         let nextUnread = prev;
         for (const session of changedSessions.values()) {
           const keys = sessionUnreadKeys(session, runtimeSessionAliasesRef.current);
-          if (intersectsSet(keys, selectedUnreadKeysRef.current)) continue;
+          if (windowFocusedRef.current && intersectsSet(keys, selectedUnreadKeysRef.current)) continue;
           nextUnread = addUnreadKeys(nextUnread, keys);
         }
         return nextUnread;
@@ -85,7 +109,7 @@ export function useUnreadSessions({
   }, [sessions]);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!selected || !windowFocusedRef.current) return;
     const selectedKeys = sessionUnreadKeys(selected, runtimeSessionAliases);
     setUnreadSessionIds((prev) => deleteUnreadKeys(prev, selectedKeys));
   }, [runtimeSessionAliases, selected]);
