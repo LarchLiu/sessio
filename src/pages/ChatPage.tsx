@@ -70,6 +70,7 @@ import {
 import { RuntimeEffortControl, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
 import {
   type ComposerAttachment,
+  ComposerAttachmentPreviewList,
   useComposerAttachments,
 } from "../components/ComposerAttachments";
 import {
@@ -667,6 +668,7 @@ export function AcpTranscriptPanel({
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const composerAttachmentButtonRef = useRef<HTMLButtonElement>(null);
+  const [composerAttachmentMenuOpen, setComposerAttachmentMenuOpen] = useState(false);
   const activeRuntimeTurnIdRef = useRef<string | null>(null);
   const fallbackRuntimeSequenceRef = useRef(0);
   const liveSession = runtimeSessionId
@@ -1444,9 +1446,14 @@ export function AcpTranscriptPanel({
     setText: setComposerText,
     textareaRef: composerRef,
     attachmentButtonRef: composerAttachmentButtonRef,
-    attachmentMenuOpen: false,
-    setAttachmentMenuOpen: () => undefined,
-    attachmentPreview: null,
+    attachmentMenuOpen: composerAttachmentMenuOpen,
+    setAttachmentMenuOpen: setComposerAttachmentMenuOpen,
+    attachmentPreview: (
+      <ComposerAttachmentPreviewList
+        attachments={attachments}
+        onRemove={removeAttachment}
+      />
+    ),
     attachments,
     supportsAttachments,
     supportsImageAttachments,
@@ -1475,6 +1482,7 @@ export function AcpTranscriptPanel({
     activeTurnId,
     agentModelOptions,
     attachments,
+    composerAttachmentMenuOpen,
     composerAttachmentButtonRef,
     composerAgent,
     composerEffort,
@@ -1488,6 +1496,7 @@ export function AcpTranscriptPanel({
     pasteAttachments,
     pickAttachments,
     removeAttachment,
+    setComposerAttachmentMenuOpen,
     selectedAgentModelValue,
     selectedComposerAgent,
     sending,
