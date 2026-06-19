@@ -441,6 +441,17 @@ export function liveSessionUpdatedAt(
   return latestLiveTurn(session)?.updatedAt ?? null;
 }
 
+export function effectiveRuntimeCapabilities(
+  liveCapabilities: RuntimeCapabilitySet | null | undefined,
+  fallbackCapabilities: RuntimeCapabilitySet | null | undefined,
+): RuntimeCapabilitySet | null {
+  if (!liveCapabilities) return fallbackCapabilities ?? null;
+  if (fallbackCapabilities && isPlaceholderRuntimeCapabilities(liveCapabilities)) {
+    return fallbackCapabilities;
+  }
+  return liveCapabilities;
+}
+
 function latestLiveTurn(session: LiveRuntimeSession | null | undefined): LiveTurn | null {
   if (!session || session.turns.length === 0) return null;
   return session.turns.reduce((latest, turn) =>

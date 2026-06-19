@@ -93,6 +93,7 @@ import {
   type AcpSessionState,
   type AcpToolCall,
   dispatchSessionStartedFallback,
+  effectiveRuntimeCapabilities,
   historyTurnsToAcpViewModel,
   liveSessionToAcpViewModel,
   type LiveRuntimeAction,
@@ -734,8 +735,10 @@ export function AcpTranscriptPanel({
   const fallbackCapabilities = fallbackRuntimeAgent?.capabilities ?? null;
   const fallbackComposerCapabilities =
     selectedComposerAgent?.capabilities ?? (composerAgent === agent ? fallbackCapabilities : null);
-  const attachmentCapabilities =
-    (composerAgent === agent ? liveSession?.capabilities : null) ?? fallbackComposerCapabilities;
+  const attachmentCapabilities = effectiveRuntimeCapabilities(
+    composerAgent === agent ? liveSession?.capabilities : null,
+    fallbackComposerCapabilities,
+  );
   const {
     attachments,
     supportsAttachments,
@@ -765,7 +768,7 @@ export function AcpTranscriptPanel({
   const commandMenu = useComposerCommandMenuState({
     trigger: commandTrigger,
     items: commandItems,
-    disabled: Boolean(activeTurnId) || sending,
+    disabled: sending,
   });
 
   const refreshCachedCommands = useCallback(() => {
