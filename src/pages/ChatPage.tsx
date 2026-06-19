@@ -5102,7 +5102,11 @@ function createMarkdownComponents(
   onPreviewImage: (image: MarkdownImage) => void,
 ): Components {
   return {
-    p: ({ children }) => <p className="my-2 first:mt-0 last:mb-0">{children}</p>,
+    p: ({ node, children }) =>
+      nodeHasParagraphBlockedDescendant(node as MarkdownTreeNode | undefined)
+        || containsBlockChild(children)
+        ? <div className="my-2 first:mt-0 last:mb-0">{children}</div>
+        : <p className="my-2 first:mt-0 last:mb-0">{children}</p>,
     h1: ({ children }) => (
       <h1 className="font-semibold text-ink mt-3 mb-1 first:mt-0">{children}</h1>
     ),
@@ -5168,6 +5172,63 @@ function createMarkdownComponents(
       );
     },
   };
+}
+
+type MarkdownTreeNode = {
+  tagName?: string;
+  children?: MarkdownTreeNode[];
+};
+
+const paragraphBlockedDescendants = new Set([
+  "address",
+  "article",
+  "aside",
+  "blockquote",
+  "details",
+  "div",
+  "dl",
+  "fieldset",
+  "figcaption",
+  "figure",
+  "footer",
+  "form",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "header",
+  "hr",
+  "main",
+  "menu",
+  "nav",
+  "ol",
+  "p",
+  "pre",
+  "section",
+  "table",
+  "ul",
+]);
+
+function containsBlockChild(children: ReactNode): boolean {
+  if (Array.isArray(children)) return children.some(containsBlockChild);
+  if (!isValidElement<{ children?: ReactNode }>(children)) return false;
+  const node = (children.props as { node?: MarkdownTreeNode }).node;
+  if (nodeHasParagraphBlockedDescendant(node)) return true;
+  const type = children.type;
+  if (typeof type === "string" && paragraphBlockedDescendants.has(type)) return true;
+  return containsBlockChild(children.props.children);
+}
+
+function nodeHasParagraphBlockedDescendant(node: MarkdownTreeNode | undefined): boolean {
+  if (!node?.children) return false;
+  for (const child of node.children) {
+    const tagName = child.tagName?.toLowerCase();
+    if (tagName && paragraphBlockedDescendants.has(tagName)) return true;
+    if (nodeHasParagraphBlockedDescendant(child)) return true;
+  }
+  return false;
 }
 
 function MarkdownCodeBlock({

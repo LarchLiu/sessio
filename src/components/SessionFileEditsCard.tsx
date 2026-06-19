@@ -196,8 +196,9 @@ export default function SessionFileEditsCard({
             return (
               <div key={`${label}-${index}`}>
                 {hasDetail ? (
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-1.5 text-left text-body-sm hover:bg-ink/[0.04]"
                     aria-expanded={detailOpen}
                     aria-label={
@@ -206,9 +207,14 @@ export default function SessionFileEditsCard({
                         : `Show changes for ${label}`
                     }
                     onClick={() => toggleDetail(detailKey)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      toggleDetail(detailKey);
+                    }}
                   >
                     {rowContent}
-                  </button>
+                  </div>
                 ) : (
                   <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-1.5 text-body-sm">
                     {rowContent}
