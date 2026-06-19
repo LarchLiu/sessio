@@ -11,6 +11,7 @@ import {
   type ReactNode,
   type StyleHTMLAttributes,
 } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -18,6 +19,7 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import type { VisualizationSpec } from "vega-embed";
+import { readLocalImageDataUrl } from "../api";
 import { renderMarkdownInput } from "./markdownInput";
 import ScrollArea from "./ScrollArea";
 import { useEffectiveThemeType, useShikiHighlightedCode } from "./shikiHighlight";
@@ -48,13 +50,13 @@ const urlAttributeNames = new Set([
   "srcset",
 ]);
 
-function rehypeSanitizeRenderedHtml() {
+function rehypeSanitizeRenderedHtml(filePath?: string | null) {
   return (tree: HastNode) => {
-    sanitizeHastChildren(tree);
+    sanitizeHastChildren(tree, filePath);
   };
 }
 
-function sanitizeHastChildren(parent: HastNode): void {
+function sanitizeHastChildren(parent: HastNode, filePath?: string | null): void {
   const children = parent.children;
   if (!children) return;
 
@@ -71,14 +73,14 @@ function sanitizeHastChildren(parent: HastNode): void {
         children.splice(index, 1);
         continue;
       }
-      sanitizeHastElement(child);
+      sanitizeHastElement(child, filePath);
     }
 
-    sanitizeHastChildren(child);
+    sanitizeHastChildren(child, filePath);
   }
 }
 
-function sanitizeHastElement(node: HastNode): void {
+function sanitizeHastElement(node: HastNode, filePath?: string | null): void {
   const properties = node.properties;
   if (!properties) return;
 
@@ -101,9 +103,19 @@ function sanitizeHastElement(node: HastNode): void {
 
     if (urlAttributeNames.has(name) || urlAttributeNames.has(normalized)) {
       if (normalized === "srcset") {
-        if (!isSafeSrcset(String(value))) delete properties[name];
-      } else if (!isSafeUrlValue(String(value))) {
-        delete properties[name];
+        const rewritten = rewriteSrcsetValue(String(value), filePath);
+        if (rewritten) {
+          properties[name] = rewritten;
+        } else {
+          delete properties[name];
+        }
+      } else {
+        const rewritten = rewriteSafeUrlValue(String(value), filePath);
+        if (rewritten) {
+          properties[name] = rewritten;
+        } else {
+          delete properties[name];
+        }
       }
     }
   }
@@ -127,13 +139,6 @@ function sanitizeInlineStyle(style: string): string {
     .join("; ");
 
   return clean ? `${clean};` : "";
-}
-
-function isSafeSrcset(value: string): boolean {
-  return value.split(",").every((candidate) => {
-    const urlPart = candidate.trim().split(/\s+/)[0];
-    return isSafeUrlValue(urlPart);
-  });
 }
 
 function isSafeUrlValue(value: string): boolean {
@@ -172,9 +177,43 @@ function isSafeUrlValue(value: string): boolean {
   }
 }
 
-export default function PlainMarkdownPreview({ text }: { text: string }) {
+function rewriteSafeUrlValue(value: string, filePath?: string | null): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const localPath = resolveLocalMarkdownPath(trimmed, filePath);
+  if (localPath) return convertFileSrc(localPath);
+  return isSafeUrlValue(trimmed) ? trimmed : null;
+}
+
+function rewriteSrcsetValue(value: string, filePath?: string | null): string | null {
+  const candidates = value
+    .split(",")
+    .map((candidate) => candidate.trim())
+    .filter(Boolean);
+  if (candidates.length === 0) return null;
+
+  const rewritten: string[] = [];
+  for (const candidate of candidates) {
+    const [urlPart, ...rest] = candidate.split(/\s+/);
+    const safeUrl = rewriteSafeUrlValue(urlPart, filePath);
+    if (!safeUrl) return null;
+    rewritten.push(rest.length > 0 ? `${safeUrl} ${rest.join(" ")}` : safeUrl);
+  }
+  return rewritten.join(", ");
+}
+
+export default function PlainMarkdownPreview({
+  text,
+  filePath = null,
+}: {
+  text: string;
+  filePath?: string | null;
+}) {
   const themeType = useEffectiveThemeType();
-  const components = useMemo(() => createMarkdownComponents(themeType), [themeType]);
+  const components = useMemo(
+    () => createMarkdownComponents(themeType, filePath),
+    [filePath, themeType],
+  );
 
   return (
     <ScrollArea
@@ -189,6 +228,7 @@ export default function PlainMarkdownPreview({ text }: { text: string }) {
         <PlainMarkdownPreviewContent
           text={text}
           components={components}
+          filePath={filePath}
           themeType={themeType}
         />
       </article>
@@ -199,25 +239,28 @@ export default function PlainMarkdownPreview({ text }: { text: string }) {
 export function PlainMarkdownPreviewContent({
   text,
   components,
+  filePath = null,
   themeType = "light",
 }: {
   text: string;
   components?: Components;
+  filePath?: string | null;
   themeType?: PreviewThemeType;
 }) {
+  const normalizedText = useMemo(() => normalizePreviewMarkdown(text), [text]);
   const resolvedComponents = useMemo(
-    () => components ?? createMarkdownComponents(themeType),
-    [components, themeType],
+    () => components ?? createMarkdownComponents(themeType, filePath),
+    [components, filePath, themeType],
   );
 
   return (
     <ReactMarkdown
       remarkPlugins={[[remarkGfm, { singleTilde: false }], remarkBreaks, remarkMath, remarkSuperSub]}
-      rehypePlugins={[rehypeRaw, rehypeSanitizeRenderedHtml, rehypeKatex]}
+      rehypePlugins={[rehypeRaw, [rehypeSanitizeRenderedHtml, filePath], rehypeKatex]}
       components={resolvedComponents}
-      urlTransform={markdownUrlTransform}
+      urlTransform={(url) => markdownUrlTransform(url, filePath)}
     >
-      {text}
+      {normalizedText}
     </ReactMarkdown>
   );
 }
@@ -286,7 +329,38 @@ function parseScriptSyntax(text: string): MdastNode[] {
   return result;
 }
 
-function createMarkdownComponents(themeType: PreviewThemeType = "light"): Components {
+function normalizePreviewMarkdown(text: string): string {
+  return coalesceBrokenMarkdownImageLinks(text);
+}
+
+function coalesceBrokenMarkdownImageLinks(text: string): string {
+  const lines = text.split(/\r?\n/);
+  const merged: string[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const current = lines[index] ?? "";
+    const next = lines[index + 1] ?? "";
+    const currentMatch = current.match(/^(\s*)!\[([^\]\n]*)]\s*$/);
+    const nextMatch = next.match(
+      /^\s*\(((?:asset:\/\/|file:\/\/|https?:\/\/|\/|\.\/|\.\.\/)[^)\n]*)\)\s*$/,
+    );
+
+    if (currentMatch && nextMatch) {
+      merged.push(`${currentMatch[1]}![${currentMatch[2]}](${nextMatch[1]})`);
+      index += 1;
+      continue;
+    }
+
+    merged.push(current);
+  }
+
+  return merged.join("\n");
+}
+
+function createMarkdownComponents(
+  themeType: PreviewThemeType = "light",
+  filePath?: string | null,
+): Components {
   const themedElement = createThemedPreviewElement(themeType);
 
   return {
@@ -337,7 +411,7 @@ function createMarkdownComponents(themeType: PreviewThemeType = "light"): Compon
       return <code>{children}</code>;
     },
     a: ({ children, href }) => {
-      const safe = safeHref(href ?? "");
+      const safe = safeHref(href ?? "", filePath);
       if (!safe) return <>{children}</>;
       return (
         <a href={safe} target="_blank" rel="noreferrer">
@@ -346,13 +420,35 @@ function createMarkdownComponents(themeType: PreviewThemeType = "light"): Compon
       );
     },
     img: ({ src, alt }) => {
-      const safeSrc = markdownImageSrc(src ?? "");
-      if (!safeSrc) {
+      if (!isRenderableMarkdownImageSrc(src ?? "", filePath)) {
         return <code>{`![${alt ?? "image"}](${src ?? ""})`}</code>;
       }
-      return <img src={safeSrc} alt={alt ?? "image"} loading="lazy" />;
+      return <PlainPreviewImage src={src ?? ""} alt={alt ?? "image"} filePath={filePath} />;
     },
   };
+}
+
+function PlainPreviewImage({
+  src,
+  alt,
+  filePath,
+}: {
+  src: string;
+  alt: string;
+  filePath?: string | null;
+}) {
+  const resolvedSrc = useResolvedImageSrc(src, filePath);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [resolvedSrc]);
+
+  if (!resolvedSrc || failed) {
+    return <code>{`![${alt}](${src})`}</code>;
+  }
+
+  return <img src={resolvedSrc} alt={alt} loading="lazy" onError={() => setFailed(true)} />;
 }
 
 function createThemedPreviewElement(themeType: PreviewThemeType) {
@@ -1351,25 +1447,26 @@ function codeTextFromChildren(children: ReactNode): string {
   return "";
 }
 
-function markdownUrlTransform(url: string): string {
+function markdownUrlTransform(url: string, filePath?: string | null): string {
   if (url.startsWith("#")) return url;
-  return safeHref(url) ?? "";
+  return safeHref(url, filePath) ?? "";
 }
 
-function safeHref(rawHref: string): string | null {
+function safeHref(rawHref: string, filePath?: string | null): string | null {
   const href = rawHref.trim();
   if (!href) return null;
-  if (
-    href.startsWith("/") ||
-    href.startsWith("./") ||
-    href.startsWith("../") ||
-    href.startsWith("#")
-  ) {
-    return href;
-  }
+  const localPath = resolveLocalMarkdownPath(href, filePath);
+  if (localPath) return convertFileSrc(localPath);
+  if (href.startsWith("#")) return href;
   try {
     const url = new URL(href);
-    if (url.protocol === "http:" || url.protocol === "https:" || url.protocol === "mailto:") {
+    if (
+      url.protocol === "http:" ||
+      url.protocol === "https:" ||
+      url.protocol === "mailto:" ||
+      url.protocol === "file:" ||
+      url.protocol === "asset:"
+    ) {
       return href;
     }
   } catch {
@@ -1378,24 +1475,127 @@ function safeHref(rawHref: string): string | null {
   return null;
 }
 
-function markdownImageSrc(rawSrc: string): string | null {
+function isRenderableMarkdownImageSrc(rawSrc: string, filePath?: string | null): boolean {
   const src = rawSrc.trim();
-  if (!src) return null;
-  if (
-    src.startsWith("data:") ||
-    src.startsWith("blob:") ||
-    src.startsWith("asset:") ||
-    src.startsWith("/") ||
-    src.startsWith("./") ||
-    src.startsWith("../")
-  ) {
-    return src;
+  if (!src) return false;
+  if (resolveLocalMarkdownPath(src, filePath)) return true;
+  if (src.startsWith("data:") || src.startsWith("blob:") || src.startsWith("asset:")) return true;
+  try {
+    const url = new URL(src);
+    return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "file:";
+  } catch {
+    return false;
   }
+}
+
+function useResolvedImageSrc(rawSrc: string, filePath?: string | null): string {
+  const fallback = useMemo(() => resolveImageSrc(rawSrc, filePath), [filePath, rawSrc]);
+  const [src, setSrc] = useState(fallback);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSrc(fallback);
+    const localPath = localImagePath(rawSrc, filePath);
+    if (!localPath) return;
+    readLocalImageDataUrl(localPath)
+      .then((dataUrl) => {
+        if (!cancelled) setSrc(dataUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setSrc(fallback);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fallback, filePath, rawSrc]);
+
+  return src;
+}
+
+function resolveImageSrc(rawSrc: string, filePath?: string | null): string {
+  const src = rawSrc.trim();
+  const localPath = resolveLocalMarkdownPath(src, filePath);
+  if (localPath) return convertFileSrc(localPath);
+  if (src.startsWith("data:") || src.startsWith("blob:") || src.startsWith("asset:")) return src;
+  if (/^file:\/\//i.test(src)) return convertFileSrc(decodeFileUri(src));
   try {
     const url = new URL(src);
     if (url.protocol === "http:" || url.protocol === "https:") return src;
   } catch {
-    return null;
+    return src;
   }
+  return src;
+}
+
+function localImagePath(rawSrc: string, filePath?: string | null): string | null {
+  const src = rawSrc.trim();
+  const localPath = resolveLocalMarkdownPath(src, filePath);
+  if (localPath) return localPath;
+  if (/^file:\/\//i.test(src)) return decodeFileUri(src);
   return null;
+}
+
+function resolveLocalMarkdownPath(rawPath: string, filePath?: string | null): string | null {
+  const value = rawPath.trim().replace(/^<|>$/g, "");
+  if (!value || value.startsWith("#")) return null;
+  const assetPath = decodeAssetUri(value);
+  if (assetPath) return assetPath;
+  if (/^(data:|blob:|https?:|mailto:|tel:)/i.test(value)) return null;
+  if (/^file:\/\//i.test(value)) return decodeFileUri(value);
+  if (/^[A-Za-z]:[\\/]/.test(value) || value.startsWith("/")) return value;
+  if (!filePath) return null;
+  if (!value.startsWith("./") && !value.startsWith("../") && value.includes(":")) return null;
+  return joinMarkdownPath(markdownDirname(filePath), value);
+}
+
+function markdownDirname(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const index = normalized.lastIndexOf("/");
+  if (index < 0) return ".";
+  if (index === 0) return "/";
+  return normalized.slice(0, index);
+}
+
+function joinMarkdownPath(baseDir: string, relativePath: string): string {
+  const normalizedBase = baseDir.replace(/\\/g, "/");
+  const normalizedRelative = relativePath.replace(/\\/g, "/");
+  const isWindows = /^[A-Za-z]:/.test(normalizedBase);
+  const drive = isWindows ? normalizedBase.slice(0, 2) : "";
+  const root = isWindows ? "" : normalizedBase.startsWith("/") ? "/" : "";
+  const baseParts = (isWindows ? normalizedBase.slice(2) : normalizedBase)
+    .split("/")
+    .filter(Boolean);
+  const relParts = normalizedRelative.split("/");
+  const parts = [...baseParts];
+
+  for (const part of relParts) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (parts.length > 0) parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+
+  const joined = parts.join("/");
+  if (isWindows) return `${drive}\\${joined.replace(/\//g, "\\")}`;
+  return `${root}${joined}`;
+}
+
+function decodeFileUri(uri: string): string {
+  try {
+    return decodeURIComponent(uri.replace(/^file:\/\//i, ""));
+  } catch {
+    return uri.replace(/^file:\/\//i, "");
+  }
+}
+
+function decodeAssetUri(uri: string): string | null {
+  const match = uri.match(/^asset:\/\/localhost\/(.+)$/i);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
 }

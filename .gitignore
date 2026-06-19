@@ -50,3 +50,4 @@ coverage
 src-tauri/binaries/*
 
 .claude/*
+.antigravitycli

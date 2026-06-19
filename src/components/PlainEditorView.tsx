@@ -598,7 +598,7 @@ export default function PlainEditorView({
           (editorMode === "preview" ? "hidden" : "")
         }
       />
-      {editorMode === "preview" && <PlainMarkdownPreview text={previewText} />}
+      {editorMode === "preview" && <PlainMarkdownPreview text={previewText} filePath={path} />}
     </div>
   );
 }
