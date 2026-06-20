@@ -1,4 +1,4 @@
-import { FileCodeCorner, ListChevronsDownUp, ListChevronsUpDown, MessageSquare, PanelLeftOpen, PanelRightClose, type LucideIcon } from "lucide-react";
+import { FileCodeCorner, ListChevronsDownUp, ListChevronsUpDown, MessageSquare, PanelLeftOpen, PanelRightClose, SquareTerminal, type LucideIcon } from "lucide-react";
 import type { ProjectInfo, SessionInfo } from "../api";
 import type { ChatView } from "../navigation";
 import { useI18n } from "../i18n";
@@ -20,10 +20,13 @@ interface AppHeaderProps {
   } | null;
   metaPopoverOpen: boolean;
   rightSidebarOpen?: boolean;
+  terminalDockOpen?: boolean;
+  terminalDockVisible?: boolean;
   chatView?: ChatView;
   chatViewVisible?: boolean;
   onOpenSidebar: () => void;
   onToggleMetaPopover: () => void;
+  onToggleTerminalDock?: () => void;
   onToggleRightSidebar?: () => void;
   onChatViewChange?: (view: ChatView) => void;
 }
@@ -39,10 +42,13 @@ export default function AppHeader({
   activeMessageMeta,
   metaPopoverOpen,
   rightSidebarOpen,
+  terminalDockOpen = false,
+  terminalDockVisible = false,
   chatView = "chat",
   chatViewVisible = false,
   onOpenSidebar,
   onToggleMetaPopover,
+  onToggleTerminalDock,
   onToggleRightSidebar,
   onChatViewChange,
 }: AppHeaderProps) {
@@ -51,6 +57,9 @@ export default function AppHeader({
   const rightPanelLabel = rightSidebarOpen
     ? t("sidebar.right_close")
     : t("sidebar.right_open");
+  const terminalDockLabel = terminalDockOpen
+    ? t("terminal_dock.hide")
+    : t("terminal_dock.show");
 
   return (
     <div
@@ -133,6 +142,25 @@ export default function AppHeader({
       <div className="flex h-full items-center justify-self-end gap-2" data-tauri-drag-region="false">
         {chatViewVisible && onChatViewChange && (
           <ChatViewToggle value={chatView} onChange={onChatViewChange} />
+        )}
+        {terminalDockVisible && onToggleTerminalDock && (
+          <Tooltip content={terminalDockLabel} placement="bottom">
+            <button
+              type="button"
+              aria-label={terminalDockLabel}
+              aria-pressed={terminalDockOpen}
+              data-tauri-drag-region="false"
+              onClick={onToggleTerminalDock}
+              className={
+                "rounded-md p-1 transition-colors " +
+                (terminalDockOpen
+                  ? "bg-brand/12 text-brand/90"
+                  : "text-ink/55 hover:bg-ink/5 hover:text-ink")
+              }
+            >
+              <SquareTerminal className="h-4 w-4" />
+            </button>
+          </Tooltip>
         )}
         {onToggleRightSidebar && !rightSidebarOpen && (
           <div className={isMac ? "" : "mr-[138px]"}>

@@ -43,6 +43,46 @@ export interface ProjectInfo {
   sessionCount: number;
 }
 
+export interface TerminalSessionInfo {
+  id: string;
+  title: string;
+  cwd: string;
+  shell: string;
+  cols: number;
+  rows: number;
+  output: string;
+  running: boolean;
+  exitCode: number | null;
+  createdAtMs: number;
+}
+
+export type TerminalEvent =
+  | {
+      kind: "created";
+      session: TerminalSessionInfo;
+    }
+  | {
+      kind: "output";
+      data: string;
+    }
+  | {
+      kind: "resized";
+      cols: number;
+      rows: number;
+    }
+  | {
+      kind: "closed";
+      exitCode: number | null;
+    }
+  | {
+      kind: "removed";
+    };
+
+export interface TerminalEventEnvelope {
+  terminalId: string;
+  event: TerminalEvent;
+}
+
 export type AgentType = "builtin" | "custom";
 
 export interface AgentInfo {
@@ -1227,6 +1267,51 @@ export type SessionScope =
 
 export async function listSessions(): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessions");
+}
+
+export async function listTerminals(): Promise<TerminalSessionInfo[]> {
+  return invoke<TerminalSessionInfo[]>("list_terminals");
+}
+
+export async function createTerminal(input: {
+  cwd?: string | null;
+  cols?: number | null;
+  rows?: number | null;
+  shell?: string | null;
+}): Promise<TerminalSessionInfo> {
+  return invoke<TerminalSessionInfo>("create_terminal", {
+    req: {
+      cwd: input.cwd ?? null,
+      cols: input.cols ?? null,
+      rows: input.rows ?? null,
+      shell: input.shell ?? null,
+    },
+  });
+}
+
+export async function writeTerminalInput(
+  terminalId: string,
+  data: string,
+): Promise<void> {
+  return invoke<void>("write_terminal_input", {
+    req: { terminalId, data },
+  });
+}
+
+export async function resizeTerminal(
+  terminalId: string,
+  cols: number,
+  rows: number,
+): Promise<void> {
+  return invoke<void>("resize_terminal", {
+    req: { terminalId, cols, rows },
+  });
+}
+
+export async function closeTerminal(terminalId: string): Promise<void> {
+  return invoke<void>("close_terminal", {
+    req: { terminalId },
+  });
 }
 
 export async function listChannelSessions(): Promise<ChannelSessionInfo[]> {

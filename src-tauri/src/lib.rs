@@ -13,6 +13,7 @@ pub mod polling;
 pub mod scheduled_tasks;
 pub mod shell_env;
 pub mod store;
+pub mod terminal;
 pub mod turns;
 pub mod watch;
 
@@ -62,6 +63,10 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent,
+};
+use terminal::{
+    CloseTerminalRequest, CreateTerminalRequest, ResizeTerminalRequest, TerminalService,
+    TerminalSessionSummary, WriteTerminalInputRequest,
 };
 
 const HISTORY_CACHE_VERSION: i64 = 1;
@@ -310,6 +315,45 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[tauri::command]
+fn list_terminals(
+    terminal_service: State<'_, TerminalService>,
+) -> Result<Vec<TerminalSessionSummary>, String> {
+    terminal_service.list_sessions()
+}
+
+#[tauri::command]
+fn create_terminal(
+    req: CreateTerminalRequest,
+    terminal_service: State<'_, TerminalService>,
+) -> Result<TerminalSessionSummary, String> {
+    terminal_service.create_session(req)
+}
+
+#[tauri::command]
+fn write_terminal_input(
+    req: WriteTerminalInputRequest,
+    terminal_service: State<'_, TerminalService>,
+) -> Result<(), String> {
+    terminal_service.write_input(req)
+}
+
+#[tauri::command]
+fn resize_terminal(
+    req: ResizeTerminalRequest,
+    terminal_service: State<'_, TerminalService>,
+) -> Result<(), String> {
+    terminal_service.resize_session(req)
+}
+
+#[tauri::command]
+fn close_terminal(
+    req: CloseTerminalRequest,
+    terminal_service: State<'_, TerminalService>,
+) -> Result<(), String> {
+    terminal_service.close_session(req)
 }
 
 #[tauri::command]
@@ -4727,6 +4771,7 @@ pub fn run() {
             network::apply_network_proxy_env(&app_config.network.proxy);
             let runtime = RuntimeManager::new(app.handle().clone());
             app.manage(runtime.clone());
+            app.manage(TerminalService::new(app.handle().clone()));
             let preview_file_watcher =
                 file_preview_watch::PreviewFileWatcher::new(app.handle().clone())?;
             app.manage(preview_file_watcher);
@@ -4855,6 +4900,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            list_terminals,
+            create_terminal,
+            write_terminal_input,
+            resize_terminal,
+            close_terminal,
             list_sessions,
             list_channel_sessions,
             list_process_templates,

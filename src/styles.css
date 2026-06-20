@@ -177,6 +177,44 @@ body {
   pointer-events: none;
 }
 
+.app-terminal-dock-resize-handle {
+  position: relative;
+  z-index: 10;
+  height: 1px;
+  flex-shrink: 0;
+  cursor: row-resize;
+  outline: none;
+  touch-action: none;
+}
+
+.app-terminal-dock-resize-handle::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: -3px;
+  height: 6px;
+  background: transparent;
+  cursor: row-resize;
+}
+
+.app-terminal-dock-resize-handle::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 1px;
+  background: transparent;
+  transition: background-color 120ms ease;
+  cursor: row-resize;
+}
+
+.app-terminal-dock-resize-handle:hover::after,
+.app-terminal-dock-resize-handle:focus-visible::after,
+.app-terminal-dock-resize-handle:active::after,
+.app-terminal-dock-resize-handle[data-dragging="true"]::after {
+  background: rgb(var(--color-fg) / 0.12);
+}
+
 .app-right-sidebar-panel {
   width: var(--app-right-sidebar-width);
   transform: translateX(0);

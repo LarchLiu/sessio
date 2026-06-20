@@ -32,6 +32,7 @@ import AppMain from "./components/AppMain";
 import AppOverlays, { type DeleteTarget } from "./components/AppOverlays";
 import AppSidebar from "./components/AppSidebar";
 import AppRightSidebar from "./components/AppRightSidebar";
+import TerminalDock from "./components/TerminalDock";
 import ToastStack from "./components/ToastStack";
 import UpdateConfirmDialog from "./components/UpdateConfirmDialog";
 import SettingsPage from "./pages/SettingsPage";
@@ -127,6 +128,7 @@ export default function App() {
   const [rightSidebarOpen, setRightSidebarOpen] = useState<boolean>(() =>
     readRightSidebarOpen(),
   );
+  const [terminalDockOpen, setTerminalDockOpen] = useState(false);
   const [rightSidebarFilesReloadKey, setRightSidebarFilesReloadKey] = useState(0);
   const [memorySearchOpen, setMemorySearchOpen] = useState(false);
   const [memorySearchMounted, setMemorySearchMounted] = useState(false);
@@ -914,6 +916,7 @@ export default function App() {
   const currentChatView: ChatView = chatView;
   const chatViewToggleVisible =
     Boolean(selected) && detailMode === "chat";
+  const terminalDockVisible = !autoTasksOpen;
   const handleChatViewChange = useCallback(
     (next: ChatView) => {
       setChatView(next);
@@ -954,10 +957,13 @@ export default function App() {
       activeMessageMeta={activeMessageMeta}
       metaPopoverOpen={metaPopoverOpen}
       rightSidebarOpen={rightSidebarOpen}
+      terminalDockOpen={terminalDockOpen}
+      terminalDockVisible={terminalDockVisible}
       chatView={currentChatView}
       chatViewVisible={chatViewToggleVisible}
       onOpenSidebar={() => setSidebarOpen(true)}
       onToggleMetaPopover={() => setMetaPopoverOpen((open) => !open)}
+      onToggleTerminalDock={() => setTerminalDockOpen((open) => !open)}
       onToggleRightSidebar={() => setRightSidebarOpen((open) => !open)}
       onChatViewChange={handleChatViewChange}
     />
@@ -975,8 +981,11 @@ export default function App() {
       activeMessageMeta={null}
       metaPopoverOpen={false}
       rightSidebarOpen={rightSidebarOpen}
+      terminalDockOpen={false}
+      terminalDockVisible={false}
       onOpenSidebar={() => setSidebarOpen(true)}
       onToggleMetaPopover={() => {}}
+      onToggleTerminalDock={() => {}}
       onToggleRightSidebar={() => setRightSidebarOpen((open) => !open)}
     />
   );
@@ -1099,46 +1108,58 @@ export default function App() {
         {autoTasksOpen ? (
           <AutoTasksPage onError={setError} />
         ) : (
-          <AppMain
-          activeProject={activeProject ?? activeThreadProject}
-          selectedThreadId={selectedThreadId}
-          selected={selected}
-          selectedSessionProject={selectedSessionProject}
-          detailRoute={detailRoute}
-          viewMode={viewMode}
-          chatView={currentChatView}
-          filesSubview={filesSubview}
-          onFilesSubviewChange={setFilesSubview}
-          projectFilesReloadKey={rightSidebarFilesReloadKey}
-          projectGitRepos={projectGitRepos}
-          onProjectGitRepoDetected={handleProjectGitRepoDetected}
-          selectedProjectFileRequest={currentProjectFileSelection}
-          onOpenProjectFile={handleOpenProjectFile}
-          liveState={liveRuntimeState}
-          runtimeAgents={runtimeAgents}
-          lastRuntimeAgentSelection={lastRuntimeAgentSelection}
-          rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
-          debugAcpConfig={debugAcpConfig}
-          runtimeSessionAliases={runtimeSessionAliases}
-          selectedAncestorSessions={selectedAncestorSessions}
-          newChatProjectKey={newChatProjectKey}
-          pendingNewChats={pendingNewChats}
-          setNewChatProjectKey={setNewChatProjectKey}
-          projectGroups={projectGroups}
-          availableSessions={availableSessions}
-          dispatchLiveEvent={dispatchLiveRuntimeEvent}
-          setProjects={setProjects}
-          setFilter={setFilter}
-          setSelectedProject={setSelectedProject}
-          setSelectedThread={setSelectedThread}
-          setSelected={setSelected}
-          setDetailMode={setDetailMode}
-          setPendingNewChats={setPendingNewChats}
-          refreshSessions={refreshSessions}
-          onMessageCount={handleMessageCount}
-          onActiveMessageMeta={handleActiveMessageMeta}
-          onError={setError}
-        />
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <AppMain
+              activeProject={activeProject ?? activeThreadProject}
+              selectedThreadId={selectedThreadId}
+              selected={selected}
+              selectedSessionProject={selectedSessionProject}
+              detailRoute={detailRoute}
+              viewMode={viewMode}
+              chatView={currentChatView}
+              filesSubview={filesSubview}
+              onFilesSubviewChange={setFilesSubview}
+              projectFilesReloadKey={rightSidebarFilesReloadKey}
+              projectGitRepos={projectGitRepos}
+              onProjectGitRepoDetected={handleProjectGitRepoDetected}
+              selectedProjectFileRequest={currentProjectFileSelection}
+              onOpenProjectFile={handleOpenProjectFile}
+              liveState={liveRuntimeState}
+              runtimeAgents={runtimeAgents}
+              lastRuntimeAgentSelection={lastRuntimeAgentSelection}
+              rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
+              debugAcpConfig={debugAcpConfig}
+              runtimeSessionAliases={runtimeSessionAliases}
+              selectedAncestorSessions={selectedAncestorSessions}
+              newChatProjectKey={newChatProjectKey}
+              pendingNewChats={pendingNewChats}
+              setNewChatProjectKey={setNewChatProjectKey}
+              projectGroups={projectGroups}
+              availableSessions={availableSessions}
+              dispatchLiveEvent={dispatchLiveRuntimeEvent}
+              setProjects={setProjects}
+              setFilter={setFilter}
+              setSelectedProject={setSelectedProject}
+              setSelectedThread={setSelectedThread}
+              setSelected={setSelected}
+              setDetailMode={setDetailMode}
+              setPendingNewChats={setPendingNewChats}
+              refreshSessions={refreshSessions}
+              onMessageCount={handleMessageCount}
+              onActiveMessageMeta={handleActiveMessageMeta}
+              onError={setError}
+            />
+            <TerminalDock
+              open={terminalDockOpen}
+              defaultCwd={
+                activeThreadProject?.path ??
+                activeProject?.path ??
+                selectedSessionProject?.path ??
+                "~"
+              }
+              onOpenChange={setTerminalDockOpen}
+            />
+          </div>
         )}
       </AppLayout>
       <ToastStack message={error} onMessageConsumed={() => setError(null)} />
