@@ -134,7 +134,7 @@ export default function TldrawCanvasHost({
     return Array.from(new Set(merged)).slice(0, 4);
   }, [editedFiles, projectFiles]);
   const addMenuOptions = useMemo<PopupMenuOption<string>[]>(() => [
-    { key: "file", label: "Add file", icon: <FolderOpen className="h-4 w-4" /> },
+    { key: "file", label: "Choose files", icon: <FolderOpen className="h-4 w-4" /> },
     { key: "image", label: "Add image", icon: <FileImage className="h-4 w-4" /> },
     { key: "workflow", label: "Add workflow", icon: <Workflow className="h-4 w-4" /> },
     { key: "note", label: "Add note", icon: <StickyNote className="h-4 w-4" /> },
@@ -512,11 +512,6 @@ export default function TldrawCanvasHost({
       return;
     }
     if (key === "file") {
-      const next = suggestionFiles[0];
-      if (next) {
-        addFileNode(next);
-        return;
-      }
       try {
         const selection = await open({
           multiple: true,
