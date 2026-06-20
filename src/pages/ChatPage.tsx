@@ -747,6 +747,7 @@ export function AcpTranscriptPanel({
     supportsAttachments,
     supportsImageAttachments,
     supportsEmbeddedContext,
+    addAttachments,
     removeAttachment,
     clearAttachments,
     pickAttachments,
@@ -1196,6 +1197,7 @@ export function AcpTranscriptPanel({
     rawText: string,
     clearComposer = false,
     inputAttachments: ComposerAttachment[] = [],
+    runtimeOptions?: Record<string, unknown>,
   ) => {
     const text = buildPromptText(selectedSlashCommand, rawText).trim();
     if (!text || sending) return;
@@ -1376,6 +1378,7 @@ export function AcpTranscriptPanel({
       const turn = await sendAgentInput(handle.sessioRuntimeSessionId, {
         text,
         attachments: inputAttachmentsWithContext,
+        options: runtimeOptions,
       });
       activeRuntimeTurnIdRef.current = turn.turnId;
       resetComposerInputHistory();
@@ -1452,6 +1455,33 @@ export function AcpTranscriptPanel({
       setComposerError(String(err));
     }
   }, [activeTurnId, runtimeSessionId]);
+
+  const sendWithContext = useCallback(
+    async (
+      prompt: string,
+      options?: {
+        clearComposer?: boolean;
+        attachments?: ComposerAttachment[];
+        runtimeOptions?: Record<string, unknown>;
+      },
+    ) => {
+      const nextPrompt = prompt.trim();
+      if (!nextPrompt) return false;
+      try {
+        await handleSendText(
+          nextPrompt,
+          options?.clearComposer ?? true,
+          options?.attachments ?? attachments,
+          options?.runtimeOptions,
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [attachments, handleSendText],
+  );
+
   const chatComposerController = useMemo<ChatComposerController>(() => ({
     text: composerText,
     setText: setComposerText,
@@ -1469,6 +1499,7 @@ export function AcpTranscriptPanel({
     supportsAttachments,
     supportsImageAttachments,
     supportsEmbeddedContext,
+    appendAttachments: addAttachments,
     removeAttachment,
     pickAttachments,
     pasteAttachments,
@@ -1477,6 +1508,7 @@ export function AcpTranscriptPanel({
     setComposerError,
     canSend: composerText.trim().length > 0 && !sending && !activeTurnId,
     canSendWithWorkspace: (path: string | null | undefined) => Boolean(path),
+    sendWithContext,
     selectedAgent: composerAgent,
     selectedRuntimeAgent: selectedComposerAgent,
     selectedModel: composerModel,
@@ -1493,6 +1525,7 @@ export function AcpTranscriptPanel({
     activeTurnId,
     agentModelOptions,
     attachments,
+    addAttachments,
     composerAttachmentMenuOpen,
     composerAttachmentButtonRef,
     composerAgent,
@@ -1507,6 +1540,7 @@ export function AcpTranscriptPanel({
     pasteAttachments,
     pickAttachments,
     removeAttachment,
+    sendWithContext,
     setComposerAttachmentMenuOpen,
     selectedAgentModelValue,
     selectedComposerAgent,

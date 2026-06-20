@@ -1260,11 +1260,107 @@ fn spawn_prompt_task(
 }
 
 fn prompt_request_from_input(session_id: SessionId, input: AgentInput) -> Result<PromptRequest> {
-    let mut prompt = vec![ContentBlock::Text(TextContent::new(input.text))];
-    for attachment in input.attachments {
+    let AgentInput {
+        text,
+        attachments,
+        options,
+    } = input;
+    let normalized_text = normalize_canvas_prompt_text(&text, &options);
+    let mut prompt = vec![ContentBlock::Text(TextContent::new(normalized_text))];
+    for attachment in attachments {
         prompt.push(content_block_from_attachment(&attachment)?);
     }
     Ok(PromptRequest::new(session_id, prompt))
+}
+
+fn normalize_canvas_prompt_text(text: &str, options: &RuntimeMetadata) -> String {
+    let Some(canvas_context) = options.get("canvasContext") else {
+        return text.to_string();
+    };
+    let Some(block) = build_canvas_prompt_block(canvas_context) else {
+        return text.to_string();
+    };
+    format!("{block}\n\n---\n\n{text}")
+}
+
+fn build_canvas_prompt_block(value: &serde_json::Value) -> Option<String> {
+    let context = value.as_object()?;
+    let scope = context
+        .get("scope")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("canvas");
+    let refs = context
+        .get("refs")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut lines = vec![
+        "[Canvas context]".to_string(),
+        format!("Canvas scope: {scope}"),
+    ];
+    let shape_ids = context
+        .get("shapeIds")
+        .and_then(|value| value.as_array())
+        .map(|ids| ids.len())
+        .unwrap_or(0);
+    if shape_ids > 0 {
+        lines.push(format!("Selected items: {shape_ids}"));
+    }
+    if refs.is_empty() {
+        lines.push("Use the current canvas selection when answering.".to_string());
+    } else {
+        lines.push("Selected refs:".to_string());
+        for (index, item) in refs.iter().take(8).enumerate() {
+            let Some(record) = item.as_object() else {
+                continue;
+            };
+            let kind = record
+                .get("kind")
+                .and_then(|value| value.as_str())
+                .unwrap_or("item");
+            let source = record
+                .get("sourcePath")
+                .and_then(|value| value.as_str())
+                .or_else(|| record.get("sourceKey").and_then(|value| value.as_str()))
+                .unwrap_or(kind);
+            let summary = record
+                .get("summary")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| truncate_canvas_summary(value, 180));
+            let mut line = format!("{}. {} - {}", index + 1, kind, source);
+            if let Some(summary) = summary {
+                line.push_str(": ");
+                line.push_str(&summary);
+            }
+            lines.push(line);
+        }
+        if refs.len() > 8 {
+            lines.push(format!("... and {} more items.", refs.len() - 8));
+        }
+    }
+    if context
+        .get("snapshotAttachmentPath")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .is_some()
+    {
+        lines.push("Use the attached canvas snapshot when helpful.".to_string());
+    }
+    Some(lines.join("\n"))
+}
+
+fn truncate_canvas_summary(value: &str, limit: usize) -> String {
+    let trimmed = value.trim().replace('\n', " ");
+    let mut chars = trimmed.chars();
+    let head: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        format!("{head}...")
+    } else {
+        head
+    }
 }
 
 fn content_block_from_attachment(attachment: &AgentAttachment) -> Result<ContentBlock> {

@@ -19,16 +19,25 @@ import {
 } from "tldraw";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AlertCircle, FileImage, FilePlus2, FolderOpen, Layers3, Save, StickyNote, Workflow } from "lucide-react";
-import type { CanvasDocumentState, CanvasNodeKind, CanvasSourceType } from "../canvasTypes";
+import { AlertCircle, Camera, FileImage, FilePlus2, FolderOpen, Layers3, MessageCircleQuestionMark, Save, StickyNote, Workflow } from "lucide-react";
+import type {
+  CanvasContextOption,
+  CanvasContextRef,
+  CanvasDocumentState,
+  CanvasNodeKind,
+  CanvasSourceType,
+} from "../canvasTypes";
 import {
   type Agent,
+  createCanvasContextFile,
   getThreadWorkSnapshot,
   listProjectFiles,
+  savePastedAttachment,
   saveCanvasDraft,
   saveCanvasRevision,
   updateCanvasShapeRefs,
 } from "../api";
+import type { ComposerAttachment } from "./ComposerAttachments";
 import type { ChatComposerController } from "../hooks/useChatComposer";
 import PopupMenu, { type PopupMenuOption } from "./PopupMenu";
 
@@ -73,6 +82,7 @@ export default function TldrawCanvasHost({
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   const [selectedShapeMeta, setSelectedShapeMeta] = useState<Record<string, unknown> | null>(null);
+  const [bridgeBusy, setBridgeBusy] = useState<null | "ask" | "snapshot">(null);
   const lastSavedRevision = initialState.savedRevision?.revision ?? null;
 
   useEffect(() => {
@@ -486,6 +496,199 @@ export default function TldrawCanvasHost({
     }, AUTOSAVE_DEBOUNCE_MS);
   };
 
+  const getSelectedShapeRefs = () => {
+    const editor = editorRef.current;
+    if (!editor) return [];
+    const selectedIds = editor.getSelectedShapeIds();
+    const selectedSet = new Set(selectedIds);
+    const refsById = new Map(initialState.shapeRefs.map((ref) => [ref.shapeId, ref]));
+    return editor
+      .getCurrentPageShapes()
+      .filter((shape) => selectedSet.has(shape.id))
+      .map((shape) => {
+        const ref = refsById.get(shape.id);
+        const meta = (shape.meta ?? {}) as Record<string, unknown>;
+        const title =
+          typeof meta.title === "string" && meta.title.trim()
+            ? meta.title
+            : ref?.sourceKey
+              ? ref.sourceKey
+              : shape.type;
+        const sourcePath =
+          typeof meta.sourcePath === "string" && meta.sourcePath.trim()
+            ? meta.sourcePath
+            : ref?.sourcePath ?? null;
+        const sourceKey =
+          typeof meta.sourceKey === "string" && meta.sourceKey.trim()
+            ? meta.sourceKey
+            : ref?.sourceKey ?? null;
+        const sourceType =
+          typeof meta.sourceType === "string" && meta.sourceType.trim()
+            ? meta.sourceType
+            : ref?.sourceType ?? shape.type;
+        const kind =
+          typeof meta.kind === "string" && meta.kind.trim()
+            ? meta.kind
+            : ref?.kind ?? shape.type;
+        const summary = buildShapeSummary(kind, title, sourcePath, meta);
+        const contextRef: CanvasContextRef = {
+          shapeId: shape.id,
+          kind: normalizeNodeKind(kind),
+          sourceType,
+          sourcePath,
+          sourceKey,
+          summary,
+        };
+        return {
+          shape,
+          meta,
+          title,
+          sourcePath,
+          kind: normalizeNodeKind(kind),
+          contextRef,
+        };
+      });
+  };
+
+  const exportSelectionSnapshot = async () => {
+    const editor = editorRef.current;
+    if (!editor) return null;
+    const ids = editor.getSelectedShapeIds();
+    if (ids.length === 0) return null;
+    const result = await editor.toImage(ids, {
+      format: "png",
+      background: true,
+      scale: 1,
+      padding: 24,
+    });
+    const blob = result?.blob ?? null;
+    if (!blob) return null;
+    const path = await saveBlobAsAttachment(blob, `canvas-selection-${Date.now()}.png`);
+    return {
+      path,
+      attachment: {
+        path,
+        kind: "image",
+        mimeType: "image/png",
+        previewDataUrl: null,
+        displayName: "Canvas selection",
+        name: "Canvas selection",
+      } satisfies ComposerAttachment,
+    };
+  };
+
+  const buildSelectionContext = async () => {
+    const refs = getSelectedShapeRefs();
+    if (refs.length === 0) return null;
+    const selectionSummary = renderSelectionSummaryMarkdown(refs);
+    const summaryPath = await createCanvasContextFile({
+      sessionId,
+      kind: "selection",
+      fileNamePrefix: "canvas-selection",
+      content: selectionSummary,
+    });
+    const attachments: ComposerAttachment[] = [
+      {
+        path: summaryPath,
+        kind: "file",
+        mimeType: "text/markdown",
+        previewDataUrl: null,
+        displayName: "Canvas selection summary",
+        name: "Canvas selection summary",
+      },
+    ];
+    const workflowRefs = refs.filter((ref) => ref.kind === "workflow");
+    for (const workflow of workflowRefs) {
+      const workflowMarkdown = renderWorkflowSummaryMarkdown(workflow.meta, workflow.title);
+      const workflowPath = await createCanvasContextFile({
+        sessionId,
+        kind: "workflow",
+        fileNamePrefix: safeFilePrefix(workflow.title),
+        content: workflowMarkdown,
+      });
+      attachments.push({
+        path: workflowPath,
+        kind: "file",
+        mimeType: "text/markdown",
+        previewDataUrl: null,
+        displayName: `${workflow.title} workflow summary`,
+        name: `${workflow.title} workflow summary`,
+      });
+    }
+    const snapshot = await exportSelectionSnapshot();
+    if (snapshot) attachments.push(snapshot.attachment);
+    const canvasContext: CanvasContextOption = {
+      canvasId: initialState.document.id,
+      scope: "selection",
+      shapeIds: refs.map((ref) => ref.shape.id),
+      snapshotAttachmentPath: snapshot?.path ?? null,
+      refs: refs.map((ref) => ref.contextRef),
+    };
+    return {
+      refs,
+      attachments,
+      canvasContext,
+      summaryText: selectionSummary,
+    };
+  };
+
+  const attachSelectionSnapshot = async () => {
+    if (!composer.supportsImageAttachments) {
+      onError("The selected agent does not support image attachments.");
+      return;
+    }
+    setBridgeBusy("snapshot");
+    try {
+      const snapshot = await exportSelectionSnapshot();
+      if (!snapshot) {
+        onError("Select one or more shapes before attaching a snapshot.");
+        return;
+      }
+      await composer.appendAttachments([
+        {
+          path: snapshot.path,
+          kind: "image",
+          mimeType: "image/png",
+          displayName: snapshot.attachment.displayName,
+          name: snapshot.attachment.name,
+        },
+      ]);
+    } catch (error) {
+      onError(`Failed to attach selection snapshot: ${String(error)}`);
+    } finally {
+      setBridgeBusy(null);
+    }
+  };
+
+  const askSelection = async () => {
+    setBridgeBusy("ask");
+    try {
+      const payload = await buildSelectionContext();
+      if (!payload) {
+        onError("Select one or more shapes before asking about the canvas.");
+        return;
+      }
+      const prompt =
+        composer.text.trim() ||
+        `Help me reason about these ${payload.refs.length} selected canvas item${payload.refs.length === 1 ? "" : "s"}.`;
+      const sent = await composer.sendWithContext(prompt, {
+        clearComposer: true,
+        attachments: [...composer.attachments, ...payload.attachments],
+        runtimeOptions: {
+          canvasContext: payload.canvasContext,
+        },
+      });
+      if (!sent) {
+        onError("Failed to send the canvas selection to the agent.");
+        return;
+      }
+    } catch (error) {
+      onError(`Failed to ask about the current selection: ${String(error)}`);
+    } finally {
+      setBridgeBusy(null);
+    }
+  };
+
   return (
     <div className="absolute inset-0 flex min-h-0 flex-col">
       <div className="flex items-center justify-between gap-3 border-b border-ink/8 bg-surface-panel/90 px-4 py-2">
@@ -515,6 +718,24 @@ export default function TldrawCanvasHost({
           <span className="rounded-full border border-ink/10 px-2.5 py-1 text-ink/55">
             {selectionCount > 0 ? `${selectionCount} selected` : "Canvas"}
           </span>
+          <button
+            type="button"
+            onClick={() => void askSelection()}
+            disabled={selectionCount === 0 || bridgeBusy !== null}
+            className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 px-2.5 py-1 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <MessageCircleQuestionMark className="h-3.5 w-3.5" />
+            Ask selection
+          </button>
+          <button
+            type="button"
+            onClick={() => void attachSelectionSnapshot()}
+            disabled={selectionCount === 0 || bridgeBusy !== null || !composer.supportsImageAttachments}
+            className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 px-2.5 py-1 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Camera className="h-3.5 w-3.5" />
+            Attach snapshot
+          </button>
           <button
             type="button"
             onClick={() => groupSelection()}
@@ -655,4 +876,122 @@ function serializeJsonValue(value: unknown): string {
   } catch {
     return "null";
   }
+}
+
+function normalizeNodeKind(value: string): CanvasNodeKind {
+  switch (value) {
+    case "file":
+    case "image":
+    case "video":
+    case "workflow":
+    case "note":
+    case "group":
+      return value;
+    default:
+      return "note";
+  }
+}
+
+function buildShapeSummary(
+  kind: string,
+  title: string,
+  sourcePath: string | null,
+  meta: Record<string, unknown>,
+): string {
+  if (kind === "workflow") {
+    return `${title}${sourcePath ? ` (${sourcePath})` : ""}`;
+  }
+  if (kind === "image") {
+    return `${title}${sourcePath ? ` from ${sourcePath}` : ""}`;
+  }
+  if (kind === "file") {
+    return `${title}${sourcePath ? ` at ${sourcePath}` : ""}`;
+  }
+  if (kind === "note") {
+    const note = typeof meta.title === "string" ? meta.title : "Canvas note";
+    return note;
+  }
+  return title;
+}
+
+function renderSelectionSummaryMarkdown(
+  refs: Array<{
+    title: string;
+    sourcePath: string | null;
+    kind: CanvasNodeKind;
+    contextRef: CanvasContextRef;
+  }>,
+): string {
+  const lines = [
+    "# Canvas selection",
+    "",
+    ...refs.map((ref, index) =>
+      `${index + 1}. ${ref.kind} - ${ref.title}${ref.sourcePath ? ` (${ref.sourcePath})` : ""}`,
+    ),
+    "",
+    "Use the attached canvas snapshot and workflow summaries when helpful.",
+  ];
+  return lines.join("\n");
+}
+
+function renderWorkflowSummaryMarkdown(meta: Record<string, unknown>, title: string): string {
+  const snapshotJson =
+    typeof meta.workflowSnapshotJson === "string" && meta.workflowSnapshotJson.trim()
+      ? meta.workflowSnapshotJson
+      : null;
+  const snapshot = snapshotJson ? tryParseJson(snapshotJson) : null;
+  const stages = Array.isArray(snapshot?.stages) ? snapshot.stages : [];
+  const lines = [
+    `# ${title}`,
+    "",
+    typeof snapshot?.goal === "string" && snapshot.goal.trim() ? snapshot.goal.trim() : "Workflow summary",
+    "",
+  ];
+  if (stages.length > 0) {
+    lines.push("## Stages", "");
+    for (const stage of stages.slice(0, 8)) {
+      if (!stage || typeof stage !== "object") continue;
+      const stageRecord = stage as Record<string, unknown>;
+      const name =
+        typeof stageRecord.name === "string" && stageRecord.name.trim()
+          ? stageRecord.name.trim()
+          : "Stage";
+      const status =
+        typeof stageRecord.status === "string" && stageRecord.status.trim()
+          ? stageRecord.status.trim()
+          : "unknown";
+      lines.push(`- ${name}: ${status}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+function safeFilePrefix(value: string): string {
+  const cleaned = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return cleaned || "canvas";
+}
+
+function tryParseJson(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveBlobAsAttachment(blob: Blob, fileName: string): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  const { path } = await savePastedAttachment({
+    fileName,
+    mimeType: blob.type || "image/png",
+    dataBase64: btoa(binary),
+  });
+  return path;
 }
