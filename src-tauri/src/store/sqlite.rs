@@ -2980,6 +2980,23 @@ fn latest_canvas_revision(conn: &Connection, canvas_id: &str) -> Result<Option<C
     .map_err(Into::into)
 }
 
+fn stale_canvas_revision_paths(
+    conn: &Connection,
+    canvas_id: &str,
+    keep_latest: usize,
+) -> Result<Vec<String>> {
+    let keep_latest = i64::try_from(keep_latest).unwrap_or(i64::MAX);
+    let mut stmt = conn.prepare(
+        "SELECT snapshot_path
+         FROM canvas_revisions
+         WHERE canvas_id = ?
+         ORDER BY revision DESC, created_at DESC
+         LIMIT -1 OFFSET ?",
+    )?;
+    let rows = stmt.query_map(params![canvas_id, keep_latest], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn load_canvas_shape_refs(conn: &Connection, canvas_id: &str) -> Result<Vec<CanvasShapeRef>> {
     let mut stmt = conn.prepare(
         "SELECT id, canvas_id, shape_id, kind, source_type, source_key, source_path,
@@ -9246,6 +9263,33 @@ impl SessionStore for SqliteStore {
         )?;
         tx.commit()?;
         Ok((updated_document, revision))
+    }
+
+    fn prune_canvas_revisions(
+        &self,
+        session_id: &str,
+        keep_latest: usize,
+    ) -> Result<Vec<String>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let document = upsert_canvas_document_title(&tx, session_id, None)?;
+        let stale_paths = stale_canvas_revision_paths(&tx, &document.id, keep_latest)?;
+        if !stale_paths.is_empty() {
+            let keep_latest = i64::try_from(keep_latest).unwrap_or(i64::MAX);
+            tx.execute(
+                "DELETE FROM canvas_revisions
+                 WHERE id IN (
+                    SELECT id
+                    FROM canvas_revisions
+                    WHERE canvas_id = ?
+                    ORDER BY revision DESC, created_at DESC
+                    LIMIT -1 OFFSET ?
+                 )",
+                params![document.id.as_str(), keep_latest],
+            )?;
+        }
+        tx.commit()?;
+        Ok(stale_paths)
     }
 
     fn replace_canvas_shape_refs(

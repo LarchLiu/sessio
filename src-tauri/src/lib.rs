@@ -3991,6 +3991,9 @@ fn canvas_context_dir(session_id: &str) -> Result<PathBuf, String> {
         .join("context"))
 }
 
+const CANVAS_REVISION_RETENTION_LIMIT: usize = 24;
+const CANVAS_CONTEXT_FILE_RETENTION_LIMIT: usize = 24;
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))
@@ -3998,6 +4001,40 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn read_optional_text_file(path: Option<&str>) -> Option<String> {
     path.and_then(|value| std::fs::read_to_string(value).ok())
+}
+
+fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Target path has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Target path has no file name".to_string())?;
+    let temp_path = parent.join(format!(".{file_name}.tmp"));
+    std::fs::write(&temp_path, bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&temp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp_path);
+        e.to_string()
+    })
+}
+
+fn prune_canvas_context_files(session_id: &str, keep_latest: usize) -> Result<(), String> {
+    let dir = canvas_context_dir(session_id)?;
+    let entries = std::fs::read_dir(&dir);
+    let Ok(entries) = entries else {
+        return Ok(());
+    };
+    let mut files = entries
+        .filter_map(|entry| entry.ok().map(|item| item.path()))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| right.cmp(left));
+    for stale in files.into_iter().skip(keep_latest) {
+        let _ = std::fs::remove_file(stale);
+    }
+    Ok(())
 }
 
 fn file_mtime_ms(meta: &std::fs::Metadata) -> Result<u64, String> {
@@ -4193,11 +4230,7 @@ fn save_canvas_draft(
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<SavedCanvasDraft, String> {
     let path = canvas_draft_path(&req.session_id)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Canvas draft path has no parent".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    std::fs::write(&path, req.snapshot_json.as_bytes()).map_err(|e| e.to_string())?;
+    write_atomic_bytes(&path, req.snapshot_json.as_bytes())?;
     let hash = sha256_hex(req.snapshot_json.as_bytes());
     let document = store
         .save_canvas_draft(
@@ -4224,7 +4257,7 @@ fn save_canvas_revision(
         .map_err(|e| e.to_string())?;
     let next_revision = current.document.current_saved_revision.unwrap_or(0) + 1;
     let path = revisions_dir.join(format!("{next_revision:06}.tldr.json"));
-    std::fs::write(&path, &snapshot_bytes).map_err(|e| e.to_string())?;
+    write_atomic_bytes(&path, &snapshot_bytes)?;
     let (document, revision) = store
         .save_canvas_revision(
             &req.session_id,
@@ -4235,6 +4268,12 @@ fn save_canvas_revision(
             req.source.trim(),
         )
         .map_err(|e| e.to_string())?;
+    let stale_paths = store
+        .prune_canvas_revisions(&req.session_id, CANVAS_REVISION_RETENTION_LIMIT)
+        .map_err(|e| e.to_string())?;
+    for stale_path in stale_paths {
+        let _ = std::fs::remove_file(stale_path);
+    }
     Ok(SavedCanvasRevision { document, revision })
 }
 
@@ -4280,6 +4319,7 @@ fn create_canvas_context_file(req: BuildCanvasContextFileRequest) -> Result<Stri
             file.write_all(req.content.as_bytes())
         })
         .map_err(|e| e.to_string())?;
+    prune_canvas_context_files(&req.session_id, CANVAS_CONTEXT_FILE_RETENTION_LIMIT)?;
     Ok(path.to_string_lossy().to_string())
 }
 

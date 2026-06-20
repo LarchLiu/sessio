@@ -181,6 +181,36 @@ export default function TldrawCanvasHost({
     }
   };
 
+  const restoreSavedRevision = async () => {
+    const editor = editorRef.current;
+    const snapshotText = initialState.savedSnapshot;
+    if (!editor || !snapshotText) return;
+    try {
+      const result = parseTldrawJsonFile({
+        json: snapshotText,
+        schema: editor.store.schema,
+      });
+      if (!result.ok) {
+        throw new Error(result.error.type);
+      }
+      editor.loadSnapshot(result.value.getStoreSnapshot());
+      currentSnapshotRef.current = snapshotText;
+      setSaveState("saved");
+      setSaveError(null);
+      onStateLoaded({
+        ...initialState,
+        draftSnapshot: snapshotText,
+        savedSnapshot: snapshotText,
+      });
+      await persistShapeRefs(editor);
+    } catch (error) {
+      const message = `Failed to restore the last saved revision: ${String(error)}`;
+      setSaveState("failed");
+      setSaveError(message);
+      onError(message);
+    }
+  };
+
   const persistShapeRefs = async (editor: Editor) => {
     const shapes = editor
       .getCurrentPageShapes()
@@ -842,6 +872,11 @@ export default function TldrawCanvasHost({
               <span className="max-w-[180px] truncate">{file.split(/[/\\]/).pop() ?? file}</span>
             </button>
           ))}
+          {suggestionFiles.length === 0 && (
+            <div className="rounded-full border border-dashed border-ink/10 px-3 py-1.5 text-ink/40">
+              Add files, notes, workflow mirrors, or screenshots to seed the canvas.
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2 text-caption">
           <span className="rounded-full border border-ink/10 px-2.5 py-1 text-ink/55">
@@ -917,8 +952,20 @@ export default function TldrawCanvasHost({
       </div>
       {saveError && (
         <div className="mx-4 mt-3 rounded-xl border border-status-error/20 bg-status-error/8 px-3 py-2 text-caption text-status-error">
-          {saveError}
-          {lastSavedRevision !== null ? ` Last saved revision: ${lastSavedRevision}.` : ""}
+          <div>
+            {saveError}
+            {lastSavedRevision !== null ? ` Last saved revision: ${lastSavedRevision}.` : ""}
+          </div>
+          {initialState.savedSnapshot && (
+            <button
+              type="button"
+              onClick={() => void restoreSavedRevision()}
+              className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-status-error/20 px-3 py-1 text-[11px] transition hover:bg-status-error/10"
+            >
+              <Save className="h-3.5 w-3.5" />
+              Restore saved revision
+            </button>
+          )}
         </div>
       )}
       <div className="flex-1 min-h-0">
@@ -1071,6 +1118,11 @@ export default function TldrawCanvasHost({
             </div>
           )}
         </aside>
+      )}
+      {!selectedShapeMeta && anchors.length === 0 && (
+        <div className="pointer-events-none absolute right-4 top-16 z-10 w-[260px] rounded-2xl border border-dashed border-ink/10 bg-surface-panel/70 p-3 text-caption text-ink/42 backdrop-blur">
+          Select a shape to inspect metadata, trigger workflow actions, or review anchors after sending a canvas selection.
+        </div>
       )}
       {addMenuOpen && addMenuButtonRef.current && (
         <PopupMenu

@@ -954,6 +954,11 @@ pub trait SessionStore: Send + Sync {
         snapshot_size_bytes: i64,
         source: &str,
     ) -> Result<(CanvasDocumentInfo, CanvasRevisionInfo)>;
+    fn prune_canvas_revisions(
+        &self,
+        session_id: &str,
+        keep_latest: usize,
+    ) -> Result<Vec<String>>;
     fn replace_canvas_shape_refs(
         &self,
         session_id: &str,

@@ -1145,6 +1145,14 @@ impl SessionStore for CachedStore {
         )
     }
 
+    fn prune_canvas_revisions(
+        &self,
+        session_id: &str,
+        keep_latest: usize,
+    ) -> Result<Vec<String>> {
+        self.inner.prune_canvas_revisions(session_id, keep_latest)
+    }
+
     fn replace_canvas_shape_refs(
         &self,
         session_id: &str,
