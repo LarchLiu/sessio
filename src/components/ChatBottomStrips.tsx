@@ -5,6 +5,7 @@ import {
   Brain,
   ClipboardList,
   Code2,
+  FilePlus2,
   FileDiff,
   FileSearch,
   FolderOpen,
@@ -328,6 +329,7 @@ export function EditedFilesBar({
   edits = [],
   onClick,
   onOpenFile,
+  onAddToCanvas,
 }: {
   fileCount: number;
   additions: number;
@@ -335,6 +337,7 @@ export function EditedFilesBar({
   edits?: FileEditItem[];
   onClick?: () => void;
   onOpenFile?: (path: string) => void;
+  onAddToCanvas?: (paths: string[] | string) => void;
 }) {
   const { t } = useI18n();
   const anchorRef = useRef<HTMLButtonElement | HTMLDivElement | null>(null);
@@ -476,6 +479,10 @@ export function EditedFilesBar({
     fileCount === 1
       ? t("chat.files.count_one")
       : t("chat.files.count", { count: fileCount });
+  const editPaths = useMemo(
+    () => edits.map((edit) => edit.path?.trim() ?? "").filter(Boolean),
+    [edits],
+  );
   const Tag = onClick ? "button" : "div";
   const popupStyle = popupPos ?? { top: 0, left: 0, width: 0, height: 0 };
 
@@ -501,6 +508,20 @@ export function EditedFilesBar({
           <span className="text-ink/25"> </span>
           <span className="text-status-error">-{deletions}</span>
         </span>
+        {onAddToCanvas && editPaths.length > 0 && (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onAddToCanvas(editPaths);
+            }}
+            className="ml-auto inline-flex items-center gap-1 rounded-full border border-ink/10 px-2 py-0.5 text-[11px] text-ink/60 transition hover:bg-ink/5 hover:text-ink/80"
+          >
+            <FilePlus2 className="h-3 w-3" />
+            Add to canvas
+          </button>
+        )}
       </Tag>
       {hoverOpen && edits.length > 0
         ? createPortal(

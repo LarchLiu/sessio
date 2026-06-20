@@ -49,6 +49,10 @@ export interface TldrawCanvasHostProps {
   workspacePath: string | null;
   sessionThreadId?: string | null;
   editedFiles?: string[];
+  selectedFileRequest?: {
+    paths: string[];
+    requestId: number;
+  } | null;
   initialState: CanvasDocumentState;
   initialSnapshot: string | null;
   composer: ChatComposerController;
@@ -66,6 +70,7 @@ export default function TldrawCanvasHost({
   workspacePath,
   sessionThreadId = null,
   editedFiles = [],
+  selectedFileRequest = null,
   initialState,
   initialSnapshot,
   composer,
@@ -75,6 +80,7 @@ export default function TldrawCanvasHost({
   onOpenThreadMultiSessionChat,
 }: TldrawCanvasHostProps) {
   const editorRef = useRef<Editor | null>(null);
+  const handledFileRequestRef = useRef<number | null>(null);
   const autosaveTimerRef = useRef<number | null>(null);
   const inflightSaveRef = useRef(false);
   const queuedSaveRef = useRef<string | null>(null);
@@ -133,6 +139,10 @@ export default function TldrawCanvasHost({
     const merged = [...editedFiles, ...projectFiles].filter(Boolean);
     return Array.from(new Set(merged)).slice(0, 4);
   }, [editedFiles, projectFiles]);
+  const changedFiles = useMemo(
+    () => Array.from(new Set(editedFiles.map((path) => path.trim()).filter(Boolean))),
+    [editedFiles],
+  );
   const addMenuOptions = useMemo<PopupMenuOption<string>[]>(() => [
     { key: "file", label: "Choose files", icon: <FolderOpen className="h-4 w-4" /> },
     { key: "image", label: "Add image", icon: <FileImage className="h-4 w-4" /> },
@@ -347,6 +357,19 @@ export default function TldrawCanvasHost({
   const addFileNode = (path: string) => {
     addFileNodes([path]);
   };
+
+  const addChangedFiles = () => {
+    addFileNodes(changedFiles);
+  };
+
+  useEffect(() => {
+    const requestId = selectedFileRequest?.requestId ?? null;
+    if (!selectedFileRequest || requestId === null) return;
+    if (handledFileRequestRef.current === requestId) return;
+    if (!editorRef.current) return;
+    handledFileRequestRef.current = requestId;
+    addFileNodes(selectedFileRequest.paths);
+  }, [selectedFileRequest]);
 
   const addWorkflowNode = async () => {
     const editor = editorRef.current;
@@ -863,6 +886,15 @@ export default function TldrawCanvasHost({
           >
             <Layers3 className="h-3.5 w-3.5" />
             Add to canvas
+          </button>
+          <button
+            type="button"
+            onClick={addChangedFiles}
+            disabled={changedFiles.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 px-3 py-1.5 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <FilePlus2 className="h-3.5 w-3.5" />
+            Add changed files
           </button>
           {suggestionFiles.map((file) => (
             <button

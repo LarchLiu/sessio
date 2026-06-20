@@ -160,7 +160,12 @@ export interface ChatPageProps {
     path: string;
     requestId: number;
   } | null;
+  selectedCanvasFileRequest?: {
+    paths: string[];
+    requestId: number;
+  } | null;
   onOpenProjectFile?: (path: string) => void;
+  onAddProjectFileToCanvas?: (paths: string[] | string) => void;
   onOpenThreadMultiSessionChat?: (threadId: string) => void;
   sessionThreadId?: string | null;
   liveState: LiveRuntimeState;
@@ -575,7 +580,12 @@ export interface AcpTranscriptPanelProps {
     path: string;
     requestId: number;
   } | null;
+  selectedCanvasFileRequest?: {
+    paths: string[];
+    requestId: number;
+  } | null;
   onOpenProjectFile?: (path: string) => void;
+  onAddProjectFileToCanvas?: (paths: string[] | string) => void;
   onOpenThreadMultiSessionChat?: (threadId: string) => void;
   sessionThreadId?: string | null;
   skipHistoryLoad?: boolean;
@@ -612,7 +622,9 @@ export function AcpTranscriptPanel({
   workspacePath,
   projectFilesReloadKey = 0,
   selectedProjectFileRequest = null,
+  selectedCanvasFileRequest = null,
   onOpenProjectFile,
+  onAddProjectFileToCanvas,
   onOpenThreadMultiSessionChat,
   sessionThreadId = null,
   skipHistoryLoad = false,
@@ -1646,6 +1658,7 @@ export function AcpTranscriptPanel({
             sessionTitle={sessionId}
             workspacePath={workspacePath}
             editedFiles={fileViewEdits.map((edit) => edit.path).filter((path): path is string => Boolean(path))}
+            selectedCanvasFileRequest={selectedCanvasFileRequest}
             composer={chatComposerController}
             onError={setComposerError}
             onOpenProjectFile={onOpenProjectFile}
@@ -1746,6 +1759,7 @@ export function AcpTranscriptPanel({
             deletions={currentTurnFileEdits.deletions}
             edits={currentTurnFileEdits.edits}
             onOpenFile={onOpenProjectFile}
+            onAddToCanvas={onAddProjectFileToCanvas}
           />
         </ComposerTopAttachments>
       )}

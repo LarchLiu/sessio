@@ -15,6 +15,10 @@ export interface ChatCanvasViewProps {
   workspacePath: string | null;
   sessionThreadId?: string | null;
   editedFiles?: string[];
+  selectedCanvasFileRequest?: {
+    paths: string[];
+    requestId: number;
+  } | null;
   composer: ChatComposerController;
   onError: (message: string) => void;
   onOpenProjectFile?: (path: string) => void;
@@ -28,6 +32,7 @@ export default function ChatCanvasView({
   workspacePath,
   sessionThreadId = null,
   editedFiles = [],
+  selectedCanvasFileRequest = null,
   composer,
   onError,
   onOpenProjectFile,
@@ -131,6 +136,7 @@ export default function ChatCanvasView({
             workspacePath={workspacePath}
             sessionThreadId={sessionThreadId}
             editedFiles={editedFiles}
+            selectedFileRequest={selectedCanvasFileRequest}
             initialState={state}
             initialSnapshot={initialSnapshot}
             composer={composer}

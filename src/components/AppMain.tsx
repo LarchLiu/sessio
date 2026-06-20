@@ -30,7 +30,9 @@ export default function AppMain({
   projectGitRepos,
   onProjectGitRepoDetected,
   selectedProjectFileRequest,
+  selectedCanvasFileRequest,
   onOpenProjectFile,
+  onAddProjectFileToCanvas,
   liveState,
   runtimeAgents,
   lastRuntimeAgentSelection,
@@ -72,7 +74,12 @@ export default function AppMain({
     path: string;
     requestId: number;
   } | null;
+  selectedCanvasFileRequest?: {
+    paths: string[];
+    requestId: number;
+  } | null;
   onOpenProjectFile: (path: string) => void;
+  onAddProjectFileToCanvas: (paths: string[] | string) => void;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
   lastRuntimeAgentSelection: RuntimeAgentSelection | null;
@@ -251,7 +258,9 @@ export default function AppMain({
             onFilesSubviewChange={onFilesSubviewChange}
             projectFilesReloadKey={projectFilesReloadKey}
             selectedProjectFileRequest={selectedProjectFileRequest}
+            selectedCanvasFileRequest={selectedCanvasFileRequest}
             onOpenProjectFile={onOpenProjectFile}
+            onAddProjectFileToCanvas={onAddProjectFileToCanvas}
             onOpenThreadMultiSessionChat={(threadId) => {
               if (!selectedSessionProject) return;
               setSelected(null);
@@ -294,7 +303,9 @@ export default function AppMain({
             onFilesSubviewChange={onFilesSubviewChange}
             projectFilesReloadKey={projectFilesReloadKey}
             selectedProjectFileRequest={selectedProjectFileRequest}
+            selectedCanvasFileRequest={selectedCanvasFileRequest}
             onOpenProjectFile={onOpenProjectFile}
+            onAddProjectFileToCanvas={onAddProjectFileToCanvas}
             onOpenThreadMultiSessionChat={(threadId) => {
               if (!selectedSessionProject) return;
               setSelected(null);

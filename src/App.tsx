@@ -77,6 +77,7 @@ const RIGHT_SIDEBAR_OPEN_STORAGE_KEY = "sessio.rightSidebarOpen";
 
 type ThreadSelection = { projectId: string; threadId: string; goal: string } | null;
 type ProjectFileSelectionRequest = { path: string; requestId: number };
+type CanvasFileSelectionRequest = { paths: string[]; requestId: number };
 
 function readViewMode(): ViewMode {
   if (typeof localStorage === "undefined") return "native";
@@ -160,6 +161,7 @@ export default function App() {
   const [pendingNewChats, setPendingNewChats] = useState<Record<string, PendingNewChatSession>>({});
   const [runtimeSessionAliases, setRuntimeSessionAliases] = useState<Record<string, string>>({});
   const [projectFileSelectionBySession, setProjectFileSelectionBySession] = useState<Record<string, ProjectFileSelectionRequest>>({});
+  const [canvasFileSelectionBySession, setCanvasFileSelectionBySession] = useState<Record<string, CanvasFileSelectionRequest>>({});
   const [threadIndexItems, setThreadIndexItems] = useState<ThreadIndexItemInfo[]>([]);
   const { mode, setMode } = useTheme();
   const [systemAppearance, setSystemAppearance] = useState<"light" | "dark">("dark");
@@ -926,6 +928,8 @@ export default function App() {
   const currentSessionIdentity = selected ? sessionIdentityKey(selected) : null;
   const currentProjectFileSelection =
     currentSessionIdentity ? projectFileSelectionBySession[currentSessionIdentity] ?? null : null;
+  const currentCanvasFileSelection =
+    currentSessionIdentity ? canvasFileSelectionBySession[currentSessionIdentity] ?? null : null;
   const handleOpenProjectFile = useCallback(
     (path: string) => {
       if (!selected || detailMode !== "chat") return;
@@ -937,6 +941,29 @@ export default function App() {
           ...prev,
           [identity]: {
             path,
+            requestId: (currentSelection?.requestId ?? 0) + 1,
+          },
+        };
+      });
+    },
+    [currentChatView, detailMode, selected],
+  );
+  const handleAddProjectFileToCanvas = useCallback(
+    (paths: string[] | string) => {
+      if (!selected || detailMode !== "chat") return;
+      const nextPaths = (Array.isArray(paths) ? paths : [paths]).map((path) => path.trim()).filter(Boolean);
+      if (nextPaths.length === 0) return;
+      if (currentChatView !== "canvas") setChatView("canvas");
+      const identity = sessionIdentityKey(selected);
+      setCanvasFileSelectionBySession((prev) => {
+        const currentSelection = prev[identity];
+        const merged = currentSelection
+          ? Array.from(new Set([...currentSelection.paths, ...nextPaths]))
+          : nextPaths;
+        return {
+          ...prev,
+          [identity]: {
+            paths: merged,
             requestId: (currentSelection?.requestId ?? 0) + 1,
           },
         };
@@ -1098,6 +1125,7 @@ export default function App() {
             }}
             onOpenThreadMultiSessionChat={() => setDetailMode("threadMultiSessionChat")}
             onOpenProjectFile={handleOpenProjectFile}
+            onAddProjectFileToCanvas={handleAddProjectFileToCanvas}
             onClose={() => setRightSidebarOpen(false)}
             onError={setError}
           />
@@ -1123,7 +1151,9 @@ export default function App() {
               projectGitRepos={projectGitRepos}
               onProjectGitRepoDetected={handleProjectGitRepoDetected}
               selectedProjectFileRequest={currentProjectFileSelection}
+              selectedCanvasFileRequest={currentCanvasFileSelection}
               onOpenProjectFile={handleOpenProjectFile}
+              onAddProjectFileToCanvas={handleAddProjectFileToCanvas}
               liveState={liveRuntimeState}
               runtimeAgents={runtimeAgents}
               lastRuntimeAgentSelection={lastRuntimeAgentSelection}
