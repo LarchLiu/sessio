@@ -1,4 +1,4 @@
-import { FileCodeCorner, ListChevronsDownUp, ListChevronsUpDown, MessageSquare, PanelLeftOpen, PanelRightClose, SquareTerminal, type LucideIcon } from "lucide-react";
+import { FileCodeCorner, ListChevronsDownUp, ListChevronsUpDown, MessageSquare, PanelBottomClose, PanelBottomOpen, PanelLeftOpen, PanelRightClose, type LucideIcon } from "lucide-react";
 import type { ProjectInfo, SessionInfo } from "../api";
 import type { ChatView } from "../navigation";
 import { useI18n } from "../i18n";
@@ -151,14 +151,13 @@ export default function AppHeader({
               aria-pressed={terminalDockOpen}
               data-tauri-drag-region="false"
               onClick={onToggleTerminalDock}
-              className={
-                "rounded-md p-1 transition-colors " +
-                (terminalDockOpen
-                  ? "bg-brand/12 text-brand/90"
-                  : "text-ink/55 hover:bg-ink/5 hover:text-ink")
-              }
+              className="rounded-md p-1 text-ink/55 transition-colors hover:bg-ink/5 hover:text-ink"
             >
-              <SquareTerminal className="h-4 w-4" />
+              {terminalDockOpen ? (
+                <PanelBottomClose className="h-4 w-4" />
+              ) : (
+                <PanelBottomOpen className="h-4 w-4" />
+              )}
             </button>
           </Tooltip>
         )}
