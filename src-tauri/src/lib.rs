@@ -34,7 +34,7 @@ use agents::runtime::types::{
 use agents::runtime::RuntimeManager;
 use app_paths::{
     app_home, cross_context_dir, db_path as default_db_path, paste_cache_dir, projects_dir,
-    removed_sessions_dir,
+    removed_sessions_dir, session_canvas_dir,
 };
 use astra::{AstraHandle, AstraService, CancelAstraRunRequest, CreateAstraRunRequest};
 use indexer::{IndexTask, IndexerHandle};
@@ -43,7 +43,8 @@ use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
-    AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
+    AstraConfig, CanvasContextAnchor, CanvasDocumentState, CanvasNodeKind, CanvasShapeRef,
+    CanvasSourceType, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
     ProjectStageInfo, RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
@@ -55,7 +56,7 @@ use store::sqlite::SqliteStore;
 use store::{
     AgentPreferencesPatch, AstraConfigPatch, NewAssistant, NewPlanRound, NewPlanTask,
     NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, SessionHistorySnapshotRecord,
-    SessionStore, ThreadWorkSnapshotRecord,
+    SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasShapeRefRecord,
 };
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
@@ -155,6 +156,73 @@ struct SavePastedAttachmentRequest {
 #[serde(rename_all = "camelCase")]
 struct SavedPastedAttachment {
     path: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveCanvasDraftRequest {
+    session_id: String,
+    title: Option<String>,
+    snapshot_json: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveCanvasRevisionRequest {
+    session_id: String,
+    title: Option<String>,
+    snapshot_json: String,
+    source: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertCanvasShapeRefInput {
+    shape_id: String,
+    kind: CanvasNodeKind,
+    source_type: CanvasSourceType,
+    source_key: Option<String>,
+    source_path: Option<String>,
+    metadata_json: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCanvasShapeRefsRequest {
+    session_id: String,
+    refs: Vec<UpsertCanvasShapeRefInput>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertCanvasAnchorRequest {
+    session_id: String,
+    anchor_shape_id: Option<String>,
+    selection_shape_ids_json: String,
+    turn_id: String,
+    summary: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildCanvasContextFileRequest {
+    session_id: String,
+    kind: String,
+    file_name_prefix: String,
+    content: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedCanvasDraft {
+    document: crate::models::CanvasDocumentInfo,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedCanvasRevision {
+    document: crate::models::CanvasDocumentInfo,
+    revision: crate::models::CanvasRevisionInfo,
 }
 
 #[derive(serde::Deserialize)]
@@ -2374,6 +2442,11 @@ fn matches_scope(scope: &SessionScope, session: &SessionInfo) -> bool {
 fn remove_session_files_inner(session: SessionInfo) -> anyhow::Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
     let removed_root = removed_sessions_dir()?;
+    if let Ok(canvas_dir) = session_canvas_dir(&session.id) {
+        if canvas_dir.exists() {
+            let _ = std::fs::remove_dir_all(canvas_dir);
+        }
+    }
 
     if session.agent == Agent::Gemini {
         if crate::agents::sources::gemini::parser::remove_session_from_logs(
@@ -3881,6 +3954,52 @@ fn workspace_text_file_path(workspace_path: &str, path: &str) -> Result<PathBuf,
     Ok(file)
 }
 
+fn safe_canvas_file_component(raw: &str, fallback: &str) -> String {
+    let sanitized: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let compact = sanitized.trim_matches('-');
+    if compact.is_empty() {
+        fallback.to_string()
+    } else {
+        compact.to_string()
+    }
+}
+
+fn canvas_draft_path(session_id: &str) -> Result<PathBuf, String> {
+    Ok(session_canvas_dir(session_id)
+        .map_err(|e| e.to_string())?
+        .join("draft.tldr.json"))
+}
+
+fn canvas_revisions_dir(session_id: &str) -> Result<PathBuf, String> {
+    Ok(session_canvas_dir(session_id)
+        .map_err(|e| e.to_string())?
+        .join("revisions"))
+}
+
+fn canvas_context_dir(session_id: &str) -> Result<PathBuf, String> {
+    Ok(session_canvas_dir(session_id)
+        .map_err(|e| e.to_string())?
+        .join("context"))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn read_optional_text_file(path: Option<&str>) -> Option<String> {
+    path.and_then(|value| std::fs::read_to_string(value).ok())
+}
+
 fn file_mtime_ms(meta: &std::fs::Metadata) -> Result<u64, String> {
     let modified = meta.modified().map_err(|e| e.to_string())?;
     u64::try_from(
@@ -4049,6 +4168,135 @@ fn write_cross_prompt(session_id: String, content: String) -> Result<String, Str
         })
         .map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn get_session_canvas(
+    session_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<CanvasDocumentState, String> {
+    let mut state = store
+        .get_canvas_document_state(&session_id)
+        .map_err(|e| e.to_string())?;
+    state.draft_snapshot = read_optional_text_file(state.document.draft_snapshot_path.as_deref());
+    state.saved_snapshot = read_optional_text_file(
+        state.saved_revision
+            .as_ref()
+            .map(|revision| revision.snapshot_path.as_str()),
+    );
+    Ok(state)
+}
+
+#[tauri::command]
+fn save_canvas_draft(
+    req: SaveCanvasDraftRequest,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<SavedCanvasDraft, String> {
+    let path = canvas_draft_path(&req.session_id)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Canvas draft path has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    std::fs::write(&path, req.snapshot_json.as_bytes()).map_err(|e| e.to_string())?;
+    let hash = sha256_hex(req.snapshot_json.as_bytes());
+    let document = store
+        .save_canvas_draft(
+            &req.session_id,
+            req.title.as_deref(),
+            &path.to_string_lossy(),
+            &hash,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(SavedCanvasDraft { document })
+}
+
+#[tauri::command]
+fn save_canvas_revision(
+    req: SaveCanvasRevisionRequest,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<SavedCanvasRevision, String> {
+    let revisions_dir = canvas_revisions_dir(&req.session_id)?;
+    std::fs::create_dir_all(&revisions_dir).map_err(|e| e.to_string())?;
+    let snapshot_bytes = req.snapshot_json.into_bytes();
+    let hash = sha256_hex(&snapshot_bytes);
+    let current = store
+        .get_canvas_document_state(&req.session_id)
+        .map_err(|e| e.to_string())?;
+    let next_revision = current.document.current_saved_revision.unwrap_or(0) + 1;
+    let path = revisions_dir.join(format!("{next_revision:06}.tldr.json"));
+    std::fs::write(&path, &snapshot_bytes).map_err(|e| e.to_string())?;
+    let (document, revision) = store
+        .save_canvas_revision(
+            &req.session_id,
+            req.title.as_deref(),
+            &path.to_string_lossy(),
+            &hash,
+            snapshot_bytes.len() as i64,
+            req.source.trim(),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(SavedCanvasRevision { document, revision })
+}
+
+#[tauri::command]
+fn update_canvas_shape_refs(
+    req: UpdateCanvasShapeRefsRequest,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<CanvasShapeRef>, String> {
+    let refs = req
+        .refs
+        .into_iter()
+        .map(|item| UpsertCanvasShapeRefRecord {
+            shape_id: item.shape_id,
+            kind: item.kind,
+            source_type: item.source_type,
+            source_key: item.source_key,
+            source_path: item.source_path,
+            metadata_json: item.metadata_json.unwrap_or_else(|| "{}".to_string()),
+        })
+        .collect::<Vec<_>>();
+    store
+        .replace_canvas_shape_refs(&req.session_id, &refs)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_canvas_context_file(req: BuildCanvasContextFileRequest) -> Result<String, String> {
+    let dir = canvas_context_dir(&req.session_id)?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let prefix = safe_canvas_file_component(&req.file_name_prefix, "canvas");
+    let kind = safe_canvas_file_component(&req.kind, "selection");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = dir.join(format!("{prefix}-{kind}-{ts}.md"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(req.content.as_bytes())
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn create_canvas_anchor(
+    req: UpsertCanvasAnchorRequest,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<CanvasContextAnchor, String> {
+    store
+        .create_canvas_context_anchor(
+            &req.session_id,
+            req.anchor_shape_id.as_deref(),
+            &req.selection_shape_ids_json,
+            &req.turn_id,
+            req.summary.as_deref(),
+        )
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -4981,6 +5229,12 @@ pub fn run() {
             read_local_text_file,
             read_workspace_text_file,
             write_workspace_text_file,
+            get_session_canvas,
+            save_canvas_draft,
+            save_canvas_revision,
+            update_canvas_shape_refs,
+            create_canvas_context_file,
+            create_canvas_anchor,
             get_file_git_diff,
             watch_preview_file,
             unwatch_preview_file,

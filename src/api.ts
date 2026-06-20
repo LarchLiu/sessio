@@ -1,4 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
+import type {
+  BuildCanvasContextFileRequest,
+  CanvasAnchorInfo,
+  CanvasDocumentState,
+  CanvasRevisionInfo,
+  CanvasShapeRef,
+  SaveCanvasDraftRequest,
+  SaveCanvasRevisionRequest,
+  UpdateCanvasShapeRefsRequest,
+  UpsertCanvasAnchorRequest,
+} from "./canvasTypes";
 
 export type Agent = "astra-pi" | "codex" | "claude" | "gemini" | "opencode";
 
@@ -1132,6 +1143,15 @@ export interface AgentInput {
   text: string;
   attachments?: AgentAttachment[];
   options?: Record<string, unknown>;
+}
+
+export interface SavedCanvasDraft {
+  document: CanvasDocumentState["document"];
+}
+
+export interface SavedCanvasRevision {
+  document: CanvasDocumentState["document"];
+  revision: CanvasRevisionInfo;
 }
 
 export interface AgentSessionConfigChange {
@@ -2326,6 +2346,40 @@ export async function writeCrossPrompt(
   content: string,
 ): Promise<string> {
   return invoke<string>("write_cross_prompt", { sessionId, content });
+}
+
+export async function getSessionCanvas(sessionId: string): Promise<CanvasDocumentState> {
+  return invoke<CanvasDocumentState>("get_session_canvas", { sessionId });
+}
+
+export async function saveCanvasDraft(
+  req: SaveCanvasDraftRequest,
+): Promise<SavedCanvasDraft> {
+  return invoke<SavedCanvasDraft>("save_canvas_draft", { req });
+}
+
+export async function saveCanvasRevision(
+  req: SaveCanvasRevisionRequest,
+): Promise<SavedCanvasRevision> {
+  return invoke<SavedCanvasRevision>("save_canvas_revision", { req });
+}
+
+export async function updateCanvasShapeRefs(
+  req: UpdateCanvasShapeRefsRequest,
+): Promise<CanvasShapeRef[]> {
+  return invoke<CanvasShapeRef[]>("update_canvas_shape_refs", { req });
+}
+
+export async function createCanvasContextFile(
+  req: BuildCanvasContextFileRequest,
+): Promise<string> {
+  return invoke<string>("create_canvas_context_file", { req });
+}
+
+export async function createCanvasAnchor(
+  req: UpsertCanvasAnchorRequest,
+): Promise<CanvasAnchorInfo> {
+  return invoke<CanvasAnchorInfo>("create_canvas_anchor", { req });
 }
 
 export async function getAgentRuntimeStatus(agent: Agent): Promise<RuntimeStatus> {

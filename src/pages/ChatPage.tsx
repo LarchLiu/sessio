@@ -140,6 +140,7 @@ import {
   type AcpRenderItem,
 } from "../acpRenderItems";
 import ChatFilesView, { type ChatFilesSubview } from "../components/ChatFilesView";
+import ChatCanvasView from "../components/ChatCanvasView";
 import {
   ComposerTopAttachments,
   EditedFilesBar,
@@ -1037,6 +1038,9 @@ export function AcpTranscriptPanel({
       .join("|");
   }, [liveSession]);
   const isFilesView = chatView === "file";
+  const isCanvasView = chatView === "canvas";
+  const isTranscriptView = chatView === "chat";
+  const showSharedStrips = isFilesView || isCanvasView;
   const initialPositionMode = useMemo(() => {
     if (!available || !filePath || skipHistoryLoad) {
       return skipHistoryLoad ? "bottom" : null;
@@ -1058,7 +1062,7 @@ export function AcpTranscriptPanel({
     sourceKey,
     available,
     filePath,
-    viewportActive: !isFilesView,
+    viewportActive: isTranscriptView,
     skipHistoryLoad,
     loading: loading || ancestorsLoading,
     visibleDisplayItemCount: visibleDisplayItems.length,
@@ -1579,6 +1583,15 @@ export function AcpTranscriptPanel({
               }
             />
           </div>
+        ) : isCanvasView ? (
+          <ChatCanvasView
+            sessionId={sessionId}
+            sessionTitle={sessionId}
+            workspacePath={workspacePath}
+            composer={chatComposerController}
+            onError={setComposerError}
+            onOpenProjectFile={onOpenProjectFile}
+          />
         ) : (
           <>
             <ScrollArea
@@ -1654,7 +1667,7 @@ export function AcpTranscriptPanel({
           </>
         )}
       </div>
-      {isFilesView && (
+      {showSharedStrips && (
         <ComposerTopAttachments>
           {pendingPermissions.map((permission) => (
             <FilesPermissionRow

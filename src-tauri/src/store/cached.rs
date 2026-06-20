@@ -3,11 +3,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use crate::models::{
-    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AstraConfig, ChannelSessionInfo,
-    IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo, PlanTaskInfo,
-    PlanTaskSessionInfo, PlanTaskSessionRole, ProcessTemplateInfo, ProjectInfo, ProjectStageInfo,
-    SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo, ThreadAgentInfo,
-    ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
+    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AstraConfig, CanvasContextAnchor,
+    CanvasDocumentInfo, CanvasDocumentState, CanvasRevisionInfo, CanvasShapeRef,
+    ChannelSessionInfo, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
+    PlanTaskInfo, PlanTaskSessionInfo, PlanTaskSessionRole, ProcessTemplateInfo, ProjectInfo,
+    ProjectStageInfo, SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo,
+    ThreadAgentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
 };
 use crate::store::{
     is_real_session_file_path, AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord,
@@ -15,7 +16,7 @@ use crate::store::{
     NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord,
     RuntimeAgentSelection, RuntimeAgentSessionConfigRecord, ScheduledTaskRecord,
     ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef, SessionStore,
-    ThreadWorkSnapshotRecord,
+    ThreadWorkSnapshotRecord, UpsertCanvasShapeRefRecord,
 };
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
@@ -1096,6 +1097,77 @@ impl SessionStore for CachedStore {
             }
         }
         Ok(())
+    }
+
+    fn get_or_create_canvas_document(
+        &self,
+        session_id: &str,
+        title: Option<&str>,
+    ) -> Result<CanvasDocumentInfo> {
+        self.inner.get_or_create_canvas_document(session_id, title)
+    }
+
+    fn get_canvas_document_state(&self, session_id: &str) -> Result<CanvasDocumentState> {
+        self.inner.get_canvas_document_state(session_id)
+    }
+
+    fn save_canvas_draft(
+        &self,
+        session_id: &str,
+        title: Option<&str>,
+        draft_snapshot_path: &str,
+        draft_snapshot_hash: &str,
+    ) -> Result<CanvasDocumentInfo> {
+        self.inner.save_canvas_draft(
+            session_id,
+            title,
+            draft_snapshot_path,
+            draft_snapshot_hash,
+        )
+    }
+
+    fn save_canvas_revision(
+        &self,
+        session_id: &str,
+        title: Option<&str>,
+        snapshot_path: &str,
+        snapshot_hash: &str,
+        snapshot_size_bytes: i64,
+        source: &str,
+    ) -> Result<(CanvasDocumentInfo, CanvasRevisionInfo)> {
+        self.inner.save_canvas_revision(
+            session_id,
+            title,
+            snapshot_path,
+            snapshot_hash,
+            snapshot_size_bytes,
+            source,
+        )
+    }
+
+    fn replace_canvas_shape_refs(
+        &self,
+        session_id: &str,
+        refs: &[UpsertCanvasShapeRefRecord],
+    ) -> Result<Vec<CanvasShapeRef>> {
+        self.inner.replace_canvas_shape_refs(session_id, refs)
+    }
+
+    fn create_canvas_context_anchor(
+        &self,
+        session_id: &str,
+        anchor_shape_id: Option<&str>,
+        selection_shape_ids_json: &str,
+        turn_id: &str,
+        summary: Option<&str>,
+    ) -> Result<CanvasContextAnchor> {
+        self.inner.create_canvas_context_anchor(
+            session_id,
+            anchor_shape_id,
+            selection_shape_ids_json,
+            turn_id,
+            summary,
+        )
     }
 }
 

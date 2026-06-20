@@ -7,12 +7,14 @@ use std::collections::{HashMap, HashSet};
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
-    AstraConfig, ChannelSessionInfo, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus,
-    PlanRoundInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
-    PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
-    ProjectStageInfo, RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
-    StageIssueInfo, StageStatus, SubagentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind,
-    ThreadOrigin, ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo,
+    AstraConfig, CanvasContextAnchor, CanvasDocumentInfo, CanvasDocumentState, CanvasNodeKind,
+    CanvasRevisionInfo, CanvasShapeRef, CanvasSourceType, ChannelSessionInfo, IssueSeverity,
+    IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo, PlanRoundMode, PlanRoundSource,
+    PlanRoundStatus, PlanTaskInfo, PlanTaskRisk, PlanTaskSessionInfo, PlanTaskSessionRole,
+    PlanTaskStatus, ProcessTemplateInfo, ProjectInfo, ProjectStageInfo,
+    RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo,
+    StageStatus, SubagentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
+    ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo,
     ThreadReplaySessionSourceKind,
 };
 
@@ -229,6 +231,16 @@ pub struct ThreadWorkSnapshotRecord {
     pub snapshot_json: String,
     pub version: i64,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpsertCanvasShapeRefRecord {
+    pub shape_id: String,
+    pub kind: CanvasNodeKind,
+    pub source_type: CanvasSourceType,
+    pub source_key: Option<String>,
+    pub source_path: Option<String>,
+    pub metadata_json: String,
 }
 
 #[derive(Debug, Clone)]
@@ -920,6 +932,41 @@ pub trait SessionStore: Send + Sync {
         agent: Agent,
         present: &HashSet<String>,
     ) -> Result<()>;
+    fn get_or_create_canvas_document(
+        &self,
+        session_id: &str,
+        title: Option<&str>,
+    ) -> Result<CanvasDocumentInfo>;
+    fn get_canvas_document_state(&self, session_id: &str) -> Result<CanvasDocumentState>;
+    fn save_canvas_draft(
+        &self,
+        session_id: &str,
+        title: Option<&str>,
+        draft_snapshot_path: &str,
+        draft_snapshot_hash: &str,
+    ) -> Result<CanvasDocumentInfo>;
+    fn save_canvas_revision(
+        &self,
+        session_id: &str,
+        title: Option<&str>,
+        snapshot_path: &str,
+        snapshot_hash: &str,
+        snapshot_size_bytes: i64,
+        source: &str,
+    ) -> Result<(CanvasDocumentInfo, CanvasRevisionInfo)>;
+    fn replace_canvas_shape_refs(
+        &self,
+        session_id: &str,
+        refs: &[UpsertCanvasShapeRefRecord],
+    ) -> Result<Vec<CanvasShapeRef>>;
+    fn create_canvas_context_anchor(
+        &self,
+        session_id: &str,
+        anchor_shape_id: Option<&str>,
+        selection_shape_ids_json: &str,
+        turn_id: &str,
+        summary: Option<&str>,
+    ) -> Result<CanvasContextAnchor>;
 }
 
 pub(crate) fn collect_referenced_session_keys(

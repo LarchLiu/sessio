@@ -1621,6 +1621,149 @@ pub struct RuntimeAgentOptionMetadata {
     pub order: i64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CanvasNodeKind {
+    File,
+    Image,
+    Video,
+    Workflow,
+    Note,
+    Group,
+}
+
+impl CanvasNodeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CanvasNodeKind::File => "file",
+            CanvasNodeKind::Image => "image",
+            CanvasNodeKind::Video => "video",
+            CanvasNodeKind::Workflow => "workflow",
+            CanvasNodeKind::Note => "note",
+            CanvasNodeKind::Group => "group",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "file" => Some(CanvasNodeKind::File),
+            "image" => Some(CanvasNodeKind::Image),
+            "video" => Some(CanvasNodeKind::Video),
+            "workflow" => Some(CanvasNodeKind::Workflow),
+            "note" => Some(CanvasNodeKind::Note),
+            "group" => Some(CanvasNodeKind::Group),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CanvasSourceType {
+    WorkspaceFile,
+    EditedFile,
+    AttachmentFile,
+    AttachmentImage,
+    VideoFile,
+    WorkflowDefinition,
+    Note,
+    Group,
+}
+
+impl CanvasSourceType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CanvasSourceType::WorkspaceFile => "workspace_file",
+            CanvasSourceType::EditedFile => "edited_file",
+            CanvasSourceType::AttachmentFile => "attachment_file",
+            CanvasSourceType::AttachmentImage => "attachment_image",
+            CanvasSourceType::VideoFile => "video_file",
+            CanvasSourceType::WorkflowDefinition => "workflow_definition",
+            CanvasSourceType::Note => "note",
+            CanvasSourceType::Group => "group",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "workspace_file" => Some(CanvasSourceType::WorkspaceFile),
+            "edited_file" => Some(CanvasSourceType::EditedFile),
+            "attachment_file" => Some(CanvasSourceType::AttachmentFile),
+            "attachment_image" => Some(CanvasSourceType::AttachmentImage),
+            "video_file" => Some(CanvasSourceType::VideoFile),
+            "workflow_definition" => Some(CanvasSourceType::WorkflowDefinition),
+            "note" => Some(CanvasSourceType::Note),
+            "group" => Some(CanvasSourceType::Group),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasDocumentInfo {
+    pub id: String,
+    pub session_id: String,
+    pub title: String,
+    pub current_saved_revision: Option<i64>,
+    pub draft_snapshot_path: Option<String>,
+    pub draft_snapshot_hash: Option<String>,
+    pub draft_updated_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasRevisionInfo {
+    pub id: String,
+    pub canvas_id: String,
+    pub revision: i64,
+    pub snapshot_path: String,
+    pub snapshot_hash: String,
+    pub snapshot_size_bytes: i64,
+    pub source: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasShapeRef {
+    pub id: String,
+    pub canvas_id: String,
+    pub shape_id: String,
+    pub kind: CanvasNodeKind,
+    pub source_type: CanvasSourceType,
+    pub source_key: Option<String>,
+    pub source_path: Option<String>,
+    pub metadata_json: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasContextAnchor {
+    pub id: String,
+    pub canvas_id: String,
+    pub anchor_shape_id: Option<String>,
+    pub selection_shape_ids_json: String,
+    pub turn_id: String,
+    pub summary: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasDocumentState {
+    pub document: CanvasDocumentInfo,
+    pub draft_snapshot: Option<String>,
+    pub saved_revision: Option<CanvasRevisionInfo>,
+    pub saved_snapshot: Option<String>,
+    pub shape_refs: Vec<CanvasShapeRef>,
+    pub anchors: Vec<CanvasContextAnchor>,
+}
+
 pub fn normalize_preview(s: &str) -> String {
     const MAX_PREVIEW_CHARS: usize = 50;
     let trimmed = s.trim();
