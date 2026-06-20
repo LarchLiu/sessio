@@ -10,8 +10,10 @@ const TldrawCanvasHost = lazy(() => import("./TldrawCanvasHost"));
 
 export interface ChatCanvasViewProps {
   sessionId: string;
+  sessionAgent: "astra-pi" | "codex" | "claude" | "gemini" | "opencode";
   sessionTitle: string;
   workspacePath: string | null;
+  editedFiles?: string[];
   composer: ChatComposerController;
   onError: (message: string) => void;
   onOpenProjectFile?: (path: string) => void;
@@ -19,8 +21,10 @@ export interface ChatCanvasViewProps {
 
 export default function ChatCanvasView({
   sessionId,
+  sessionAgent,
   sessionTitle,
   workspacePath,
+  editedFiles = [],
   composer,
   onError,
   onOpenProjectFile,
@@ -119,7 +123,9 @@ export default function ChatCanvasView({
         >
           <TldrawCanvasHost
             sessionId={sessionId}
+            sessionAgent={sessionAgent}
             workspacePath={workspacePath}
+            editedFiles={editedFiles}
             initialState={state}
             initialSnapshot={initialSnapshot}
             composer={composer}

@@ -1586,8 +1586,10 @@ export function AcpTranscriptPanel({
         ) : isCanvasView ? (
           <ChatCanvasView
             sessionId={sessionId}
+            sessionAgent={agent}
             sessionTitle={sessionId}
             workspacePath={workspacePath}
+            editedFiles={fileViewEdits.map((edit) => edit.path).filter((path): path is string => Boolean(path))}
             composer={chatComposerController}
             onError={setComposerError}
             onOpenProjectFile={onOpenProjectFile}
