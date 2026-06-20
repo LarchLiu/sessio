@@ -62,6 +62,11 @@ type CanvasSelectionRef = {
   meta: Record<string, unknown> | null;
 };
 
+type CanvasSelectionContext = {
+  refs: CanvasSelectionRef[];
+  elementIds: string[];
+};
+
 type BlockSuiteEditor = HTMLElement & {
   std?: {
     get?: <T>(token: unknown) => T;
@@ -798,13 +803,18 @@ export default function BlockSuiteCanvasHost({
     };
   }, [getEditor, getRootService]);
 
-  const getSelectedCanvasRefs = useCallback((): CanvasSelectionRef[] => {
+  const getSelectedCanvasContext = useCallback((): CanvasSelectionContext => {
     const rootService = getRootService();
-    if (!rootService) return [];
+    if (!rootService) {
+      return {
+        refs: [],
+        elementIds: [],
+      };
+    }
     const selectedIds = rootService.selection.selectedIds ?? [];
     const selectedSet = new Set(selectedIds);
     const refsById = new Map(blockRecords.map((ref) => [ref.blockId, ref]));
-    return selectedIds.map((id) => {
+    const refs = selectedIds.map((id) => {
       const ref = refsById.get(id);
       const meta = readCanvasMeta(id, getDoc(), blockRecords);
       const title =
@@ -827,10 +837,14 @@ export default function BlockSuiteCanvasHost({
         meta,
       };
     }).filter((item): item is CanvasSelectionRef => Boolean(item));
+    return {
+      refs,
+      elementIds: selectedIds,
+    };
   }, [blockRecords, getDoc, getRootService]);
 
   const buildSelectionContext = useCallback(async () => {
-    const refs = getSelectedCanvasRefs();
+    const { refs, elementIds } = getSelectedCanvasContext();
     if (refs.length === 0) return null;
     const selectionSummary = renderSelectionSummaryMarkdown(refs);
     const summaryPath = await createCanvasContextFile({
@@ -873,7 +887,7 @@ export default function BlockSuiteCanvasHost({
       canvasId: initialState.document.id,
       scope: "selection",
       blockIds: refs.map((ref) => ref.blockId),
-      elementIds: [],
+      elementIds,
       snapshotAttachmentPath: snapshot?.path ?? null,
       refs: refs.map((ref) => {
         const record = blockRecords.find((item) => item.blockId === ref.blockId);
@@ -894,7 +908,7 @@ export default function BlockSuiteCanvasHost({
       attachments,
       canvasContext,
     };
-  }, [blockRecords, exportSelectionSnapshot, getSelectedCanvasRefs, initialState.document.id, sessionId]);
+  }, [blockRecords, exportSelectionSnapshot, getSelectedCanvasContext, initialState.document.id, sessionId]);
 
   const attachSelectionSnapshot = async () => {
     if (!composer.supportsImageAttachments) {
@@ -943,15 +957,17 @@ export default function BlockSuiteCanvasHost({
         sessionId,
         anchorBlockId: payload.refs[0]?.blockId ?? null,
         selectionBlockIdsJson: JSON.stringify(payload.refs.map((ref) => ref.blockId)),
-        selectionElementIdsJson: "[]",
+        selectionElementIdsJson: JSON.stringify(payload.canvasContext.elementIds),
         turnId,
         summary: payload.refs.map((ref) => ref.title).join(", ").slice(0, 180),
       });
       setAnchors((current) => [anchor, ...current]);
-      latestStateRef.current = {
+      const nextState = {
         ...latestStateRef.current,
         anchors: [anchor, ...latestStateRef.current.anchors],
       };
+      latestStateRef.current = nextState;
+      onStateLoaded(nextState);
     } catch (error) {
       onError(`Failed to ask about the current selection: ${String(error)}`);
     } finally {

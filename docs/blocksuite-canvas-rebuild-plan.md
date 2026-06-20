@@ -361,6 +361,14 @@ Phase 0 spike 可先使用 umbrella 或核心 SDK 包快速验证：
 
 因此第一个阶段必须先做 package spike，且 spike 的通过标准不能只停留在“空白 edgeless 能挂载”。
 
+额外要求：
+
+- Phase 0 spike 需要明确验证 React ↔ Lit 边界，而不是只验证自定义 block schema 能注册
+- `sessio:markdown-preview` 的核心集成风险是要在 Lit 自定义 block 中复用 React 写的 `PlainMarkdownPreviewContent`
+- 这要求先建立一套 React-root-in-Lit 的 portal bridge，并验证它在 BlockSuite 的 light DOM / `ShadowlessElement` 环境里可稳定挂载、卸载与重渲染
+- spike 验收必须覆盖 “React 组件能在 edgeless block 内挂载 / 卸载 / 随 `xywh` 缩放”
+- 不应把这条风险留到 Phase 2 才第一次验证
+
 ## 新数据模型
 
 由于不做旧画布迁移，本次重构允许直接清理 `shape` 语义，建立新的 block 语义；同时直接修改 SQLite、Tauri command 和 runtime metadata，不保留兼容层。
@@ -419,6 +427,8 @@ Phase 0 spike 可先使用 umbrella 或核心 SDK 包快速验证：
 - 这里的“一次性改名”针对对外协议、持久化字段和共享类型
 - 旧 `tldraw` 宿主在下线前，内部直接调用 tldraw API 的局部变量名可暂时保留 `shape`
 - 但这些旧局部命名不应再泄漏到新的 DTO、SQLite 字段、Tauri command 或 runtime metadata
+- `elementIds` / `selectionElementIdsJson` 不是旧字段改名，而是新增的 edgeless 选区补充定位字段
+- 也就是说，`canvas_context_anchors` 表除了 `selection_shape_ids_json -> selection_block_ids_json` 的语义替换外，还需要新增 `selection_element_ids_json` 列，不能误解为一次 rename 就结束
 
 ### 新类型命名建议
 
@@ -603,6 +613,12 @@ BlockSuite snapshot 文件应保存：
   - 保存 `selectionBlockIdsJson`
   - 保存 `selectionElementIdsJson`
   - 保存 `turnId` 与 `summary`
+
+其中需要单列说明：
+
+- `selection_element_ids_json` 是 anchor 表中的新增列
+- 这列用于保存 edgeless element 级别的补充选区信息
+- 它不是任何旧 `shape` 字段的 rename
 
 ### 建议的 TypeScript DTO
 
