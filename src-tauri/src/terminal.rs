@@ -159,6 +159,7 @@ impl TerminalService {
 
         let mut command = CommandBuilder::new(shell.clone());
         command.cwd(cwd.clone());
+        apply_terminal_env_defaults(&mut command);
         if request.shell.is_none() && cfg!(unix) {
             command.arg("-l");
         }
@@ -420,6 +421,30 @@ fn normalize_cols(cols: Option<u16>) -> u16 {
 
 fn normalize_rows(rows: Option<u16>) -> u16 {
     rows.unwrap_or(32).max(8)
+}
+
+fn apply_terminal_env_defaults(command: &mut CommandBuilder) {
+    if command.get_env("TERM").is_none() {
+        command.env("TERM", "xterm-256color");
+    }
+    if command.get_env("COLORTERM").is_none() {
+        command.env("COLORTERM", "truecolor");
+    }
+    if command.get_env("CLICOLOR").is_none() {
+        command.env("CLICOLOR", "1");
+    }
+    if command.get_env("TERM_PROGRAM").is_none() {
+        command.env("TERM_PROGRAM", "Sessio");
+    }
+    if command.get_env("TERM_PROGRAM_VERSION").is_none() {
+        command.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    }
+    if command.get_env("LC_TERMINAL").is_none() {
+        command.env("LC_TERMINAL", "Sessio");
+    }
+    if command.get_env("LC_TERMINAL_VERSION").is_none() {
+        command.env("LC_TERMINAL_VERSION", env!("CARGO_PKG_VERSION"));
+    }
 }
 
 fn push_output(buffer: &mut String, chunk: &str) {
