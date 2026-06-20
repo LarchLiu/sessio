@@ -957,13 +957,10 @@ export default function App() {
       const identity = sessionIdentityKey(selected);
       setCanvasFileSelectionBySession((prev) => {
         const currentSelection = prev[identity];
-        const merged = currentSelection
-          ? Array.from(new Set([...currentSelection.paths, ...nextPaths]))
-          : nextPaths;
         return {
           ...prev,
           [identity]: {
-            paths: merged,
+            paths: nextPaths,
             requestId: (currentSelection?.requestId ?? 0) + 1,
           },
         };

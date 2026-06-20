@@ -80,7 +80,7 @@ export default function TldrawCanvasHost({
   onOpenThreadMultiSessionChat,
 }: TldrawCanvasHostProps) {
   const editorRef = useRef<Editor | null>(null);
-  const handledFileRequestRef = useRef<number | null>(null);
+  const handledFileRequestRef = useRef<string | null>(null);
   const autosaveTimerRef = useRef<number | null>(null);
   const inflightSaveRef = useRef(false);
   const queuedSaveRef = useRef<string | null>(null);
@@ -362,14 +362,18 @@ export default function TldrawCanvasHost({
     addFileNodes(changedFiles);
   };
 
-  useEffect(() => {
+  const consumeSelectedFileRequest = (editor: Editor | null = editorRef.current) => {
     const requestId = selectedFileRequest?.requestId ?? null;
-    if (!selectedFileRequest || requestId === null) return;
-    if (handledFileRequestRef.current === requestId) return;
-    if (!editorRef.current) return;
-    handledFileRequestRef.current = requestId;
+    if (!selectedFileRequest || requestId === null || !editor) return;
+    const requestKey = `${sessionId}:${requestId}`;
+    if (handledFileRequestRef.current === requestKey) return;
+    handledFileRequestRef.current = requestKey;
     addFileNodes(selectedFileRequest.paths);
-  }, [selectedFileRequest]);
+  };
+
+  useEffect(() => {
+    consumeSelectedFileRequest();
+  }, [selectedFileRequest, sessionId]);
 
   const addWorkflowNode = async () => {
     const editor = editorRef.current;
@@ -1010,6 +1014,7 @@ export default function TldrawCanvasHost({
           onMount={(editor) => {
             editorRef.current = editor;
             void hydrateSnapshot(editor, currentSnapshotRef.current);
+            consumeSelectedFileRequest(editor);
             const dispose = editor.store.listen(() => {
               const selectedIds = editor.getSelectedShapeIds();
               setSelectionCount(selectedIds.length);
