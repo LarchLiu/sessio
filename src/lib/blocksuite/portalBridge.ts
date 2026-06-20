@@ -4,6 +4,9 @@ type BridgeState = {
   reactToLit: ReactToLit;
   workspacePath: string | null;
   updateBlock: (blockId: string, props: Record<string, unknown>) => void;
+  promoteFileCardToMarkdown?: (blockId: string) => void;
+  runWorkflowBlock?: (blockId: string) => void;
+  openWorkflowThread?: (blockId: string) => void;
 };
 
 let currentBridge: BridgeState | null = null;
