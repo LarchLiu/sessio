@@ -9,8 +9,12 @@ import {
   Schema,
   type DocSnapshot,
 } from "@blocksuite/store";
+import { SessioBlockSuiteSchemas, SessioEdgelessSpecs } from "../../lib/blocksuite/specs";
 
-const blockSuiteSchema = new Schema().register(AffineSchemas);
+const blockSuiteSchema = new Schema().register([
+  ...AffineSchemas,
+  ...SessioBlockSuiteSchemas,
+]);
 
 export interface BlockSuiteDocHandle {
   collection: DocCollection;
@@ -44,9 +48,7 @@ export function createEdgelessEditorWithSpecs(
   const editor = new AffineEditorContainer();
   editor.doc = doc;
   editor.mode = "edgeless";
-  if (specs && specs.length > 0) {
-    editor.edgelessSpecs = specs;
-  }
+  editor.edgelessSpecs = specs && specs.length > 0 ? specs : SessioEdgelessSpecs;
   return editor;
 }
 

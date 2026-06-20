@@ -125,6 +125,9 @@ importers:
       katex:
         specifier: ^0.16.47
         version: 0.16.47
+      lit:
+        specifier: ^3.3.3
+        version: 3.3.3
       lucide-react:
         specifier: ^1.14.0
         version: 1.14.0(react@19.2.6)

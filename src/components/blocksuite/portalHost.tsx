@@ -1,14 +1,11 @@
-import type { ReactNode } from "react";
-import { createPortal } from "react-dom";
+import type { ReactPortal } from "react";
 
-export interface PortalMount {
-  id: string;
-  container: Element;
-  node: ReactNode;
-}
-
-export function renderPortalMounts(mounts: PortalMount[]) {
-  return mounts.map((mount) => (
-    <span key={mount.id}>{createPortal(mount.node, mount.container)}</span>
-  ));
+export function PortalHost({ portals }: { portals: Array<{ id: string; portal: ReactPortal }> }) {
+  return (
+    <>
+      {portals.map((entry) => (
+        <span key={entry.id}>{entry.portal}</span>
+      ))}
+    </>
+  );
 }

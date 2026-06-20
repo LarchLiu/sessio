@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import { LoaderCircle, RefreshCcw, Save } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { FilePlus2, LoaderCircle, RefreshCcw, Save } from "lucide-react";
+import { Bound } from "@blocksuite/global/utils";
 import type { CanvasDocumentState } from "../../canvasTypes";
-import { saveCanvasDraft, saveCanvasRevision } from "../../api";
+import { readWorkspaceTextFile, saveCanvasDraft, saveCanvasRevision, updateCanvasBlocks } from "../../api";
 import type { Agent } from "../../api";
 import type { ChatComposerController } from "../../hooks/useChatComposer";
 import {
@@ -11,6 +12,12 @@ import {
   exportDocSnapshot,
   importDocSnapshot,
 } from "./bootstrap";
+import { PortalHost } from "./portalHost";
+import { useReactToLitBridge } from "../../lib/blocksuite/reactToLit";
+import { markdownPreviewModelToCanvasBlock } from "../../lib/blocksuite/persistence";
+import type { MarkdownPreviewBlockModel } from "../../lib/blocksuite/blocks/markdown-preview";
+import { EdgelessRootService } from "@blocksuite/blocks";
+import { setBlockSuitePortalBridge } from "../../lib/blocksuite/portalBridge";
 
 export interface BlockSuiteCanvasHostProps {
   sessionId: string;
@@ -39,6 +46,9 @@ function snapshotToJson(doc: ReturnType<typeof createBlockSuiteDoc>["doc"]) {
 
 export default function BlockSuiteCanvasHost({
   sessionId,
+  workspacePath,
+  editedFiles = [],
+  selectedFileRequest = null,
   initialState,
   initialSnapshot,
   onStateLoaded,
@@ -52,10 +62,33 @@ export default function BlockSuiteCanvasHost({
   const inflightSaveRef = useRef(false);
   const queuedSnapshotRef = useRef<string | null>(null);
   const currentSnapshotRef = useRef(initialSnapshot);
+  const handledFileRequestRef = useRef<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [status, setStatus] = useState("Initializing BlockSuite canvas…");
   const [isReady, setIsReady] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [reactToLit, portals] = useReactToLitBridge();
+
+  const changedFiles = useMemo(
+    () => Array.from(new Set(editedFiles.map((path) => path.trim()).filter(Boolean))),
+    [editedFiles],
+  );
+
+  useEffect(() => {
+    setBlockSuitePortalBridge({
+      reactToLit,
+      workspacePath,
+      updateBlock: (blockId, props) => {
+        const doc = docRef.current;
+        const model = doc?.getBlockById(blockId) ?? null;
+        if (!doc || !model) return;
+        doc.updateBlock(model, props);
+      },
+    });
+    return () => {
+      setBlockSuitePortalBridge(null);
+    };
+  }, [reactToLit, workspacePath]);
 
   const lastSavedRevision = initialState.savedRevision?.revision ?? null;
 
@@ -84,6 +117,24 @@ export default function BlockSuiteCanvasHost({
         void flushSaveRef.current(snapshotJson);
       }, AUTOSAVE_DEBOUNCE_MS);
     });
+  };
+
+  const syncCanvasBlocks = async (doc: ReturnType<typeof createBlockSuiteDoc>["doc"]) => {
+    const blocks = doc
+      .getBlocks()
+      .map((item) => item as MarkdownPreviewBlockModel)
+      .filter((item) => item.flavour === "sessio:markdown-preview")
+      .map(markdownPreviewModelToCanvasBlock);
+    try {
+      await updateCanvasBlocks({
+        sessionId,
+        blocks,
+      });
+    } catch (error) {
+      const message = `Failed to sync canvas blocks: ${String(error)}`;
+      setSaveError(message);
+      onError(message);
+    }
   };
 
   const flushSaveRef = useRef<(snapshotJson: string) => Promise<void>>(async () => {});
@@ -133,6 +184,9 @@ export default function BlockSuiteCanvasHost({
           document: saved.document,
           draftSnapshot: snapshotJson,
         });
+        if (docRef.current) {
+          void syncCanvasBlocks(docRef.current);
+        }
       } catch (error) {
         const message = `Canvas draft save failed: ${String(error)}`;
         setSaveError(message);
@@ -220,6 +274,7 @@ export default function BlockSuiteCanvasHost({
         savedRevision: saved.revision,
         savedSnapshot: snapshotJson,
       });
+      await syncCanvasBlocks(doc);
     } catch (error) {
       const message = `Canvas save failed: ${String(error)}`;
       setSaveError(message);
@@ -248,12 +303,75 @@ export default function BlockSuiteCanvasHost({
         ...initialState,
         draftSnapshot: savedSnapshot,
       });
+      await syncCanvasBlocks(restored);
     } catch (error) {
       const message = `Failed to restore the last saved revision: ${String(error)}`;
       setSaveError(message);
       onError(message);
     }
   };
+
+  const addMarkdownPreviewBlocks = async (paths: string[]) => {
+    const doc = docRef.current;
+    const editor = editorRef.current;
+    if (!doc || !editor || !workspacePath) return;
+    const rootService = (editor as { std?: { getService?: (flavour: string) => EdgelessRootService | null } }).std?.getService?.("affine:page");
+    if (!rootService) {
+      onError("BlockSuite edgeless service is not ready yet.");
+      return;
+    }
+    const uniquePaths = Array.from(new Set(paths.map((path) => path.trim()).filter(Boolean)));
+    const center = rootService.viewport.center;
+
+    for (const [index, path] of uniquePaths.entries()) {
+      try {
+        const absolutePath = resolveCanvasFilePath(path, workspacePath);
+        if (!absolutePath) {
+          throw new Error("file path is unavailable");
+        }
+        const file = await readWorkspaceTextFile(workspacePath, absolutePath);
+        const title = absolutePath.split(/[/\\]/).pop() ?? absolutePath;
+        const excerpt = file.content
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .slice(0, 4)
+          .join(" ")
+          .slice(0, 280);
+        const bound = Bound.fromCenter(
+          [center.x + index * 32, center.y + index * 24],
+          420,
+          260,
+        );
+        rootService.addBlock("sessio:markdown-preview", {
+          title,
+          sourcePath: absolutePath,
+          sourceType: changedFiles.includes(path) || changedFiles.includes(absolutePath)
+            ? "edited_file"
+            : "workspace_file",
+          excerpt,
+          renderMode: "summary",
+          collapsed: false,
+          contentVersion: `${absolutePath}:${file.mtimeMs}`,
+          cachedContent: "",
+          xywh: bound.serialize(),
+        }, doc.getBlocksByFlavour("affine:surface")[0]?.model ?? undefined);
+      } catch (error) {
+        onError(`Failed to add markdown preview for ${path}: ${String(error)}`);
+      }
+    }
+
+    await syncCanvasBlocks(doc);
+  };
+
+  useEffect(() => {
+    const requestId = selectedFileRequest?.requestId ?? null;
+    if (!selectedFileRequest || requestId === null) return;
+    const requestKey = `${sessionId}:${requestId}`;
+    if (handledFileRequestRef.current === requestKey) return;
+    handledFileRequestRef.current = requestKey;
+    void addMarkdownPreviewBlocks(selectedFileRequest.paths);
+  }, [selectedFileRequest, sessionId, workspacePath]);
 
   return (
     <div className="absolute inset-0 flex min-h-0 flex-col">
@@ -269,6 +387,15 @@ export default function BlockSuiteCanvasHost({
           )}
         </div>
         <div className="flex items-center gap-2 text-caption">
+          <button
+            type="button"
+            onClick={() => void addMarkdownPreviewBlocks(changedFiles)}
+            disabled={!isReady || changedFiles.length === 0}
+            className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-2.5 text-ink/65 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <FilePlus2 className="h-3.5 w-3.5" />
+            Add edited files
+          </button>
           <span className="inline-flex h-6 items-center rounded-md border border-ink/10 px-2.5 text-ink/55">
             BlockSuite
           </span>
@@ -302,9 +429,17 @@ export default function BlockSuiteCanvasHost({
         </div>
       )}
       <div ref={hostRef} className="min-h-0 flex-1" />
-      <div className="sr-only" aria-hidden>
-        BlockSuite portal host reserved for React-backed block views.
-      </div>
+      <PortalHost portals={portals} />
     </div>
   );
+}
+
+function resolveCanvasFilePath(path: string, workspacePath: string | null): string | null {
+  if (!path) return null;
+  if (/^([a-zA-Z]:[\\/]|\/)/.test(path)) return path;
+  if (!workspacePath) return null;
+  const separator = workspacePath.includes("\\") ? "\\" : "/";
+  const trimmedRoot = workspacePath.replace(/[\\/]+$/, "");
+  const trimmedPath = path.replace(/^[\\/]+/, "");
+  return `${trimmedRoot}${separator}${trimmedPath}`;
 }
