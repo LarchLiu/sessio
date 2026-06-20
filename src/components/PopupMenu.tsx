@@ -25,6 +25,7 @@ export default function PopupMenu<T extends string = string>({
   onSelect,
   onClose,
   className = "",
+  overlayClassName = "",
 }: {
   anchor: HTMLElement;
   options: PopupMenuOption<T>[];
@@ -32,6 +33,7 @@ export default function PopupMenu<T extends string = string>({
   onSelect: (key: T) => void;
   onClose: () => void;
   className?: string;
+  overlayClassName?: string;
 }) {
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -90,13 +92,13 @@ export default function PopupMenu<T extends string = string>({
 
   return createPortal(
     <>
-      <div className="fixed inset-0 z-[39] bg-transparent" onMouseDown={onClose} />
+      <div
+        className={`fixed inset-0 z-[39] bg-transparent ${overlayClassName}`.trim()}
+        onMouseDown={onClose}
+      />
       <div
         ref={menuRef}
-        className={
-          "fixed z-40 min-w-[192px] rounded-xl border border-ink/10 bg-surface-panel p-1.5 shadow-[0_20px_60px_rgba(0,0,0,0.22)] " +
-          className
-        }
+        className={`fixed z-40 min-w-[192px] rounded-xl border border-ink/10 bg-surface-panel p-1.5 shadow-[0_20px_60px_rgba(0,0,0,0.22)] ${className}`.trim()}
         style={{
           top: pos?.top ?? -9999,
           left: pos?.left ?? -9999,

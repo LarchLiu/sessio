@@ -309,21 +309,24 @@ export default function TldrawCanvasHost({
     editor.select(id);
   };
 
-  const addFileNode = (path: string) => {
+  const addFileNodes = (paths: string[]) => {
     const editor = editorRef.current;
-    if (!editor) return;
+    const nextPaths = paths.filter((path) => path.trim());
+    if (!editor || nextPaths.length === 0) return;
     const point = placePoint(editor);
-    const id = createShapeId("file");
-    const fileName = path.split(/[/\\]/).pop() ?? path;
-    const sourceType = resolveFileSourceType(path, workspacePath);
-    editor.createShapes([
-      {
+    const shapes = nextPaths.map((path, index) => {
+      const id = createShapeId("file");
+      const fileName = path.split(/[/\\]/).pop() ?? path;
+      const sourceType = resolveFileSourceType(path, workspacePath);
+      const column = index % 3;
+      const row = Math.floor(index / 3);
+      return {
         id,
-        type: "geo",
-        x: point.x,
-        y: point.y,
+        type: "geo" as const,
+        x: point.x + column * 348,
+        y: point.y + row * 138,
         props: {
-          geo: "rectangle",
+          geo: "rectangle" as const,
           w: 320,
           h: 110,
           richText: toRichText(`${fileName}\n${path}`),
@@ -335,9 +338,14 @@ export default function TldrawCanvasHost({
           sourceKey: fileName,
           title: fileName,
         },
-      },
-    ]);
-    editor.select(id);
+      };
+    });
+    editor.createShapes(shapes);
+    editor.select(...shapes.map((shape) => shape.id));
+  };
+
+  const addFileNode = (path: string) => {
+    addFileNodes([path]);
   };
 
   const addWorkflowNode = async () => {
@@ -511,11 +519,11 @@ export default function TldrawCanvasHost({
       }
       try {
         const selection = await open({
-          multiple: false,
+          multiple: true,
           directory: false,
         });
-        if (!selection || Array.isArray(selection)) return;
-        addFileNode(selection);
+        if (!selection) return;
+        addFileNodes(Array.isArray(selection) ? selection : [selection]);
       } catch (error) {
         onError(`Failed to add file node: ${String(error)}`);
       }
@@ -849,7 +857,7 @@ export default function TldrawCanvasHost({
   );
 
   return (
-    <div className="absolute inset-0 flex min-h-0 flex-col">
+    <div className="canvas-tldraw-host absolute inset-0 flex min-h-0 flex-col">
       <div className="flex items-center justify-between gap-3 border-b border-ink/8 bg-surface-panel/90 px-4 py-2">
         <div className="flex items-center gap-3 text-caption text-ink/50">
           <button
@@ -1129,6 +1137,8 @@ export default function TldrawCanvasHost({
           anchor={addMenuButtonRef.current}
           options={addMenuOptions}
           placement="bottom-start"
+          className="z-[1010]"
+          overlayClassName="z-[1009]"
           onSelect={(key) => void handleAddMenuSelect(key)}
           onClose={() => setAddMenuOpen(false)}
         />
@@ -1136,6 +1146,15 @@ export default function TldrawCanvasHost({
       <div className="sr-only" aria-hidden>
         {composer.selectedAgent}
       </div>
+      <style>{`
+        .canvas-tldraw-host .tlui-layout__top {
+          top: 56px;
+        }
+
+        .canvas-tldraw-host .tlui-style-panel__wrapper {
+          top: 112px;
+        }
+      `}</style>
     </div>
   );
 }
