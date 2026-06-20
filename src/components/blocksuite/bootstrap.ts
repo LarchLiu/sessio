@@ -1,4 +1,4 @@
-import "@blocksuite/affine/effects";
+import { effects as registerAffineEffects } from "@blocksuite/affine/effects";
 
 import type { ExtensionType } from "@blocksuite/block-std";
 import { MarkdownTransformer } from "@blocksuite/blocks";
@@ -11,6 +11,19 @@ import {
   type DocSnapshot,
 } from "@blocksuite/store";
 import { SessioBlockSuiteSchemas, SessioEdgelessSpecs } from "../../lib/blocksuite/specs";
+
+const BLOCKSUITE_EFFECTS_REGISTERED_KEY = "__sessio_blocksuite_effects_registered__";
+
+function ensureBlockSuiteEffectsRegistered() {
+  const globalScope = globalThis as typeof globalThis & {
+    [BLOCKSUITE_EFFECTS_REGISTERED_KEY]?: boolean;
+  };
+  if (globalScope[BLOCKSUITE_EFFECTS_REGISTERED_KEY]) return;
+  registerAffineEffects();
+  globalScope[BLOCKSUITE_EFFECTS_REGISTERED_KEY] = true;
+}
+
+ensureBlockSuiteEffectsRegistered();
 
 const blockSuiteSchema = new Schema().register([
   ...AffineSchemas,
@@ -31,11 +44,14 @@ export function createBlockSuiteDoc(docId?: string): BlockSuiteDocHandle {
 }
 
 export function ensureEdgelessRoot(doc: BlockSuiteDocHandle["doc"]) {
-  if (doc.root) return;
-  const rootId = doc.addBlock("affine:page", {});
-  doc.addBlock("affine:surface", {}, rootId);
-  const noteId = doc.addBlock("affine:note", {}, rootId);
-  doc.addBlock("affine:paragraph", {}, noteId);
+  let rootId = doc.root?.id ?? null;
+  if (!rootId) {
+    rootId = doc.addBlock("affine:page", {});
+  }
+  const hasSurface = doc.getBlocksByFlavour("affine:surface").length > 0;
+  if (!hasSurface) {
+    doc.addBlock("affine:surface", {}, rootId);
+  }
 }
 
 export function ensurePageRoot(doc: BlockSuiteDocHandle["doc"]) {
@@ -53,7 +69,7 @@ export function createEdgelessEditorWithSpecs(
   doc: BlockSuiteDocHandle["doc"],
   specs?: ExtensionType[],
 ) {
-  const editor = new AffineEditorContainer();
+  const editor = document.createElement("affine-editor-container") as AffineEditorContainer;
   editor.doc = doc;
   editor.mode = "edgeless";
   editor.edgelessSpecs = specs && specs.length > 0 ? specs : SessioEdgelessSpecs;
@@ -64,7 +80,7 @@ export function createPageEditor(
   doc: BlockSuiteDocHandle["doc"],
   specs?: ExtensionType[],
 ) {
-  const editor = new PageEditor();
+  const editor = document.createElement("page-editor") as PageEditor;
   editor.doc = doc;
   editor.specs = specs && specs.length > 0 ? specs : editor.specs;
   editor.style.display = "block";

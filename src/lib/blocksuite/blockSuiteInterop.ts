@@ -190,7 +190,9 @@ export function canvasInteropModelToCanvasBlock(
     case "sessio:workflow-card":
       return workflowCardModelToCanvasBlock(model as WorkflowCardBlockModel);
     case "affine:note":
-      return noteModelToCanvasBlock(model as NoteLikeModel);
+      return isPlaceholderEdgelessNote(model as NoteLikeModel)
+        ? null
+        : noteModelToCanvasBlock(model as NoteLikeModel);
     case "affine:image":
       return imageModelToCanvasBlock(model as ImageLikeModel);
     default:
@@ -364,6 +366,10 @@ function extractNoteTitle(model: NoteLikeModel): string {
   const text = extractNoteText(model);
   const title = text.split(/\r?\n/).map(line => line.trim()).find(Boolean) ?? "";
   return title.slice(0, 120) || "New note";
+}
+
+function isPlaceholderEdgelessNote(model: NoteLikeModel): boolean {
+  return extractNoteText(model).trim().length === 0;
 }
 
 function extractNoteText(model: NoteLikeModel): string {

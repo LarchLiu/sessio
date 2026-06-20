@@ -1,7 +1,6 @@
 import { createElement } from "react";
 import { BlockComponent, toGfxBlockComponent } from "@blocksuite/block-std";
 import { html } from "lit";
-import { customElement } from "lit/decorators.js";
 import { classMap } from "lit/directives/class-map.js";
 import { styleMap } from "lit/directives/style-map.js";
 import { getBlockSuitePortalBridge } from "../../portalBridge";
@@ -58,8 +57,11 @@ class FileCardPageComponent extends BlockComponent<FileCardBlockModel> {
   }
 }
 
-@customElement("sessio-edgeless-file-card")
 export class FileCardEdgelessComponent extends toGfxBlockComponent(FileCardPageComponent) {}
+
+if (!customElements.get("sessio-edgeless-file-card")) {
+  customElements.define("sessio-edgeless-file-card", FileCardEdgelessComponent);
+}
 
 declare global {
   namespace BlockSuite {

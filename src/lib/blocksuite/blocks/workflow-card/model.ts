@@ -37,8 +37,9 @@ export const WorkflowCardBlockSchema = defineBlockSchema({
   }),
   metadata: {
     version: 1,
-    role: "content",
+    role: "hub",
     parent: ["affine:surface"],
+    children: [],
   },
   toModel: () => new WorkflowCardBlockModel(),
 });

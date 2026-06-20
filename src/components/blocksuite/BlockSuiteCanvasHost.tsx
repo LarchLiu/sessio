@@ -54,6 +54,8 @@ import type { WorkflowCardBlockModel } from "../../lib/blocksuite/blocks/workflo
 
 const CANVAS_ADD_FILES_EVENT = "sessio:canvas-add-files";
 const AUTOSAVE_DEBOUNCE_MS = 900;
+const ROOT_SERVICE_RETRY_MS = 80;
+const ROOT_SERVICE_RETRY_LIMIT = 125;
 
 type CanvasSelectionRef = {
   blockId: string;
@@ -71,7 +73,7 @@ type CanvasSelectionContext = {
 type BlockSuiteEditor = HTMLElement & {
   std?: {
     get?: <T>(token: unknown) => T;
-    getService?: (flavour: string) => EdgelessRootService | null;
+    getService?: <T>(flavour: string) => T | null;
     host?: HTMLElement & {
       view?: {
         getBlock?: (blockId: string) => HTMLElement | null;
@@ -87,6 +89,13 @@ type SelectionElementLike = {
   xywh?: string;
   title?: string;
   childIds?: string[];
+  group?: unknown;
+};
+
+type EdgelessSelectable = {
+  id: string;
+  xywh: string;
+  flavour?: string;
 };
 
 export interface BlockSuiteCanvasHostProps {
@@ -130,7 +139,9 @@ export default function BlockSuiteCanvasHost({
   const editorRef = useRef<BlockSuiteEditor | null>(null);
   const docRef = useRef<ReturnType<typeof createBlockSuiteDoc>["doc"] | null>(null);
   const latestStateRef = useRef(initialState);
+  const blockRecordsRef = useRef(initialState.blockRecords);
   const blockUpdatedDisposeRef = useRef<{ dispose: () => void } | null>(null);
+  const selectionUpdatedDisposeRef = useRef<{ dispose: () => void } | null>(null);
   const autosaveTimerRef = useRef<number | null>(null);
   const inflightSaveRef = useRef(false);
   const queuedSnapshotRef = useRef<string | null>(null);
@@ -169,6 +180,7 @@ export default function BlockSuiteCanvasHost({
 
   useEffect(() => {
     latestStateRef.current = initialState;
+    blockRecordsRef.current = initialState.blockRecords;
     setAnchors(initialState.anchors);
     setBlockRecords(initialState.blockRecords);
   }, [initialState]);
@@ -176,9 +188,38 @@ export default function BlockSuiteCanvasHost({
   const getEditor = useCallback(() => editorRef.current, []);
   const getDoc = useCallback(() => docRef.current, []);
 
-  const getRootService = useCallback(() => {
-    return getEditor()?.std?.getService?.("affine:page") ?? null;
+  const getRootService = useCallback((): EdgelessRootService | null => {
+    try {
+      return getEditor()?.std?.get?.<EdgelessRootService>(EdgelessRootService) ?? null;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`Canvas startup failed: ${message}`);
+      return null;
+    }
   }, [getEditor]);
+
+  const waitForRootService = useCallback(async (): Promise<EdgelessRootService | null> => {
+    let rootService = getRootService();
+    for (let attempt = 0; attempt < ROOT_SERVICE_RETRY_LIMIT && !rootService; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, ROOT_SERVICE_RETRY_MS));
+      rootService = getRootService();
+    }
+    return rootService;
+  }, [getRootService]);
+
+  const insertEdgelessBlock = useCallback((
+    flavour: string,
+    props: Record<string, unknown>,
+  ) => {
+    const rootService = getRootService();
+    if (!rootService) {
+      throw new Error("Canvas root service is not ready");
+    }
+    if (!rootService.surface) {
+      throw new Error("Canvas surface is not ready");
+    }
+    return rootService.addBlock(flavour, props, rootService.surface);
+  }, [getRootService]);
 
   const updateSelectionState = useCallback(() => {
     const rootService = getRootService();
@@ -198,16 +239,40 @@ export default function BlockSuiteCanvasHost({
       setWorkflowRunState(null);
       return;
     }
-    const nextMeta = readCanvasMeta(selectedId, getDoc(), blockRecords);
+    const nextMeta = readCanvasMeta(selectedId, getDoc(), blockRecordsRef.current);
     setSelectedBlockMeta(nextMeta);
     setWorkflowRunState(readWorkflowRunState(nextMeta));
-  }, [blockRecords, getDoc, getRootService]);
+  }, [getDoc, getRootService]);
+
+  const finishCanvasInitialization = useCallback(async (nextStatus: string) => {
+    if (!getRootService()) {
+      setStatus("Finishing canvas startup…");
+    }
+    const rootService = await waitForRootService();
+    if (!rootService) {
+      setStatus("Canvas initialization is taking longer than expected.");
+      setIsReady(false);
+      return false;
+    }
+    setStatus(nextStatus);
+    setIsReady(true);
+    updateSelectionState();
+    return true;
+  }, [getRootService, updateSelectionState, waitForRootService]);
 
   const syncCanvasBlocks = useCallback(async (doc: NonNullable<ReturnType<typeof getDoc>>) => {
     const nextBlocks: CanvasBlockRecord["metadataJson"][] = [];
     const records = doc
-      .getBlocks()
-      .map((item) => canvasInteropModelToCanvasBlock(item as MarkdownPreviewBlockModel | FileCardBlockModel | WorkflowCardBlockModel))
+      .getBlocksByFlavour([
+        "sessio:markdown-preview",
+        "sessio:file-card",
+        "sessio:workflow-card",
+        "affine:note",
+        "affine:image",
+      ])
+      .map((item) => canvasInteropModelToCanvasBlock(
+        item.model as MarkdownPreviewBlockModel | FileCardBlockModel | WorkflowCardBlockModel,
+      ))
       .filter((item): item is NonNullable<typeof item> => Boolean(item));
 
     const surface = doc.getBlocksByFlavour("affine:surface")[0]?.model as {
@@ -225,6 +290,7 @@ export default function BlockSuiteCanvasHost({
         sessionId,
         blocks: [...records, ...surfaceRecords],
       });
+      blockRecordsRef.current = saved;
       setBlockRecords(saved);
       latestStateRef.current = {
         ...latestStateRef.current,
@@ -251,34 +317,48 @@ export default function BlockSuiteCanvasHost({
 
   const flushSaveRef = useRef<(snapshotJson: string) => Promise<void>>(async () => {});
 
+  const scheduleAutosave = useCallback((doc: ReturnType<typeof createBlockSuiteDoc>["doc"]) => {
+    if (autosaveTimerRef.current !== null) {
+      window.clearTimeout(autosaveTimerRef.current);
+    }
+    autosaveTimerRef.current = window.setTimeout(() => {
+      const snapshotJson = snapshotToJson(doc);
+      if (!snapshotJson || snapshotJson === currentSnapshotRef.current) {
+        return;
+      }
+      if (inflightSaveRef.current) {
+        queuedSnapshotRef.current = snapshotJson;
+        return;
+      }
+      void flushSaveRef.current(snapshotJson);
+    }, AUTOSAVE_DEBOUNCE_MS);
+  }, []);
+
   const attachDoc = useCallback((host: HTMLDivElement, doc: ReturnType<typeof createBlockSuiteDoc>["doc"]) => {
     ensureEdgelessRoot(doc);
+    removePlaceholderNotes(doc);
     const editor = createEdgelessEditorWithSpecs(doc) as BlockSuiteEditor;
     editorRef.current?.remove();
     editorRef.current = editor;
     docRef.current = doc;
     host.replaceChildren(editor);
     blockUpdatedDisposeRef.current?.dispose();
+    selectionUpdatedDisposeRef.current?.dispose();
     blockUpdatedDisposeRef.current = doc.slots.blockUpdated.on(() => {
-      const snapshotJson = snapshotToJson(doc);
-      if (!snapshotJson || snapshotJson === currentSnapshotRef.current) return;
-      if (autosaveTimerRef.current !== null) {
-        window.clearTimeout(autosaveTimerRef.current);
-      }
-      autosaveTimerRef.current = window.setTimeout(() => {
-        if (inflightSaveRef.current) {
-          queuedSnapshotRef.current = snapshotJson;
-          return;
-        }
-        void flushSaveRef.current(snapshotJson);
-      }, AUTOSAVE_DEBOUNCE_MS);
-      updateSelectionState();
+      scheduleAutosave(doc);
     });
     window.requestAnimationFrame(() => {
-      updateSelectionState();
+      void waitForRootService().then((rootService) => {
+        if (!rootService || docRef.current !== doc) return;
+        selectionUpdatedDisposeRef.current?.dispose();
+        selectionUpdatedDisposeRef.current = rootService.selection.slots.updated.on(() => {
+          updateSelectionState();
+        });
+        updateSelectionState();
+      });
       scheduleSyncBlocks();
     });
-  }, [scheduleSyncBlocks, updateSelectionState]);
+  }, [scheduleAutosave, scheduleSyncBlocks, updateSelectionState, waitForRootService]);
 
   const openEditedFilesPicker = () => {
     if (changedFiles.length === 0) return;
@@ -319,10 +399,23 @@ export default function BlockSuiteCanvasHost({
 
   const addFileCards = useCallback(async (paths: string[]) => {
     const doc = getDoc();
-    const rootService = getRootService();
-    if (!doc || !rootService || !workspacePath) return;
+    if (!doc) {
+      onError("Canvas document is not ready yet.");
+      return false;
+    }
+    const rootService = await waitForRootService();
+    if (!rootService) {
+      onError("Canvas is still initializing. Please try adding files again in a moment.");
+      return false;
+    }
+    if (!workspacePath) {
+      onError("This session is not linked to a workspace, so files can not be added to the canvas.");
+      return false;
+    }
     const uniquePaths = Array.from(new Set(paths.map((path) => path.trim()).filter(Boolean)));
     const center = rootService.viewport.center;
+    let addedCount = 0;
+    const insertedBlockIds: string[] = [];
     for (const [index, path] of uniquePaths.entries()) {
       try {
         const absolutePath = resolveCanvasFilePath(path, workspacePath);
@@ -334,7 +427,7 @@ export default function BlockSuiteCanvasHost({
           340,
           144,
         );
-        rootService.addBlock(
+        const blockId = insertEdgelessBlock(
           "sessio:file-card",
           {
             title,
@@ -346,14 +439,33 @@ export default function BlockSuiteCanvasHost({
             contentVersion: file ? `${absolutePath}:${file.mtimeMs}` : absolutePath,
             xywh: bound.serialize(),
           },
-          doc.getBlocksByFlavour("affine:surface")[0]?.model ?? undefined,
         );
+        const inserted = doc.getBlockById(blockId);
+        if (!inserted || inserted.flavour !== "sessio:file-card") {
+          throw new Error(`BlockSuite did not retain inserted file card ${blockId}.`);
+        }
+        insertedBlockIds.push(blockId);
+        addedCount += 1;
       } catch (error) {
-        onError(`Failed to add file card for ${path}: ${String(error)}`);
+        const message = error instanceof Error ? error.message : String(error);
+        onError(`Failed to add file card for ${path}: ${message}`);
       }
     }
+    if (addedCount === 0) {
+      return false;
+    }
+    focusBlocksInViewport(rootService, doc, insertedBlockIds);
+    const snapshotJson = snapshotToJson(doc);
+    if (!snapshotJson) {
+      onError("Canvas snapshot export failed after adding file cards.");
+      return false;
+    }
+    await flushSaveRef.current(snapshotJson);
     await syncCanvasBlocks(doc);
-  }, [getDoc, getRootService, onError, resolveFileSourceType, syncCanvasBlocks, workspacePath]);
+    setStatus(`Added ${addedCount} file card${addedCount === 1 ? "" : "s"} to canvas.`);
+    updateSelectionState();
+    return true;
+  }, [getDoc, insertEdgelessBlock, onError, resolveFileSourceType, syncCanvasBlocks, updateSelectionState, waitForRootService, workspacePath]);
 
   const addPendingEditedFiles = () => {
     if (pendingEditedFiles.length === 0) return;
@@ -418,7 +530,7 @@ export default function BlockSuiteCanvasHost({
     const summaryMarkdown = workflowSnapshotToMarkdown(snapshot);
     const center = rootService.viewport.center;
     const bound = Bound.fromCenter([center.x, center.y], 360, 196);
-    rootService.addBlock(
+    insertEdgelessBlock(
       "sessio:workflow-card",
       {
         title,
@@ -433,10 +545,10 @@ export default function BlockSuiteCanvasHost({
         status: "ready",
         xywh: bound.serialize(),
       },
-      doc.getBlocksByFlavour("affine:surface")[0]?.model ?? undefined,
     );
     await syncCanvasBlocks(doc);
-  }, [getDoc, getRootService, sessionAgent, sessionId, syncCanvasBlocks]);
+    updateSelectionState();
+  }, [getDoc, getRootService, insertEdgelessBlock, sessionAgent, sessionId, syncCanvasBlocks, updateSelectionState]);
 
   const groupSelection = useCallback(() => {
     const rootService = getRootService();
@@ -463,7 +575,7 @@ export default function BlockSuiteCanvasHost({
     const bound = Bound.deserialize(model.xywh);
     const nextWidth = Math.max(bound.w, 420);
     const nextHeight = Math.max(bound.h + 96, 260);
-    rootService.addBlock(
+    insertEdgelessBlock(
       "sessio:markdown-preview",
       {
         title: model.title || "Markdown preview",
@@ -476,11 +588,11 @@ export default function BlockSuiteCanvasHost({
         cachedContent: "",
         xywh: Bound.fromCenter([bound.center[0] + 28, bound.center[1] + 28], nextWidth, nextHeight).serialize(),
       },
-      doc.getBlocksByFlavour("affine:surface")[0]?.model ?? undefined,
     );
     rootService.removeElement(blockId);
     scheduleSyncBlocks();
-  }, [getDoc, getRootService, scheduleSyncBlocks]);
+    updateSelectionState();
+  }, [getDoc, getRootService, insertEdgelessBlock, scheduleSyncBlocks, updateSelectionState]);
 
   const runWorkflowBlock = useCallback(async (blockId: string) => {
     const doc = getDoc();
@@ -573,6 +685,9 @@ export default function BlockSuiteCanvasHost({
     const host = hostRef.current;
     if (!host) return;
 
+    setIsReady(false);
+    setStatus("Initializing BlockSuite canvas…");
+
     let activeDoc = createBlockSuiteDoc(initialState.document.id).doc;
     const documentTitle = initialState.document.title;
 
@@ -603,9 +718,6 @@ export default function BlockSuiteCanvasHost({
           draftSnapshot: snapshotJson,
         };
         onStateLoaded(latestStateRef.current);
-        if (docRef.current) {
-          void syncCanvasBlocks(docRef.current);
-        }
       } catch (error) {
         const message = `Canvas draft save failed: ${String(error)}`;
         setSaveError(message);
@@ -627,23 +739,20 @@ export default function BlockSuiteCanvasHost({
         if (!initialSnapshot) {
           mountDoc(activeDoc);
           clearSaveError();
-          setStatus("Opened a fresh BlockSuite canvas.");
-          setIsReady(true);
+          await finishCanvasInitialization("Opened a fresh BlockSuite canvas.");
           return;
         }
         const snapshot = JSON.parse(initialSnapshot);
         const restored = await importDocSnapshot(snapshot);
         mountDoc(restored ?? activeDoc);
         clearSaveError();
-        setStatus("Restored canvas snapshot.");
-        setIsReady(true);
+        await finishCanvasInitialization("Restored canvas snapshot.");
       } catch (error) {
         mountDoc(activeDoc);
         const message = `Failed to restore saved canvas state: ${String(error)}`;
         setSaveError(message);
         onError(message);
-        setStatus("Opened a fresh BlockSuite canvas after restore failure.");
-        setIsReady(true);
+        await finishCanvasInitialization("Opened a fresh BlockSuite canvas after restore failure.");
       }
     };
 
@@ -655,12 +764,14 @@ export default function BlockSuiteCanvasHost({
       }
       blockUpdatedDisposeRef.current?.dispose();
       blockUpdatedDisposeRef.current = null;
+      selectionUpdatedDisposeRef.current?.dispose();
+      selectionUpdatedDisposeRef.current = null;
       editorRef.current?.remove();
       editorRef.current = null;
     };
   }, [
     attachDoc,
-    initialSnapshot,
+    finishCanvasInitialization,
     initialState.document.id,
     initialState.document.title,
     onError,
@@ -710,6 +821,8 @@ export default function BlockSuiteCanvasHost({
     const savedSnapshot = initialState.savedSnapshot;
     if (!savedSnapshot || !hostRef.current) return;
     try {
+      setIsReady(false);
+      setStatus("Restoring the last saved revision…");
       const snapshot = JSON.parse(savedSnapshot);
       const restored = await importDocSnapshot(snapshot);
       if (!restored) {
@@ -717,9 +830,10 @@ export default function BlockSuiteCanvasHost({
       }
       ensureEdgelessRoot(restored);
       attachDoc(hostRef.current, restored);
+      const ready = await finishCanvasInitialization("Restored the last saved revision.");
+      if (!ready) return;
       currentSnapshotRef.current = savedSnapshot;
       setSaveError(null);
-      setStatus("Restored the last saved revision.");
       latestStateRef.current = {
         ...latestStateRef.current,
         draftSnapshot: savedSnapshot,
@@ -765,20 +879,20 @@ export default function BlockSuiteCanvasHost({
     const editor = getEditor();
     const rootService = getRootService();
     if (!editor || !rootService) return null;
-    const selected = rootService.selection.selectedElements;
+    const selected = rootService.selection.selectedElements as EdgelessSelectable[];
     if (selected.length === 0) return null;
     const bounds = selected
-      .map((item) => Bound.deserialize(item.xywh))
+      .map((item: EdgelessSelectable) => Bound.deserialize(item.xywh))
       .filter(Boolean);
     if (bounds.length === 0) return null;
-    const common = bounds.reduce((current, next) => current.unite(next));
+    const common = bounds.reduce((current: Bound, next: Bound) => current.unite(next));
     const exportManager = editor.std?.get?.(ExportManager) as ExportManager | null;
     const rootHost = editor.std?.host?.querySelector?.("affine-edgeless-root") as {
       surface?: { renderer?: unknown };
     } | null;
     if (!exportManager || !rootHost?.surface?.renderer) return null;
-    const blocks = selected.filter(item => "flavour" in item) as BlockSuite.EdgelessBlockModelType[];
-    const shapes = selected.filter(item => !("flavour" in item)) as BlockSuite.SurfaceModel[];
+    const blocks = selected.filter((item: EdgelessSelectable) => "flavour" in item) as BlockSuite.EdgelessBlockModelType[];
+    const shapes = selected.filter((item: EdgelessSelectable) => !("flavour" in item)) as BlockSuite.SurfaceModel[];
     const canvas = await exportManager.edgelessToCanvas(rootHost.surface.renderer as never, common, undefined, blocks, shapes, {
       zoom: rootService.viewport.zoom,
     });
@@ -812,10 +926,10 @@ export default function BlockSuiteCanvasHost({
         elementIds: [],
       };
     }
-    const selectedIds = rootService.selection.selectedIds ?? [];
+    const selectedIds = (rootService.selection.selectedIds ?? []) as string[];
     const selectedSet = new Set(selectedIds);
     const refsById = new Map(blockRecords.map((ref) => [ref.blockId, ref]));
-    const refs = selectedIds.map((id) => {
+    const refs = selectedIds.map((id: string) => {
       const ref = refsById.get(id);
       const meta = readCanvasMeta(id, getDoc(), blockRecords);
       const title =
@@ -837,7 +951,7 @@ export default function BlockSuiteCanvasHost({
         blockKind: kind,
         meta,
       };
-    }).filter((item): item is CanvasSelectionRef => Boolean(item));
+    }).filter((item: CanvasSelectionRef | null): item is CanvasSelectionRef => Boolean(item));
     return {
       refs,
       elementIds: selectedIds,
@@ -978,12 +1092,15 @@ export default function BlockSuiteCanvasHost({
 
   useEffect(() => {
     const requestId = selectedFileRequest?.requestId ?? null;
-    if (!selectedFileRequest || requestId === null) return;
+    if (!selectedFileRequest || requestId === null || !isReady) return;
     const requestKey = `${sessionId}:${requestId}`;
     if (handledFileRequestRef.current === requestKey) return;
-    handledFileRequestRef.current = requestKey;
-    void addFileCards(selectedFileRequest.paths);
-  }, [addFileCards, selectedFileRequest, sessionId, workspacePath]);
+    void addFileCards(selectedFileRequest.paths).then((added) => {
+      if (added) {
+        handledFileRequestRef.current = requestKey;
+      }
+    });
+  }, [addFileCards, isReady, selectedFileRequest, sessionId]);
 
   useEffect(() => {
     const handleCanvasAddFiles = (event: Event) => {
@@ -1240,6 +1357,63 @@ export default function BlockSuiteCanvasHost({
 
 function normalizePathSegment(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function removePlaceholderNotes(doc: ReturnType<typeof createBlockSuiteDoc>["doc"]) {
+  const noteBlocks = doc.getBlocksByFlavour("affine:note");
+  for (const block of noteBlocks) {
+    if (!isPlaceholderNoteBlock(block.model as { children?: Array<{ text?: { toString(): string } | null; children?: unknown[] }> })) {
+      continue;
+    }
+    doc.deleteBlock(block.model);
+  }
+}
+
+function isPlaceholderNoteBlock(
+  model: { children?: Array<{ text?: { toString(): string } | null; caption?: string | null; children?: unknown[] }> } | null,
+) {
+  if (!model) return false;
+  const chunks: string[] = [];
+  collectNoteTextChunks(model.children ?? [], chunks);
+  return chunks.join("\n").trim().length === 0;
+}
+
+function collectNoteTextChunks(
+  children: Array<{ text?: { toString(): string } | null; caption?: string | null; children?: unknown[] }>,
+  chunks: string[],
+) {
+  for (const child of children) {
+    const direct = child.text?.toString().trim();
+    if (direct) {
+      chunks.push(direct);
+    } else if (typeof child.caption === "string" && child.caption.trim()) {
+      chunks.push(child.caption.trim());
+    }
+    if (Array.isArray(child.children)) {
+      collectNoteTextChunks(
+        child.children as Array<{ text?: { toString(): string } | null; caption?: string | null; children?: unknown[] }>,
+        chunks,
+      );
+    }
+  }
+}
+
+function focusBlocksInViewport(
+  rootService: EdgelessRootService,
+  doc: ReturnType<typeof createBlockSuiteDoc>["doc"],
+  blockIds: string[],
+) {
+  const bounds = blockIds
+    .map((blockId) => doc.getBlockById(blockId) as { xywh?: string } | null)
+    .map((model) => (model?.xywh ? Bound.deserialize(model.xywh) : null))
+    .filter((bound): bound is Bound => Boolean(bound));
+  if (bounds.length === 0) return;
+  const commonBound = bounds.reduce((current, next) => current.unite(next));
+  rootService.selection.set({
+    editing: false,
+    elements: blockIds,
+  });
+  rootService.viewport.setViewportByBound(commonBound, [96, 96, 96, 96], true);
 }
 
 function summarizeText(content: string, maxLength: number): string {

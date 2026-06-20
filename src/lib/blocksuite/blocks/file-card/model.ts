@@ -31,8 +31,9 @@ export const FileCardBlockSchema = defineBlockSchema({
   }),
   metadata: {
     version: 1,
-    role: "content",
+    role: "hub",
     parent: ["affine:surface"],
+    children: [],
   },
   toModel: () => new FileCardBlockModel(),
 });

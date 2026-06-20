@@ -35,8 +35,9 @@ export const MarkdownPreviewBlockSchema = defineBlockSchema({
   }),
   metadata: {
     version: 1,
-    role: "content",
+    role: "hub",
     parent: ["affine:surface"],
+    children: [],
   },
   toModel: () => new MarkdownPreviewBlockModel(),
 });

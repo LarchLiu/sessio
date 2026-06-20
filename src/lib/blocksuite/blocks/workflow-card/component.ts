@@ -1,7 +1,6 @@
 import { createElement } from "react";
 import { BlockComponent, toGfxBlockComponent } from "@blocksuite/block-std";
 import { html } from "lit";
-import { customElement } from "lit/decorators.js";
 import { classMap } from "lit/directives/class-map.js";
 import { styleMap } from "lit/directives/style-map.js";
 import { getBlockSuitePortalBridge } from "../../portalBridge";
@@ -62,8 +61,11 @@ class WorkflowCardPageComponent extends BlockComponent<WorkflowCardBlockModel> {
   }
 }
 
-@customElement("sessio-edgeless-workflow-card")
 export class WorkflowCardEdgelessComponent extends toGfxBlockComponent(WorkflowCardPageComponent) {}
+
+if (!customElements.get("sessio-edgeless-workflow-card")) {
+  customElements.define("sessio-edgeless-workflow-card", WorkflowCardEdgelessComponent);
+}
 
 declare global {
   namespace BlockSuite {

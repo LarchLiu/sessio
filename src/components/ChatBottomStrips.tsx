@@ -474,15 +474,15 @@ export function EditedFilesBar({
     };
   }, []);
 
+  const editPaths = useMemo(
+    () => edits.map((edit) => edit.path?.trim() ?? "").filter(Boolean),
+    [edits],
+  );
   if (fileCount === 0) return null;
   const label =
     fileCount === 1
       ? t("chat.files.count_one")
       : t("chat.files.count", { count: fileCount });
-  const editPaths = useMemo(
-    () => edits.map((edit) => edit.path?.trim() ?? "").filter(Boolean),
-    [edits],
-  );
   const Tag = onClick ? "button" : "div";
   const popupStyle = popupPos ?? { top: 0, left: 0, width: 0, height: 0 };
 

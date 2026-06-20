@@ -3,7 +3,6 @@ import type { MarkdownPreviewBlockModel } from "./model";
 import { MarkdownPreviewHost } from "./host";
 import { BlockComponent, toGfxBlockComponent } from "@blocksuite/block-std";
 import { html } from "lit";
-import { customElement } from "lit/decorators.js";
 import { classMap } from "lit/directives/class-map.js";
 import { styleMap } from "lit/directives/style-map.js";
 import { getBlockSuitePortalBridge } from "../../portalBridge";
@@ -73,10 +72,13 @@ class MarkdownPreviewPageComponent extends BlockComponent<MarkdownPreviewBlockMo
   }
 }
 
-@customElement("sessio-edgeless-markdown-preview")
 export class MarkdownPreviewEdgelessComponent extends toGfxBlockComponent(
   MarkdownPreviewPageComponent,
 ) {}
+
+if (!customElements.get("sessio-edgeless-markdown-preview")) {
+  customElements.define("sessio-edgeless-markdown-preview", MarkdownPreviewEdgelessComponent);
+}
 
 declare global {
   namespace BlockSuite {

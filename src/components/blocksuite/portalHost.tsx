@@ -1,6 +1,6 @@
 import type { ReactPortal } from "react";
 
-export function PortalHost({ portals }: { portals: Array<{ id: string; portal: ReactPortal }> }) {
+export function PortalHost({ portals }: { portals: ReadonlyArray<{ id: string; portal: ReactPortal }> }) {
   return (
     <>
       {portals.map((entry) => (
