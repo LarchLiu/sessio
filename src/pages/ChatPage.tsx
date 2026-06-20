@@ -1657,7 +1657,7 @@ export function AcpTranscriptPanel({
             sessionAgent={agent}
             sessionTitle={sessionId}
             workspacePath={workspacePath}
-            editedFiles={fileViewEdits.map((edit) => edit.path).filter((path): path is string => Boolean(path))}
+            editedFiles={sessionFileEdits.edits.map((edit) => edit.path).filter((path): path is string => Boolean(path))}
             selectedCanvasFileRequest={selectedCanvasFileRequest}
             composer={chatComposerController}
             onError={setComposerError}

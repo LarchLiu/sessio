@@ -299,7 +299,7 @@ export default function TldrawCanvasHost({
     const editor = editorRef.current;
     if (!editor) return;
     const point = placePoint(editor);
-    const id = createShapeId("note");
+    const id = createShapeId();
     editor.createShapes([
       {
         id,
@@ -321,11 +321,11 @@ export default function TldrawCanvasHost({
 
   const addFileNodes = (paths: string[]) => {
     const editor = editorRef.current;
-    const nextPaths = paths.filter((path) => path.trim());
+    const nextPaths = Array.from(new Set(paths.map((path) => path.trim()).filter(Boolean)));
     if (!editor || nextPaths.length === 0) return;
     const point = placePoint(editor);
     const shapes = nextPaths.map((path, index) => {
-      const id = createShapeId("file");
+      const id = createShapeId();
       const fileName = path.split(/[/\\]/).pop() ?? path;
       const sourceType = resolveFileSourceType(path, workspacePath);
       const column = index % 3;
@@ -385,7 +385,7 @@ export default function TldrawCanvasHost({
       ?? "- Define the next step\n- Run the first slice\n- Review the output";
     const workflowMeta = snapshot?.snapshot ? serializeJsonValue(snapshot.snapshot) : null;
     const mirrorLabel = snapshot?.snapshot.goal?.trim() || null;
-    const id = createShapeId("workflow");
+    const id = createShapeId();
     editor.createShapes([
       {
         id,
@@ -898,7 +898,7 @@ export default function TldrawCanvasHost({
             className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 px-3 py-1.5 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <FilePlus2 className="h-3.5 w-3.5" />
-            Add changed files
+            Add edited files
           </button>
           {suggestionFiles.map((file) => (
             <button
