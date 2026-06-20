@@ -2,10 +2,12 @@ import "tldraw/tldraw.css";
 
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   AssetRecordType,
   Tldraw,
@@ -19,7 +21,7 @@ import {
 } from "tldraw";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AlertCircle, ArrowUpRight, Camera, FileImage, FilePlus2, FolderOpen, Layers3, MessageCircleQuestionMark, MessagesSquare, Save, StickyNote, Workflow } from "lucide-react";
+import { ArrowUpRight, Camera, Check, FileImage, FilePlus2, FolderOpen, Layers3, MessageCircleQuestionMark, MessagesSquare, Save, StickyNote, Workflow, X } from "lucide-react";
 import type {
   CanvasContextOption,
   CanvasContextRef,
@@ -33,7 +35,7 @@ import {
   createCanvasAnchor,
   createCanvasContextFile,
   getThreadWorkSnapshot,
-  listProjectFiles,
+  readLocalImageDataUrl,
   savePastedAttachment,
   saveCanvasDraft,
   saveCanvasRevision,
@@ -42,6 +44,9 @@ import {
 import type { ComposerAttachment } from "./ComposerAttachments";
 import type { ChatComposerController } from "../hooks/useChatComposer";
 import PopupMenu, { type PopupMenuOption } from "./PopupMenu";
+import ScrollArea from "./ScrollArea";
+
+const CANVAS_ADD_FILES_EVENT = "sessio:canvas-add-files";
 
 export interface TldrawCanvasHostProps {
   sessionId: string;
@@ -58,7 +63,6 @@ export interface TldrawCanvasHostProps {
   composer: ChatComposerController;
   onStateLoaded: (state: CanvasDocumentState) => void;
   onError: (message: string) => void;
-  onOpenProjectFile?: (path: string) => void;
   onOpenThreadMultiSessionChat?: (threadId: string) => void;
 }
 
@@ -76,7 +80,6 @@ export default function TldrawCanvasHost({
   composer,
   onStateLoaded,
   onError,
-  onOpenProjectFile,
   onOpenThreadMultiSessionChat,
 }: TldrawCanvasHostProps) {
   const editorRef = useRef<Editor | null>(null);
@@ -87,11 +90,12 @@ export default function TldrawCanvasHost({
   const currentSnapshotRef = useRef(initialSnapshot);
   const hydratedRef = useRef(false);
   const addMenuButtonRef = useRef<HTMLButtonElement>(null);
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+  const editedFilesButtonRef = useRef<HTMLButtonElement>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [selectionCount, setSelectionCount] = useState(0);
-  const [projectFiles, setProjectFiles] = useState<string[]>([]);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [editedFilesPickerOpen, setEditedFilesPickerOpen] = useState(false);
+  const [pendingEditedFiles, setPendingEditedFiles] = useState<string[]>([]);
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   const [selectedShapeMeta, setSelectedShapeMeta] = useState<Record<string, unknown> | null>(null);
   const [bridgeBusy, setBridgeBusy] = useState<null | "ask" | "snapshot" | "workflow">(null);
@@ -109,25 +113,6 @@ export default function TldrawCanvasHost({
   }, [initialState.anchors]);
 
   useEffect(() => {
-    if (!workspacePath) {
-      setProjectFiles([]);
-      return;
-    }
-    let cancelled = false;
-    listProjectFiles(workspacePath)
-      .then((files) => {
-        if (cancelled) return;
-        setProjectFiles(files.slice(0, 8));
-      })
-      .catch((error) => {
-        if (!cancelled) onError(String(error));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [onError, workspacePath]);
-
-  useEffect(() => {
     return () => {
       if (autosaveTimerRef.current !== null) {
         window.clearTimeout(autosaveTimerRef.current);
@@ -135,10 +120,6 @@ export default function TldrawCanvasHost({
     };
   }, []);
 
-  const suggestionFiles = useMemo(() => {
-    const merged = [...editedFiles, ...projectFiles].filter(Boolean);
-    return Array.from(new Set(merged)).slice(0, 4);
-  }, [editedFiles, projectFiles]);
   const changedFiles = useMemo(
     () => Array.from(new Set(editedFiles.map((path) => path.trim()).filter(Boolean))),
     [editedFiles],
@@ -185,7 +166,6 @@ export default function TldrawCanvasHost({
       hydratedRef.current = true;
     } catch (error) {
       const message = `Failed to load saved canvas state: ${String(error)}`;
-      setSaveState("failed");
       setSaveError(message);
       onError(message);
     }
@@ -205,7 +185,6 @@ export default function TldrawCanvasHost({
       }
       editor.loadSnapshot(result.value.getStoreSnapshot());
       currentSnapshotRef.current = snapshotText;
-      setSaveState("saved");
       setSaveError(null);
       onStateLoaded({
         ...initialState,
@@ -215,7 +194,6 @@ export default function TldrawCanvasHost({
       await persistShapeRefs(editor);
     } catch (error) {
       const message = `Failed to restore the last saved revision: ${String(error)}`;
-      setSaveState("failed");
       setSaveError(message);
       onError(message);
     }
@@ -280,7 +258,6 @@ export default function TldrawCanvasHost({
       });
     } catch (error) {
       const message = `Failed to sync canvas refs: ${String(error)}`;
-      setSaveState("failed");
       setSaveError(message);
       onError(message);
     }
@@ -354,12 +331,32 @@ export default function TldrawCanvasHost({
     editor.select(...shapes.map((shape) => shape.id));
   };
 
-  const addFileNode = (path: string) => {
-    addFileNodes([path]);
+  const openEditedFilesPicker = () => {
+    if (changedFiles.length === 0) return;
+    setPendingEditedFiles((current) => (
+      current.length > 0
+        ? current.filter((path) => changedFiles.includes(path))
+        : changedFiles
+    ));
+    setEditedFilesPickerOpen(true);
   };
 
-  const addChangedFiles = () => {
-    addFileNodes(changedFiles);
+  const closeEditedFilesPicker = () => {
+    setEditedFilesPickerOpen(false);
+  };
+
+  const togglePendingEditedFile = (path: string) => {
+    setPendingEditedFiles((current) => (
+      current.includes(path)
+        ? current.filter((item) => item !== path)
+        : [...current, path]
+    ));
+  };
+
+  const addPendingEditedFiles = () => {
+    if (pendingEditedFiles.length === 0) return;
+    addFileNodes(pendingEditedFiles);
+    setEditedFilesPickerOpen(false);
   };
 
   const consumeSelectedFileRequest = (editor: Editor | null = editorRef.current) => {
@@ -374,6 +371,16 @@ export default function TldrawCanvasHost({
   useEffect(() => {
     consumeSelectedFileRequest();
   }, [selectedFileRequest, sessionId]);
+
+  useEffect(() => {
+    const handleCanvasAddFiles = (event: Event) => {
+      const detail = (event as CustomEvent<{ paths?: string[]; sessionId?: string | null }>).detail;
+      if (!detail || detail.sessionId !== sessionId || !Array.isArray(detail.paths)) return;
+      addFileNodes(detail.paths);
+    };
+    window.addEventListener(CANVAS_ADD_FILES_EVENT, handleCanvasAddFiles);
+    return () => window.removeEventListener(CANVAS_ADD_FILES_EVENT, handleCanvasAddFiles);
+  }, [sessionId]);
 
   const addWorkflowNode = async () => {
     const editor = editorRef.current;
@@ -482,7 +489,6 @@ export default function TldrawCanvasHost({
     if (!editor) return;
     try {
       const snapshotJson = await serializeTldrawJson(editor);
-      setSaveState("saving");
       setSaveError(null);
       const saved = await saveCanvasRevision({
         sessionId,
@@ -491,7 +497,6 @@ export default function TldrawCanvasHost({
         source: "manual",
       });
       currentSnapshotRef.current = snapshotJson;
-      setSaveState("saved");
       onStateLoaded({
         ...initialState,
         document: saved.document,
@@ -502,7 +507,6 @@ export default function TldrawCanvasHost({
       await persistShapeRefs(editor);
     } catch (error) {
       const message = `Canvas save failed: ${String(error)}`;
-      setSaveState("failed");
       setSaveError(message);
       onError(message);
     }
@@ -554,7 +558,6 @@ export default function TldrawCanvasHost({
 
   const flushSave = async (snapshotJson: string) => {
     inflightSaveRef.current = true;
-    setSaveState("saving");
     setSaveError(null);
     try {
       const saved = await saveCanvasDraft({
@@ -563,7 +566,6 @@ export default function TldrawCanvasHost({
         snapshotJson,
       });
       currentSnapshotRef.current = snapshotJson;
-      setSaveState("saved");
       onStateLoaded({
         ...initialState,
         document: saved.document,
@@ -574,7 +576,6 @@ export default function TldrawCanvasHost({
       }
     } catch (error) {
       const message = `Canvas draft save failed: ${String(error)}`;
-      setSaveState("failed");
       setSaveError(message);
       onError(message);
     } finally {
@@ -670,13 +671,14 @@ export default function TldrawCanvasHost({
     const blob = result?.blob ?? null;
     if (!blob) return null;
     const path = await saveBlobAsAttachment(blob, `canvas-selection-${Date.now()}.png`);
+    const previewDataUrl = await readLocalImageDataUrl(path).catch(() => null);
     return {
       path,
       attachment: {
         path,
         kind: "image",
         mimeType: "image/png",
-        previewDataUrl: null,
+        previewDataUrl,
         displayName: "Canvas selection",
         name: "Canvas selection",
       } satisfies ComposerAttachment,
@@ -755,6 +757,7 @@ export default function TldrawCanvasHost({
           path: snapshot.path,
           kind: "image",
           mimeType: "image/png",
+          previewDataUrl: snapshot.attachment.previewDataUrl ?? null,
           displayName: snapshot.attachment.displayName,
           name: snapshot.attachment.name,
         },
@@ -880,52 +883,37 @@ export default function TldrawCanvasHost({
 
   return (
     <div className="canvas-tldraw-host absolute inset-0 flex min-h-0 flex-col">
-      <div className="flex items-center justify-between gap-3 border-b border-ink/8 bg-surface-panel/90 px-4 py-2">
+      <div className="flex h-9 shrink-0 items-center justify-between gap-3 border-b border-ink/8 bg-surface-panel/90 px-4">
         <div className="flex items-center gap-3 text-caption text-ink/50">
           <button
             ref={addMenuButtonRef}
             type="button"
             onClick={() => setAddMenuOpen((value) => !value)}
-            className="inline-flex items-center gap-1.5 rounded-full border border-ink/12 px-3 py-1.5 text-ink/72 transition hover:bg-ink/5"
+            className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/12 px-3 text-ink/72 transition hover:bg-ink/5"
           >
             <Layers3 className="h-3.5 w-3.5" />
             Add to canvas
           </button>
           <button
+            ref={editedFilesButtonRef}
             type="button"
-            onClick={addChangedFiles}
+            onClick={openEditedFilesPicker}
             disabled={changedFiles.length === 0}
-            className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 px-3 py-1.5 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-3 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <FilePlus2 className="h-3.5 w-3.5" />
             Add edited files
           </button>
-          {suggestionFiles.map((file) => (
-            <button
-              key={file}
-              type="button"
-              onClick={() => addFileNode(file)}
-              className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 px-3 py-1.5 transition hover:bg-ink/5"
-            >
-              <FilePlus2 className="h-3.5 w-3.5" />
-              <span className="max-w-[180px] truncate">{file.split(/[/\\]/).pop() ?? file}</span>
-            </button>
-          ))}
-          {suggestionFiles.length === 0 && (
-            <div className="rounded-full border border-dashed border-ink/10 px-3 py-1.5 text-ink/40">
-              Add files, notes, workflow mirrors, or screenshots to seed the canvas.
-            </div>
-          )}
         </div>
         <div className="flex items-center gap-2 text-caption">
-          <span className="rounded-full border border-ink/10 px-2.5 py-1 text-ink/55">
+          <span className="inline-flex h-6 items-center rounded-md border border-ink/10 px-2.5 text-ink/55">
             {selectionCount > 0 ? `${selectionCount} selected` : "Canvas"}
           </span>
           <button
             type="button"
             onClick={() => void askSelection()}
             disabled={selectionCount === 0 || bridgeBusy !== null}
-            className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 px-2.5 py-1 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-2.5 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <MessageCircleQuestionMark className="h-3.5 w-3.5" />
             Ask selection
@@ -934,7 +922,7 @@ export default function TldrawCanvasHost({
             type="button"
             onClick={() => void attachSelectionSnapshot()}
             disabled={selectionCount === 0 || bridgeBusy !== null || !composer.supportsImageAttachments}
-            className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 px-2.5 py-1 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-2.5 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Camera className="h-3.5 w-3.5" />
             Attach snapshot
@@ -943,7 +931,7 @@ export default function TldrawCanvasHost({
             type="button"
             onClick={() => groupSelection()}
             disabled={selectionCount < 2}
-            className="rounded-full border border-ink/10 px-2.5 py-1 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex h-6 items-center rounded-md border border-ink/10 px-2.5 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Group
           </button>
@@ -951,42 +939,18 @@ export default function TldrawCanvasHost({
             type="button"
             onClick={() => ungroupSelection()}
             disabled={selectionCount === 0}
-            className="rounded-full border border-ink/10 px-2.5 py-1 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex h-6 items-center rounded-md border border-ink/10 px-2.5 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Ungroup
           </button>
           <button
             type="button"
             onClick={() => void saveRevision()}
-            className="rounded-full border border-ink/10 px-2.5 py-1 text-ink/70 transition hover:bg-ink/5"
+            className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-2.5 text-ink/70 transition hover:bg-ink/5"
           >
-            Save canvas
+            <Save className="h-3.5 w-3.5" />
+            Save
           </button>
-          <span
-            className={
-              "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 " +
-              (saveState === "failed"
-                ? "bg-status-error/10 text-status-error"
-                : saveState === "saving"
-                  ? "bg-ink/8 text-ink/65"
-                  : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300")
-            }
-          >
-            {saveState === "failed" ? (
-              <AlertCircle className="h-3.5 w-3.5" />
-            ) : (
-              <Save className="h-3.5 w-3.5" />
-            )}
-            <span>
-              {saveState === "failed"
-                ? "Save failed"
-                : saveState === "saving"
-                  ? "Saving…"
-                  : saveState === "saved"
-                    ? "Saved"
-                    : "Draft autosave"}
-            </span>
-          </span>
         </div>
       </div>
       {saveError && (
@@ -999,7 +963,7 @@ export default function TldrawCanvasHost({
             <button
               type="button"
               onClick={() => void restoreSavedRevision()}
-              className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-status-error/20 px-3 py-1 text-[11px] transition hover:bg-status-error/10"
+              className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-status-error/20 px-3 py-1 text-[11px] transition hover:bg-status-error/10"
             >
               <Save className="h-3.5 w-3.5" />
               Restore saved revision
@@ -1037,22 +1001,6 @@ export default function TldrawCanvasHost({
       {!workspacePath && (
         <div className="border-t border-ink/8 px-4 py-2 text-caption text-status-warn">
           This session has no workspace path, so file suggestions and source-opening are limited.
-        </div>
-      )}
-      {workspacePath && onOpenProjectFile && (
-        <div className="border-t border-ink/8 px-4 py-2 text-caption text-ink/50">
-          {selectedShapeId && selectedShapeMeta && typeof selectedShapeMeta.sourcePath === "string" ? (
-            <button
-              type="button"
-              onClick={() => onOpenProjectFile(selectedShapeMeta.sourcePath as string)}
-              className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 px-3 py-1.5 text-ink/70 transition hover:bg-ink/5"
-            >
-              <FolderOpen className="h-3.5 w-3.5" />
-              Open source file
-            </button>
-          ) : (
-            "Open a suggested file to inspect it in the file view, then switch back to keep sketching on the canvas."
-          )}
         </div>
       )}
       {(selectedShapeMeta || anchors.length > 0) && (
@@ -1097,7 +1045,7 @@ export default function TldrawCanvasHost({
                     type="button"
                     onClick={() => void runWorkflowSelection()}
                     disabled={bridgeBusy !== null || typeof selectedShapeMeta.threadId !== "string"}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 px-3 py-1.5 text-caption text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="inline-flex items-center gap-1.5 rounded-md border border-ink/10 px-3 py-1.5 text-caption text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <Workflow className="h-3.5 w-3.5" />
                     Run workflow
@@ -1106,7 +1054,7 @@ export default function TldrawCanvasHost({
                     type="button"
                     onClick={openWorkflowThread}
                     disabled={bridgeBusy !== null || !canOpenWorkflowThread}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 px-3 py-1.5 text-caption text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="inline-flex items-center gap-1.5 rounded-md border border-ink/10 px-3 py-1.5 text-caption text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <MessagesSquare className="h-3.5 w-3.5" />
                     Open thread chat
@@ -1173,6 +1121,16 @@ export default function TldrawCanvasHost({
           overlayClassName="z-[1009]"
           onSelect={(key) => void handleAddMenuSelect(key)}
           onClose={() => setAddMenuOpen(false)}
+        />
+      )}
+      {editedFilesPickerOpen && editedFilesButtonRef.current && (
+        <EditedFilesPopover
+          anchor={editedFilesButtonRef.current}
+          files={changedFiles}
+          selectedFiles={pendingEditedFiles}
+          onToggleFile={togglePendingEditedFile}
+          onAdd={addPendingEditedFiles}
+          onClose={closeEditedFilesPicker}
         />
       )}
       <div className="sr-only" aria-hidden>
@@ -1369,4 +1327,159 @@ async function saveBlobAsAttachment(blob: Blob, fileName: string): Promise<strin
     dataBase64: btoa(binary),
   });
   return path;
+}
+
+function EditedFilesPopover({
+  anchor,
+  files,
+  selectedFiles,
+  onToggleFile,
+  onAdd,
+  onClose,
+}: {
+  anchor: HTMLElement;
+  files: string[];
+  selectedFiles: string[];
+  onToggleFile: (path: string) => void;
+  onAdd: () => void;
+  onClose: () => void;
+}) {
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{
+    top: number;
+    left: number;
+    width: number;
+    maxHeight: number;
+  } | null>(null);
+
+  useLayoutEffect(() => {
+    const update = () => {
+      const rect = anchor.getBoundingClientRect();
+      const gap = 6;
+      const margin = 8;
+      const width = Math.min(420, Math.max(320, rect.width + 120));
+      const top = rect.bottom + gap;
+      const maxHeight = Math.max(200, window.innerHeight - top - margin);
+      const left = Math.min(
+        Math.max(margin, rect.left),
+        window.innerWidth - margin - width,
+      );
+      setPos({
+        top,
+        left,
+        width,
+        maxHeight,
+      });
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [anchor]);
+
+  useEffect(() => {
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (popoverRef.current?.contains(target)) return;
+      if (anchor.contains(target)) return;
+      onClose();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [anchor, onClose]);
+
+  if (!pos) return null;
+
+  return createPortal(
+    <div
+      ref={popoverRef}
+      className="fixed z-[1012] overflow-hidden rounded-xl border border-ink/10 bg-surface-panel shadow-[0_20px_60px_rgba(0,0,0,0.22)]"
+      style={{
+        top: pos.top,
+        left: pos.left,
+        width: pos.width,
+      }}
+    >
+      <div className="flex items-center justify-between gap-3 border-b border-ink/8 px-3 py-2.5">
+        <div className="min-w-0">
+          <div className="text-body-sm font-medium text-ink/82">Edited files</div>
+          <div className="text-caption text-ink/48">
+            Select multiple files to add to canvas
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-ink/45 transition hover:bg-ink/5 hover:text-ink/72"
+          aria-label="Close edited files picker"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+      <ScrollArea
+        className="overscroll-contain"
+        style={{ maxHeight: Math.min(pos.maxHeight, 320) }}
+        viewportClassName="py-1"
+        persistScrollbars
+      >
+        <ul className="flex flex-col px-1.5 py-1">
+          {files.map((path) => {
+            const checked = selectedFiles.includes(path);
+            const fileName = path.split(/[/\\]/).pop() ?? path;
+            return (
+              <li key={path}>
+                <button
+                  type="button"
+                  onClick={() => onToggleFile(path)}
+                  className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition hover:bg-ink/[0.05]"
+                >
+                  <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border border-ink/15 bg-ink/[0.04]">
+                    {checked && <Check className="h-3 w-3 text-ink/72" />}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-body-sm text-ink/82">{fileName}</span>
+                    <span className="mt-0.5 block break-all font-mono text-caption text-ink/45">{path}</span>
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </ScrollArea>
+      <div className="flex items-center justify-between gap-3 border-t border-ink/8 px-3 py-2.5">
+        <div className="text-caption text-ink/48">
+          {selectedFiles.length} selected
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-ink/10 px-3 py-1.5 text-caption text-ink/60 transition hover:bg-ink/5"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onAdd}
+            disabled={selectedFiles.length === 0}
+            className="rounded-md border border-ink/10 bg-ink px-3 py-1.5 text-caption text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Add selected
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
 }

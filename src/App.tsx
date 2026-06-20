@@ -932,7 +932,7 @@ export default function App() {
     currentSessionIdentity ? canvasFileSelectionBySession[currentSessionIdentity] ?? null : null;
   const handleOpenProjectFile = useCallback(
     (path: string) => {
-      if (!selected || detailMode !== "chat") return;
+      if (!selected || (detailMode !== "chat" && detailMode !== "threadChat")) return;
       if (currentChatView !== "file") setChatView("file");
       const identity = sessionIdentityKey(selected);
       setProjectFileSelectionBySession((prev) => {
@@ -950,7 +950,7 @@ export default function App() {
   );
   const handleAddProjectFileToCanvas = useCallback(
     (paths: string[] | string) => {
-      if (!selected || detailMode !== "chat") return;
+      if (!selected || (detailMode !== "chat" && detailMode !== "threadChat")) return;
       const nextPaths = (Array.isArray(paths) ? paths : [paths]).map((path) => path.trim()).filter(Boolean);
       if (nextPaths.length === 0) return;
       if (currentChatView !== "canvas") setChatView("canvas");
@@ -1110,6 +1110,8 @@ export default function App() {
             selectedSessionProject={selectedSessionProject}
             selectedThreadProject={activeThreadProject}
             open={rightSidebarOpen}
+            isCanvasViewActive={currentChatView === "canvas"}
+            activeCanvasSessionId={selected?.id ?? null}
             liveState={liveRuntimeState}
             filesReloadKey={rightSidebarFilesReloadKey}
             projectGitRepos={projectGitRepos}

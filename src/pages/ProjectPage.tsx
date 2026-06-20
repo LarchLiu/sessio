@@ -95,6 +95,8 @@ import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTab
 import { projectStageIcon, projectStageLabel, stageStatusVisual } from "../utils/stageDisplay";
 import { sessionDisplayTitle } from "../appUtils";
 
+const CANVAS_ADD_FILES_EVENT = "sessio:canvas-add-files";
+
 export type ProjectView = "threads" | "stages" | "assistants" | "files" | "sourceControl";
 type ThreadPanelView = "threads" | "thread-chats";
 const THREAD_KINDS: ThreadKind[] = ["process", "teamwork", "brainstorm", "debate"];
@@ -372,6 +374,7 @@ export function ProjectWorkbenchPage({
   onViewChange,
   hideTabs = false,
   filesReloadKey = 0,
+  activeCanvasSessionId = null,
   onOpenFile,
   onAddFileToCanvas,
   projectHasGit,
@@ -384,6 +387,7 @@ export function ProjectWorkbenchPage({
   onViewChange?: (view: ProjectView) => void;
   hideTabs?: boolean;
   filesReloadKey?: number;
+  activeCanvasSessionId?: string | null;
   onOpenFile?: (path: string) => void;
   onAddFileToCanvas?: (paths: string[] | string) => void;
   projectHasGit?: boolean;
@@ -493,6 +497,7 @@ export function ProjectWorkbenchPage({
           <ProjectFilesPanel
             project={project}
             reloadKey={filesReloadKey}
+            activeCanvasSessionId={activeCanvasSessionId}
             onOpenFile={onOpenFile}
             onAddFileToCanvas={onAddFileToCanvas}
             projectHasGit={projectHasGit}
@@ -585,6 +590,7 @@ export function ProjectWorkbenchPage({
 function ProjectFilesPanel({
   project,
   reloadKey = 0,
+  activeCanvasSessionId = null,
   onOpenFile,
   onAddFileToCanvas,
   projectHasGit,
@@ -592,6 +598,7 @@ function ProjectFilesPanel({
 }: {
   project: ProjectInfo;
   reloadKey?: number;
+  activeCanvasSessionId?: string | null;
   onOpenFile?: (path: string) => void;
   onAddFileToCanvas?: (paths: string[] | string) => void;
   projectHasGit?: boolean;
@@ -696,6 +703,7 @@ function ProjectFilesPanel({
           gitStatus={gitStatus}
           refreshing={refreshing}
           error={error}
+          activeCanvasSessionId={activeCanvasSessionId}
           onRefresh={() => {
             void loadProjectFiles({ background: pathsRef.current !== null, detectGit: true });
           }}
@@ -712,6 +720,7 @@ function ProjectFilesTree({
   gitStatus,
   refreshing,
   error,
+  activeCanvasSessionId,
   onRefresh,
   onOpenFile,
   onAddFileToCanvas,
@@ -720,6 +729,7 @@ function ProjectFilesTree({
   gitStatus: ProjectGitStatusEntry[];
   refreshing: boolean;
   error: string | null;
+  activeCanvasSessionId: string | null;
   onRefresh: () => void;
   onOpenFile?: (path: string) => void;
   onAddFileToCanvas?: (paths: string[] | string) => void;
@@ -843,6 +853,7 @@ function ProjectFilesTree({
               <ProjectFileTreeContextMenu
                 path={item.path}
                 context={context}
+                activeCanvasSessionId={activeCanvasSessionId}
                 onOpenFile={onOpenFile}
                 onAddFileToCanvas={onAddFileToCanvas}
               />
@@ -862,6 +873,7 @@ function ProjectFilesTree({
 function ProjectFileTreeContextMenu({
   path,
   context,
+  activeCanvasSessionId,
   onOpenFile,
   onAddFileToCanvas,
 }: {
@@ -870,6 +882,7 @@ function ProjectFileTreeContextMenu({
     anchorElement: HTMLElement;
     close: (options?: { restoreFocus?: boolean }) => void;
   };
+  activeCanvasSessionId: string | null;
   onOpenFile?: (path: string) => void;
   onAddFileToCanvas?: (paths: string[] | string) => void;
 }) {
@@ -909,18 +922,27 @@ function ProjectFileTreeContextMenu({
         <FileCode2 className="h-4 w-4 shrink-0 text-ink/55" />
         <span>Add to code view</span>
       </button>
-      <button
-        type="button"
-        className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-body-sm text-ink/72 transition hover:bg-ink/[0.08] hover:text-ink"
-        role="menuitem"
-        onClick={() => {
-          context.close({ restoreFocus: false });
-          onAddFileToCanvas?.(path);
-        }}
-      >
-        <FilePlus2 className="h-4 w-4 shrink-0 text-ink/55" />
-        <span>Add to canvas</span>
-      </button>
+      {onAddFileToCanvas && (
+        <button
+          type="button"
+          className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-body-sm text-ink/72 transition hover:bg-ink/[0.08] hover:text-ink"
+          role="menuitem"
+          onClick={() => {
+            context.close({ restoreFocus: false });
+            if (activeCanvasSessionId) {
+              window.dispatchEvent(
+                new CustomEvent(CANVAS_ADD_FILES_EVENT, {
+                  detail: { paths: [path], sessionId: activeCanvasSessionId },
+                }),
+              );
+            }
+            onAddFileToCanvas(path);
+          }}
+        >
+          <FilePlus2 className="h-4 w-4 shrink-0 text-ink/55" />
+          <span>Add to canvas</span>
+        </button>
+      )}
     </div>,
     document.body,
   );

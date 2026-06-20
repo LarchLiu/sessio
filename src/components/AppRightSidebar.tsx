@@ -20,6 +20,8 @@ interface AppRightSidebarProps {
   selectedSessionProject: ProjectInfo | null;
   selectedThreadProject: ProjectInfo | null;
   open: boolean;
+  isCanvasViewActive: boolean;
+  activeCanvasSessionId: string | null;
   liveState: LiveRuntimeState;
   filesReloadKey: number;
   projectGitRepos: Record<string, boolean>;
@@ -44,6 +46,8 @@ export default function AppRightSidebar({
   selectedSessionProject,
   selectedThreadProject,
   open,
+  isCanvasViewActive,
+  activeCanvasSessionId,
   liveState,
   filesReloadKey,
   projectGitRepos,
@@ -261,8 +265,9 @@ export default function AppRightSidebar({
             view={activeTab.view}
             hideTabs
             filesReloadKey={filesReloadKey + liveFilesReloadKey}
+            activeCanvasSessionId={activeCanvasSessionId}
             onOpenFile={onOpenProjectFile}
-            onAddFileToCanvas={onAddProjectFileToCanvas}
+            onAddFileToCanvas={isCanvasViewActive ? onAddProjectFileToCanvas : undefined}
             projectHasGit={project.path ? projectGitRepos[project.path] === true : false}
             onProjectGitRepoDetected={onProjectGitRepoDetected}
             onSelectThreadChatSession={onSelectThreadChatSession}

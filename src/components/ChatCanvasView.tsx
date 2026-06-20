@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { AlertCircle, LoaderCircle, RefreshCcw, Save } from "lucide-react";
+import { AlertCircle, LoaderCircle, RefreshCcw } from "lucide-react";
 import type { CanvasDocumentState } from "../canvasTypes";
 import {
   getSessionCanvas,
@@ -21,7 +21,6 @@ export interface ChatCanvasViewProps {
   } | null;
   composer: ChatComposerController;
   onError: (message: string) => void;
-  onOpenProjectFile?: (path: string) => void;
   onOpenThreadMultiSessionChat?: (threadId: string) => void;
 }
 
@@ -35,7 +34,6 @@ export default function ChatCanvasView({
   selectedCanvasFileRequest = null,
   composer,
   onError,
-  onOpenProjectFile,
   onOpenThreadMultiSessionChat,
 }: ChatCanvasViewProps) {
   const [state, setState] = useState<CanvasDocumentState | null>(null);
@@ -105,20 +103,6 @@ export default function ChatCanvasView({
 
   return (
     <div className="flex flex-1 min-h-0 flex-col">
-      <div className="flex items-center justify-between gap-3 border-b border-ink/8 px-4 py-2.5">
-        <div className="min-w-0">
-          <div className="truncate text-body-sm font-medium text-ink/82">
-            {state.document.title || "Canvas"}
-          </div>
-          <div className="truncate text-caption text-ink/45">
-            Session-scoped workspace for this chat
-          </div>
-        </div>
-        <div className="flex items-center gap-2 text-caption text-ink/45">
-          <Save className="h-3.5 w-3.5" />
-          <span>Draft autosaves</span>
-        </div>
-      </div>
       <div className="relative flex-1 min-h-0">
         <Suspense
           fallback={
@@ -140,7 +124,6 @@ export default function ChatCanvasView({
             initialState={state}
             initialSnapshot={initialSnapshot}
             composer={composer}
-            onOpenProjectFile={onOpenProjectFile}
             onOpenThreadMultiSessionChat={onOpenThreadMultiSessionChat}
             onStateLoaded={setState}
             onError={onError}
