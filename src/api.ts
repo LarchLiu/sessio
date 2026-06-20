@@ -2,12 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   BuildCanvasContextFileRequest,
   CanvasAnchorInfo,
+  CanvasBlockRecord,
   CanvasDocumentState,
   CanvasRevisionInfo,
-  CanvasShapeRef,
   SaveCanvasDraftRequest,
   SaveCanvasRevisionRequest,
-  UpdateCanvasShapeRefsRequest,
+  UpdateCanvasBlocksRequest,
   UpsertCanvasAnchorRequest,
 } from "./canvasTypes";
 
@@ -2364,10 +2364,10 @@ export async function saveCanvasRevision(
   return invoke<SavedCanvasRevision>("save_canvas_revision", { req });
 }
 
-export async function updateCanvasShapeRefs(
-  req: UpdateCanvasShapeRefsRequest,
-): Promise<CanvasShapeRef[]> {
-  return invoke<CanvasShapeRef[]>("update_canvas_shape_refs", { req });
+export async function updateCanvasBlocks(
+  req: UpdateCanvasBlocksRequest,
+): Promise<CanvasBlockRecord[]> {
+  return invoke<CanvasBlockRecord[]>("update_canvas_blocks", { req });
 }
 
 export async function createCanvasContextFile(

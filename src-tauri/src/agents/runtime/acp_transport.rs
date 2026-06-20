@@ -1299,13 +1299,13 @@ fn build_canvas_prompt_block(value: &serde_json::Value) -> Option<String> {
         "[Canvas context]".to_string(),
         format!("Canvas scope: {scope}"),
     ];
-    let shape_ids = context
-        .get("shapeIds")
+    let block_ids = context
+        .get("blockIds")
         .and_then(|value| value.as_array())
         .map(|ids| ids.len())
         .unwrap_or(0);
-    if shape_ids > 0 {
-        lines.push(format!("Selected items: {shape_ids}"));
+    if block_ids > 0 {
+        lines.push(format!("Selected items: {block_ids}"));
     }
     if refs.is_empty() {
         lines.push("Use the current canvas selection when answering.".to_string());
@@ -1316,7 +1316,7 @@ fn build_canvas_prompt_block(value: &serde_json::Value) -> Option<String> {
                 continue;
             };
             let kind = record
-                .get("kind")
+                .get("blockKind")
                 .and_then(|value| value.as_str())
                 .unwrap_or("item");
             let source = record

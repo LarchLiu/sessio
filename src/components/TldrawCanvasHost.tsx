@@ -23,11 +23,11 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ArrowUpRight, Camera, Check, FileImage, FilePlus2, FolderOpen, Layers3, MessageCircleQuestionMark, MessagesSquare, Save, StickyNote, Workflow, X } from "lucide-react";
 import type {
+  CanvasBlockKind,
+  CanvasBlockSourceType,
   CanvasContextOption,
   CanvasContextRef,
   CanvasDocumentState,
-  CanvasNodeKind,
-  CanvasSourceType,
 } from "../canvasTypes";
 import {
   type Agent,
@@ -39,7 +39,7 @@ import {
   savePastedAttachment,
   saveCanvasDraft,
   saveCanvasRevision,
-  updateCanvasShapeRefs,
+  updateCanvasBlocks,
 } from "../api";
 import type { ComposerAttachment } from "./ComposerAttachments";
 import type { ChatComposerController } from "../hooks/useChatComposer";
@@ -214,37 +214,32 @@ export default function TldrawCanvasHost({
             : null;
         const metaKind = typeof meta.kind === "string" ? meta.kind : null;
         const metaSourceType = typeof meta.sourceType === "string" ? meta.sourceType : null;
-        const shapeType: CanvasNodeKind =
-          metaKind === "file" ||
-          metaKind === "image" ||
-          metaKind === "workflow" ||
+        const blockKind: CanvasBlockKind =
+          metaKind === "markdown_preview" ||
+          metaKind === "file_card" ||
+          metaKind === "workflow_card" ||
           metaKind === "note" ||
           metaKind === "group" ||
-          metaKind === "video"
+          metaKind === "image"
             ? metaKind
             : shape.type === "image"
               ? "image"
-              : shape.type === "group"
-                ? "group"
-                : "note";
-        const sourceType: CanvasSourceType =
+              : "note";
+        const sourceType: CanvasBlockSourceType =
           metaSourceType === "workspace_file" ||
           metaSourceType === "edited_file" ||
-          metaSourceType === "attachment_file" ||
           metaSourceType === "attachment_image" ||
-          metaSourceType === "video_file" ||
           metaSourceType === "workflow_definition" ||
+          metaSourceType === "inline_markdown" ||
           metaSourceType === "note" ||
           metaSourceType === "group"
             ? metaSourceType
             : shape.type === "image"
               ? "attachment_image"
-              : shape.type === "group"
-                ? "group"
-                : "note";
+              : "note";
         return {
-          shapeId: shape.id,
-          kind: shapeType,
+          blockId: shape.id,
+          blockKind,
           sourceType,
           sourceKey,
           sourcePath,
@@ -252,9 +247,9 @@ export default function TldrawCanvasHost({
         };
       });
     try {
-      await updateCanvasShapeRefs({
+      await updateCanvasBlocks({
         sessionId,
-        refs: shapes,
+        blocks: shapes,
       });
     } catch (error) {
       const message = `Failed to sync canvas refs: ${String(error)}`;
@@ -608,7 +603,7 @@ export default function TldrawCanvasHost({
     if (!editor) return [];
     const selectedIds = editor.getSelectedShapeIds();
     const selectedSet = new Set(selectedIds);
-    const refsById = new Map(initialState.shapeRefs.map((ref) => [ref.shapeId, ref]));
+    const refsById = new Map(initialState.blockRecords.map((ref) => [ref.blockId, ref]));
     return editor
       .getCurrentPageShapes()
       .filter((shape) => selectedSet.has(shape.id))
@@ -636,11 +631,11 @@ export default function TldrawCanvasHost({
         const kind =
           typeof meta.kind === "string" && meta.kind.trim()
             ? meta.kind
-            : ref?.kind ?? shape.type;
+            : ref?.blockKind ?? shape.type;
         const summary = buildShapeSummary(kind, title, sourcePath, meta);
         const contextRef: CanvasContextRef = {
-          shapeId: shape.id,
-          kind: normalizeNodeKind(kind),
+          blockId: shape.id,
+          blockKind: normalizeNodeKind(kind),
           sourceType,
           sourcePath,
           sourceKey,
@@ -651,7 +646,7 @@ export default function TldrawCanvasHost({
           meta,
           title,
           sourcePath,
-          kind: normalizeNodeKind(kind),
+          blockKind: normalizeNodeKind(kind),
           contextRef,
         };
       });
@@ -705,7 +700,7 @@ export default function TldrawCanvasHost({
         name: "Canvas selection summary",
       },
     ];
-    const workflowRefs = refs.filter((ref) => ref.kind === "workflow");
+    const workflowRefs = refs.filter((ref) => ref.blockKind === "workflow_card");
     for (const workflow of workflowRefs) {
       const workflowMarkdown = renderWorkflowSummaryMarkdown(workflow.meta, workflow.title);
       const workflowPath = await createCanvasContextFile({
@@ -728,7 +723,8 @@ export default function TldrawCanvasHost({
     const canvasContext: CanvasContextOption = {
       canvasId: initialState.document.id,
       scope: "selection",
-      shapeIds: refs.map((ref) => ref.shape.id),
+      blockIds: refs.map((ref) => ref.shape.id),
+      elementIds: [],
       snapshotAttachmentPath: snapshot?.path ?? null,
       refs: refs.map((ref) => ref.contextRef),
     };
@@ -794,8 +790,9 @@ export default function TldrawCanvasHost({
       const turnId = sent.turnId ?? `canvas-selection:${Date.now()}`;
       const anchor = await createCanvasAnchor({
         sessionId,
-        anchorShapeId: payload.refs[0]?.shape.id ?? null,
-        selectionShapeIdsJson: JSON.stringify(payload.refs.map((ref) => ref.shape.id)),
+        anchorBlockId: payload.refs[0]?.shape.id ?? null,
+        selectionBlockIdsJson: JSON.stringify(payload.refs.map((ref) => ref.shape.id)),
+        selectionElementIdsJson: "[]",
         turnId,
         summary: payload.refs.map((ref) => ref.title).join(", ").slice(0, 180),
       });
@@ -1093,7 +1090,7 @@ export default function TldrawCanvasHost({
                     key={anchor.id}
                     className={
                       "rounded-xl border px-2.5 py-2 text-caption " +
-                      (anchor.anchorShapeId && anchor.anchorShapeId === selectedShapeId
+                      (anchor.anchorBlockId && anchor.anchorBlockId === selectedShapeId
                         ? "border-ink/16 bg-ink/[0.05] text-ink/72"
                         : "border-ink/8 bg-ink/[0.03] text-ink/65")
                     }
@@ -1149,8 +1146,8 @@ export default function TldrawCanvasHost({
   );
 }
 
-function resolveFileSourceType(path: string, workspacePath: string | null): CanvasSourceType {
-  if (!workspacePath) return "attachment_file";
+function resolveFileSourceType(path: string, workspacePath: string | null): CanvasBlockSourceType {
+  if (!workspacePath) return "inline_markdown";
   const normalizedWorkspace = normalizePathSegment(workspacePath);
   const normalizedPath = normalizePathSegment(path);
   if (
@@ -1159,7 +1156,7 @@ function resolveFileSourceType(path: string, workspacePath: string | null): Canv
   ) {
     return "workspace_file";
   }
-  return "attachment_file";
+  return "inline_markdown";
 }
 
 function normalizePathSegment(path: string): string {
@@ -1174,12 +1171,11 @@ function serializeJsonValue(value: unknown): string {
   }
 }
 
-function normalizeNodeKind(value: string): CanvasNodeKind {
+function normalizeNodeKind(value: string): CanvasBlockKind {
   switch (value) {
-    case "file":
+    case "file_card":
     case "image":
-    case "video":
-    case "workflow":
+    case "workflow_card":
     case "note":
     case "group":
       return value;
@@ -1214,7 +1210,7 @@ function renderSelectionSummaryMarkdown(
   refs: Array<{
     title: string;
     sourcePath: string | null;
-    kind: CanvasNodeKind;
+    blockKind: CanvasBlockKind;
     contextRef: CanvasContextRef;
   }>,
 ): string {
@@ -1222,7 +1218,7 @@ function renderSelectionSummaryMarkdown(
     "# Canvas selection",
     "",
     ...refs.map((ref, index) =>
-      `${index + 1}. ${ref.kind} - ${ref.title}${ref.sourcePath ? ` (${ref.sourcePath})` : ""}`,
+      `${index + 1}. ${ref.blockKind} - ${ref.title}${ref.sourcePath ? ` (${ref.sourcePath})` : ""}`,
     ),
     "",
     "Use the attached canvas snapshot and workflow summaries when helpful.",

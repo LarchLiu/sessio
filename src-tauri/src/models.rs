@@ -1623,35 +1623,35 @@ pub struct RuntimeAgentOptionMetadata {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum CanvasNodeKind {
-    File,
-    Image,
-    Video,
-    Workflow,
+pub enum CanvasBlockKind {
+    MarkdownPreview,
+    FileCard,
+    WorkflowCard,
     Note,
+    Image,
     Group,
 }
 
-impl CanvasNodeKind {
+impl CanvasBlockKind {
     pub fn as_str(&self) -> &'static str {
         match self {
-            CanvasNodeKind::File => "file",
-            CanvasNodeKind::Image => "image",
-            CanvasNodeKind::Video => "video",
-            CanvasNodeKind::Workflow => "workflow",
-            CanvasNodeKind::Note => "note",
-            CanvasNodeKind::Group => "group",
+            CanvasBlockKind::MarkdownPreview => "markdown_preview",
+            CanvasBlockKind::FileCard => "file_card",
+            CanvasBlockKind::WorkflowCard => "workflow_card",
+            CanvasBlockKind::Note => "note",
+            CanvasBlockKind::Image => "image",
+            CanvasBlockKind::Group => "group",
         }
     }
 
     pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
-            "file" => Some(CanvasNodeKind::File),
-            "image" => Some(CanvasNodeKind::Image),
-            "video" => Some(CanvasNodeKind::Video),
-            "workflow" => Some(CanvasNodeKind::Workflow),
-            "note" => Some(CanvasNodeKind::Note),
-            "group" => Some(CanvasNodeKind::Group),
+            "markdown_preview" => Some(CanvasBlockKind::MarkdownPreview),
+            "file_card" => Some(CanvasBlockKind::FileCard),
+            "workflow_card" => Some(CanvasBlockKind::WorkflowCard),
+            "note" => Some(CanvasBlockKind::Note),
+            "image" => Some(CanvasBlockKind::Image),
+            "group" => Some(CanvasBlockKind::Group),
             _ => None,
         }
     }
@@ -1659,41 +1659,38 @@ impl CanvasNodeKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum CanvasSourceType {
+pub enum CanvasBlockSourceType {
     WorkspaceFile,
     EditedFile,
-    AttachmentFile,
     AttachmentImage,
-    VideoFile,
     WorkflowDefinition,
+    InlineMarkdown,
     Note,
     Group,
 }
 
-impl CanvasSourceType {
+impl CanvasBlockSourceType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            CanvasSourceType::WorkspaceFile => "workspace_file",
-            CanvasSourceType::EditedFile => "edited_file",
-            CanvasSourceType::AttachmentFile => "attachment_file",
-            CanvasSourceType::AttachmentImage => "attachment_image",
-            CanvasSourceType::VideoFile => "video_file",
-            CanvasSourceType::WorkflowDefinition => "workflow_definition",
-            CanvasSourceType::Note => "note",
-            CanvasSourceType::Group => "group",
+            CanvasBlockSourceType::WorkspaceFile => "workspace_file",
+            CanvasBlockSourceType::EditedFile => "edited_file",
+            CanvasBlockSourceType::AttachmentImage => "attachment_image",
+            CanvasBlockSourceType::WorkflowDefinition => "workflow_definition",
+            CanvasBlockSourceType::InlineMarkdown => "inline_markdown",
+            CanvasBlockSourceType::Note => "note",
+            CanvasBlockSourceType::Group => "group",
         }
     }
 
     pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
-            "workspace_file" => Some(CanvasSourceType::WorkspaceFile),
-            "edited_file" => Some(CanvasSourceType::EditedFile),
-            "attachment_file" => Some(CanvasSourceType::AttachmentFile),
-            "attachment_image" => Some(CanvasSourceType::AttachmentImage),
-            "video_file" => Some(CanvasSourceType::VideoFile),
-            "workflow_definition" => Some(CanvasSourceType::WorkflowDefinition),
-            "note" => Some(CanvasSourceType::Note),
-            "group" => Some(CanvasSourceType::Group),
+            "workspace_file" => Some(CanvasBlockSourceType::WorkspaceFile),
+            "edited_file" => Some(CanvasBlockSourceType::EditedFile),
+            "attachment_image" => Some(CanvasBlockSourceType::AttachmentImage),
+            "workflow_definition" => Some(CanvasBlockSourceType::WorkflowDefinition),
+            "inline_markdown" => Some(CanvasBlockSourceType::InlineMarkdown),
+            "note" => Some(CanvasBlockSourceType::Note),
+            "group" => Some(CanvasBlockSourceType::Group),
             _ => None,
         }
     }
@@ -1728,12 +1725,12 @@ pub struct CanvasRevisionInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CanvasShapeRef {
+pub struct CanvasBlockRecord {
     pub id: String,
     pub canvas_id: String,
-    pub shape_id: String,
-    pub kind: CanvasNodeKind,
-    pub source_type: CanvasSourceType,
+    pub block_id: String,
+    pub block_kind: CanvasBlockKind,
+    pub source_type: CanvasBlockSourceType,
     pub source_key: Option<String>,
     pub source_path: Option<String>,
     pub metadata_json: String,
@@ -1746,8 +1743,9 @@ pub struct CanvasShapeRef {
 pub struct CanvasContextAnchor {
     pub id: String,
     pub canvas_id: String,
-    pub anchor_shape_id: Option<String>,
-    pub selection_shape_ids_json: String,
+    pub anchor_block_id: Option<String>,
+    pub selection_block_ids_json: String,
+    pub selection_element_ids_json: String,
     pub turn_id: String,
     pub summary: Option<String>,
     pub created_at: i64,
@@ -1760,7 +1758,7 @@ pub struct CanvasDocumentState {
     pub draft_snapshot: Option<String>,
     pub saved_revision: Option<CanvasRevisionInfo>,
     pub saved_snapshot: Option<String>,
-    pub shape_refs: Vec<CanvasShapeRef>,
+    pub block_records: Vec<CanvasBlockRecord>,
     pub anchors: Vec<CanvasContextAnchor>,
 }
 

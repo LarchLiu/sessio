@@ -1,5 +1,6 @@
 import "@blocksuite/affine/effects";
 
+import type { ExtensionType } from "@blocksuite/block-std";
 import { AffineEditorContainer } from "@blocksuite/presets";
 import { AffineSchemas } from "@blocksuite/affine/blocks/schemas";
 import {
@@ -33,9 +34,19 @@ export function ensureEdgelessRoot(doc: BlockSuiteDocHandle["doc"]) {
 }
 
 export function createEdgelessEditor(doc: BlockSuiteDocHandle["doc"]) {
+  return createEdgelessEditorWithSpecs(doc);
+}
+
+export function createEdgelessEditorWithSpecs(
+  doc: BlockSuiteDocHandle["doc"],
+  specs?: ExtensionType[],
+) {
   const editor = new AffineEditorContainer();
   editor.doc = doc;
   editor.mode = "edgeless";
+  if (specs && specs.length > 0) {
+    editor.edgelessSpecs = specs;
+  }
   return editor;
 }
 

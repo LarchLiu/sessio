@@ -1,12 +1,17 @@
-export type CanvasNodeKind = "file" | "image" | "video" | "workflow" | "note" | "group";
+export type CanvasBlockKind =
+  | "markdown_preview"
+  | "file_card"
+  | "workflow_card"
+  | "note"
+  | "image"
+  | "group";
 
-export type CanvasSourceType =
+export type CanvasBlockSourceType =
   | "workspace_file"
   | "edited_file"
-  | "attachment_file"
   | "attachment_image"
-  | "video_file"
   | "workflow_definition"
+  | "inline_markdown"
   | "note"
   | "group";
 
@@ -33,12 +38,12 @@ export interface CanvasRevisionInfo {
   createdAt: number;
 }
 
-export interface CanvasShapeRef {
+export interface CanvasBlockRecord {
   id: string;
   canvasId: string;
-  shapeId: string;
-  kind: CanvasNodeKind;
-  sourceType: CanvasSourceType;
+  blockId: string;
+  blockKind: CanvasBlockKind;
+  sourceType: CanvasBlockSourceType;
   sourceKey: string | null;
   sourcePath: string | null;
   metadataJson: string;
@@ -49,8 +54,9 @@ export interface CanvasShapeRef {
 export interface CanvasAnchorInfo {
   id: string;
   canvasId: string;
-  anchorShapeId: string | null;
-  selectionShapeIdsJson: string;
+  anchorBlockId: string | null;
+  selectionBlockIdsJson: string;
+  selectionElementIdsJson: string;
   turnId: string;
   summary: string | null;
   createdAt: number;
@@ -61,14 +67,14 @@ export interface CanvasDocumentState {
   draftSnapshot: string | null;
   savedRevision: CanvasRevisionInfo | null;
   savedSnapshot: string | null;
-  shapeRefs: CanvasShapeRef[];
+  blockRecords: CanvasBlockRecord[];
   anchors: CanvasAnchorInfo[];
 }
 
-export interface UpsertCanvasShapeRefInput {
-  shapeId: string;
-  kind: CanvasNodeKind;
-  sourceType: CanvasSourceType;
+export interface UpsertCanvasBlockRecordInput {
+  blockId: string;
+  blockKind: CanvasBlockKind;
+  sourceType: CanvasBlockSourceType;
   sourceKey?: string | null;
   sourcePath?: string | null;
   metadataJson?: string | null;
@@ -87,22 +93,23 @@ export interface SaveCanvasRevisionRequest {
   source: string;
 }
 
-export interface UpdateCanvasShapeRefsRequest {
+export interface UpdateCanvasBlocksRequest {
   sessionId: string;
-  refs: UpsertCanvasShapeRefInput[];
+  blocks: UpsertCanvasBlockRecordInput[];
 }
 
 export interface UpsertCanvasAnchorRequest {
   sessionId: string;
-  anchorShapeId?: string | null;
-  selectionShapeIdsJson: string;
+  anchorBlockId?: string | null;
+  selectionBlockIdsJson: string;
+  selectionElementIdsJson: string;
   turnId: string;
   summary?: string | null;
 }
 
 export interface CanvasContextRef {
-  shapeId: string;
-  kind: CanvasNodeKind;
+  blockId: string;
+  blockKind: CanvasBlockKind;
   sourceType: string;
   sourcePath?: string | null;
   sourceKey?: string | null;
@@ -112,7 +119,8 @@ export interface CanvasContextRef {
 export interface CanvasContextOption {
   canvasId: string;
   scope: "canvas" | "selection" | "anchor";
-  shapeIds: string[];
+  blockIds: string[];
+  elementIds: string[];
   anchorId?: string | null;
   snapshotAttachmentPath?: string | null;
   refs: CanvasContextRef[];
@@ -124,4 +132,3 @@ export interface BuildCanvasContextFileRequest {
   fileNamePrefix: string;
   content: string;
 }
-

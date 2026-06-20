@@ -6,7 +6,7 @@ import {
 } from "../api";
 import type { ChatComposerController } from "../hooks/useChatComposer";
 
-const TldrawCanvasHost = lazy(() => import("./TldrawCanvasHost"));
+const BlockSuiteCanvasHost = lazy(() => import("./blocksuite/BlockSuiteCanvasHost"));
 
 export interface ChatCanvasViewProps {
   sessionId: string;
@@ -114,7 +114,7 @@ export default function ChatCanvasView({
             </div>
           }
         >
-          <TldrawCanvasHost
+          <BlockSuiteCanvasHost
             sessionId={sessionId}
             sessionAgent={sessionAgent}
             workspacePath={workspacePath}

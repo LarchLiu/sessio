@@ -14,8 +14,9 @@ use crate::memory::{
 };
 use crate::models::{
     Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AgentType, AssistantAgentInfo,
-    AssistantInfo, AssistantType, AstraConfig, CanvasContextAnchor, CanvasDocumentInfo,
-    CanvasDocumentState, CanvasNodeKind, CanvasRevisionInfo, CanvasShapeRef, CanvasSourceType,
+    AssistantInfo, AssistantType, AstraConfig, CanvasBlockKind, CanvasBlockRecord,
+    CanvasBlockSourceType, CanvasContextAnchor, CanvasDocumentInfo, CanvasDocumentState,
+    CanvasRevisionInfo,
     ChannelSessionInfo, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo,
@@ -30,7 +31,7 @@ use crate::store::{
     NewPlanTask, NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch,
     RuntimeAgentCapabilityRecord, RuntimeAgentSelection, RuntimeAgentSessionConfigRecord,
     ScheduledTaskRecord, ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef,
-    SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasShapeRefRecord,
+    SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
     SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK,
 };
 
@@ -857,32 +858,33 @@ CREATE TABLE IF NOT EXISTS canvas_revisions (
 CREATE INDEX IF NOT EXISTS idx_canvas_revisions_canvas_created
     ON canvas_revisions(canvas_id, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS canvas_shape_refs (
+CREATE TABLE IF NOT EXISTS canvas_blocks (
     id            TEXT PRIMARY KEY,
     canvas_id     TEXT NOT NULL,
-    shape_id      TEXT NOT NULL,
-    kind          TEXT NOT NULL,
+    block_id      TEXT NOT NULL,
+    block_kind    TEXT NOT NULL,
     source_type   TEXT NOT NULL,
     source_key    TEXT,
     source_path   TEXT,
     metadata_json TEXT NOT NULL,
     created_at    INTEGER NOT NULL,
     updated_at    INTEGER NOT NULL,
-    UNIQUE(canvas_id, shape_id),
+    UNIQUE(canvas_id, block_id),
     FOREIGN KEY(canvas_id) REFERENCES canvases(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_canvas_shape_refs_canvas
-    ON canvas_shape_refs(canvas_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_canvas_blocks_canvas
+    ON canvas_blocks(canvas_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS canvas_context_anchors (
-    id                       TEXT PRIMARY KEY,
-    canvas_id                TEXT NOT NULL,
-    anchor_shape_id          TEXT,
-    selection_shape_ids_json TEXT NOT NULL,
-    turn_id                  TEXT NOT NULL,
-    summary                  TEXT,
-    created_at               INTEGER NOT NULL,
+    id                         TEXT PRIMARY KEY,
+    canvas_id                  TEXT NOT NULL,
+    anchor_block_id            TEXT,
+    selection_block_ids_json   TEXT NOT NULL,
+    selection_element_ids_json TEXT NOT NULL DEFAULT '[]',
+    turn_id                    TEXT NOT NULL,
+    summary                    TEXT,
+    created_at                 INTEGER NOT NULL,
     FOREIGN KEY(canvas_id) REFERENCES canvases(id) ON DELETE CASCADE
 );
 
@@ -926,6 +928,8 @@ fn unique_suffix() -> String {
 }
 
 fn initialize_schema(conn: &Connection) -> Result<()> {
+    conn.execute("DROP TABLE IF EXISTS canvas_shape_refs", [])?;
+    conn.execute("DROP TABLE IF EXISTS canvas_context_anchors", [])?;
     conn.execute_batch(SCHEMA_SESSIONS)?;
     conn.execute_batch(SCHEMA_MEMORY)?;
     conn.execute_batch(SCHEMA_APP)?;
@@ -2592,17 +2596,18 @@ fn stable_canvas_revision_id(canvas_id: &str, revision: i64, now: i64, nonce: &s
     format!("canvas-revision-{}", &hex::encode(hasher.finalize())[..16])
 }
 
-fn stable_canvas_shape_ref_id(canvas_id: &str, shape_id: &str) -> String {
+fn stable_canvas_block_record_id(canvas_id: &str, block_id: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(canvas_id.as_bytes());
-    hasher.update(shape_id.as_bytes());
-    format!("canvas-shape-{}", &hex::encode(hasher.finalize())[..16])
+    hasher.update(block_id.as_bytes());
+    format!("canvas-block-{}", &hex::encode(hasher.finalize())[..16])
 }
 
 fn stable_canvas_anchor_id(
     canvas_id: &str,
-    selection_shape_ids_json: &str,
+    selection_block_ids_json: &str,
+    selection_element_ids_json: &str,
     turn_id: &str,
     now: i64,
     nonce: &str,
@@ -2610,7 +2615,8 @@ fn stable_canvas_anchor_id(
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(canvas_id.as_bytes());
-    hasher.update(selection_shape_ids_json.as_bytes());
+    hasher.update(selection_block_ids_json.as_bytes());
+    hasher.update(selection_element_ids_json.as_bytes());
     hasher.update(turn_id.as_bytes());
     hasher.update(now.to_string().as_bytes());
     hasher.update(nonce.as_bytes());
@@ -2704,16 +2710,16 @@ fn canvas_revision_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanvasR
     })
 }
 
-fn canvas_shape_ref_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanvasShapeRef> {
+fn canvas_block_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanvasBlockRecord> {
     let kind_raw: String = row.get(3)?;
     let source_type_raw: String = row.get(4)?;
-    Ok(CanvasShapeRef {
+    Ok(CanvasBlockRecord {
         id: row.get(0)?,
         canvas_id: row.get(1)?,
-        shape_id: row.get(2)?,
-        kind: CanvasNodeKind::from_db_str(&kind_raw).unwrap_or(CanvasNodeKind::Note),
-        source_type: CanvasSourceType::from_db_str(&source_type_raw)
-            .unwrap_or(CanvasSourceType::Note),
+        block_id: row.get(2)?,
+        block_kind: CanvasBlockKind::from_db_str(&kind_raw).unwrap_or(CanvasBlockKind::Note),
+        source_type: CanvasBlockSourceType::from_db_str(&source_type_raw)
+            .unwrap_or(CanvasBlockSourceType::Note),
         source_key: row.get(5)?,
         source_path: row.get(6)?,
         metadata_json: row.get(7)?,
@@ -2726,11 +2732,12 @@ fn canvas_anchor_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanvasCon
     Ok(CanvasContextAnchor {
         id: row.get(0)?,
         canvas_id: row.get(1)?,
-        anchor_shape_id: row.get(2)?,
-        selection_shape_ids_json: row.get(3)?,
-        turn_id: row.get(4)?,
-        summary: row.get(5)?,
-        created_at: row.get(6)?,
+        anchor_block_id: row.get(2)?,
+        selection_block_ids_json: row.get(3)?,
+        selection_element_ids_json: row.get(4)?,
+        turn_id: row.get(5)?,
+        summary: row.get(6)?,
+        created_at: row.get(7)?,
     })
 }
 
@@ -2997,21 +3004,21 @@ fn stale_canvas_revision_paths(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn load_canvas_shape_refs(conn: &Connection, canvas_id: &str) -> Result<Vec<CanvasShapeRef>> {
+fn load_canvas_block_records(conn: &Connection, canvas_id: &str) -> Result<Vec<CanvasBlockRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, canvas_id, shape_id, kind, source_type, source_key, source_path,
+        "SELECT id, canvas_id, block_id, block_kind, source_type, source_key, source_path,
                 metadata_json, created_at, updated_at
-         FROM canvas_shape_refs
+         FROM canvas_blocks
          WHERE canvas_id = ?
-         ORDER BY updated_at DESC, created_at DESC, shape_id ASC",
+         ORDER BY updated_at DESC, created_at DESC, block_id ASC",
     )?;
-    let rows = stmt.query_map(params![canvas_id], canvas_shape_ref_from_row)?;
+    let rows = stmt.query_map(params![canvas_id], canvas_block_record_from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 fn load_canvas_anchors(conn: &Connection, canvas_id: &str) -> Result<Vec<CanvasContextAnchor>> {
     let mut stmt = conn.prepare(
-        "SELECT id, canvas_id, anchor_shape_id, selection_shape_ids_json, turn_id, summary, created_at
+        "SELECT id, canvas_id, anchor_block_id, selection_block_ids_json, selection_element_ids_json, turn_id, summary, created_at
          FROM canvas_context_anchors
          WHERE canvas_id = ?
          ORDER BY created_at DESC, id DESC",
@@ -3023,14 +3030,14 @@ fn load_canvas_anchors(conn: &Connection, canvas_id: &str) -> Result<Vec<CanvasC
 fn load_canvas_document_state(conn: &Connection, session_id: &str) -> Result<CanvasDocumentState> {
     let document = upsert_canvas_document_title(conn, session_id, None)?;
     let saved_revision = latest_canvas_revision(conn, &document.id)?;
-    let shape_refs = load_canvas_shape_refs(conn, &document.id)?;
+    let block_records = load_canvas_block_records(conn, &document.id)?;
     let anchors = load_canvas_anchors(conn, &document.id)?;
     Ok(CanvasDocumentState {
         document,
         draft_snapshot: None,
         saved_revision,
         saved_snapshot: None,
-        shape_refs,
+        block_records,
         anchors,
     })
 }
@@ -9292,31 +9299,31 @@ impl SessionStore for SqliteStore {
         Ok(stale_paths)
     }
 
-    fn replace_canvas_shape_refs(
+    fn replace_canvas_blocks(
         &self,
         session_id: &str,
-        refs: &[UpsertCanvasShapeRefRecord],
-    ) -> Result<Vec<CanvasShapeRef>> {
+        blocks: &[UpsertCanvasBlockRecord],
+    ) -> Result<Vec<CanvasBlockRecord>> {
         let now = now_ms();
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let document = upsert_canvas_document_title(&tx, session_id, None)?;
         tx.execute(
-            "DELETE FROM canvas_shape_refs WHERE canvas_id = ?",
+            "DELETE FROM canvas_blocks WHERE canvas_id = ?",
             params![document.id.as_str()],
         )?;
-        for item in refs {
-            let id = stable_canvas_shape_ref_id(&document.id, &item.shape_id);
+        for item in blocks {
+            let id = stable_canvas_block_record_id(&document.id, &item.block_id);
             tx.execute(
-                "INSERT INTO canvas_shape_refs (
-                    id, canvas_id, shape_id, kind, source_type, source_key, source_path,
+                "INSERT INTO canvas_blocks (
+                    id, canvas_id, block_id, block_kind, source_type, source_key, source_path,
                     metadata_json, created_at, updated_at
                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     id,
                     document.id.as_str(),
-                    item.shape_id.as_str(),
-                    item.kind.as_str(),
+                    item.block_id.as_str(),
+                    item.block_kind.as_str(),
                     item.source_type.as_str(),
                     item.source_key.as_deref(),
                     item.source_path.as_deref(),
@@ -9326,7 +9333,7 @@ impl SessionStore for SqliteStore {
                 ],
             )?;
         }
-        let loaded = load_canvas_shape_refs(&tx, &document.id)?;
+        let loaded = load_canvas_block_records(&tx, &document.id)?;
         tx.commit()?;
         Ok(loaded)
     }
@@ -9334,8 +9341,9 @@ impl SessionStore for SqliteStore {
     fn create_canvas_context_anchor(
         &self,
         session_id: &str,
-        anchor_shape_id: Option<&str>,
-        selection_shape_ids_json: &str,
+        anchor_block_id: Option<&str>,
+        selection_block_ids_json: &str,
+        selection_element_ids_json: &str,
         turn_id: &str,
         summary: Option<&str>,
     ) -> Result<CanvasContextAnchor> {
@@ -9344,23 +9352,31 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let document = upsert_canvas_document_title(&conn, session_id, None)?;
         let id =
-            stable_canvas_anchor_id(&document.id, selection_shape_ids_json, turn_id, now, &nonce);
+            stable_canvas_anchor_id(
+                &document.id,
+                selection_block_ids_json,
+                selection_element_ids_json,
+                turn_id,
+                now,
+                &nonce,
+            );
         conn.execute(
             "INSERT INTO canvas_context_anchors (
-                id, canvas_id, anchor_shape_id, selection_shape_ids_json, turn_id, summary, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                id, canvas_id, anchor_block_id, selection_block_ids_json, selection_element_ids_json, turn_id, summary, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 id,
                 document.id.as_str(),
-                anchor_shape_id,
-                selection_shape_ids_json,
+                anchor_block_id,
+                selection_block_ids_json,
+                selection_element_ids_json,
                 turn_id,
                 summary,
                 now,
             ],
         )?;
         conn.query_row(
-            "SELECT id, canvas_id, anchor_shape_id, selection_shape_ids_json, turn_id, summary, created_at
+            "SELECT id, canvas_id, anchor_block_id, selection_block_ids_json, selection_element_ids_json, turn_id, summary, created_at
              FROM canvas_context_anchors
              WHERE id = ?",
             params![id],

@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use crate::models::{
-    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AstraConfig, CanvasContextAnchor,
-    CanvasDocumentInfo, CanvasDocumentState, CanvasRevisionInfo, CanvasShapeRef,
+    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AstraConfig, CanvasBlockRecord,
+    CanvasContextAnchor, CanvasDocumentInfo, CanvasDocumentState, CanvasRevisionInfo,
     ChannelSessionInfo, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
     PlanTaskInfo, PlanTaskSessionInfo, PlanTaskSessionRole, ProcessTemplateInfo, ProjectInfo,
     ProjectStageInfo, SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo,
@@ -16,7 +16,7 @@ use crate::store::{
     NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord,
     RuntimeAgentSelection, RuntimeAgentSessionConfigRecord, ScheduledTaskRecord,
     ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef, SessionStore,
-    ThreadWorkSnapshotRecord, UpsertCanvasShapeRefRecord,
+    ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
 };
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
@@ -1153,26 +1153,28 @@ impl SessionStore for CachedStore {
         self.inner.prune_canvas_revisions(session_id, keep_latest)
     }
 
-    fn replace_canvas_shape_refs(
+    fn replace_canvas_blocks(
         &self,
         session_id: &str,
-        refs: &[UpsertCanvasShapeRefRecord],
-    ) -> Result<Vec<CanvasShapeRef>> {
-        self.inner.replace_canvas_shape_refs(session_id, refs)
+        blocks: &[UpsertCanvasBlockRecord],
+    ) -> Result<Vec<CanvasBlockRecord>> {
+        self.inner.replace_canvas_blocks(session_id, blocks)
     }
 
     fn create_canvas_context_anchor(
         &self,
         session_id: &str,
-        anchor_shape_id: Option<&str>,
-        selection_shape_ids_json: &str,
+        anchor_block_id: Option<&str>,
+        selection_block_ids_json: &str,
+        selection_element_ids_json: &str,
         turn_id: &str,
         summary: Option<&str>,
     ) -> Result<CanvasContextAnchor> {
         self.inner.create_canvas_context_anchor(
             session_id,
-            anchor_shape_id,
-            selection_shape_ids_json,
+            anchor_block_id,
+            selection_block_ids_json,
+            selection_element_ids_json,
             turn_id,
             summary,
         )

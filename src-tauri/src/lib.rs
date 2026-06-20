@@ -43,8 +43,8 @@ use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
-    AstraConfig, CanvasContextAnchor, CanvasDocumentState, CanvasNodeKind, CanvasShapeRef,
-    CanvasSourceType, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
+    AstraConfig, CanvasBlockKind, CanvasBlockRecord, CanvasBlockSourceType, CanvasContextAnchor,
+    CanvasDocumentState, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
     ProjectStageInfo, RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
@@ -56,7 +56,7 @@ use store::sqlite::SqliteStore;
 use store::{
     AgentPreferencesPatch, AstraConfigPatch, NewAssistant, NewPlanRound, NewPlanTask,
     NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, SessionHistorySnapshotRecord,
-    SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasShapeRefRecord,
+    SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
 };
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
@@ -177,10 +177,10 @@ struct SaveCanvasRevisionRequest {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UpsertCanvasShapeRefInput {
-    shape_id: String,
-    kind: CanvasNodeKind,
-    source_type: CanvasSourceType,
+struct UpsertCanvasBlockRecordInput {
+    block_id: String,
+    block_kind: CanvasBlockKind,
+    source_type: CanvasBlockSourceType,
     source_key: Option<String>,
     source_path: Option<String>,
     metadata_json: Option<String>,
@@ -188,17 +188,18 @@ struct UpsertCanvasShapeRefInput {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UpdateCanvasShapeRefsRequest {
+struct UpdateCanvasBlocksRequest {
     session_id: String,
-    refs: Vec<UpsertCanvasShapeRefInput>,
+    blocks: Vec<UpsertCanvasBlockRecordInput>,
 }
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpsertCanvasAnchorRequest {
     session_id: String,
-    anchor_shape_id: Option<String>,
-    selection_shape_ids_json: String,
+    anchor_block_id: Option<String>,
+    selection_block_ids_json: String,
+    selection_element_ids_json: String,
     turn_id: String,
     summary: Option<String>,
 }
@@ -3976,7 +3977,7 @@ fn safe_canvas_file_component(raw: &str, fallback: &str) -> String {
 fn canvas_draft_path(session_id: &str) -> Result<PathBuf, String> {
     Ok(session_canvas_dir(session_id)
         .map_err(|e| e.to_string())?
-        .join("draft.tldr.json"))
+        .join("draft.canvas.json"))
 }
 
 fn canvas_revisions_dir(session_id: &str) -> Result<PathBuf, String> {
@@ -4256,7 +4257,7 @@ fn save_canvas_revision(
         .get_canvas_document_state(&req.session_id)
         .map_err(|e| e.to_string())?;
     let next_revision = current.document.current_saved_revision.unwrap_or(0) + 1;
-    let path = revisions_dir.join(format!("{next_revision:06}.tldr.json"));
+    let path = revisions_dir.join(format!("{next_revision:06}.canvas.json"));
     write_atomic_bytes(&path, &snapshot_bytes)?;
     let (document, revision) = store
         .save_canvas_revision(
@@ -4278,16 +4279,16 @@ fn save_canvas_revision(
 }
 
 #[tauri::command]
-fn update_canvas_shape_refs(
-    req: UpdateCanvasShapeRefsRequest,
+fn update_canvas_blocks(
+    req: UpdateCanvasBlocksRequest,
     store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<Vec<CanvasShapeRef>, String> {
-    let refs = req
-        .refs
+) -> Result<Vec<CanvasBlockRecord>, String> {
+    let blocks = req
+        .blocks
         .into_iter()
-        .map(|item| UpsertCanvasShapeRefRecord {
-            shape_id: item.shape_id,
-            kind: item.kind,
+        .map(|item| UpsertCanvasBlockRecord {
+            block_id: item.block_id,
+            block_kind: item.block_kind,
             source_type: item.source_type,
             source_key: item.source_key,
             source_path: item.source_path,
@@ -4295,7 +4296,7 @@ fn update_canvas_shape_refs(
         })
         .collect::<Vec<_>>();
     store
-        .replace_canvas_shape_refs(&req.session_id, &refs)
+        .replace_canvas_blocks(&req.session_id, &blocks)
         .map_err(|e| e.to_string())
 }
 
@@ -4331,8 +4332,9 @@ fn create_canvas_anchor(
     store
         .create_canvas_context_anchor(
             &req.session_id,
-            req.anchor_shape_id.as_deref(),
-            &req.selection_shape_ids_json,
+            req.anchor_block_id.as_deref(),
+            &req.selection_block_ids_json,
+            &req.selection_element_ids_json,
             &req.turn_id,
             req.summary.as_deref(),
         )
@@ -5272,7 +5274,7 @@ pub fn run() {
             get_session_canvas,
             save_canvas_draft,
             save_canvas_revision,
-            update_canvas_shape_refs,
+            update_canvas_blocks,
             create_canvas_context_file,
             create_canvas_anchor,
             get_file_git_diff,

@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
-    AstraConfig, CanvasContextAnchor, CanvasDocumentInfo, CanvasDocumentState, CanvasNodeKind,
-    CanvasRevisionInfo, CanvasShapeRef, CanvasSourceType, ChannelSessionInfo, IssueSeverity,
+    AstraConfig, CanvasBlockKind, CanvasBlockRecord, CanvasBlockSourceType, CanvasContextAnchor,
+    CanvasDocumentInfo, CanvasDocumentState, CanvasRevisionInfo, ChannelSessionInfo, IssueSeverity,
     IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo, PlanRoundMode, PlanRoundSource,
     PlanRoundStatus, PlanTaskInfo, PlanTaskRisk, PlanTaskSessionInfo, PlanTaskSessionRole,
     PlanTaskStatus, ProcessTemplateInfo, ProjectInfo, ProjectStageInfo,
@@ -234,10 +234,10 @@ pub struct ThreadWorkSnapshotRecord {
 }
 
 #[derive(Debug, Clone)]
-pub struct UpsertCanvasShapeRefRecord {
-    pub shape_id: String,
-    pub kind: CanvasNodeKind,
-    pub source_type: CanvasSourceType,
+pub struct UpsertCanvasBlockRecord {
+    pub block_id: String,
+    pub block_kind: CanvasBlockKind,
+    pub source_type: CanvasBlockSourceType,
     pub source_key: Option<String>,
     pub source_path: Option<String>,
     pub metadata_json: String,
@@ -959,16 +959,17 @@ pub trait SessionStore: Send + Sync {
         session_id: &str,
         keep_latest: usize,
     ) -> Result<Vec<String>>;
-    fn replace_canvas_shape_refs(
+    fn replace_canvas_blocks(
         &self,
         session_id: &str,
-        refs: &[UpsertCanvasShapeRefRecord],
-    ) -> Result<Vec<CanvasShapeRef>>;
+        blocks: &[UpsertCanvasBlockRecord],
+    ) -> Result<Vec<CanvasBlockRecord>>;
     fn create_canvas_context_anchor(
         &self,
         session_id: &str,
-        anchor_shape_id: Option<&str>,
-        selection_shape_ids_json: &str,
+        anchor_block_id: Option<&str>,
+        selection_block_ids_json: &str,
+        selection_element_ids_json: &str,
         turn_id: &str,
         summary: Option<&str>,
     ) -> Result<CanvasContextAnchor>;
