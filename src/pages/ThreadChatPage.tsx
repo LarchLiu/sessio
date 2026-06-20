@@ -27,6 +27,9 @@ export default function ThreadChatPage(props: ChatPageProps) {
       beforeMessages={beforeMessages}
       showThreadPromptPlaceholders
       threadPromptFallbacks={threadPromptFallbacks}
+      onOpenThreadMultiSessionChat={(threadId) => {
+        props.onOpenThreadMultiSessionChat?.(threadId);
+      }}
     />
   );
 }

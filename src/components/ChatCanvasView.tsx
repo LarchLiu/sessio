@@ -13,10 +13,12 @@ export interface ChatCanvasViewProps {
   sessionAgent: "astra-pi" | "codex" | "claude" | "gemini" | "opencode";
   sessionTitle: string;
   workspacePath: string | null;
+  sessionThreadId?: string | null;
   editedFiles?: string[];
   composer: ChatComposerController;
   onError: (message: string) => void;
   onOpenProjectFile?: (path: string) => void;
+  onOpenThreadMultiSessionChat?: (threadId: string) => void;
 }
 
 export default function ChatCanvasView({
@@ -24,10 +26,12 @@ export default function ChatCanvasView({
   sessionAgent,
   sessionTitle,
   workspacePath,
+  sessionThreadId = null,
   editedFiles = [],
   composer,
   onError,
   onOpenProjectFile,
+  onOpenThreadMultiSessionChat,
 }: ChatCanvasViewProps) {
   const [state, setState] = useState<CanvasDocumentState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -125,11 +129,13 @@ export default function ChatCanvasView({
             sessionId={sessionId}
             sessionAgent={sessionAgent}
             workspacePath={workspacePath}
+            sessionThreadId={sessionThreadId}
             editedFiles={editedFiles}
             initialState={state}
             initialSnapshot={initialSnapshot}
             composer={composer}
             onOpenProjectFile={onOpenProjectFile}
+            onOpenThreadMultiSessionChat={onOpenThreadMultiSessionChat}
             onStateLoaded={setState}
             onError={onError}
           />

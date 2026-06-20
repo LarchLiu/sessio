@@ -19,7 +19,7 @@ import {
 } from "tldraw";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AlertCircle, Camera, FileImage, FilePlus2, FolderOpen, Layers3, MessageCircleQuestionMark, Save, StickyNote, Workflow } from "lucide-react";
+import { AlertCircle, ArrowUpRight, Camera, FileImage, FilePlus2, FolderOpen, Layers3, MessageCircleQuestionMark, MessagesSquare, Save, StickyNote, Workflow } from "lucide-react";
 import type {
   CanvasContextOption,
   CanvasContextRef,
@@ -29,6 +29,8 @@ import type {
 } from "../canvasTypes";
 import {
   type Agent,
+  createAstraRun,
+  createCanvasAnchor,
   createCanvasContextFile,
   getThreadWorkSnapshot,
   listProjectFiles,
@@ -45,6 +47,7 @@ export interface TldrawCanvasHostProps {
   sessionId: string;
   sessionAgent: Agent;
   workspacePath: string | null;
+  sessionThreadId?: string | null;
   editedFiles?: string[];
   initialState: CanvasDocumentState;
   initialSnapshot: string | null;
@@ -52,6 +55,7 @@ export interface TldrawCanvasHostProps {
   onStateLoaded: (state: CanvasDocumentState) => void;
   onError: (message: string) => void;
   onOpenProjectFile?: (path: string) => void;
+  onOpenThreadMultiSessionChat?: (threadId: string) => void;
 }
 
 const AUTOSAVE_DEBOUNCE_MS = 900;
@@ -60,6 +64,7 @@ export default function TldrawCanvasHost({
   sessionId,
   sessionAgent,
   workspacePath,
+  sessionThreadId = null,
   editedFiles = [],
   initialState,
   initialSnapshot,
@@ -67,6 +72,7 @@ export default function TldrawCanvasHost({
   onStateLoaded,
   onError,
   onOpenProjectFile,
+  onOpenThreadMultiSessionChat,
 }: TldrawCanvasHostProps) {
   const editorRef = useRef<Editor | null>(null);
   const autosaveTimerRef = useRef<number | null>(null);
@@ -82,13 +88,19 @@ export default function TldrawCanvasHost({
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   const [selectedShapeMeta, setSelectedShapeMeta] = useState<Record<string, unknown> | null>(null);
-  const [bridgeBusy, setBridgeBusy] = useState<null | "ask" | "snapshot">(null);
+  const [bridgeBusy, setBridgeBusy] = useState<null | "ask" | "snapshot" | "workflow">(null);
+  const [workflowRunState, setWorkflowRunState] = useState<null | { status: string; runId: string; threadId: string | null }>(null);
+  const [anchors, setAnchors] = useState(initialState.anchors);
   const lastSavedRevision = initialState.savedRevision?.revision ?? null;
 
   useEffect(() => {
     currentSnapshotRef.current = initialSnapshot;
     hydratedRef.current = false;
   }, [initialSnapshot, sessionId]);
+
+  useEffect(() => {
+    setAnchors(initialState.anchors);
+  }, [initialState.anchors]);
 
   useEffect(() => {
     if (!workspacePath) {
@@ -127,6 +139,27 @@ export default function TldrawCanvasHost({
     { key: "workflow", label: "Add workflow", icon: <Workflow className="h-4 w-4" /> },
     { key: "note", label: "Add note", icon: <StickyNote className="h-4 w-4" /> },
   ], []);
+
+  const patchShapeMeta = (shapeId: string, patch: Record<string, unknown>) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const shape = editor.getShape(shapeId as never);
+    if (!shape) return;
+    const nextMeta = {
+      ...(shape.meta ?? {}),
+      ...patch,
+    };
+    editor.updateShapes([
+        {
+          id: shape.id,
+          type: shape.type,
+          meta: nextMeta as never,
+        },
+      ]);
+    if (selectedShapeId === shapeId) {
+      setSelectedShapeMeta(nextMeta);
+    }
+  };
 
   const hydrateSnapshot = async (editor: Editor, snapshotText: string | null) => {
     if (!snapshotText || hydratedRef.current) return;
@@ -286,6 +319,7 @@ export default function TldrawCanvasHost({
     const body = snapshot?.snapshot.stages?.slice(0, 5).map((stage) => `- ${stage.name}: ${stage.status}`).join("\n")
       ?? "- Define the next step\n- Run the first slice\n- Review the output";
     const workflowMeta = snapshot?.snapshot ? serializeJsonValue(snapshot.snapshot) : null;
+    const mirrorLabel = snapshot?.snapshot.goal?.trim() || null;
     const id = createShapeId("workflow");
     editor.createShapes([
       {
@@ -307,6 +341,18 @@ export default function TldrawCanvasHost({
           threadId: snapshot?.threadId ?? null,
           threadStageId: snapshot?.stageId ?? null,
           workflowSnapshotJson: workflowMeta,
+          mirrorSource: snapshot?.threadId
+            ? {
+                kind: "thread_workflow",
+                label: mirrorLabel,
+              }
+            : null,
+          execution: {
+            enabled: Boolean(snapshot?.threadId),
+            driver: snapshot?.threadId ? "astra" : null,
+            lastRunId: null,
+            lastStatus: "idle",
+          },
         },
       },
     ]);
@@ -678,16 +724,99 @@ export default function TldrawCanvasHost({
           canvasContext: payload.canvasContext,
         },
       });
-      if (!sent) {
+      if (!sent.ok) {
         onError("Failed to send the canvas selection to the agent.");
         return;
       }
+      const turnId = sent.turnId ?? `canvas-selection:${Date.now()}`;
+      const anchor = await createCanvasAnchor({
+        sessionId,
+        anchorShapeId: payload.refs[0]?.shape.id ?? null,
+        selectionShapeIdsJson: JSON.stringify(payload.refs.map((ref) => ref.shape.id)),
+        turnId,
+        summary: payload.refs.map((ref) => ref.title).join(", ").slice(0, 180),
+      });
+      setAnchors((current) => [anchor, ...current]);
     } catch (error) {
       onError(`Failed to ask about the current selection: ${String(error)}`);
     } finally {
       setBridgeBusy(null);
     }
   };
+
+  const runWorkflowSelection = async () => {
+    if (!selectedShapeId || !selectedShapeMeta) return;
+    const threadId =
+      typeof selectedShapeMeta.threadId === "string" && selectedShapeMeta.threadId.trim()
+        ? selectedShapeMeta.threadId
+        : null;
+    if (!threadId) {
+      onError("This workflow node is not linked to a thread workflow.");
+      return;
+    }
+    setBridgeBusy("workflow");
+    patchShapeMeta(selectedShapeId, {
+      execution: {
+        ...parseWorkflowExecution(selectedShapeMeta),
+        enabled: true,
+        driver: "astra",
+        lastStatus: "running",
+      },
+    });
+    try {
+      const run = await createAstraRun(threadId, composer.text.trim() || null);
+      const nextState = {
+        status: run.status,
+        runId: run.runId,
+        threadId,
+      };
+      setWorkflowRunState(nextState);
+      patchShapeMeta(selectedShapeId, {
+        execution: {
+          ...parseWorkflowExecution(selectedShapeMeta),
+          enabled: true,
+          driver: "astra",
+          lastRunId: run.runId,
+          lastStatus: run.status,
+        },
+      });
+    } catch (error) {
+      patchShapeMeta(selectedShapeId, {
+        execution: {
+          ...parseWorkflowExecution(selectedShapeMeta),
+          enabled: true,
+          driver: "astra",
+          lastStatus: "failed",
+        },
+      });
+      onError(`Failed to start workflow run: ${String(error)}`);
+    } finally {
+      setBridgeBusy(null);
+    }
+  };
+
+  const openWorkflowThread = () => {
+    const selectedThreadId =
+      selectedShapeMeta && typeof selectedShapeMeta.threadId === "string" && selectedShapeMeta.threadId.trim()
+        ? selectedShapeMeta.threadId
+        : sessionThreadId;
+    if (!selectedThreadId) {
+      onError("This canvas item is not linked to a thread workflow yet.");
+      return;
+    }
+    if (!onOpenThreadMultiSessionChat) {
+      onError("Thread multi-session chat is not available from this view.");
+      return;
+    }
+    onOpenThreadMultiSessionChat(selectedThreadId);
+  };
+
+  const canOpenWorkflowThread = Boolean(
+    onOpenThreadMultiSessionChat && (
+      (selectedShapeMeta && typeof selectedShapeMeta.threadId === "string" && selectedShapeMeta.threadId.trim()) ||
+      sessionThreadId
+    ),
+  );
 
   return (
     <div className="absolute inset-0 flex min-h-0 flex-col">
@@ -804,7 +933,9 @@ export default function TldrawCanvasHost({
               setSelectionCount(selectedIds.length);
               const currentSelected = selectedIds[0] ? editor.getShape(selectedIds[0]) : null;
               setSelectedShapeId(currentSelected?.id ?? null);
-              setSelectedShapeMeta((currentSelected?.meta ?? null) as Record<string, unknown> | null);
+              const nextMeta = (currentSelected?.meta ?? null) as Record<string, unknown> | null;
+              setSelectedShapeMeta(nextMeta);
+              setWorkflowRunState(readWorkflowRunState(nextMeta));
               void scheduleSave(editor);
             });
             const selectedIds = editor.getSelectedShapeIds();
@@ -836,6 +967,110 @@ export default function TldrawCanvasHost({
             "Open a suggested file to inspect it in the file view, then switch back to keep sketching on the canvas."
           )}
         </div>
+      )}
+      {(selectedShapeMeta || anchors.length > 0) && (
+        <aside className="absolute right-4 top-16 z-20 w-[280px] rounded-2xl border border-ink/10 bg-surface-panel/95 p-3 shadow-lg backdrop-blur">
+          <div className="text-caption uppercase tracking-wide text-ink/38">Inspector</div>
+          {selectedShapeMeta ? (
+            <div className="mt-3 space-y-2 text-body-sm text-ink/72">
+              <div>
+                <div className="text-caption text-ink/40">Type</div>
+                <div>{String(selectedShapeMeta.kind ?? "note")}</div>
+              </div>
+              <div>
+                <div className="text-caption text-ink/40">Title</div>
+                <div>{String(selectedShapeMeta.title ?? "Untitled")}</div>
+              </div>
+              {typeof selectedShapeMeta.sourcePath === "string" && (
+                <div>
+                  <div className="text-caption text-ink/40">Source</div>
+                  <div className="break-all">{selectedShapeMeta.sourcePath}</div>
+                </div>
+              )}
+              {typeof selectedShapeMeta.threadId === "string" && (
+                <div>
+                  <div className="text-caption text-ink/40">Thread link</div>
+                  <div className="break-all">{selectedShapeMeta.threadId}</div>
+                </div>
+              )}
+              {typeof selectedShapeMeta.threadStageId === "string" && (
+                <div>
+                  <div className="text-caption text-ink/40">Stage link</div>
+                  <div className="break-all">{selectedShapeMeta.threadStageId}</div>
+                </div>
+              )}
+              {selectedShapeMeta.kind === "workflow" && (
+                <div className="rounded-xl border border-ink/8 bg-ink/[0.03] px-2.5 py-2 text-caption text-ink/58">
+                  Canvas keeps only the definition and latest run pointer here. Thread lanes, replay, and execution details stay in multi-session chat.
+                </div>
+              )}
+              {selectedShapeMeta.kind === "workflow" && (
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => void runWorkflowSelection()}
+                    disabled={bridgeBusy !== null || typeof selectedShapeMeta.threadId !== "string"}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 px-3 py-1.5 text-caption text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Workflow className="h-3.5 w-3.5" />
+                    Run workflow
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openWorkflowThread}
+                    disabled={bridgeBusy !== null || !canOpenWorkflowThread}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-ink/10 px-3 py-1.5 text-caption text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <MessagesSquare className="h-3.5 w-3.5" />
+                    Open thread chat
+                  </button>
+                </div>
+              )}
+              {workflowRunState && (
+                <div>
+                  <div className="text-caption text-ink/40">Latest run</div>
+                  <div>{workflowRunState.status}</div>
+                  <div className="break-all text-caption text-ink/45">{workflowRunState.runId}</div>
+                  {workflowRunState.threadId && (
+                    <button
+                      type="button"
+                      onClick={openWorkflowThread}
+                      className="mt-2 inline-flex items-center gap-1 text-caption text-ink/55 transition hover:text-ink/72"
+                    >
+                      <ArrowUpRight className="h-3.5 w-3.5" />
+                      Inspect full thread activity
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="mt-3 text-body-sm text-ink/48">
+              Select a shape to inspect its source metadata.
+            </div>
+          )}
+          {anchors.length > 0 && (
+            <div className="mt-4 border-t border-ink/8 pt-3">
+              <div className="text-caption uppercase tracking-wide text-ink/38">Recent anchors</div>
+              <div className="mt-2 space-y-2">
+                {anchors.slice(0, 4).map((anchor) => (
+                  <div
+                    key={anchor.id}
+                    className={
+                      "rounded-xl border px-2.5 py-2 text-caption " +
+                      (anchor.anchorShapeId && anchor.anchorShapeId === selectedShapeId
+                        ? "border-ink/16 bg-ink/[0.05] text-ink/72"
+                        : "border-ink/8 bg-ink/[0.03] text-ink/65")
+                    }
+                  >
+                    <div className="font-medium text-ink/72">{anchor.summary ?? "Canvas anchor"}</div>
+                    <div className="mt-1 break-all text-ink/45">Turn: {anchor.turnId}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </aside>
       )}
       {addMenuOpen && addMenuButtonRef.current && (
         <PopupMenu
@@ -970,6 +1205,43 @@ function renderWorkflowSummaryMarkdown(meta: Record<string, unknown>, title: str
 function safeFilePrefix(value: string): string {
   const cleaned = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   return cleaned || "canvas";
+}
+
+function parseWorkflowExecution(meta: Record<string, unknown> | null): {
+  enabled: boolean;
+  driver: string | null;
+  lastRunId: string | null;
+  lastStatus: string | null;
+} {
+  const execution = meta?.execution;
+  if (!execution || typeof execution !== "object" || Array.isArray(execution)) {
+    return {
+      enabled: false,
+      driver: null,
+      lastRunId: null,
+      lastStatus: null,
+    };
+  }
+  const record = execution as Record<string, unknown>;
+  return {
+    enabled: Boolean(record.enabled),
+    driver: typeof record.driver === "string" ? record.driver : null,
+    lastRunId: typeof record.lastRunId === "string" ? record.lastRunId : null,
+    lastStatus: typeof record.lastStatus === "string" ? record.lastStatus : null,
+  };
+}
+
+function readWorkflowRunState(
+  meta: Record<string, unknown> | null,
+): { status: string; runId: string; threadId: string | null } | null {
+  if (!meta || meta.kind !== "workflow") return null;
+  const execution = parseWorkflowExecution(meta);
+  if (!execution.lastStatus) return null;
+  return {
+    status: execution.lastStatus,
+    runId: execution.lastRunId ?? "pending",
+    threadId: typeof meta.threadId === "string" ? meta.threadId : null,
+  };
 }
 
 function tryParseJson(value: string): Record<string, unknown> | null {

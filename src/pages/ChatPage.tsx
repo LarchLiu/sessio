@@ -161,6 +161,8 @@ export interface ChatPageProps {
     requestId: number;
   } | null;
   onOpenProjectFile?: (path: string) => void;
+  onOpenThreadMultiSessionChat?: (threadId: string) => void;
+  sessionThreadId?: string | null;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
   rememberRuntimeAgentSelection?: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
@@ -309,30 +311,33 @@ function snapshotGroupsToAncestorHistoryGroups(
   }));
 }
 
-function ChatPage({
-  session,
-  assistants = [],
-  viewMode,
-  chatView = "chat",
-  filesSubview = "code",
-  onFilesSubviewChange = () => {},
-  projectFilesReloadKey = 0,
-  selectedProjectFileRequest = null,
-  onOpenProjectFile,
-  liveState,
-  runtimeAgents,
-  rememberRuntimeAgentSelection,
-  debugAcpConfig = false,
-  runtimeSessionAliases = {},
-  ancestorSessions = [],
-  dispatchLiveEvent,
-  onPendingSession,
-  onMessageCount,
-  onActiveMessageMeta,
-  beforeMessages,
-  showThreadPromptPlaceholders = false,
-  threadPromptFallbacks = [],
-}: ChatPageProps) {
+function ChatPage(props: ChatPageProps) {
+  const {
+    session,
+    assistants = [],
+    viewMode,
+    chatView = "chat",
+    filesSubview = "code",
+    onFilesSubviewChange = () => {},
+    projectFilesReloadKey = 0,
+    selectedProjectFileRequest = null,
+    onOpenProjectFile,
+    onOpenThreadMultiSessionChat,
+    sessionThreadId = null,
+    liveState,
+    runtimeAgents,
+    rememberRuntimeAgentSelection,
+    debugAcpConfig = false,
+    runtimeSessionAliases = {},
+    ancestorSessions = [],
+    dispatchLiveEvent,
+    onPendingSession,
+    onMessageCount,
+    onActiveMessageMeta,
+    beforeMessages,
+    showThreadPromptPlaceholders = false,
+    threadPromptFallbacks = [],
+  } = props;
   const { t } = useI18n();
   const defaultTab: Tab = useMemo(
     () =>
@@ -459,12 +464,14 @@ function ChatPage({
           onMessageCount={onMessageCount}
           messageCount={activeMessageMeta.count}
           workspacePath={session.projectPath}
-            projectFilesReloadKey={projectFilesReloadKey}
-            selectedProjectFileRequest={selectedProjectFileRequest}
-            onOpenProjectFile={onOpenProjectFile}
-            skipHistoryLoad={tab.kind === "main" && !session.filePath && hasMainLiveSession}
-            beforeMessages={tab.kind === "main" ? beforeMessages : null}
-            showThreadPromptPlaceholders={showThreadPromptPlaceholders}
+          projectFilesReloadKey={projectFilesReloadKey}
+          selectedProjectFileRequest={selectedProjectFileRequest}
+          onOpenProjectFile={onOpenProjectFile}
+          onOpenThreadMultiSessionChat={onOpenThreadMultiSessionChat}
+          sessionThreadId={sessionThreadId}
+          skipHistoryLoad={tab.kind === "main" && !session.filePath && hasMainLiveSession}
+          beforeMessages={tab.kind === "main" ? beforeMessages : null}
+          showThreadPromptPlaceholders={showThreadPromptPlaceholders}
           threadPromptFallbacks={tab.kind === "main" ? threadPromptFallbacks : []}
         />
 
@@ -569,6 +576,8 @@ export interface AcpTranscriptPanelProps {
     requestId: number;
   } | null;
   onOpenProjectFile?: (path: string) => void;
+  onOpenThreadMultiSessionChat?: (threadId: string) => void;
+  sessionThreadId?: string | null;
   skipHistoryLoad?: boolean;
   scrollKey?: string;
   beforeMessages?: ReactNode | null;
@@ -604,6 +613,8 @@ export function AcpTranscriptPanel({
   projectFilesReloadKey = 0,
   selectedProjectFileRequest = null,
   onOpenProjectFile,
+  onOpenThreadMultiSessionChat,
+  sessionThreadId = null,
   skipHistoryLoad = false,
   scrollKey,
   beforeMessages = null,
@@ -1198,15 +1209,15 @@ export function AcpTranscriptPanel({
     clearComposer = false,
     inputAttachments: ComposerAttachment[] = [],
     runtimeOptions?: Record<string, unknown>,
-  ) => {
+  ): Promise<string | null> => {
     const text = buildPromptText(selectedSlashCommand, rawText).trim();
-    if (!text || sending) return;
+    if (!text || sending) return null;
     const slashName = parseSelectedSlashCommandName(text);
     if (slashName) {
       const slashCommand = cachedAvailableCommands.find((item) => item.name === slashName);
       if (slashCommand && (slashCommand.commandType ?? "agent_builtin") !== "agent_builtin") {
         setComposerError(`Unsupported app command: ${slashCommand.name}`);
-        return;
+        return null;
       }
     }
     const agentAttachments: AgentAttachment[] = await Promise.all(
@@ -1241,7 +1252,7 @@ export function AcpTranscriptPanel({
     );
     if (!workspacePath) {
       setComposerError("This session has no workspace path, so live chat cannot start yet.");
-      return;
+      return null;
     }
     setSending(true);
     setComposerError(null);
@@ -1388,13 +1399,19 @@ export function AcpTranscriptPanel({
         clearAttachments();
       }
       window.requestAnimationFrame(() => composerRef.current?.focus());
+      return turn.turnId;
     } catch (err) {
       const message = String(err);
       setComposerError(message);
+      return null;
     } finally {
       setSending(false);
     }
   }, [agent, beginFollowingLiveStream, cachedAvailableCommands, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, resetComposerInputHistory, runtimeSessionId, scrollChatToBottom, selectedSlashCommand, sending, sessionId, workspacePath]);
+
+  const runCommandText = useCallback(async (text: string) => {
+    await handleSendText(text);
+  }, [handleSendText]);
 
   const handleCommandSelect = useCallback((key: string) => {
     if (!commandTrigger) return;
@@ -1466,17 +1483,20 @@ export function AcpTranscriptPanel({
       },
     ) => {
       const nextPrompt = prompt.trim();
-      if (!nextPrompt) return false;
+      if (!nextPrompt) return { ok: false, turnId: null };
       try {
-        await handleSendText(
+        const turnId = await handleSendText(
           nextPrompt,
           options?.clearComposer ?? true,
           options?.attachments ?? attachments,
           options?.runtimeOptions,
         );
-        return true;
+        return {
+          ok: Boolean(turnId),
+          turnId,
+        };
       } catch {
-        return false;
+        return { ok: false, turnId: null };
       }
     },
     [attachments, handleSendText],
@@ -1573,6 +1593,8 @@ export function AcpTranscriptPanel({
       ...sessionFileEdits.edits,
     ];
   }, [selectedProjectFilePath, sessionFileEdits.edits]);
+  const canvasSessionThreadId = sessionThreadId;
+  const openCanvasThreadMultiSessionChat = onOpenThreadMultiSessionChat;
   const pendingPermissions = useMemo(() => {
     const permissions: AcpPermissionRequest[] = [];
     for (const turn of acpViewModel.turns) {
@@ -1627,6 +1649,8 @@ export function AcpTranscriptPanel({
             composer={chatComposerController}
             onError={setComposerError}
             onOpenProjectFile={onOpenProjectFile}
+            sessionThreadId={canvasSessionThreadId}
+            onOpenThreadMultiSessionChat={openCanvasThreadMultiSessionChat}
           />
         ) : (
           <>
@@ -1658,7 +1682,7 @@ export function AcpTranscriptPanel({
                   state={acpViewModel.sessionState}
                   sessioRuntimeSessionId={sessionStateRuntimeSessionId}
                   debugAcpConfig={debugAcpConfig}
-                  onRunCommand={handleSendText}
+                  onRunCommand={runCommandText}
                 />
                 <AcpRenderItems
                   items={visibleDisplayItems}

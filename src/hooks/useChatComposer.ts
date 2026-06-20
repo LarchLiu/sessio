@@ -86,7 +86,7 @@ export interface ChatComposerController {
       attachments?: ReturnType<typeof useComposerAttachments>["attachments"];
       runtimeOptions?: Record<string, unknown>;
     },
-  ) => Promise<boolean>;
+  ) => Promise<{ ok: boolean; turnId: string | null }>;
   selectedAgent: Agent | null;
   selectedRuntimeAgent: RuntimeAgentMetadata | null;
   selectedModel: string;
@@ -440,7 +440,7 @@ export function useChatComposer({
     canSend: text.trim().length > 0 && agentModelOptions.length > 0 && !sending,
     canSendWithWorkspace: (workspacePath) =>
       text.trim().length > 0 && Boolean(workspacePath) && agentModelOptions.length > 0 && !sending,
-    sendWithContext: async () => false,
+    sendWithContext: async () => ({ ok: false, turnId: null }),
     selectedAgent: agent || null,
     selectedRuntimeAgent,
     selectedModel: model,

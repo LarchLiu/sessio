@@ -252,6 +252,18 @@ export default function AppMain({
             projectFilesReloadKey={projectFilesReloadKey}
             selectedProjectFileRequest={selectedProjectFileRequest}
             onOpenProjectFile={onOpenProjectFile}
+            onOpenThreadMultiSessionChat={(threadId) => {
+              if (!selectedSessionProject) return;
+              setSelected(null);
+              setSelectedProject(null);
+              setSelectedThread({
+                projectId: selectedSessionProject.id,
+                threadId,
+                goal: "Thread",
+              });
+              setDetailMode("threadMultiSessionChat");
+            }}
+            sessionThreadId={null}
             liveState={liveState}
             runtimeAgents={runtimeAgents}
             rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
@@ -283,6 +295,18 @@ export default function AppMain({
             projectFilesReloadKey={projectFilesReloadKey}
             selectedProjectFileRequest={selectedProjectFileRequest}
             onOpenProjectFile={onOpenProjectFile}
+            onOpenThreadMultiSessionChat={(threadId) => {
+              if (!selectedSessionProject) return;
+              setSelected(null);
+              setSelectedProject(null);
+              setSelectedThread({
+                projectId: selectedSessionProject.id,
+                threadId,
+                goal: "Thread",
+              });
+              setDetailMode("threadMultiSessionChat");
+            }}
+            sessionThreadId={selectedThreadId}
             liveState={liveState}
             runtimeAgents={runtimeAgents}
             rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
