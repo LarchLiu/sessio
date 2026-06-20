@@ -1,0 +1,52 @@
+import "@blocksuite/affine/effects";
+
+import { AffineEditorContainer } from "@blocksuite/presets";
+import { AffineSchemas } from "@blocksuite/affine/blocks/schemas";
+import {
+  DocCollection,
+  Job,
+  Schema,
+  type DocSnapshot,
+} from "@blocksuite/store";
+
+const blockSuiteSchema = new Schema().register(AffineSchemas);
+
+export interface BlockSuiteDocHandle {
+  collection: DocCollection;
+  doc: ReturnType<DocCollection["createDoc"]>;
+}
+
+export function createBlockSuiteDoc(docId?: string): BlockSuiteDocHandle {
+  const collection = new DocCollection({ schema: blockSuiteSchema });
+  collection.meta.initialize();
+  const doc = collection.createDoc(docId ? { id: docId } : undefined);
+  doc.load();
+  return { collection, doc };
+}
+
+export function ensureEdgelessRoot(doc: BlockSuiteDocHandle["doc"]) {
+  if (doc.root) return;
+  const rootId = doc.addBlock("affine:page", {});
+  doc.addBlock("affine:surface", {}, rootId);
+  const noteId = doc.addBlock("affine:note", {}, rootId);
+  doc.addBlock("affine:paragraph", {}, noteId);
+}
+
+export function createEdgelessEditor(doc: BlockSuiteDocHandle["doc"]) {
+  const editor = new AffineEditorContainer();
+  editor.doc = doc;
+  editor.mode = "edgeless";
+  return editor;
+}
+
+export function exportDocSnapshot(doc: BlockSuiteDocHandle["doc"]): DocSnapshot | null {
+  const snapshot = new Job({ collection: doc.collection }).docToSnapshot(doc);
+  return snapshot ?? null;
+}
+
+export async function importDocSnapshot(snapshot: DocSnapshot): Promise<BlockSuiteDocHandle["doc"] | null> {
+  const collection = new DocCollection({ schema: blockSuiteSchema });
+  collection.meta.initialize();
+  const restored = await new Job({ collection }).snapshotToDoc(snapshot);
+  return restored ?? null;
+}
