@@ -35,6 +35,7 @@ import {
   exportDocSnapshot,
   importDocSnapshot,
 } from "./bootstrap";
+import BlockSuiteDocPreview from "./BlockSuiteDocPreview";
 import { PortalHost } from "./portalHost";
 import { useReactToLitBridge } from "../../lib/blocksuite/reactToLit";
 import { setBlockSuitePortalBridge } from "../../lib/blocksuite/portalBridge";
@@ -1128,6 +1129,13 @@ export default function BlockSuiteCanvasHost({
                 <div className="rounded-xl border border-ink/8 bg-ink/[0.03] px-2.5 py-2 text-caption text-ink/58">
                   Canvas keeps the workflow mirror and latest run pointer here. Replay and execution details stay in multi-session chat.
                 </div>
+              )}
+              {selectedBlockMeta.kind === "workflow_card" && typeof selectedBlockMeta.workflowSummaryMarkdown === "string" && selectedBlockMeta.workflowSummaryMarkdown.trim() && (
+                <BlockSuiteDocPreview
+                  markdown={selectedBlockMeta.workflowSummaryMarkdown}
+                  title={String(selectedBlockMeta.title ?? "Workflow")}
+                  emptyState="Workflow summary has not been materialized yet."
+                />
               )}
               {selectedBlockMeta.kind === "workflow_card" && selectedBlockId && (
                 <div className="flex flex-wrap gap-2 pt-1">

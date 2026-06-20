@@ -1,7 +1,8 @@
 import "@blocksuite/affine/effects";
 
 import type { ExtensionType } from "@blocksuite/block-std";
-import { AffineEditorContainer } from "@blocksuite/presets";
+import { MarkdownTransformer } from "@blocksuite/blocks";
+import { AffineEditorContainer, PageEditor } from "@blocksuite/presets";
 import { AffineSchemas } from "@blocksuite/affine/blocks/schemas";
 import {
   DocCollection,
@@ -37,6 +38,13 @@ export function ensureEdgelessRoot(doc: BlockSuiteDocHandle["doc"]) {
   doc.addBlock("affine:paragraph", {}, noteId);
 }
 
+export function ensurePageRoot(doc: BlockSuiteDocHandle["doc"]) {
+  if (doc.root) return;
+  const rootId = doc.addBlock("affine:page", {});
+  const noteId = doc.addBlock("affine:note", {}, rootId);
+  doc.addBlock("affine:paragraph", {}, noteId);
+}
+
 export function createEdgelessEditor(doc: BlockSuiteDocHandle["doc"]) {
   return createEdgelessEditorWithSpecs(doc);
 }
@@ -52,9 +60,45 @@ export function createEdgelessEditorWithSpecs(
   return editor;
 }
 
+export function createPageEditor(
+  doc: BlockSuiteDocHandle["doc"],
+  specs?: ExtensionType[],
+) {
+  const editor = new PageEditor();
+  editor.doc = doc;
+  editor.specs = specs && specs.length > 0 ? specs : editor.specs;
+  editor.style.display = "block";
+  editor.style.height = "100%";
+  return editor;
+}
+
 export function exportDocSnapshot(doc: BlockSuiteDocHandle["doc"]): DocSnapshot | null {
   const snapshot = new Job({ collection: doc.collection }).docToSnapshot(doc);
   return snapshot ?? null;
+}
+
+export async function createPageDocFromMarkdown(
+  markdown: string,
+  title?: string,
+): Promise<BlockSuiteDocHandle> {
+  const collection = new DocCollection({ schema: blockSuiteSchema });
+  collection.meta.initialize();
+  const normalizedMarkdown = markdown.trim();
+  if (!normalizedMarkdown) {
+    const doc = collection.createDoc();
+    doc.load();
+    ensurePageRoot(doc);
+    return { collection, doc };
+  }
+  const docId = await MarkdownTransformer.importMarkdownToDoc({
+    collection,
+    markdown: normalizedMarkdown,
+    fileName: title?.trim() || "Structured preview",
+  });
+  const doc = (docId ? collection.getDoc(docId) : null) ?? collection.createDoc();
+  doc.load();
+  ensurePageRoot(doc);
+  return { collection, doc };
 }
 
 export async function importDocSnapshot(snapshot: DocSnapshot): Promise<BlockSuiteDocHandle["doc"] | null> {
