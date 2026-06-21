@@ -717,13 +717,43 @@ affine-edgeless-root sessio-edgeless-workflow-card > *:not([data-overlay-anchor]
 }
 
 /*
- * Keep custom overlay cards below BlockSuite widgets (selected rect, marquee,
- * drag handles) so native selection visuals always stay on top.
+ * Layer stack for the edgeless root's three top-level siblings.
+ *
+ * Custom nodes (file-card / markdown-preview / workflow-card) are React
+ * overlays portaled into `.edgeless-mount-point`, while connector lines AND
+ * their connection anchor dots are painted on the surface <canvas> that lives
+ * *inside* `gfx-viewport`. By default the mount-point paints above the
+ * background (which holds gfx-viewport), so the cards covered the connectors.
+ *
+ * `.edgeless-background` is `position: relative; z-index: auto`, so it does NOT
+ * create a stacking context; `gfx-viewport` does (via `transform`), so its
+ * z-index competes directly with its uncle siblings here. Ordering:
+ *   mount-point (cards) < gfx-viewport (blocks + connectors + anchors) < widgets
+ * keeps connectors/anchors above the cards while native selection visuals
+ * (selected rect, marquee, drag handles) stay on top of everything.
  */
 affine-edgeless-root .edgeless-mount-point {
   z-index: 0;
 }
 
-affine-edgeless-root .widgets-container {
+affine-edgeless-root gfx-viewport {
   z-index: 1;
+}
+
+affine-edgeless-root .widgets-container {
+  z-index: 2;
+}
+
+/*
+ * With gfx-viewport lifted above the card overlay, the invisible custom-block
+ * placeholders (which carry `pointer-events: auto` while active) would sit over
+ * the cards and swallow clicks meant for the card's own buttons. Selection and
+ * dragging are coordinate-based (gfx.getElementByPoint) with pointer events
+ * bound on the editor host, so dropping pointer-events on these placeholders
+ * keeps select/drag working while letting button clicks reach the overlay below.
+ */
+affine-edgeless-root sessio-edgeless-file-card,
+affine-edgeless-root sessio-edgeless-markdown-preview,
+affine-edgeless-root sessio-edgeless-workflow-card {
+  pointer-events: none !important;
 }
