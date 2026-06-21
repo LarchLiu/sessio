@@ -2,7 +2,9 @@ import { fileURLToPath } from 'node:url';
 
 import { defineConfig } from 'vitest/config';
 
-export default defineConfig({
+import { defineBlocksuiteProject } from '../../../vitest.shared';
+
+export default defineConfig(defineBlocksuiteProject({
   esbuild: {
     target: 'es2018',
   },
@@ -26,4 +28,4 @@ export default defineConfig({
     },
     environment: 'happy-dom',
   },
-});
+}));

@@ -1,6 +1,8 @@
 import { defineConfig } from 'vitest/config';
 
-export default defineConfig({
+import { defineBlocksuiteProject } from '../../vitest.shared';
+
+export default defineConfig(defineBlocksuiteProject({
   test: {
     include: ['src/__tests__/**/*.unit.spec.ts'],
     testTimeout: 500,
@@ -19,4 +21,4 @@ export default defineConfig({
       throw new Error(log);
     },
   },
-});
+}));

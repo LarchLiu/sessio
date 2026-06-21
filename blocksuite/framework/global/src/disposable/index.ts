@@ -34,42 +34,59 @@ export class DisposableGroup {
   }
 
   addFromEvent<N extends keyof WindowEventMap>(
-    element: Window,
+    element: Window | null | undefined,
     eventName: N,
     handler: (e: WindowEventMap[N]) => void,
     options?: boolean | AddEventListenerOptions
   ): void;
   addFromEvent<N extends keyof DocumentEventMap>(
-    element: Document,
+    element: Document | null | undefined,
     eventName: N,
     handler: (e: DocumentEventMap[N]) => void,
     eventOptions?: boolean | AddEventListenerOptions
   ): void;
   addFromEvent<N extends keyof HTMLElementEventMap>(
-    element: HTMLElement,
+    element: HTMLElement | null | undefined,
     eventName: N,
     handler: (e: HTMLElementEventMap[N]) => void,
     eventOptions?: boolean | AddEventListenerOptions
   ): void;
   addFromEvent<N extends keyof VisualViewportEventMap>(
-    element: VisualViewport,
+    element: VisualViewport | null | undefined,
     eventName: N,
     handler: (e: VisualViewportEventMap[N]) => void,
     eventOptions?: boolean | AddEventListenerOptions
   ): void;
   addFromEvent<N extends keyof VirtualKeyboardEventMap>(
-    element: VirtualKeyboard,
+    element: VirtualKeyboard | null | undefined,
     eventName: N,
     handler: (e: VirtualKeyboardEventMap[N]) => void,
     eventOptions?: boolean | AddEventListenerOptions
   ): void;
+  addFromEvent<E extends Event = Event>(
+    target: EventTarget | null | undefined,
+    type: string,
+    handler: (e: E) => void,
+    eventOptions?: boolean | AddEventListenerOptions
+  ): void;
 
   addFromEvent(
-    target: HTMLElement | Window | Document | VisualViewport | VirtualKeyboard,
+    target:
+      | EventTarget
+      | HTMLElement
+      | Window
+      | Document
+      | VisualViewport
+      | VirtualKeyboard
+      | null
+      | undefined,
     type: string,
     handler: (e: Event) => void,
     eventOptions?: boolean | AddEventListenerOptions
   ) {
+    if (!target) {
+      return;
+    }
     this.add({
       dispose: () => {
         target.removeEventListener(type, handler as () => void, eventOptions);

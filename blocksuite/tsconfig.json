@@ -2,6 +2,9 @@
   // exists for easier extending in blocksuite packages
   "extends": "../tsconfig.web.json",
   "compilerOptions": {
-    "types": ["node"]
+    "types": ["node"],
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true
   }
 }

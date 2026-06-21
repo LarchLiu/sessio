@@ -1,7 +1,9 @@
 import { playwright } from '@vitest/browser-playwright';
 import { defineConfig } from 'vitest/config';
 
-export default defineConfig({
+import { defineBlocksuiteBrowserProject } from '../../../vitest.shared';
+
+export default defineConfig(defineBlocksuiteBrowserProject({
   esbuild: {
     target: 'es2018',
   },
@@ -22,4 +24,4 @@ export default defineConfig({
     },
     restoreMocks: true,
   },
-});
+}));

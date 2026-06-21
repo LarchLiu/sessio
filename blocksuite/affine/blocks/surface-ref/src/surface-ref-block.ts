@@ -397,7 +397,7 @@ export class SurfaceRefBlockComponent extends BlockComponent<SurfaceRefBlockMode
         })}
         data-theme=${edgelessTheme}
       >
-        ${guard(this._previewDoc, () => {
+        ${guard([this._previewDoc], () => {
           return this._previewDoc
             ? new BlockStdScope({
                 store: this._previewDoc,

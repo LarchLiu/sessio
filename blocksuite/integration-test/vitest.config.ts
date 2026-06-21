@@ -1,9 +1,19 @@
-import { vanillaExtractPlugin } from '@vanilla-extract/vite-plugin';
 import { playwright } from '@vitest/browser-playwright';
 import { defineConfig } from 'vitest/config';
 
+import { defineBlocksuiteBrowserProject } from '../vitest.shared';
+
+const browserInstances =
+  process.env.CI === 'true' || process.env.BLOCKSUITE_ALL_BROWSERS === 'true'
+    ? [
+        { browser: 'chromium' as const },
+        { browser: 'firefox' as const },
+        { browser: 'webkit' as const },
+      ]
+    : [{ browser: 'webkit' as const }];
+
 export default defineConfig(_configEnv =>
-  defineConfig({
+  defineConfig(defineBlocksuiteBrowserProject({
     esbuild: { target: 'es2018' },
     optimizeDeps: {
       force: true,
@@ -13,7 +23,6 @@ export default defineConfig(_configEnv =>
         target: 'es2022',
       },
     },
-    plugins: [vanillaExtractPlugin()],
     test: {
       include: ['src/__tests__/**/*.spec.ts'],
       fileParallelism: false,
@@ -21,11 +30,7 @@ export default defineConfig(_configEnv =>
       browser: {
         enabled: true,
         headless: true,
-        instances: [
-          { browser: 'chromium' },
-          { browser: 'firefox' },
-          { browser: 'webkit' },
-        ],
+        instances: browserInstances,
         provider: playwright(),
         isolate: false,
         viewport: {
@@ -42,5 +47,5 @@ export default defineConfig(_configEnv =>
         interopDefault: true,
       },
     },
-  })
+  }))
 );

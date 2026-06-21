@@ -1,13 +1,13 @@
 import { fileURLToPath } from 'node:url';
 
-import { vanillaExtractPlugin } from '@vanilla-extract/vite-plugin';
 import { defineConfig } from 'vitest/config';
 
-export default defineConfig({
+import { defineBlocksuiteProject } from '../../vitest.shared';
+
+export default defineConfig(defineBlocksuiteProject({
   esbuild: {
     target: 'es2018',
   },
-  plugins: [vanillaExtractPlugin()],
   test: {
     globalSetup: fileURLToPath(
       new URL('../../../scripts/vitest-global.js', import.meta.url)
@@ -38,4 +38,4 @@ export default defineConfig({
     },
     environment: 'happy-dom',
   },
-});
+}));

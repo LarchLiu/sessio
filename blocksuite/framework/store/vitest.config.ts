@@ -1,6 +1,8 @@
 import { defineConfig } from 'vitest/config';
 
-export default defineConfig({
+import { defineBlocksuiteProject } from '../../vitest.shared';
+
+export default defineConfig(defineBlocksuiteProject({
   esbuild: {
     target: 'es2018',
   },
@@ -25,4 +27,4 @@ export default defineConfig({
       throw new Error(log);
     },
   },
-});
+}));
