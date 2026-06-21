@@ -1,11 +1,8 @@
-import { createElement } from "react";
 import { BlockComponent, toGfxBlockComponent } from "@blocksuite/std";
 import { html } from "lit";
 import { classMap } from "lit/directives/class-map.js";
 import { styleMap } from "lit/directives/style-map.js";
-import { getBlockSuitePortalBridge } from "../../portalBridge";
 import type { WorkflowCardBlockModel } from "./model";
-import { WorkflowCardHost } from "./host";
 
 class WorkflowCardPageComponent extends BlockComponent<WorkflowCardBlockModel> {
   blockDraggable = false;
@@ -16,6 +13,15 @@ class WorkflowCardPageComponent extends BlockComponent<WorkflowCardBlockModel> {
     height: "100%",
   });
 
+  protected placeholderStyleMap = styleMap({
+    width: "100%",
+    height: "100%",
+    borderRadius: "20px",
+    border: "1px solid rgb(var(--color-ink) / 0.10)",
+    background: "transparent",
+    pointerEvents: "none",
+  });
+
   override connectedCallback() {
     super.connectedCallback();
     this.contentEditable = "false";
@@ -23,28 +29,6 @@ class WorkflowCardPageComponent extends BlockComponent<WorkflowCardBlockModel> {
 
   override renderBlock() {
     const selected = this.selected$.value;
-    const bridge = getBlockSuitePortalBridge();
-    const content = bridge
-      ? bridge.reactToLit(
-          () =>
-            createElement(WorkflowCardHost, {
-              title: this.model.title || "Workflow",
-              threadId: this.model.threadId || "",
-              threadStageId: this.model.threadStageId || "",
-              executionState: this.model.executionState || "idle",
-              lastRunId: this.model.lastRunId || "",
-              threadGoal: this.model.threadGoal || "",
-              workflowSummaryMarkdown: this.model.workflowSummaryMarkdown || "",
-              onRunWorkflow: () => {
-                bridge.runWorkflowBlock?.(this.model.id);
-              },
-              onOpenThread: () => {
-                bridge.openWorkflowThread?.(this.model.id);
-              },
-            }),
-          true,
-        )
-      : html`<div class="sessio-workflow-card-fallback">Workflow card bridge is not ready.</div>`;
 
     return html`
       <div
@@ -55,7 +39,7 @@ class WorkflowCardPageComponent extends BlockComponent<WorkflowCardBlockModel> {
         })}
         style=${this.containerStyleMap}
       >
-        ${content}
+        <div aria-hidden="true" style=${this.placeholderStyleMap}></div>
       </div>
     `;
   }
@@ -65,6 +49,12 @@ export class WorkflowCardEdgelessComponent extends toGfxBlockComponent(WorkflowC
 
 if (!customElements.get("sessio-edgeless-workflow-card")) {
   customElements.define("sessio-edgeless-workflow-card", WorkflowCardEdgelessComponent);
+}
+
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    window.location.reload();
+  });
 }
 
 declare global {

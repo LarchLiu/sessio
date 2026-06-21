@@ -204,6 +204,11 @@ class DragController extends PointerControllerBase {
       this._move
     );
     this._dispatcher.disposables.addFromEvent(document, 'pointerup', this._up);
+    this._dispatcher.disposables.addFromEvent(
+      document,
+      'pointercancel',
+      this._up
+    );
   };
 
   private _dragging = false;
@@ -308,6 +313,7 @@ class DragController extends PointerControllerBase {
 
     document.removeEventListener('pointermove', this._move);
     document.removeEventListener('pointerup', this._up);
+    document.removeEventListener('pointercancel', this._up);
   };
 
   private _startPointerState: PointerEventState | null = null;

@@ -2,6 +2,10 @@ import { effects as registerAffineEffects } from "@blocksuite/integration-test/e
 import { getTestStoreManager } from "@blocksuite/integration-test/store";
 import { getInternalViewExtensions } from "@blocksuite/affine/extensions/view";
 import { ViewExtensionManager } from "@blocksuite/affine/ext-loader";
+import { SignalWatcher, WithDisposable } from "@blocksuite/affine/global/lit";
+import { noop } from "@blocksuite/global/utils";
+import { ThemeProvider } from "@blocksuite/affine/shared/services";
+import { BlockStdScope, EditorHost, ShadowlessElement } from "@blocksuite/affine/std";
 import type { ExtensionType, Store, DocSnapshot } from "@blocksuite/store";
 import { Schema, Text, nanoid } from "@blocksuite/store";
 import {
@@ -10,6 +14,9 @@ import {
 import { MarkdownTransformer } from "@blocksuite/affine/widgets/linked-doc";
 import { AffineSchemas } from "@blocksuite/affine/schemas";
 import { CommunityCanvasTextFonts, FontConfigExtension } from "@blocksuite/affine/shared/services";
+import { css, html, nothing } from "lit";
+import { property, state } from "lit/decorators.js";
+import { guard } from "lit/directives/guard.js";
 
 import {
   SessioBlockSuiteSchemas,
@@ -24,10 +31,189 @@ const blockSuiteSchema = new Schema().register([
   ...SessioBlockSuiteSchemas,
 ]);
 const storeManager = getTestStoreManager();
-const viewManager = new ViewExtensionManager([
+const baseViewExtensions = [
   ...getInternalViewExtensions(),
+];
+const viewManager = new ViewExtensionManager([
+  ...baseViewExtensions,
   ...SessioCustomBlockViewExtensions,
 ]);
+const nativeOnlyViewManager = new ViewExtensionManager(baseViewExtensions);
+
+noop(EditorHost);
+
+class SessioPageEditor extends SignalWatcher(
+  WithDisposable(ShadowlessElement),
+) {
+  static override styles = css`
+    page-editor {
+      font-family: var(--affine-font-family);
+      background: var(--affine-background-primary-color);
+      display: block;
+      height: 100%;
+    }
+
+    page-editor * {
+      box-sizing: border-box;
+    }
+
+    .page-editor-container {
+      display: block;
+      height: 100%;
+    }
+  `;
+
+  get host() {
+    try {
+      return this.std.host;
+    } catch {
+      return null;
+    }
+  }
+
+  override connectedCallback() {
+    super.connectedCallback();
+    this._disposables.add(
+      this.doc.slots.rootAdded.subscribe(() => this.requestUpdate()),
+    );
+    this.std = new BlockStdScope({
+      store: this.doc,
+      extensions: this.specs,
+    });
+  }
+
+  override async getUpdateComplete(): Promise<boolean> {
+    const result = await super.getUpdateComplete();
+    await this.host?.updateComplete;
+    return result;
+  }
+
+  override render() {
+    if (!this.doc.root) return nothing;
+
+    const std = this.std;
+    const theme = std.get(ThemeProvider).app$.value;
+    return html`
+      <div data-theme=${theme} class="page-editor-container">
+        ${guard([std], () => std.render())}
+      </div>
+    `;
+  }
+
+  override willUpdate(
+    changedProperties: Map<string | number | symbol, unknown>,
+  ) {
+    super.willUpdate(changedProperties);
+    if (this.hasUpdated && changedProperties.has("doc")) {
+      this.std = new BlockStdScope({
+        store: this.doc,
+        extensions: this.specs,
+      });
+    }
+  }
+
+  @property({ attribute: false })
+  accessor doc!: Store;
+
+  @property({ attribute: false })
+  accessor specs: ExtensionType[] = [];
+
+  @state()
+  accessor std!: BlockStdScope;
+}
+
+class SessioEdgelessEditor extends SignalWatcher(
+  WithDisposable(ShadowlessElement),
+) {
+  static override styles = css`
+    edgeless-editor {
+      font-family: var(--affine-font-family);
+      background: var(--affine-background-primary-color);
+      display: block;
+      height: 100%;
+    }
+
+    edgeless-editor * {
+      box-sizing: border-box;
+    }
+
+    .affine-edgeless-viewport {
+      display: block;
+      height: 100%;
+      position: relative;
+      overflow: clip;
+      container-name: viewport;
+      container-type: inline-size;
+    }
+  `;
+
+  get host() {
+    try {
+      return this.std.host;
+    } catch {
+      return null;
+    }
+  }
+
+  override connectedCallback() {
+    super.connectedCallback();
+    this._disposables.add(
+      this.doc.slots.rootAdded.subscribe(() => this.requestUpdate()),
+    );
+    this.std = new BlockStdScope({
+      store: this.doc,
+      extensions: this.specs,
+    });
+  }
+
+  override async getUpdateComplete(): Promise<boolean> {
+    const result = await super.getUpdateComplete();
+    await this.host?.updateComplete;
+    return result;
+  }
+
+  override render() {
+    if (!this.doc.root) return nothing;
+
+    const std = this.std;
+    const theme = std.get(ThemeProvider).edgeless$.value;
+    return html`
+      <div class="affine-edgeless-viewport" data-theme=${theme}>
+        ${guard([std], () => std.render())}
+      </div>
+    `;
+  }
+
+  override willUpdate(
+    changedProperties: Map<string | number | symbol, unknown>,
+  ) {
+    super.willUpdate(changedProperties);
+    if (this.hasUpdated && changedProperties.has("doc")) {
+      this.std = new BlockStdScope({
+        store: this.doc,
+        extensions: this.specs,
+      });
+    }
+  }
+
+  @property({ attribute: false })
+  accessor doc!: Store;
+
+  @property({ attribute: false })
+  accessor specs: ExtensionType[] = [];
+
+  @state()
+  accessor std!: BlockStdScope;
+}
+
+function ensureSessioEditorElementsRegistered() {
+  if (!customElements.get("page-editor")) {
+    customElements.define("page-editor", SessioPageEditor);
+  }
+  if (!customElements.get("edgeless-editor")) {
+    customElements.define("edgeless-editor", SessioEdgelessEditor);
+  }
+}
 
 function ensureBlockSuiteEffectsRegistered() {
   const globalScope = globalThis as typeof globalThis & {
@@ -56,9 +242,18 @@ function createDocStore(workspace: TestWorkspace, docId?: string) {
   return doc.getStore({ id: doc.id });
 }
 
-function createEditorSpecs(scope: "page" | "edgeless", extraSpecs?: ExtensionType[]) {
+function createEditorSpecs(
+  scope: "page" | "edgeless",
+  extraSpecs?: ExtensionType[],
+  options?: {
+    includeSessioCustomViews?: boolean;
+  },
+) {
+  const manager = options?.includeSessioCustomViews === false
+    ? nativeOnlyViewManager
+    : viewManager;
   return [
-    ...viewManager.get(scope),
+    ...manager.get(scope),
     FontConfigExtension(CommunityCanvasTextFonts),
     ...(scope === "edgeless" ? SessioEdgelessSpecs : []),
     ...(extraSpecs ?? []),
@@ -66,6 +261,7 @@ function createEditorSpecs(scope: "page" | "edgeless", extraSpecs?: ExtensionTyp
 }
 
 ensureBlockSuiteEffectsRegistered();
+ensureSessioEditorElementsRegistered();
 
 export interface BlockSuiteDocHandle {
   collection: TestWorkspace;
@@ -104,15 +300,20 @@ export function createEdgelessEditor(doc: BlockSuiteDocHandle["doc"]) {
 export function createEdgelessEditorWithSpecs(
   doc: BlockSuiteDocHandle["doc"],
   specs?: ExtensionType[],
+  options?: {
+    includeSessioCustomViews?: boolean;
+  },
 ) {
-  const editor = document.createElement("affine-editor-container") as HTMLElement & {
+  const editor = document.createElement("edgeless-editor") as HTMLElement & {
     doc: Store;
-    mode: "page" | "edgeless";
-    edgelessSpecs: ExtensionType[];
+    specs: ExtensionType[];
+    std?: BlockStdScope;
+    host?: HTMLElement;
   };
   editor.doc = doc;
-  editor.mode = "edgeless";
-  editor.edgelessSpecs = createEditorSpecs("edgeless", specs);
+  editor.specs = createEditorSpecs("edgeless", specs, options);
+  editor.style.display = "block";
+  editor.style.height = "100%";
   return editor;
 }
 
@@ -120,14 +321,14 @@ export function createPageEditor(
   doc: BlockSuiteDocHandle["doc"],
   specs?: ExtensionType[],
 ) {
-  const editor = document.createElement("affine-editor-container") as HTMLElement & {
+  const editor = document.createElement("page-editor") as HTMLElement & {
     doc: Store;
-    mode: "page" | "edgeless";
-    pageSpecs: ExtensionType[];
+    specs: ExtensionType[];
+    std?: BlockStdScope;
+    host?: HTMLElement;
   };
   editor.doc = doc;
-  editor.mode = "page";
-  editor.pageSpecs = createEditorSpecs("page", specs);
+  editor.specs = createEditorSpecs("page", specs);
   editor.style.display = "block";
   editor.style.height = "100%";
   return editor;

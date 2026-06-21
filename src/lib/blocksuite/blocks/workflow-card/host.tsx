@@ -8,6 +8,7 @@ export interface WorkflowCardHostProps {
   workflowSummaryMarkdown: string;
   onRunWorkflow: () => void;
   onOpenThread: () => void;
+  interactionMode?: "block" | "overlay";
 }
 
 export function WorkflowCardHost({
@@ -20,7 +21,13 @@ export function WorkflowCardHost({
   workflowSummaryMarkdown,
   onRunWorkflow,
   onOpenThread,
+  interactionMode = "block",
 }: WorkflowCardHostProps) {
+  const overlayRootClassName =
+    interactionMode === "overlay" ? "pointer-events-none" : "";
+  const overlayActionClassName =
+    interactionMode === "overlay" ? "pointer-events-auto" : "";
+
   const summary = workflowSummaryMarkdown
     .split(/\r?\n/)
     .map(line => line.trim())
@@ -29,7 +36,7 @@ export function WorkflowCardHost({
     .join(" ");
 
   return (
-    <div className="h-full w-full overflow-hidden rounded-[20px] border border-ink/10 bg-surface-panel/95 text-ink/80 shadow-[0_16px_40px_rgba(18,24,33,0.08)]">
+    <div className={"h-full w-full overflow-hidden rounded-[20px] border border-ink/10 bg-surface-panel/95 text-ink/80 shadow-[0_16px_40px_rgba(18,24,33,0.08)] " + overlayRootClassName}>
       <div className="flex items-start justify-between gap-3 border-b border-ink/8 px-4 py-3">
         <div className="min-w-0">
           <div className="truncate text-body-sm font-medium text-ink/88">{title || "Workflow"}</div>
@@ -39,14 +46,14 @@ export function WorkflowCardHost({
           <button
             type="button"
             onClick={onRunWorkflow}
-            className="rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5"
+            className={"rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5 " + overlayActionClassName}
           >
             Run
           </button>
           <button
             type="button"
             onClick={onOpenThread}
-            className="rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5"
+            className={"rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5 " + overlayActionClassName}
           >
             Thread
           </button>

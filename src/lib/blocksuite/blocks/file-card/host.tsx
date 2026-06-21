@@ -8,6 +8,7 @@ export interface FileCardHostProps {
   summary: string;
   status: string;
   onPromoteToMarkdown: () => void;
+  interactionMode?: "block" | "overlay";
 }
 
 export function FileCardHost({
@@ -18,9 +19,15 @@ export function FileCardHost({
   summary,
   status,
   onPromoteToMarkdown,
+  interactionMode = "block",
 }: FileCardHostProps) {
+  const overlayRootClassName =
+    interactionMode === "overlay" ? "pointer-events-none" : "";
+  const overlayActionClassName =
+    interactionMode === "overlay" ? "pointer-events-auto" : "";
+
   return (
-    <div className="h-full w-full overflow-hidden rounded-[20px] border border-ink/10 bg-surface-panel/95 text-ink/80 shadow-[0_16px_40px_rgba(18,24,33,0.08)]">
+    <div className={"h-full w-full overflow-hidden rounded-[20px] border border-ink/10 bg-surface-panel/95 text-ink/80 shadow-[0_16px_40px_rgba(18,24,33,0.08)] " + overlayRootClassName}>
       <div className="flex items-start justify-between gap-3 border-b border-ink/8 px-4 py-3">
         <div className="min-w-0">
           <div className="truncate text-body-sm font-medium text-ink/88">{title || "File card"}</div>
@@ -32,14 +39,14 @@ export function FileCardHost({
             onClick={() => {
               void openPath(sourcePath).catch(() => {});
             }}
-            className="rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5"
+            className={"rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5 " + overlayActionClassName}
           >
             Open
           </button>
           <button
             type="button"
             onClick={onPromoteToMarkdown}
-            className="rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5"
+            className={"rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5 " + overlayActionClassName}
           >
             Preview
           </button>

@@ -1,11 +1,8 @@
-import { createElement } from "react";
 import { BlockComponent, toGfxBlockComponent } from "@blocksuite/std";
 import { html } from "lit";
 import { classMap } from "lit/directives/class-map.js";
 import { styleMap } from "lit/directives/style-map.js";
-import { getBlockSuitePortalBridge } from "../../portalBridge";
 import type { FileCardBlockModel } from "./model";
-import { FileCardHost } from "./host";
 
 class FileCardPageComponent extends BlockComponent<FileCardBlockModel> {
   blockDraggable = false;
@@ -16,6 +13,15 @@ class FileCardPageComponent extends BlockComponent<FileCardBlockModel> {
     height: "100%",
   });
 
+  protected placeholderStyleMap = styleMap({
+    width: "100%",
+    height: "100%",
+    borderRadius: "20px",
+    border: "1px solid rgb(var(--color-ink) / 0.10)",
+    background: "transparent",
+    pointerEvents: "none",
+  });
+
   override connectedCallback() {
     super.connectedCallback();
     this.contentEditable = "false";
@@ -23,24 +29,6 @@ class FileCardPageComponent extends BlockComponent<FileCardBlockModel> {
 
   override renderBlock() {
     const selected = this.selected$.value;
-    const bridge = getBlockSuitePortalBridge();
-    const content = bridge
-      ? bridge.reactToLit(
-          () =>
-            createElement(FileCardHost, {
-              title: this.model.title || "File card",
-              sourcePath: this.model.sourcePath || "",
-              sourceType: this.model.sourceType || "workspace_file",
-              subtitle: this.model.subtitle || "",
-              summary: this.model.summary || "",
-              status: this.model.status || "idle",
-              onPromoteToMarkdown: () => {
-                bridge.promoteFileCardToMarkdown?.(this.model.id);
-              },
-            }),
-          true,
-        )
-      : html`<div class="sessio-file-card-fallback">File card bridge is not ready.</div>`;
 
     return html`
       <div
@@ -51,7 +39,7 @@ class FileCardPageComponent extends BlockComponent<FileCardBlockModel> {
         })}
         style=${this.containerStyleMap}
       >
-        ${content}
+        <div aria-hidden="true" style=${this.placeholderStyleMap}></div>
       </div>
     `;
   }
@@ -61,6 +49,12 @@ export class FileCardEdgelessComponent extends toGfxBlockComponent(FileCardPageC
 
 if (!customElements.get("sessio-edgeless-file-card")) {
   customElements.define("sessio-edgeless-file-card", FileCardEdgelessComponent);
+}
+
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    window.location.reload();
+  });
 }
 
 declare global {

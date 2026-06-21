@@ -40,8 +40,10 @@ import {
   exportDocSnapshot,
   importDocSnapshot,
 } from "./bootstrap";
-import { PortalHost } from "./portalHost";
-import { useReactToLitBridge } from "../../lib/blocksuite/reactToLit";
+import {
+  CanvasCustomBlockOverlay,
+  type CanvasCustomBlockOverlayItem,
+} from "./CanvasCustomBlockOverlay";
 import { setBlockSuitePortalBridge } from "../../lib/blocksuite/portalBridge";
 import {
   canvasBlockRecordToContextRef,
@@ -60,6 +62,7 @@ const CANVAS_ADD_FILES_EVENT = "sessio:canvas-add-files";
 const AUTOSAVE_DEBOUNCE_MS = 900;
 const ROOT_SERVICE_RETRY_MS = 80;
 const ROOT_SERVICE_RETRY_LIMIT = 125;
+const BOX_SELECTING_CLASS_NAME = "sessio-box-selecting";
 
 type CanvasSelectionRef = {
   blockId: string;
@@ -112,6 +115,9 @@ type GfxControllerLike = {
   viewport: {
     toViewCoord: (x: number, y: number) => [number, number];
     toModelCoord: (x: number, y: number) => [number, number];
+    viewportUpdated?: {
+      subscribe: (listener: () => void) => { unsubscribe: () => void };
+    };
   };
 };
 
@@ -193,7 +199,18 @@ export default function BlockSuiteCanvasHost({
   const blockRecordsRef = useRef(initialState.blockRecords);
   const blockUpdatedDisposeRef = useRef<{ dispose: () => void } | null>(null);
   const selectionUpdatedDisposeRef = useRef<{ dispose: () => void } | null>(null);
+  const selectionUiFrameRef = useRef<number | null>(null);
+  const selectionUiStateRef = useRef({
+    count: 0,
+    canUngroup: false,
+  });
   const autosaveTimerRef = useRef<number | null>(null);
+  const overlaySyncFrameRef = useRef<number | null>(null);
+  const overlaySyncDeferredRef = useRef(false);
+  const selectionUiDeferredRef = useRef(false);
+  const boxSelectingObserverRef = useRef<MutationObserver | null>(null);
+  const boxSelectingHostRef = useRef<HTMLElement | null>(null);
+  const isBoxSelectingRef = useRef(false);
   const inflightSaveRef = useRef(false);
   const queuedSnapshotRef = useRef<string | null>(null);
   const currentSnapshotRef = useRef(initialSnapshot);
@@ -211,7 +228,8 @@ export default function BlockSuiteCanvasHost({
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [editedFilesPickerOpen, setEditedFilesPickerOpen] = useState(false);
   const [pendingEditedFiles, setPendingEditedFiles] = useState<string[]>([]);
-  const [reactToLit, portals] = useReactToLitBridge();
+  const [customOverlayItems, setCustomOverlayItems] = useState<CanvasCustomBlockOverlayItem[]>([]);
+  const [overlayMountElement, setOverlayMountElement] = useState<HTMLDivElement | null>(null);
 
   const changedFiles = useMemo(
     () => Array.from(new Set(editedFiles.map((path) => path.trim()).filter(Boolean))),
@@ -268,21 +286,226 @@ export default function BlockSuiteCanvasHost({
     return rootService.crud.addBlock(flavour, props, rootService.surface.id);
   }, [getRootService]);
 
+  const commitSelectionState = useCallback((count: number, canUngroup: boolean) => {
+    const current = selectionUiStateRef.current;
+    if (current.count === count && current.canUngroup === canUngroup) {
+      return;
+    }
+    selectionUiStateRef.current = {
+      count,
+      canUngroup,
+    };
+    setSelectionCount(count);
+    setCanUngroupSelection(canUngroup);
+  }, []);
+
   const updateSelectionState = useCallback(() => {
     const rootService = getRootService();
     if (!rootService) {
-      setSelectionCount(0);
-      setCanUngroupSelection(false);
+      commitSelectionState(0, false);
       return;
     }
     const selectedIds = rootService.selection.selectedIds ?? [];
-    setSelectionCount(selectedIds.length);
     const selectedElement =
       selectedIds.length === 1
         ? (rootService.selection.selectedElements[0] as SelectionElementLike | undefined)
         : undefined;
-    setCanUngroupSelection(selectedIds.length === 1 && selectedElement?.type === "group");
-  }, [getRootService]);
+    commitSelectionState(
+      selectedIds.length,
+      selectedIds.length === 1 && selectedElement?.type === "group",
+    );
+  }, [commitSelectionState, getRootService]);
+
+  const scheduleSelectionStateUpdate = useCallback(() => {
+    if (selectionUiFrameRef.current !== null) {
+      return;
+    }
+    selectionUiFrameRef.current = window.requestAnimationFrame(() => {
+      selectionUiFrameRef.current = null;
+      updateSelectionState();
+    });
+  }, [updateSelectionState]);
+
+  const clearBoxSelectingObserver = useCallback(() => {
+    boxSelectingObserverRef.current?.disconnect();
+    boxSelectingObserverRef.current = null;
+    boxSelectingHostRef.current = null;
+    isBoxSelectingRef.current = false;
+    overlaySyncDeferredRef.current = false;
+    selectionUiDeferredRef.current = false;
+  }, []);
+
+  const syncCustomBlockOverlay = useCallback(() => {
+    const host = hostRef.current;
+    const editor = getEditor();
+    const rootService = getRootService();
+    const doc = getDoc();
+    if (!host || !editor || !rootService || !doc) {
+      setCustomOverlayItems((current) => (current.length === 0 ? current : []));
+      return;
+    }
+
+    const hostRect = host.getBoundingClientRect();
+    const selectedIds = new Set(rootService.selection.selectedIds ?? []);
+    const overlays: CanvasCustomBlockOverlayItem[] = [];
+    const entries = [
+      ...doc.getBlocksByFlavour("sessio:file-card"),
+      ...doc.getBlocksByFlavour("sessio:markdown-preview"),
+      ...doc.getBlocksByFlavour("sessio:workflow-card"),
+    ];
+
+    for (const entry of entries) {
+      const element = editor.std?.host?.view?.getBlock?.(entry.model.id) as HTMLElement | null;
+      if (!element?.isConnected) {
+        continue;
+      }
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        continue;
+      }
+
+      const transform = window.getComputedStyle(element).transform;
+      const matrix = transform && transform !== "none" ? new DOMMatrixReadOnly(transform) : null;
+      const scaleX = matrix ? Math.hypot(matrix.a, matrix.b) : 1;
+      const scaleY = matrix ? Math.hypot(matrix.c, matrix.d) : 1;
+      const scale = scaleX || scaleY ? (scaleX + scaleY) / (scaleX && scaleY ? 2 : 1) : 1;
+      const geometryModel = entry.model as { xywh?: string };
+      const bound = geometryModel.xywh ? Bound.deserialize(geometryModel.xywh) : null;
+      const baseWidth = bound ? bound.w : rect.width / scale;
+      const baseHeight = bound ? bound.h : rect.height / scale;
+      const base = {
+        blockId: entry.model.id,
+        left: rect.left - hostRect.left,
+        top: rect.top - hostRect.top,
+        baseWidth,
+        baseHeight,
+        scale,
+        selected: selectedIds.has(entry.model.id),
+      };
+
+      if (entry.model.flavour === "sessio:file-card") {
+        const fileCardModel = entry.model as FileCardBlockModel;
+        overlays.push({
+          ...base,
+          kind: "file_card",
+          title: fileCardModel.title || "File card",
+          sourcePath: fileCardModel.sourcePath || "",
+          sourceType: fileCardModel.sourceType || "workspace_file",
+          subtitle: fileCardModel.subtitle || "",
+          summary: fileCardModel.summary || "",
+          status: fileCardModel.status || "idle",
+        });
+        continue;
+      }
+
+      if (entry.model.flavour === "sessio:workflow-card") {
+        const workflowCardModel = entry.model as WorkflowCardBlockModel;
+        overlays.push({
+          ...base,
+          kind: "workflow_card",
+          title: workflowCardModel.title || "Workflow",
+          threadId: workflowCardModel.threadId || "",
+          threadStageId: workflowCardModel.threadStageId || "",
+          executionState: workflowCardModel.executionState || "idle",
+          lastRunId: workflowCardModel.lastRunId || "",
+          threadGoal: workflowCardModel.threadGoal || "",
+          workflowSummaryMarkdown: workflowCardModel.workflowSummaryMarkdown || "",
+        });
+        continue;
+      }
+
+      const markdownPreviewModel = entry.model as MarkdownPreviewBlockModel;
+      overlays.push({
+        ...base,
+        kind: "markdown_preview",
+        title: markdownPreviewModel.title || "Markdown preview",
+        sourcePath: markdownPreviewModel.sourcePath || "",
+        excerpt: markdownPreviewModel.excerpt || "",
+        contentVersion: markdownPreviewModel.contentVersion || "",
+        renderMode:
+          selectedIds.has(entry.model.id)
+          && !markdownPreviewModel.collapsed
+          && markdownPreviewModel.renderMode === "preview"
+            ? "preview"
+            : "summary",
+        workspacePath,
+      });
+    }
+
+    setCustomOverlayItems(overlays);
+  }, [getDoc, getEditor, getRootService, workspacePath]);
+
+  const scheduleCustomBlockOverlaySync = useCallback((force = false) => {
+    if (isBoxSelectingRef.current && !force) {
+      overlaySyncDeferredRef.current = true;
+      return;
+    }
+    if (overlaySyncFrameRef.current !== null) {
+      return;
+    }
+    overlaySyncFrameRef.current = window.requestAnimationFrame(() => {
+      overlaySyncFrameRef.current = null;
+      if (isBoxSelectingRef.current && !force) {
+        overlaySyncDeferredRef.current = true;
+        return;
+      }
+      syncCustomBlockOverlay();
+    });
+  }, [syncCustomBlockOverlay]);
+
+  const flushDeferredCanvasUiSync = useCallback(() => {
+    if (selectionUiDeferredRef.current) {
+      selectionUiDeferredRef.current = false;
+      scheduleSelectionStateUpdate();
+    }
+    if (overlaySyncDeferredRef.current) {
+      overlaySyncDeferredRef.current = false;
+      scheduleCustomBlockOverlaySync(true);
+    }
+  }, [scheduleCustomBlockOverlaySync, scheduleSelectionStateUpdate]);
+
+  const attachBoxSelectingObserver = useCallback(() => {
+    const editor = getEditor();
+    const nextHost = ((editor?.std?.host as HTMLElement | undefined) ?? editor) ?? null;
+    if (!nextHost) {
+      clearBoxSelectingObserver();
+      return;
+    }
+    if (boxSelectingHostRef.current === nextHost && boxSelectingObserverRef.current) {
+      return;
+    }
+
+    clearBoxSelectingObserver();
+    boxSelectingHostRef.current = nextHost;
+    isBoxSelectingRef.current = nextHost.classList.contains(BOX_SELECTING_CLASS_NAME);
+
+    const syncBoxSelectingState = () => {
+      const nextIsSelecting = nextHost.classList.contains(BOX_SELECTING_CLASS_NAME);
+      if (nextIsSelecting === isBoxSelectingRef.current) {
+        return;
+      }
+      isBoxSelectingRef.current = nextIsSelecting;
+      if (nextIsSelecting) {
+        if (overlaySyncFrameRef.current !== null) {
+          window.cancelAnimationFrame(overlaySyncFrameRef.current);
+          overlaySyncFrameRef.current = null;
+        }
+        if (selectionUiFrameRef.current !== null) {
+          window.cancelAnimationFrame(selectionUiFrameRef.current);
+          selectionUiFrameRef.current = null;
+        }
+        return;
+      }
+      flushDeferredCanvasUiSync();
+    };
+
+    const observer = new MutationObserver(syncBoxSelectingState);
+    observer.observe(nextHost, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+    boxSelectingObserverRef.current = observer;
+  }, [clearBoxSelectingObserver, flushDeferredCanvasUiSync, getEditor]);
 
   const finishCanvasInitialization = useCallback(async (nextStatus: string) => {
     if (!getRootService()) {
@@ -384,6 +607,7 @@ export default function BlockSuiteCanvasHost({
     host.replaceChildren(editor);
     blockUpdatedDisposeRef.current?.dispose();
     selectionUpdatedDisposeRef.current?.dispose();
+    clearBoxSelectingObserver();
     {
       const subscription = doc.slots.blockUpdated.subscribe(() => {
         scheduleAutosave(doc);
@@ -393,20 +617,30 @@ export default function BlockSuiteCanvasHost({
       };
     }
     window.requestAnimationFrame(() => {
+      attachBoxSelectingObserver();
       void waitForRootService().then((rootService) => {
         if (!rootService || docRef.current !== doc) return;
+        attachBoxSelectingObserver();
         selectionUpdatedDisposeRef.current?.dispose();
         const subscription = rootService.selection.slots.updated.subscribe(() => {
-          updateSelectionState();
+          if (isBoxSelectingRef.current) {
+            selectionUiDeferredRef.current = true;
+            overlaySyncDeferredRef.current = true;
+            return;
+          }
+          scheduleSelectionStateUpdate();
+          scheduleCustomBlockOverlaySync();
         });
         selectionUpdatedDisposeRef.current = {
           dispose: () => subscription.unsubscribe(),
         };
         updateSelectionState();
+        scheduleCustomBlockOverlaySync();
       });
       scheduleSyncBlocks();
+      scheduleCustomBlockOverlaySync();
     });
-  }, [scheduleAutosave, scheduleSyncBlocks, updateSelectionState, waitForRootService]);
+  }, [attachBoxSelectingObserver, clearBoxSelectingObserver, scheduleAutosave, scheduleCustomBlockOverlaySync, scheduleSelectionStateUpdate, scheduleSyncBlocks, updateSelectionState, waitForRootService]);
 
   const openEditedFilesPicker = () => {
     if (changedFiles.length === 0) return;
@@ -488,10 +722,6 @@ export default function BlockSuiteCanvasHost({
             xywh: bound.serialize(),
           },
         );
-        const inserted = doc.getModelById(blockId);
-        if (!inserted || inserted.flavour !== "sessio:file-card") {
-          throw new Error(`BlockSuite did not retain inserted file card ${blockId}.`);
-        }
         insertedBlockIds.push(blockId);
         addedCount += 1;
       } catch (error) {
@@ -693,24 +923,11 @@ export default function BlockSuiteCanvasHost({
   }, [getDoc, onError, onOpenThreadMultiSessionChat, sessionThreadId]);
 
   useEffect(() => {
-    setBlockSuitePortalBridge({
-      reactToLit,
-      workspacePath,
-      updateBlock: (blockId, props) => {
-        const doc = getDoc();
-        const model = doc?.getModelById(blockId) ?? null;
-        if (!doc || !model) return;
-        doc.updateBlock(model, props);
-        scheduleSyncBlocks();
-      },
-      promoteFileCardToMarkdown,
-      runWorkflowBlock,
-      openWorkflowThread,
-    });
+    setBlockSuitePortalBridge(null);
     return () => {
       setBlockSuitePortalBridge(null);
     };
-  }, [getDoc, openWorkflowThread, promoteFileCardToMarkdown, reactToLit, runWorkflowBlock, scheduleSyncBlocks, workspacePath]);
+  }, []);
 
   useEffect(() => {
     currentSnapshotRef.current = initialSnapshot;
@@ -721,8 +938,82 @@ export default function BlockSuiteCanvasHost({
       if (autosaveTimerRef.current !== null) {
         window.clearTimeout(autosaveTimerRef.current);
       }
+      if (overlaySyncFrameRef.current !== null) {
+        window.cancelAnimationFrame(overlaySyncFrameRef.current);
+        overlaySyncFrameRef.current = null;
+      }
+      if (selectionUiFrameRef.current !== null) {
+        window.cancelAnimationFrame(selectionUiFrameRef.current);
+        selectionUiFrameRef.current = null;
+      }
+      clearBoxSelectingObserver();
     };
-  }, []);
+  }, [clearBoxSelectingObserver]);
+
+  useEffect(() => {
+    if (!isReady) {
+      setCustomOverlayItems((current) => (current.length === 0 ? current : []));
+      return;
+    }
+
+    scheduleCustomBlockOverlaySync();
+
+    const editor = getEditor();
+    const rootService = getRootService();
+    if (!editor || !rootService) {
+      return;
+    }
+
+    const onWindowUpdate = () => {
+      scheduleCustomBlockOverlaySync();
+    };
+
+    window.addEventListener("resize", onWindowUpdate);
+    window.addEventListener("scroll", onWindowUpdate, true);
+
+    const viewportSubscription = rootService.viewport.viewportUpdated?.subscribe(() => {
+      scheduleCustomBlockOverlaySync();
+    });
+
+    const doc = getDoc();
+    const blockSubscription = doc?.slots.blockUpdated.subscribe(() => {
+      scheduleCustomBlockOverlaySync();
+    });
+
+    return () => {
+      window.removeEventListener("resize", onWindowUpdate);
+      window.removeEventListener("scroll", onWindowUpdate, true);
+      viewportSubscription?.unsubscribe();
+      blockSubscription?.unsubscribe();
+    };
+  }, [getDoc, getEditor, getRootService, isReady, scheduleCustomBlockOverlaySync]);
+
+  useLayoutEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) {
+      setOverlayMountElement(null);
+      return;
+    }
+
+    const syncOverlayMount = () => {
+      const mountPoint = editor
+        .querySelector("affine-edgeless-root .edgeless-mount-point") as HTMLDivElement | null;
+      if (mountPoint) {
+        mountPoint.style.position = "absolute";
+        mountPoint.style.inset = "0";
+        mountPoint.style.pointerEvents = "none";
+      }
+      setOverlayMountElement(mountPoint);
+    };
+
+    syncOverlayMount();
+    const frameId = window.requestAnimationFrame(syncOverlayMount);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      setOverlayMountElement((current) => (current?.isConnected ? current : null));
+    };
+  }, [isReady, initialState.document.id, initialSnapshot]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -805,15 +1096,21 @@ export default function BlockSuiteCanvasHost({
       if (autosaveTimerRef.current !== null) {
         window.clearTimeout(autosaveTimerRef.current);
       }
+      if (selectionUiFrameRef.current !== null) {
+        window.cancelAnimationFrame(selectionUiFrameRef.current);
+        selectionUiFrameRef.current = null;
+      }
       blockUpdatedDisposeRef.current?.dispose();
       blockUpdatedDisposeRef.current = null;
       selectionUpdatedDisposeRef.current?.dispose();
       selectionUpdatedDisposeRef.current = null;
+      clearBoxSelectingObserver();
       editorRef.current?.remove();
       editorRef.current = null;
     };
   }, [
     attachDoc,
+    clearBoxSelectingObserver,
     finishCanvasInitialization,
     initialState.document.id,
     initialState.document.title,
@@ -1246,7 +1543,28 @@ export default function BlockSuiteCanvasHost({
           </div>
         </div>
       )}
-      <div ref={hostRef} className="min-h-0 flex-1" />
+      <div className="relative min-h-0 flex-1">
+        <div ref={hostRef} className="absolute inset-0" />
+      </div>
+      {overlayMountElement && createPortal(
+        <CanvasCustomBlockOverlay
+          items={customOverlayItems}
+          onPromoteFileCardToMarkdown={promoteFileCardToMarkdown}
+          onRunWorkflow={(blockId) => {
+            void runWorkflowBlock(blockId);
+          }}
+          onOpenWorkflowThread={openWorkflowThread}
+          onUpdateMarkdownRenderMode={(blockId, nextMode) => {
+            const doc = getDoc();
+            const model = doc?.getModelById(blockId) ?? null;
+            if (!doc || !model) return;
+            doc.updateBlock(model, { renderMode: nextMode });
+            scheduleSyncBlocks();
+            scheduleCustomBlockOverlaySync();
+          }}
+        />,
+        overlayMountElement,
+      )}
       {addMenuOpen && addMenuButtonRef.current && (
         <PopupMenu
           anchor={addMenuButtonRef.current}
@@ -1268,7 +1586,6 @@ export default function BlockSuiteCanvasHost({
           onClose={closeEditedFilesPicker}
         />
       )}
-      <PortalHost portals={portals} />
     </div>
   );
 }
@@ -1375,19 +1692,6 @@ function fallbackTitle(kind: unknown, blockId: string): string {
   if (kind === "image") return "Image";
   if (kind === "group") return "Group";
   return blockId ? `Block ${blockId.slice(0, 6)}` : "Canvas note";
-}
-
-function readWorkflowRunState(
-  meta: Record<string, unknown> | null,
-): { status: string; runId: string; threadId: string | null } | null {
-  if (!meta || meta.kind !== "workflow_card") return null;
-  const status = typeof meta.executionState === "string" ? meta.executionState : null;
-  if (!status) return null;
-  return {
-    status,
-    runId: typeof meta.lastRunId === "string" && meta.lastRunId.trim() ? meta.lastRunId : "pending",
-    threadId: typeof meta.threadId === "string" ? meta.threadId : null,
-  };
 }
 
 function readCanvasMeta(

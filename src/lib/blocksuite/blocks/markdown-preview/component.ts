@@ -1,11 +1,8 @@
-import { createElement } from "react";
 import type { MarkdownPreviewBlockModel } from "./model";
-import { MarkdownPreviewHost } from "./host";
 import { BlockComponent, toGfxBlockComponent } from "@blocksuite/std";
 import { html } from "lit";
 import { classMap } from "lit/directives/class-map.js";
 import { styleMap } from "lit/directives/style-map.js";
-import { getBlockSuitePortalBridge } from "../../portalBridge";
 
 class MarkdownPreviewPageComponent extends BlockComponent<MarkdownPreviewBlockModel> {
   blockDraggable = false;
@@ -16,6 +13,15 @@ class MarkdownPreviewPageComponent extends BlockComponent<MarkdownPreviewBlockMo
     height: "100%",
   });
 
+  protected placeholderStyleMap = styleMap({
+    width: "100%",
+    height: "100%",
+    borderRadius: "20px",
+    border: "1px solid rgb(var(--color-ink) / 0.10)",
+    background: "transparent",
+    pointerEvents: "none",
+  });
+
   override connectedCallback() {
     super.connectedCallback();
     this.contentEditable = "false";
@@ -23,34 +29,7 @@ class MarkdownPreviewPageComponent extends BlockComponent<MarkdownPreviewBlockMo
 
   override renderBlock() {
     const selected = this.selected$.value;
-    const title = this.model.title || "Markdown preview";
-    const path = this.model.sourcePath || "";
-    const excerpt = this.model.excerpt || "";
     const collapsed = this.model.collapsed;
-    const renderMode =
-      selected && !collapsed && this.model.renderMode === "preview"
-        ? "preview"
-        : "summary";
-    const bridge = getBlockSuitePortalBridge();
-    const content = bridge
-      ? bridge.reactToLit(
-          () =>
-            createElement(MarkdownPreviewHost, {
-              workspacePath: bridge.workspacePath,
-              blockId: this.model.id,
-              title,
-              sourcePath: path,
-              excerpt,
-              contentVersion: this.model.contentVersion,
-              renderMode,
-              focused: selected,
-              onToggleRenderMode: (nextMode) => {
-                bridge.updateBlock(this.model.id, { renderMode: nextMode });
-              },
-            }),
-          true,
-        )
-      : html`<div class="sessio-markdown-preview-excerpt">${excerpt || "Markdown portal bridge is not ready."}</div>`;
 
     return html`
       <div
@@ -62,11 +41,7 @@ class MarkdownPreviewPageComponent extends BlockComponent<MarkdownPreviewBlockMo
         })}
         style=${this.containerStyleMap}
       >
-        <div class="sessio-markdown-preview-header">
-          <div class="sessio-markdown-preview-title">${title}</div>
-          <div class="sessio-markdown-preview-path">${path}</div>
-        </div>
-        <div class="sessio-markdown-preview-body">${content}</div>
+        <div aria-hidden="true" style=${this.placeholderStyleMap}></div>
       </div>
     `;
   }
@@ -78,6 +53,12 @@ export class MarkdownPreviewEdgelessComponent extends toGfxBlockComponent(
 
 if (!customElements.get("sessio-edgeless-markdown-preview")) {
   customElements.define("sessio-edgeless-markdown-preview", MarkdownPreviewEdgelessComponent);
+}
+
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    window.location.reload();
+  });
 }
 
 declare global {

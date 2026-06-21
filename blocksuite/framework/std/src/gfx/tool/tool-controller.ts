@@ -519,6 +519,44 @@ export class ToolController extends GfxExtension {
       })
     );
 
+    const resetDraggingState = () => {
+      if (!this.dragging$.peek()) {
+        return;
+      }
+
+      this.dragging$.value = false;
+      viewportSub?.unsubscribe();
+      viewportSub = null;
+      dragContext = null;
+      this.draggingViewArea$.value = {
+        x: 0,
+        y: 0,
+        startX: 0,
+        startY: 0,
+        endX: 0,
+        endY: 0,
+        w: 0,
+        h: 0,
+      };
+      this.draggingArea$.value = {
+        x: 0,
+        y: 0,
+        startX: 0,
+        startY: 0,
+        endX: 0,
+        endY: 0,
+        w: 0,
+        h: 0,
+      };
+    };
+
+    this._disposableGroup.addFromEvent(window, 'blur', resetDraggingState);
+    this._disposableGroup.addFromEvent(document, 'visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        resetDraggingState();
+      }
+    });
+
     supportedEvents.slice(5).forEach(evtName => {
       this._disposableGroup.add(
         this.std.event.add(evtName, ctx => {

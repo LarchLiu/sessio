@@ -14,6 +14,7 @@ export interface MarkdownPreviewHostProps {
   renderMode: "summary" | "preview";
   focused: boolean;
   onToggleRenderMode: (nextMode: "summary" | "preview") => void;
+  interactionMode?: "block" | "overlay";
 }
 
 export function MarkdownPreviewHost({
@@ -25,7 +26,13 @@ export function MarkdownPreviewHost({
   renderMode,
   focused,
   onToggleRenderMode,
+  interactionMode = "block",
 }: MarkdownPreviewHostProps) {
+  const overlayRootClassName =
+    interactionMode === "overlay" ? "pointer-events-none" : "";
+  const overlayActionClassName =
+    interactionMode === "overlay" ? "pointer-events-auto" : "";
+
   const themeType = useEffectiveThemeType();
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -58,7 +65,7 @@ export function MarkdownPreviewHost({
   const summary = useMemo(() => excerpt.trim() || "Open preview to load markdown content.", [excerpt]);
 
   return (
-    <div className="h-full w-full overflow-hidden rounded-[20px] border border-ink/10 bg-surface-panel/95 text-ink/80 shadow-[0_16px_40px_rgba(18,24,33,0.08)]">
+    <div className={"h-full w-full overflow-hidden rounded-[20px] border border-ink/10 bg-surface-panel/95 text-ink/80 shadow-[0_16px_40px_rgba(18,24,33,0.08)] " + overlayRootClassName}>
       <div className="flex items-start justify-between gap-3 border-b border-ink/8 px-4 py-3">
         <div className="min-w-0">
           <div className="truncate text-body-sm font-medium text-ink/88">{title || "Markdown preview"}</div>
@@ -69,14 +76,14 @@ export function MarkdownPreviewHost({
           onClick={() => {
             void openPath(sourcePath).catch(() => {});
           }}
-          className="shrink-0 rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5"
+          className={"shrink-0 rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5 " + overlayActionClassName}
         >
           Open
         </button>
         <button
           type="button"
           onClick={() => onToggleRenderMode(renderMode === "preview" ? "summary" : "preview")}
-          className="shrink-0 rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5"
+          className={"shrink-0 rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5 " + overlayActionClassName}
         >
           {renderMode === "preview" ? "Summary" : "Preview"}
         </button>

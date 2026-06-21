@@ -660,3 +660,70 @@ body {
     animation-duration: 1ms;
   }
 }
+
+/*
+ * WKWebView (Tauri) edgeless canvas blur fix + 框选卡顿修复。
+ *
+ * 现象: Tauri(WKWebView) 里 canvas 节点部分超出视口被裁剪时整块发糊(浏览器正常);
+ * 把外层视口容器整体提升合成层能修糊, 但框选时选区/选中框 overlay 每帧弄脏那块
+ * 大 backing store -> 卡。
+ *
+ * 已确认机制: 该 WKWebView 把被裁剪的合成层用 1x 栅格化再放大 -> 糊。需要把"块"
+ * 放进一个稳定的大合成层, 但这个层不能同时包含每帧变化的选区/选中框 overlay,
+ * 否则 overlay 重绘会拖累整层。
+ *
+ * 方案: 只把 <gfx-viewport>(承载所有 gfx 块的容器) 提升为合成层。它与 surface
+ * canvas、选区矩形、选中框等 widget overlay 是兄弟节点, 不在同一层:
+ *  - 块在自己的全分辨率层里被裁剪也不降采样(不糊);
+ *  - 框选时 overlay 每帧重绘只动 overlay 自己, 不弄脏块层(不卡)。
+ */
+gfx-viewport,
+affine-edgeless-root gfx-viewport {
+  transform: translateZ(0);
+}
+
+/*
+ * WKWebView box-select perf workaround.
+ *
+ * 框选时临时禁用复杂 edgeless block 内部 DOM 的命中与原生文本选择，
+ * 避免 WebKit 在拖拽边缘扫过 note / portal cards 时反复做子树 hit-test。
+ */
+.sessio-box-selecting affine-edgeless-root .block-active,
+.sessio-box-selecting affine-edgeless-root .block-active * {
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+
+.sessio-box-selecting affine-edgeless-root affine-edgeless-note,
+.sessio-box-selecting affine-edgeless-root sessio-edgeless-file-card,
+.sessio-box-selecting affine-edgeless-root sessio-edgeless-markdown-preview,
+.sessio-box-selecting affine-edgeless-root sessio-edgeless-workflow-card,
+.sessio-box-selecting affine-edgeless-root affine-edgeless-note *,
+.sessio-box-selecting affine-edgeless-root sessio-edgeless-file-card *,
+.sessio-box-selecting affine-edgeless-root sessio-edgeless-markdown-preview *,
+.sessio-box-selecting affine-edgeless-root sessio-edgeless-workflow-card * {
+  pointer-events: none !important;
+}
+
+/*
+ * Overlay-driven custom cards: keep BlockSuite's custom block DOM as a pure
+ * geometry anchor so stale pre-overlay custom element content cannot leak
+ * through during Vite HMR or custom-element reuse.
+ */
+affine-edgeless-root sessio-edgeless-file-card > *:not([data-overlay-anchor]),
+affine-edgeless-root sessio-edgeless-markdown-preview > *:not([data-overlay-anchor]),
+affine-edgeless-root sessio-edgeless-workflow-card > *:not([data-overlay-anchor]) {
+  visibility: hidden !important;
+}
+
+/*
+ * Keep custom overlay cards below BlockSuite widgets (selected rect, marquee,
+ * drag handles) so native selection visuals always stay on top.
+ */
+affine-edgeless-root .edgeless-mount-point {
+  z-index: 0;
+}
+
+affine-edgeless-root .widgets-container {
+  z-index: 1;
+}

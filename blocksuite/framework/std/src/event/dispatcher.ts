@@ -160,11 +160,18 @@ export class UIEventDispatcher extends LifeCycleWatcher {
     this._clipboardControl.listen();
 
     let _dragging = false;
+    let _pointerEngaged = false;
     this.disposables.addFromEvent(this.host, 'pointerdown', () => {
+      _pointerEngaged = true;
       _dragging = true;
       this._setActive(true);
     });
     this.disposables.addFromEvent(this.host, 'pointerup', () => {
+      _pointerEngaged = false;
+      _dragging = false;
+    });
+    this.disposables.addFromEvent(this.host, 'pointercancel', () => {
+      _pointerEngaged = false;
       _dragging = false;
     });
     this.disposables.addFromEvent(this.host, 'click', () => {
@@ -174,6 +181,9 @@ export class UIEventDispatcher extends LifeCycleWatcher {
       this._setActive(true);
     });
     this.disposables.addFromEvent(document, 'focusout', e => {
+      if (_pointerEngaged || _dragging) {
+        return;
+      }
       if (e.relatedTarget && !this.host.contains(e.relatedTarget as Node)) {
         this._setActive(false);
       }
@@ -198,9 +208,11 @@ export class UIEventDispatcher extends LifeCycleWatcher {
       this._setActive(true);
     });
     this.disposables.addFromEvent(this.host, 'dragend', () => {
+      _pointerEngaged = false;
       _dragging = false;
     });
     this.disposables.addFromEvent(this.host, 'drop', () => {
+      _pointerEngaged = false;
       _dragging = false;
       this._setActive(true);
     });
@@ -230,6 +242,9 @@ export class UIEventDispatcher extends LifeCycleWatcher {
     });
     // When the selection is outside the host, the event dispatcher should be inactive
     this.disposables.addFromEvent(document, 'selectionchange', () => {
+      if (_pointerEngaged || _dragging) {
+        return;
+      }
       const sel = document.getSelection();
       if (!sel || sel.rangeCount === 0) return;
       const { anchorNode, focusNode } = sel;

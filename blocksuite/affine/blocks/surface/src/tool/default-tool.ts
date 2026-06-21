@@ -26,6 +26,8 @@ export enum DefaultModeDragType {
 export class DefaultTool extends BaseTool {
   static override toolName: string = 'default';
 
+  private readonly _boxSelectingClassName = 'sessio-box-selecting';
+
   private _edgeScrollingTimer: number | null = null;
 
   private readonly _clearDisposable = () => {
@@ -37,6 +39,7 @@ export class DefaultTool extends BaseTool {
 
   private readonly _clearSelectingState = () => {
     this._stopEdgeScrolling();
+    this.std.host.classList.remove(this._boxSelectingClassName);
     this._clearDisposable();
   };
 
@@ -73,7 +76,48 @@ export class DefaultTool extends BaseTool {
 
   private _toBeMoved: GfxModel[] = [];
 
-  private readonly _updateSelection = () => {
+  /**
+   * rAF id for coalescing box-selection hit-testing during a drag.
+   *
+   * WKWebView (Tauri) fires pointermove far more frequently than Chromium and
+   * does not coalesce them. Running the full hit-test + `selection.set()`
+   * (which re-renders the selected-rect widget) synchronously on every move
+   * stalls the box-select drag on WKWebView, while Chromium (AFFiNE/Electron)
+   * absorbs it. We keep the marquee rect update synchronous (cheap, so the box
+   * keeps tracking the cursor) and coalesce the expensive selection work into
+   * one rAF per frame.
+   */
+  private _boxSelectRafId: number | null = null;
+
+  private readonly _flushBoxSelection = () => {
+    this._boxSelectRafId = null;
+
+    const elements = this.interactivity?.handleBoxSelection({
+      box: this.controller.draggingArea$.peek(),
+    });
+
+    if (!elements) return;
+
+    this.selection.set({
+      elements: elements.map(el => el.id),
+      editing: false,
+    });
+  };
+
+  private _cancelBoxSelectionFlush() {
+    if (this._boxSelectRafId !== null) {
+      cancelAnimationFrame(this._boxSelectRafId);
+      this._boxSelectRafId = null;
+    }
+  }
+
+  /**
+   * Update the marquee rect synchronously every move, but throttle the
+   * expensive element hit-test + selection to one animation frame. `immediate`
+   * forces a synchronous flush (used on drag end so the final selection is
+   * exact and not lost to a cancelled rAF).
+   */
+  private readonly _updateSelection = (immediate = false) => {
     const { gfx } = this;
 
     if (gfx.keyboard.spaceKey$.peek() && this._spaceTranslationRect) {
@@ -95,16 +139,15 @@ export class DefaultTool extends BaseTool {
       };
     }
 
-    const elements = this.interactivity?.handleBoxSelection({
-      box: this.controller.draggingArea$.peek(),
-    });
+    if (immediate) {
+      this._cancelBoxSelectionFlush();
+      this._flushBoxSelection();
+      return;
+    }
 
-    if (!elements) return;
-
-    this.selection.set({
-      elements: elements.map(el => el.id),
-      editing: false,
-    });
+    if (this._boxSelectRafId === null) {
+      this._boxSelectRafId = requestAnimationFrame(this._flushBoxSelection);
+    }
   };
 
   dragType = DefaultModeDragType.None;
@@ -180,6 +223,7 @@ export class DefaultTool extends BaseTool {
     // If the drag type is selecting, set up the dragging area disposable group
     // If the viewport updates when dragging, should update the dragging area and selection
     if (this.dragType === DefaultModeDragType.Selecting) {
+      this.std.host.classList.add(this._boxSelectingClassName);
       this._disposables.add(
         this.gfx.viewport.viewportUpdated.subscribe(() => {
           if (
@@ -221,6 +265,7 @@ export class DefaultTool extends BaseTool {
 
   override deactivate() {
     this._stopEdgeScrolling();
+    this._cancelBoxSelectionFlush();
     this._clearDisposable();
   }
 
@@ -244,6 +289,13 @@ export class DefaultTool extends BaseTool {
     this.interactivity?.dispatchEvent('dragend', e);
 
     if (this.selection.editing || !this.movementDragging) return;
+
+    // Flush the final selection synchronously so the last frame's box isn't
+    // lost to a pending (and about-to-be-cancelled) rAF.
+    if (this.dragType === DefaultModeDragType.Selecting) {
+      this._updateSelection(true);
+    }
+    this._cancelBoxSelectionFlush();
 
     this.movementDragging = false;
     this._toBeMoved = [];
