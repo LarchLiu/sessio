@@ -207,7 +207,7 @@ export default function AppSidebar({
           }
         >
           <SquarePen className="h-4 w-4 shrink-0" />
-          <span className="truncate">{t("sidebar.new_chat")}</span>
+          <span className="flex min-w-0 items-center truncate leading-none">{t("sidebar.new_chat")}</span>
         </button>
         <button
           type="button"
@@ -220,7 +220,7 @@ export default function AppSidebar({
           }
         >
           <CalendarClock className="h-4 w-4 shrink-0" />
-          <span className="truncate">{t("sidebar.auto_tasks")}</span>
+          <span className="flex min-w-0 items-center truncate leading-none">{t("sidebar.auto_tasks")}</span>
         </button>
         <div className="shrink-0 flex flex-col gap-0.5">
           <div className="flex items-center gap-1">
