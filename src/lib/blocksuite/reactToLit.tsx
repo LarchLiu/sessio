@@ -1,10 +1,21 @@
-import { useCallback, type ReactNode } from "react";
-import { createRoot, type Root } from "react-dom/client";
 import { html, LitElement, type TemplateResult } from "lit";
+import { useCallback, useState, type ReactNode, type ReactPortal } from "react";
+import ReactDOM from "react-dom";
 
-type PortalListener = (target: LitReactPortal) => void;
+type PortalEvent = {
+  name: "connectedCallback" | "disconnectedCallback" | "willUpdate";
+  target: LitReactPortal;
+};
+
+type PortalListener = (event: PortalEvent) => void;
 
 type ElementOrFactory = ReactNode | (() => ReactNode);
+
+type LitPortalEntry = {
+  id: string;
+  portal: ReactPortal;
+  litElement: LitReactPortal;
+};
 
 function randomId() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -16,13 +27,12 @@ function randomId() {
 const LIT_REACT_PORTAL = "sessio-lit-react-portal";
 
 function createLitPortalAnchor(
-  portalId: string,
   elementOrFactory: ElementOrFactory,
   shouldRerender: boolean,
   notify: PortalListener,
 ) {
   return html`<sessio-lit-react-portal
-    .portalId=${portalId}
+    .portalId=${randomId()}
     .elementOrFactory=${elementOrFactory}
     .shouldRerender=${shouldRerender}
     .notify=${notify}
@@ -45,10 +55,6 @@ class LitReactPortal extends LitElement {
 
   declare notify: PortalListener | undefined;
 
-  private reactRoot: Root | null = null;
-
-  private lastRenderedFactory: ElementOrFactory | null = null;
-
   constructor() {
     super();
     this.portalId = "";
@@ -59,8 +65,20 @@ class LitReactPortal extends LitElement {
 
   override connectedCallback() {
     super.connectedCallback();
-    this.notify?.(this);
-    this.renderReactPortal();
+    this.notify?.({
+      name: "connectedCallback",
+      target: this,
+    });
+  }
+
+  override attributeChangedCallback(name: string, oldVal: string | null, newVal: string | null) {
+    super.attributeChangedCallback(name, oldVal, newVal);
+    if (name.toLowerCase() === "portalid") {
+      this.notify?.({
+        name: "willUpdate",
+        target: this,
+      });
+    }
   }
 
   override createRenderRoot() {
@@ -68,33 +86,18 @@ class LitReactPortal extends LitElement {
   }
 
   override updated() {
-    this.renderReactPortal();
+    this.notify?.({
+      name: "willUpdate",
+      target: this,
+    });
   }
 
   override disconnectedCallback() {
-    this.teardownReactPortal();
     super.disconnectedCallback();
-  }
-
-  renderReactPortal() {
-    const nextFactory = this.elementOrFactory;
-    if (!nextFactory) return;
-    if (!this.shouldRerender && this.reactRoot && this.lastRenderedFactory) {
-      return;
-    }
-    this.reactRoot ??= createRoot(this);
-    this.lastRenderedFactory = nextFactory;
-    const element =
-      typeof nextFactory === "function"
-        ? nextFactory()
-        : nextFactory;
-    this.reactRoot.render(element);
-  }
-
-  teardownReactPortal() {
-    this.lastRenderedFactory = null;
-    this.reactRoot?.unmount();
-    this.reactRoot = null;
+    this.notify?.({
+      name: "disconnectedCallback",
+      target: this,
+    });
   }
 }
 
@@ -114,17 +117,60 @@ export type ReactToLit = (
 ) => TemplateResult;
 
 export function useReactToLitBridge() {
+  const [portals, setPortals] = useState<LitPortalEntry[]>([]);
+
   const reactToLit = useCallback<ReactToLit>((elementOrFactory, rerendering = false) => {
-    const portalId = randomId();
     return createLitPortalAnchor(
-      portalId,
       elementOrFactory,
       rerendering,
-      (target) => {
-        target.renderReactPortal();
+      (event) => {
+        setPortals((currentPortals) => {
+          const { name, target } = event;
+          const id = target.portalId;
+          const nextElement = target.elementOrFactory;
+          let nextPortals = currentPortals;
+
+          const updatePortals = () => {
+            if (!nextElement) {
+              return;
+            }
+
+            const element =
+              typeof nextElement === "function"
+                ? nextElement()
+                : nextElement;
+            const existingIndex = currentPortals.findIndex(
+              (entry) => entry.litElement === target,
+            );
+            const insertIndex = existingIndex === -1 ? currentPortals.length : existingIndex;
+
+            nextPortals = currentPortals.toSpliced(insertIndex, 1, {
+              id,
+              portal: ReactDOM.createPortal(element, target),
+              litElement: target,
+            });
+          };
+
+          switch (name) {
+            case "connectedCallback":
+              updatePortals();
+              break;
+            case "disconnectedCallback":
+              nextPortals = currentPortals.filter((entry) => entry.litElement.isConnected);
+              break;
+            case "willUpdate":
+              if (!target.isConnected || !rerendering) {
+                break;
+              }
+              updatePortals();
+              break;
+          }
+
+          return nextPortals;
+        });
       },
     );
   }, []);
 
-  return [reactToLit, []] as const;
+  return [reactToLit, portals] as const;
 }

@@ -1,5 +1,5 @@
-import type { GfxElementGeometry, GfxCompatibleProps } from "@blocksuite/block-std/gfx";
-import { GfxCompatible } from "@blocksuite/block-std/gfx";
+import type { GfxElementGeometry, GfxCompatibleProps } from "@blocksuite/std/gfx";
+import { GfxCompatible } from "@blocksuite/std/gfx";
 import { defineBlockSchema, BlockModel } from "@blocksuite/store";
 
 export interface FileCardBlockProps extends GfxCompatibleProps {
@@ -45,7 +45,22 @@ const FileCardBlockBase = GfxCompatible<
 
 export class FileCardBlockModel
   extends FileCardBlockBase
-  implements GfxElementGeometry {}
+  implements GfxElementGeometry
+{
+  declare title: string;
+
+  declare sourcePath: string;
+
+  declare sourceType: string;
+
+  declare subtitle: string;
+
+  declare summary: string;
+
+  declare status: string;
+
+  declare contentVersion: string;
+}
 
 declare global {
   namespace BlockSuite {

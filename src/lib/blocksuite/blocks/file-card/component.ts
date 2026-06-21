@@ -1,5 +1,5 @@
 import { createElement } from "react";
-import { BlockComponent, toGfxBlockComponent } from "@blocksuite/block-std";
+import { BlockComponent, toGfxBlockComponent } from "@blocksuite/std";
 import { html } from "lit";
 import { classMap } from "lit/directives/class-map.js";
 import { styleMap } from "lit/directives/style-map.js";
@@ -8,7 +8,7 @@ import type { FileCardBlockModel } from "./model";
 import { FileCardHost } from "./host";
 
 class FileCardPageComponent extends BlockComponent<FileCardBlockModel> {
-  blockDraggable = true;
+  blockDraggable = false;
 
   protected containerStyleMap = styleMap({
     position: "relative",
@@ -22,7 +22,7 @@ class FileCardPageComponent extends BlockComponent<FileCardBlockModel> {
   }
 
   override renderBlock() {
-    const selected = Boolean(this.selected?.is("block") || this.selected?.is("surface"));
+    const selected = this.selected$.value;
     const bridge = getBlockSuitePortalBridge();
     const content = bridge
       ? bridge.reactToLit(

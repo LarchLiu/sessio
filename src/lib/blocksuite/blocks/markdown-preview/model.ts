@@ -1,5 +1,5 @@
-import type { GfxElementGeometry, GfxCompatibleProps } from "@blocksuite/block-std/gfx";
-import { GfxCompatible } from "@blocksuite/block-std/gfx";
+import type { GfxElementGeometry, GfxCompatibleProps } from "@blocksuite/std/gfx";
+import { GfxCompatible } from "@blocksuite/std/gfx";
 import { defineBlockSchema, BlockModel } from "@blocksuite/store";
 
 export type MarkdownPreviewRenderMode = "summary" | "preview";
@@ -49,7 +49,24 @@ const MarkdownPreviewBlockBase = GfxCompatible<
 
 export class MarkdownPreviewBlockModel
   extends MarkdownPreviewBlockBase
-  implements GfxElementGeometry {}
+  implements GfxElementGeometry
+{
+  declare title: string;
+
+  declare sourcePath: string;
+
+  declare sourceType: string;
+
+  declare excerpt: string;
+
+  declare renderMode: MarkdownPreviewRenderMode;
+
+  declare collapsed: boolean;
+
+  declare contentVersion: string;
+
+  declare cachedContent: string;
+}
 
 declare global {
   namespace BlockSuite {

@@ -1,0 +1,50 @@
+{
+  "name": "@blocksuite/data-view",
+  "description": "Views of database in affine",
+  "type": "module",
+  "scripts": {
+    "build": "tsc"
+  },
+  "sideEffects": false,
+  "keywords": [],
+  "author": "toeverything",
+  "license": "MIT",
+  "dependencies": {
+    "@blocksuite/affine-components": "workspace:*",
+    "@blocksuite/affine-shared": "workspace:*",
+    "@blocksuite/global": "workspace:*",
+    "@blocksuite/icons": "^2.2.17",
+    "@blocksuite/std": "workspace:*",
+    "@blocksuite/store": "workspace:*",
+    "@emotion/css": "^11.13.5",
+    "@emotion/hash": "^0.9.2",
+    "@floating-ui/dom": "^1.6.13",
+    "@preact/signals-core": "^1.8.0",
+    "@toeverything/theme": "^1.1.23",
+    "@types/lodash-es": "^4.17.12",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.0.0",
+    "lit": "^3.2.0",
+    "lodash-es": "^4.17.23",
+    "yjs": "^13.6.27",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.8"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./property-presets": "./src/property-presets/index.ts",
+    "./property-pure-presets": "./src/property-presets/pure-index.ts",
+    "./view-presets": "./src/view-presets/index.ts",
+    "./widget-presets": "./src/widget-presets/index.ts",
+    "./effects": "./src/effects.ts"
+  },
+  "files": [
+    "src",
+    "dist",
+    "!src/__tests__",
+    "!dist/__tests__"
+  ],
+  "version": "0.26.3"
+}

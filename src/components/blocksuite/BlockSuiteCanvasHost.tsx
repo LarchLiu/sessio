@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { addImages, addNoteAtPoint, EdgelessRootService, ExportManager, NoteDisplayMode, type GroupElementModel } from "@blocksuite/blocks";
-import { Bound } from "@blocksuite/global/utils";
+import { addImages } from "@blocksuite/affine/blocks/image";
+import { EdgelessRootService } from "@blocksuite/affine/blocks/root";
+import { ExportManager, type SurfaceElementModel } from "@blocksuite/affine/blocks/surface";
+import { NoteDisplayMode, type GroupElementModel, DEFAULT_NOTE_HEIGHT, DEFAULT_NOTE_WIDTH } from "@blocksuite/affine/model";
+import { createGroupFromSelectedCommand, ungroupCommand } from "@blocksuite/affine/gfx/group";
+import { Bound, serializeXYWH } from "@blocksuite/global/gfx";
+import { GfxControllerIdentifier, type GfxBlockElementModel } from "@blocksuite/std/gfx";
 import { createPortal } from "react-dom";
-import { ArrowUpRight, Camera, Check, FileImage, FilePlus2, FolderOpen, Layers3, LoaderCircle, MessageCircleQuestionMark, MessagesSquare, RefreshCcw, Save, StickyNote, Workflow, X } from "lucide-react";
+import { Camera, Check, FileImage, FilePlus2, FolderOpen, Layers3, LoaderCircle, MessageCircleQuestionMark, RefreshCcw, Save, StickyNote, Workflow, X } from "lucide-react";
 import type { ComposerAttachment } from "../ComposerAttachments";
 import PopupMenu, { type PopupMenuOption } from "../PopupMenu";
 import ScrollArea from "../ScrollArea";
@@ -35,7 +40,6 @@ import {
   exportDocSnapshot,
   importDocSnapshot,
 } from "./bootstrap";
-import BlockSuiteDocPreview from "./BlockSuiteDocPreview";
 import { PortalHost } from "./portalHost";
 import { useReactToLitBridge } from "../../lib/blocksuite/reactToLit";
 import { setBlockSuitePortalBridge } from "../../lib/blocksuite/portalBridge";
@@ -73,6 +77,12 @@ type CanvasSelectionContext = {
 type BlockSuiteEditor = HTMLElement & {
   std?: {
     get?: <T>(token: unknown) => T;
+    command?: {
+      exec: <TArgs extends object, TResult extends object>(
+        command: unknown,
+        args?: TArgs,
+      ) => [boolean, TResult];
+    };
     getService?: <T>(flavour: string) => T | null;
     host?: HTMLElement & {
       view?: {
@@ -98,6 +108,13 @@ type EdgelessSelectable = {
   flavour?: string;
 };
 
+type GfxControllerLike = {
+  viewport: {
+    toViewCoord: (x: number, y: number) => [number, number];
+    toModelCoord: (x: number, y: number) => [number, number];
+  };
+};
+
 export interface BlockSuiteCanvasHostProps {
   sessionId: string;
   sessionAgent: Agent;
@@ -119,6 +136,40 @@ export interface BlockSuiteCanvasHostProps {
 function snapshotToJson(doc: ReturnType<typeof createBlockSuiteDoc>["doc"]) {
   const snapshot = exportDocSnapshot(doc);
   return snapshot ? JSON.stringify(snapshot) : null;
+}
+
+function addEdgelessNote(
+  rootService: EdgelessRootService,
+  editor: BlockSuiteEditor,
+) {
+  const std = editor.std;
+  if (!std) {
+    throw new Error("Canvas editor context is not ready.");
+  }
+
+  const gfx = std.get?.<GfxControllerLike>(GfxControllerIdentifier);
+  const crud = rootService.crud;
+  if (!gfx || !crud) {
+    throw new Error("Canvas drawing services are not ready.");
+  }
+
+  const center = rootService.viewport.center;
+  const [viewX, viewY] = gfx.viewport.toViewCoord(center.x, center.y);
+  const [modelX, modelY] = gfx.viewport.toModelCoord(viewX, viewY);
+
+  return crud.addBlock(
+    "affine:note",
+    {
+      xywh: serializeXYWH(
+        modelX - DEFAULT_NOTE_WIDTH / 2,
+        modelY - DEFAULT_NOTE_HEIGHT / 2,
+        DEFAULT_NOTE_WIDTH,
+        DEFAULT_NOTE_HEIGHT,
+      ),
+      displayMode: NoteDisplayMode.EdgelessOnly,
+    },
+    rootService.surface.id,
+  );
 }
 
 export default function BlockSuiteCanvasHost({
@@ -154,12 +205,9 @@ export default function BlockSuiteCanvasHost({
   const [isReady, setIsReady] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [selectionCount, setSelectionCount] = useState(0);
-  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
-  const [selectedBlockMeta, setSelectedBlockMeta] = useState<Record<string, unknown> | null>(null);
-  const [anchors, setAnchors] = useState(initialState.anchors);
+  const [canUngroupSelection, setCanUngroupSelection] = useState(false);
   const [blockRecords, setBlockRecords] = useState(initialState.blockRecords);
   const [bridgeBusy, setBridgeBusy] = useState<null | "ask" | "snapshot" | "workflow">(null);
-  const [workflowRunState, setWorkflowRunState] = useState<null | { status: string; runId: string; threadId: string | null }>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [editedFilesPickerOpen, setEditedFilesPickerOpen] = useState(false);
   const [pendingEditedFiles, setPendingEditedFiles] = useState<string[]>([]);
@@ -181,7 +229,6 @@ export default function BlockSuiteCanvasHost({
   useEffect(() => {
     latestStateRef.current = initialState;
     blockRecordsRef.current = initialState.blockRecords;
-    setAnchors(initialState.anchors);
     setBlockRecords(initialState.blockRecords);
   }, [initialState]);
 
@@ -218,31 +265,24 @@ export default function BlockSuiteCanvasHost({
     if (!rootService.surface) {
       throw new Error("Canvas surface is not ready");
     }
-    return rootService.addBlock(flavour, props, rootService.surface);
+    return rootService.crud.addBlock(flavour, props, rootService.surface.id);
   }, [getRootService]);
 
   const updateSelectionState = useCallback(() => {
     const rootService = getRootService();
     if (!rootService) {
       setSelectionCount(0);
-      setSelectedBlockId(null);
-      setSelectedBlockMeta(null);
-      setWorkflowRunState(null);
+      setCanUngroupSelection(false);
       return;
     }
     const selectedIds = rootService.selection.selectedIds ?? [];
     setSelectionCount(selectedIds.length);
-    const selectedId = selectedIds[0] ?? null;
-    setSelectedBlockId(selectedId);
-    if (!selectedId) {
-      setSelectedBlockMeta(null);
-      setWorkflowRunState(null);
-      return;
-    }
-    const nextMeta = readCanvasMeta(selectedId, getDoc(), blockRecordsRef.current);
-    setSelectedBlockMeta(nextMeta);
-    setWorkflowRunState(readWorkflowRunState(nextMeta));
-  }, [getDoc, getRootService]);
+    const selectedElement =
+      selectedIds.length === 1
+        ? (rootService.selection.selectedElements[0] as SelectionElementLike | undefined)
+        : undefined;
+    setCanUngroupSelection(selectedIds.length === 1 && selectedElement?.type === "group");
+  }, [getRootService]);
 
   const finishCanvasInitialization = useCallback(async (nextStatus: string) => {
     if (!getRootService()) {
@@ -344,16 +384,24 @@ export default function BlockSuiteCanvasHost({
     host.replaceChildren(editor);
     blockUpdatedDisposeRef.current?.dispose();
     selectionUpdatedDisposeRef.current?.dispose();
-    blockUpdatedDisposeRef.current = doc.slots.blockUpdated.on(() => {
-      scheduleAutosave(doc);
-    });
+    {
+      const subscription = doc.slots.blockUpdated.subscribe(() => {
+        scheduleAutosave(doc);
+      });
+      blockUpdatedDisposeRef.current = {
+        dispose: () => subscription.unsubscribe(),
+      };
+    }
     window.requestAnimationFrame(() => {
       void waitForRootService().then((rootService) => {
         if (!rootService || docRef.current !== doc) return;
         selectionUpdatedDisposeRef.current?.dispose();
-        selectionUpdatedDisposeRef.current = rootService.selection.slots.updated.on(() => {
+        const subscription = rootService.selection.slots.updated.subscribe(() => {
           updateSelectionState();
         });
+        selectionUpdatedDisposeRef.current = {
+          dispose: () => subscription.unsubscribe(),
+        };
         updateSelectionState();
       });
       scheduleSyncBlocks();
@@ -440,7 +488,7 @@ export default function BlockSuiteCanvasHost({
             xywh: bound.serialize(),
           },
         );
-        const inserted = doc.getBlockById(blockId);
+        const inserted = doc.getModelById(blockId);
         if (!inserted || inserted.flavour !== "sessio:file-card") {
           throw new Error(`BlockSuite did not retain inserted file card ${blockId}.`);
         }
@@ -477,11 +525,10 @@ export default function BlockSuiteCanvasHost({
     const rootService = getRootService();
     const editor = getEditor();
     if (!rootService || !editor) return;
-    const [x, y] = rootService.viewport.toViewCoord(rootService.viewport.center.x, rootService.viewport.center.y);
-    const noteId = addNoteAtPoint(editor.std as never, { x, y });
+    const noteId = addEdgelessNote(rootService, editor);
     const doc = getDoc();
     if (!doc) return;
-    const note = doc.getBlockById(noteId);
+    const note = doc.getModelById(noteId);
     if (note) {
       doc.updateBlock(note, {
         displayMode: NoteDisplayMode.EdgelessOnly,
@@ -513,7 +560,7 @@ export default function BlockSuiteCanvasHost({
           type: blob.type || "image/png",
         });
       }));
-      await addImages(editor.std as never, files);
+      await addImages(editor.std as never, files, {});
       scheduleSyncBlocks();
     } catch (error) {
       onError(`Failed to add image node: ${String(error)}`);
@@ -552,25 +599,27 @@ export default function BlockSuiteCanvasHost({
 
   const groupSelection = useCallback(() => {
     const rootService = getRootService();
-    if (!rootService || rootService.selection.selectedElements.length < 2) return;
-    rootService.createGroupFromSelected();
+    const editor = getEditor();
+    if (!rootService || !editor?.std?.command || rootService.selection.selectedElements.length < 2) return;
+    editor.std.command.exec(createGroupFromSelectedCommand);
     scheduleSyncBlocks();
-  }, [getRootService, scheduleSyncBlocks]);
+  }, [getEditor, getRootService, scheduleSyncBlocks]);
 
   const ungroupSelection = useCallback(() => {
     const rootService = getRootService();
-    if (!rootService || rootService.selection.selectedElements.length !== 1) return;
+    const editor = getEditor();
+    if (!rootService || !editor?.std?.command || rootService.selection.selectedElements.length !== 1) return;
     const selected = rootService.selection.selectedElements[0] as SelectionElementLike | undefined;
     if (!selected || selected.type !== "group") return;
-    rootService.ungroup(selected as unknown as GroupElementModel);
+    editor.std.command.exec(ungroupCommand, { group: selected as unknown as GroupElementModel });
     scheduleSyncBlocks();
-  }, [getRootService, scheduleSyncBlocks]);
+  }, [getEditor, getRootService, scheduleSyncBlocks]);
 
   const promoteFileCardToMarkdown = useCallback((blockId: string) => {
     const doc = getDoc();
     const rootService = getRootService();
     if (!doc || !rootService) return;
-    const model = doc.getBlockById(blockId) as FileCardBlockModel | null;
+    const model = doc.getModelById(blockId) as FileCardBlockModel | null;
     if (!model) return;
     const bound = Bound.deserialize(model.xywh);
     const nextWidth = Math.max(bound.w, 420);
@@ -597,7 +646,7 @@ export default function BlockSuiteCanvasHost({
   const runWorkflowBlock = useCallback(async (blockId: string) => {
     const doc = getDoc();
     if (!doc) return;
-    const model = doc.getBlockById(blockId) as WorkflowCardBlockModel | null;
+    const model = doc.getModelById(blockId) as WorkflowCardBlockModel | null;
     const threadId = model?.threadId?.trim() || "";
     if (!model || !threadId) {
       onError("This workflow card is not linked to a thread workflow.");
@@ -610,12 +659,6 @@ export default function BlockSuiteCanvasHost({
         status: "running",
       });
       const run = await createAstraRun(threadId, composer.text.trim() || null);
-      const nextRunState = {
-        status: run.status,
-        runId: run.runId,
-        threadId,
-      };
-      setWorkflowRunState(nextRunState);
       doc.updateBlock(model, {
         executionState: run.status,
         lastRunId: run.runId,
@@ -636,7 +679,7 @@ export default function BlockSuiteCanvasHost({
 
   const openWorkflowThread = useCallback((blockId: string) => {
     const doc = getDoc();
-    const model = doc?.getBlockById(blockId) as WorkflowCardBlockModel | null;
+    const model = doc?.getModelById(blockId) as WorkflowCardBlockModel | null;
     const targetThreadId = model?.threadId?.trim() || sessionThreadId || "";
     if (!targetThreadId) {
       onError("This workflow card is not linked to a thread workflow yet.");
@@ -655,7 +698,7 @@ export default function BlockSuiteCanvasHost({
       workspacePath,
       updateBlock: (blockId, props) => {
         const doc = getDoc();
-        const model = doc?.getBlockById(blockId) ?? null;
+        const model = doc?.getModelById(blockId) ?? null;
         if (!doc || !model) return;
         doc.updateBlock(model, props);
         scheduleSyncBlocks();
@@ -887,13 +930,14 @@ export default function BlockSuiteCanvasHost({
     if (bounds.length === 0) return null;
     const common = bounds.reduce((current: Bound, next: Bound) => current.unite(next));
     const exportManager = editor.std?.get?.(ExportManager) as ExportManager | null;
+    const gfx = editor.std?.get?.(GfxControllerIdentifier) as GfxControllerLike | undefined;
     const rootHost = editor.std?.host?.querySelector?.("affine-edgeless-root") as {
       surface?: { renderer?: unknown };
     } | null;
-    if (!exportManager || !rootHost?.surface?.renderer) return null;
-    const blocks = selected.filter((item: EdgelessSelectable) => "flavour" in item) as BlockSuite.EdgelessBlockModelType[];
-    const shapes = selected.filter((item: EdgelessSelectable) => !("flavour" in item)) as BlockSuite.SurfaceModel[];
-    const canvas = await exportManager.edgelessToCanvas(rootHost.surface.renderer as never, common, undefined, blocks, shapes, {
+    if (!exportManager || !rootHost?.surface?.renderer || !gfx) return null;
+    const blocks = selected.filter((item: EdgelessSelectable) => "flavour" in item) as GfxBlockElementModel[];
+    const shapes = selected.filter((item: EdgelessSelectable) => !("flavour" in item)) as SurfaceElementModel[];
+    const canvas = await exportManager.edgelessToCanvas(rootHost.surface.renderer as never, common, gfx as never, blocks, shapes, {
       zoom: rootService.viewport.zoom,
     });
     if (!canvas) return null;
@@ -1076,7 +1120,6 @@ export default function BlockSuiteCanvasHost({
         turnId,
         summary: payload.refs.map((ref) => ref.title).join(", ").slice(0, 180),
       });
-      setAnchors((current) => [anchor, ...current]);
       const nextState = {
         ...latestStateRef.current,
         anchors: [anchor, ...latestStateRef.current.anchors],
@@ -1111,13 +1154,6 @@ export default function BlockSuiteCanvasHost({
     window.addEventListener(CANVAS_ADD_FILES_EVENT, handleCanvasAddFiles);
     return () => window.removeEventListener(CANVAS_ADD_FILES_EVENT, handleCanvasAddFiles);
   }, [addFileCards, sessionId]);
-
-  const canOpenWorkflowThread = Boolean(
-    onOpenThreadMultiSessionChat && (
-      (selectedBlockMeta && typeof selectedBlockMeta.threadId === "string" && selectedBlockMeta.threadId.trim()) ||
-      sessionThreadId
-    ),
-  );
 
   return (
     <div className="absolute inset-0 flex min-h-0 flex-col">
@@ -1176,7 +1212,7 @@ export default function BlockSuiteCanvasHost({
           <button
             type="button"
             onClick={ungroupSelection}
-            disabled={selectionCount !== 1 || selectedBlockMeta?.kind !== "group"}
+            disabled={!canUngroupSelection}
             className="inline-flex h-6 items-center rounded-md border border-ink/10 px-2.5 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Ungroup
@@ -1211,124 +1247,6 @@ export default function BlockSuiteCanvasHost({
         </div>
       )}
       <div ref={hostRef} className="min-h-0 flex-1" />
-      {(selectedBlockMeta || anchors.length > 0) && (
-        <aside className="absolute right-4 top-16 z-20 w-[280px] rounded-2xl border border-ink/10 bg-surface-panel/95 p-3 shadow-lg backdrop-blur">
-          <div className="text-caption uppercase tracking-wide text-ink/38">Inspector</div>
-          {selectedBlockMeta ? (
-            <div className="mt-3 space-y-2 text-body-sm text-ink/72">
-              <div>
-                <div className="text-caption text-ink/40">Type</div>
-                <div>{String(selectedBlockMeta.kind ?? "note")}</div>
-              </div>
-              <div>
-                <div className="text-caption text-ink/40">Title</div>
-                <div>{String(selectedBlockMeta.title ?? "Untitled")}</div>
-              </div>
-              {typeof selectedBlockMeta.sourcePath === "string" && (
-                <div>
-                  <div className="text-caption text-ink/40">Source</div>
-                  <div className="break-all">{selectedBlockMeta.sourcePath}</div>
-                </div>
-              )}
-              {typeof selectedBlockMeta.threadId === "string" && (
-                <div>
-                  <div className="text-caption text-ink/40">Thread link</div>
-                  <div className="break-all">{selectedBlockMeta.threadId}</div>
-                </div>
-              )}
-              {typeof selectedBlockMeta.threadStageId === "string" && (
-                <div>
-                  <div className="text-caption text-ink/40">Stage link</div>
-                  <div className="break-all">{selectedBlockMeta.threadStageId}</div>
-                </div>
-              )}
-              {selectedBlockMeta.kind === "workflow_card" && (
-                <div className="rounded-xl border border-ink/8 bg-ink/[0.03] px-2.5 py-2 text-caption text-ink/58">
-                  Canvas keeps the workflow mirror and latest run pointer here. Replay and execution details stay in multi-session chat.
-                </div>
-              )}
-              {selectedBlockMeta.kind === "workflow_card" && typeof selectedBlockMeta.workflowSummaryMarkdown === "string" && selectedBlockMeta.workflowSummaryMarkdown.trim() && (
-                <BlockSuiteDocPreview
-                  markdown={selectedBlockMeta.workflowSummaryMarkdown}
-                  title={String(selectedBlockMeta.title ?? "Workflow")}
-                  emptyState="Workflow summary has not been materialized yet."
-                />
-              )}
-              {selectedBlockMeta.kind === "workflow_card" && selectedBlockId && (
-                <div className="flex flex-wrap gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => void runWorkflowBlock(selectedBlockId)}
-                    disabled={bridgeBusy !== null || typeof selectedBlockMeta.threadId !== "string"}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-ink/10 px-3 py-1.5 text-caption text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    <Workflow className="h-3.5 w-3.5" />
-                    Run workflow
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => openWorkflowThread(selectedBlockId)}
-                    disabled={bridgeBusy !== null || !canOpenWorkflowThread}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-ink/10 px-3 py-1.5 text-caption text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    <MessagesSquare className="h-3.5 w-3.5" />
-                    Open thread chat
-                  </button>
-                </div>
-              )}
-              {workflowRunState && (
-                <div>
-                  <div className="text-caption text-ink/40">Latest run</div>
-                  <div>{workflowRunState.status}</div>
-                  <div className="break-all text-caption text-ink/45">{workflowRunState.runId}</div>
-                  {workflowRunState.threadId && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (selectedBlockId) openWorkflowThread(selectedBlockId);
-                      }}
-                      className="mt-2 inline-flex items-center gap-1 text-caption text-ink/55 transition hover:text-ink/72"
-                    >
-                      <ArrowUpRight className="h-3.5 w-3.5" />
-                      Inspect full thread activity
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="mt-3 text-body-sm text-ink/48">
-              Select a block to inspect its source metadata.
-            </div>
-          )}
-          {anchors.length > 0 && (
-            <div className="mt-4 border-t border-ink/8 pt-3">
-              <div className="text-caption uppercase tracking-wide text-ink/38">Recent anchors</div>
-              <div className="mt-2 space-y-2">
-                {anchors.slice(0, 4).map((anchor) => (
-                  <div
-                    key={anchor.id}
-                    className={
-                      "rounded-xl border px-2.5 py-2 text-caption " +
-                      (anchor.anchorBlockId && anchor.anchorBlockId === selectedBlockId
-                        ? "border-ink/16 bg-ink/[0.05] text-ink/72"
-                        : "border-ink/8 bg-ink/[0.03] text-ink/65")
-                    }
-                  >
-                    <div className="font-medium text-ink/72">{anchor.summary ?? "Canvas anchor"}</div>
-                    <div className="mt-1 break-all text-ink/45">Turn: {anchor.turnId}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </aside>
-      )}
-      {!selectedBlockMeta && anchors.length === 0 && (
-        <div className="pointer-events-none absolute right-4 top-16 z-10 w-[260px] rounded-2xl border border-dashed border-ink/10 bg-surface-panel/70 p-3 text-caption text-ink/42 backdrop-blur">
-          Select a block to inspect metadata, trigger workflow actions, or review anchors after sending a canvas selection.
-        </div>
-      )}
       {addMenuOpen && addMenuButtonRef.current && (
         <PopupMenu
           anchor={addMenuButtonRef.current}
@@ -1404,7 +1322,7 @@ function focusBlocksInViewport(
   blockIds: string[],
 ) {
   const bounds = blockIds
-    .map((blockId) => doc.getBlockById(blockId) as { xywh?: string } | null)
+    .map((blockId) => doc.getModelById(blockId) as { xywh?: string } | null)
     .map((model) => (model?.xywh ? Bound.deserialize(model.xywh) : null))
     .filter((bound): bound is Bound => Boolean(bound));
   if (bounds.length === 0) return;
@@ -1477,7 +1395,7 @@ function readCanvasMeta(
   doc: ReturnType<typeof createBlockSuiteDoc>["doc"] | null,
   blockRecords: CanvasBlockRecord[],
 ): Record<string, unknown> | null {
-  const model = doc?.getBlockById(blockId) as (Record<string, unknown> & { flavour?: string }) | null;
+  const model = doc?.getModelById(blockId) as (Record<string, unknown> & { flavour?: string; caption?: string }) | null;
   if (model) {
     if (model.flavour === "sessio:markdown-preview") {
       return {

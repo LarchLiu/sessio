@@ -1,3 +1,20 @@
 allowBuilds:
   core-js: false
   esbuild: true
+  msw: false
+packages:
+  - blocksuite/framework/*
+  - blocksuite/affine/all
+  - blocksuite/affine/blocks/*
+  - blocksuite/affine/components
+  - blocksuite/affine/data-view
+  - blocksuite/affine/ext-loader
+  - blocksuite/affine/foundation
+  - blocksuite/affine/fragments/*
+  - blocksuite/affine/gfx/*
+  - blocksuite/affine/inlines/*
+  - blocksuite/affine/model
+  - blocksuite/affine/rich-text
+  - blocksuite/affine/shared
+  - blocksuite/affine/widgets/*
+  - blocksuite/integration-test

@@ -1,0 +1,33 @@
+{
+  "name": "@blocksuite/affine-model",
+  "description": "Models for BlockSuite in Affine.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc"
+  },
+  "sideEffects": false,
+  "keywords": [],
+  "author": "toeverything",
+  "license": "MIT",
+  "dependencies": {
+    "@blocksuite/global": "workspace:*",
+    "@blocksuite/std": "workspace:*",
+    "@blocksuite/store": "workspace:*",
+    "@toeverything/theme": "^1.1.23",
+    "@types/lodash-es": "^4.17.12",
+    "fractional-indexing": "^3.2.0",
+    "lodash-es": "^4.17.23",
+    "yjs": "^13.6.27",
+    "zod": "^3.25.76"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "dist",
+    "!src/__tests__",
+    "!dist/__tests__"
+  ],
+  "version": "0.26.3"
+}

@@ -1,5 +1,5 @@
-import type { GfxElementGeometry, GfxCompatibleProps } from "@blocksuite/block-std/gfx";
-import { GfxCompatible } from "@blocksuite/block-std/gfx";
+import type { GfxElementGeometry, GfxCompatibleProps } from "@blocksuite/std/gfx";
+import { GfxCompatible } from "@blocksuite/std/gfx";
 import { defineBlockSchema, BlockModel } from "@blocksuite/store";
 
 export interface WorkflowCardBlockProps extends GfxCompatibleProps {
@@ -51,7 +51,28 @@ const WorkflowCardBlockBase = GfxCompatible<
 
 export class WorkflowCardBlockModel
   extends WorkflowCardBlockBase
-  implements GfxElementGeometry {}
+  implements GfxElementGeometry
+{
+  declare title: string;
+
+  declare threadId: string;
+
+  declare threadStageId: string;
+
+  declare sourceType: string;
+
+  declare workflowSummaryMarkdown: string;
+
+  declare executionState: string;
+
+  declare lastRunId: string;
+
+  declare workflowSnapshotJson: string;
+
+  declare threadGoal: string;
+
+  declare status: string;
+}
 
 declare global {
   namespace BlockSuite {

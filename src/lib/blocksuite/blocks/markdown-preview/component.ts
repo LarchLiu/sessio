@@ -1,14 +1,14 @@
 import { createElement } from "react";
 import type { MarkdownPreviewBlockModel } from "./model";
 import { MarkdownPreviewHost } from "./host";
-import { BlockComponent, toGfxBlockComponent } from "@blocksuite/block-std";
+import { BlockComponent, toGfxBlockComponent } from "@blocksuite/std";
 import { html } from "lit";
 import { classMap } from "lit/directives/class-map.js";
 import { styleMap } from "lit/directives/style-map.js";
 import { getBlockSuitePortalBridge } from "../../portalBridge";
 
 class MarkdownPreviewPageComponent extends BlockComponent<MarkdownPreviewBlockModel> {
-  blockDraggable = true;
+  blockDraggable = false;
 
   protected containerStyleMap = styleMap({
     position: "relative",
@@ -22,7 +22,7 @@ class MarkdownPreviewPageComponent extends BlockComponent<MarkdownPreviewBlockMo
   }
 
   override renderBlock() {
-    const selected = Boolean(this.selected?.is("block") || this.selected?.is("surface"));
+    const selected = this.selected$.value;
     const title = this.model.title || "Markdown preview";
     const path = this.model.sourcePath || "";
     const excerpt = this.model.excerpt || "";

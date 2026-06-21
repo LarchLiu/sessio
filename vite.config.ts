@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { vanillaExtractPlugin } from "@vanilla-extract/vite-plugin";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import pkg from "./package.json" with { type: "json" };
@@ -62,9 +63,13 @@ function blockSuiteIconsCompatPlugin() {
 }
 
 export default defineConfig(async () => ({
-  plugins: [blockSuiteIconsCompatPlugin(), react()],
+  plugins: [blockSuiteIconsCompatPlugin(), vanillaExtractPlugin(), react()],
   clearScreen: false,
+  esbuild: {
+    target: "es2022",
+  },
   optimizeDeps: {
+    entries: ["index.html"],
     esbuildOptions: {
       plugins: [
         {
@@ -97,5 +102,8 @@ export default defineConfig(async () => ({
       ? { protocol: "ws", host, port: 1421 }
       : undefined,
     watch: { ignored: ["**/src-tauri/**"] },
+  },
+  build: {
+    target: "es2022",
   },
 }));
