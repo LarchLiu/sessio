@@ -129,7 +129,7 @@ export function MarkdownPreviewHost({
       {shouldLoadPreview && (
         <div
           className={
-            "h-[calc(100%-57px)] overflow-auto overscroll-contain px-4 py-3 " +
+            "flex h-[calc(100%-57px)] min-h-0 overflow-hidden overscroll-contain px-4 py-3 " +
             overlayContentClassName
           }
         >

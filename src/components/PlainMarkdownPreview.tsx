@@ -206,10 +206,12 @@ export default function PlainMarkdownPreview({
   text,
   filePath = null,
   interactionMode = "default",
+  persistScrollbars = false,
 }: {
   text: string;
   filePath?: string | null;
   interactionMode?: "default" | "thumbs-only" | "capture-wheel";
+  persistScrollbars?: boolean;
 }) {
   const themeType = useEffectiveThemeType();
   const components = useMemo(
@@ -221,7 +223,7 @@ export default function PlainMarkdownPreview({
     <ScrollArea
       className="sessio-plain-editor-preview min-h-0 flex-1"
       viewportClassName="sessio-plain-editor-preview-viewport"
-      persistScrollbars
+      persistScrollbars={persistScrollbars}
       interactionMode={interactionMode}
     >
       <article
