@@ -46,6 +46,8 @@ src-tauri/gen
 # Misc
 .cache
 coverage
+**/__screenshots__/
+**/.vitest-attachments/
 
 src-tauri/binaries/*
 

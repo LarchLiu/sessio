@@ -1,4 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
+import type {
+  BuildCanvasContextFileRequest,
+  CanvasAnchorInfo,
+  CanvasBlockRecord,
+  CanvasDocumentState,
+  CanvasRevisionInfo,
+  SaveCanvasDraftRequest,
+  SaveCanvasRevisionRequest,
+  UpdateCanvasBlocksRequest,
+  UpsertCanvasAnchorRequest,
+} from "./canvasTypes";
 
 export type Agent = "astra-pi" | "codex" | "claude" | "gemini" | "opencode";
 
@@ -41,6 +52,46 @@ export interface ProjectInfo {
   createdAt: number;
   updatedAt: number;
   sessionCount: number;
+}
+
+export interface TerminalSessionInfo {
+  id: string;
+  title: string;
+  cwd: string;
+  shell: string;
+  cols: number;
+  rows: number;
+  output: string;
+  running: boolean;
+  exitCode: number | null;
+  createdAtMs: number;
+}
+
+export type TerminalEvent =
+  | {
+      kind: "created";
+      session: TerminalSessionInfo;
+    }
+  | {
+      kind: "output";
+      data: string;
+    }
+  | {
+      kind: "resized";
+      cols: number;
+      rows: number;
+    }
+  | {
+      kind: "closed";
+      exitCode: number | null;
+    }
+  | {
+      kind: "removed";
+    };
+
+export interface TerminalEventEnvelope {
+  terminalId: string;
+  event: TerminalEvent;
 }
 
 export type AgentType = "builtin" | "custom";
@@ -1094,6 +1145,15 @@ export interface AgentInput {
   options?: Record<string, unknown>;
 }
 
+export interface SavedCanvasDraft {
+  document: CanvasDocumentState["document"];
+}
+
+export interface SavedCanvasRevision {
+  document: CanvasDocumentState["document"];
+  revision: CanvasRevisionInfo;
+}
+
 export interface AgentSessionConfigChange {
   configId: string;
   value: unknown;
@@ -1227,6 +1287,51 @@ export type SessionScope =
 
 export async function listSessions(): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessions");
+}
+
+export async function listTerminals(): Promise<TerminalSessionInfo[]> {
+  return invoke<TerminalSessionInfo[]>("list_terminals");
+}
+
+export async function createTerminal(input: {
+  cwd?: string | null;
+  cols?: number | null;
+  rows?: number | null;
+  shell?: string | null;
+}): Promise<TerminalSessionInfo> {
+  return invoke<TerminalSessionInfo>("create_terminal", {
+    req: {
+      cwd: input.cwd ?? null,
+      cols: input.cols ?? null,
+      rows: input.rows ?? null,
+      shell: input.shell ?? null,
+    },
+  });
+}
+
+export async function writeTerminalInput(
+  terminalId: string,
+  data: string,
+): Promise<void> {
+  return invoke<void>("write_terminal_input", {
+    req: { terminalId, data },
+  });
+}
+
+export async function resizeTerminal(
+  terminalId: string,
+  cols: number,
+  rows: number,
+): Promise<void> {
+  return invoke<void>("resize_terminal", {
+    req: { terminalId, cols, rows },
+  });
+}
+
+export async function closeTerminal(terminalId: string): Promise<void> {
+  return invoke<void>("close_terminal", {
+    req: { terminalId },
+  });
 }
 
 export async function listChannelSessions(): Promise<ChannelSessionInfo[]> {
@@ -2241,6 +2346,40 @@ export async function writeCrossPrompt(
   content: string,
 ): Promise<string> {
   return invoke<string>("write_cross_prompt", { sessionId, content });
+}
+
+export async function getSessionCanvas(sessionId: string): Promise<CanvasDocumentState> {
+  return invoke<CanvasDocumentState>("get_session_canvas", { sessionId });
+}
+
+export async function saveCanvasDraft(
+  req: SaveCanvasDraftRequest,
+): Promise<SavedCanvasDraft> {
+  return invoke<SavedCanvasDraft>("save_canvas_draft", { req });
+}
+
+export async function saveCanvasRevision(
+  req: SaveCanvasRevisionRequest,
+): Promise<SavedCanvasRevision> {
+  return invoke<SavedCanvasRevision>("save_canvas_revision", { req });
+}
+
+export async function updateCanvasBlocks(
+  req: UpdateCanvasBlocksRequest,
+): Promise<CanvasBlockRecord[]> {
+  return invoke<CanvasBlockRecord[]>("update_canvas_blocks", { req });
+}
+
+export async function createCanvasContextFile(
+  req: BuildCanvasContextFileRequest,
+): Promise<string> {
+  return invoke<string>("create_canvas_context_file", { req });
+}
+
+export async function createCanvasAnchor(
+  req: UpsertCanvasAnchorRequest,
+): Promise<CanvasAnchorInfo> {
+  return invoke<CanvasAnchorInfo>("create_canvas_anchor", { req });
 }
 
 export async function getAgentRuntimeStatus(agent: Agent): Promise<RuntimeStatus> {

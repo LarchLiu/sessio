@@ -36,6 +36,7 @@ import {
 import { AgentGlyph } from "../components/AgentIcon";
 import ChatComposer, {
   AssistantModeChip,
+  SlashCommandModeChip,
   ScrambledProjectName,
   resizeTextareaToContent,
 } from "../components/ChatComposer";
@@ -49,7 +50,6 @@ import { PeopleTeam24RegularIcon, Robot3LineIcon } from "../components/IconifyIc
 import {
   filterAssistantCommandItems,
   filterComposerSlashCommands,
-  formatSlashCommandText,
   normalizeAssistantAgent,
   parseComposerCommandTrigger,
   slashCommandItems,
@@ -59,6 +59,7 @@ import { useChatComposer } from "../hooks/useChatComposer";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession, ProjectGroup } from "../navigation";
 import {
+  formatChatSlashCommandText,
   parseRuntimeSessionAvailableCommands,
   parseSelectedSlashCommandName,
 } from "../chatSlashCommands";
@@ -116,6 +117,7 @@ export default function NewChatPage({
   const [participantDrafts, setParticipantDrafts] = useState<ParticipantDraft[]>([]);
   const [threadSending, setThreadSending] = useState(false);
   const [selectedAssistant, setSelectedAssistant] = useState<AssistantInfo | null>(null);
+  const [selectedSlashCommand, setSelectedSlashCommand] = useState<AcpAvailableCommand | null>(null);
   const [cachedAvailableCommands, setCachedAvailableCommands] = useState<AcpAvailableCommand[]>([]);
   const project = projects.find((p) => p.key === projectKeyValue) ?? projects[0] ?? null;
   const workspacePath = project?.path ?? null;
@@ -335,7 +337,7 @@ export default function NewChatPage({
   }, [mode, runtimeAgents]);
 
   const handleSend = async () => {
-    const prompt = composer.text.trim();
+    const prompt = buildPromptText(selectedSlashCommand, composer.text).trim();
     if (!prompt || threadSending) return;
     const slashName = parseSelectedSlashCommandName(prompt);
     if (slashName) {
@@ -350,11 +352,15 @@ export default function NewChatPage({
       return;
     }
     if (mode === "chat") {
-      await composer.runStartSession(prompt, {
+      const sent = await composer.runStartSession(prompt, {
         workspacePath,
         projectName: project.label,
         assistantPrompt: selectedAssistant?.systemPrompt?.trim() || undefined,
       });
+      if (sent) {
+        setSelectedSlashCommand(null);
+        setSelectedAssistant(null);
+      }
       return;
     }
     const validationError = validateThreadMode({
@@ -400,6 +406,8 @@ export default function NewChatPage({
         await createAstraRun(thread.id, null);
       }
       composer.setText("");
+      setSelectedSlashCommand(null);
+      setSelectedAssistant(null);
       onThreadCreated(project, thread);
     } catch (err) {
       const message = String(err);
@@ -415,7 +423,8 @@ export default function NewChatPage({
     if (command.kind === "slash") {
       const selected = cachedAvailableCommands.find((item) => item.name === key);
       if (!selected) return;
-      composer.setText(formatSlashCommandText(selected));
+      setSelectedSlashCommand(selected);
+      composer.setText(command.rest);
     } else if (command.kind === "thread") {
       const kind = key as ThreadKind;
       // 选择 thread kind 后清掉 #slug，由底部 chat mode 选择器展示
@@ -472,12 +481,22 @@ export default function NewChatPage({
             runtimeControlsDisabled={threadMode}
             placeholder={threadMode ? t("new_chat.thread_placeholder") : undefined}
             modeActions={
-              !threadMode && selectedAssistant ? (
-                <AssistantModeChip
-                  icon={assistantRobotIcon(selectedAssistant.color)}
-                  name={selectedAssistant.name}
-                  onRemove={() => setSelectedAssistant(null)}
-                />
+              !threadMode ? (
+                <>
+                  {selectedSlashCommand ? (
+                    <SlashCommandModeChip
+                      name={selectedSlashCommand.name}
+                      onRemove={() => setSelectedSlashCommand(null)}
+                    />
+                  ) : null}
+                  {selectedAssistant ? (
+                    <AssistantModeChip
+                      icon={assistantRobotIcon(selectedAssistant.color)}
+                      name={selectedAssistant.name}
+                      onRemove={() => setSelectedAssistant(null)}
+                    />
+                  ) : null}
+                </>
               ) : undefined
             }
             bottomRow={
@@ -877,6 +896,16 @@ function threadKindIcon(kind: ThreadKind, className: string) {
 
 function createThreadLabel(mode: NewChatMode, t: (key: string, vars?: Record<string, string | number>) => string): string {
   return t("new_chat.create_thread", { kind: t(mode === "chat" ? "new_chat.mode.chat" : `thread.kind.${mode}`) });
+}
+
+function buildPromptText(
+  slashCommand: Pick<AcpAvailableCommand, "name" | "input"> | null,
+  text: string,
+): string {
+  const body = text.trim();
+  if (!slashCommand) return body;
+  const commandText = formatChatSlashCommandText(slashCommand).trimEnd();
+  return body ? `${commandText} ${body}` : commandText;
 }
 
 function stageAllowsThreadAddition(stage: ProjectStageInfo): boolean {

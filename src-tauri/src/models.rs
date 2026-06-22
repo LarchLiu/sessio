@@ -1621,6 +1621,147 @@ pub struct RuntimeAgentOptionMetadata {
     pub order: i64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CanvasBlockKind {
+    MarkdownPreview,
+    FileCard,
+    WorkflowCard,
+    Note,
+    Image,
+    Group,
+}
+
+impl CanvasBlockKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CanvasBlockKind::MarkdownPreview => "markdown_preview",
+            CanvasBlockKind::FileCard => "file_card",
+            CanvasBlockKind::WorkflowCard => "workflow_card",
+            CanvasBlockKind::Note => "note",
+            CanvasBlockKind::Image => "image",
+            CanvasBlockKind::Group => "group",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "markdown_preview" => Some(CanvasBlockKind::MarkdownPreview),
+            "file_card" => Some(CanvasBlockKind::FileCard),
+            "workflow_card" => Some(CanvasBlockKind::WorkflowCard),
+            "note" => Some(CanvasBlockKind::Note),
+            "image" => Some(CanvasBlockKind::Image),
+            "group" => Some(CanvasBlockKind::Group),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CanvasBlockSourceType {
+    WorkspaceFile,
+    EditedFile,
+    AttachmentImage,
+    WorkflowDefinition,
+    InlineMarkdown,
+    Note,
+    Group,
+}
+
+impl CanvasBlockSourceType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CanvasBlockSourceType::WorkspaceFile => "workspace_file",
+            CanvasBlockSourceType::EditedFile => "edited_file",
+            CanvasBlockSourceType::AttachmentImage => "attachment_image",
+            CanvasBlockSourceType::WorkflowDefinition => "workflow_definition",
+            CanvasBlockSourceType::InlineMarkdown => "inline_markdown",
+            CanvasBlockSourceType::Note => "note",
+            CanvasBlockSourceType::Group => "group",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "workspace_file" => Some(CanvasBlockSourceType::WorkspaceFile),
+            "edited_file" => Some(CanvasBlockSourceType::EditedFile),
+            "attachment_image" => Some(CanvasBlockSourceType::AttachmentImage),
+            "workflow_definition" => Some(CanvasBlockSourceType::WorkflowDefinition),
+            "inline_markdown" => Some(CanvasBlockSourceType::InlineMarkdown),
+            "note" => Some(CanvasBlockSourceType::Note),
+            "group" => Some(CanvasBlockSourceType::Group),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasDocumentInfo {
+    pub id: String,
+    pub session_id: String,
+    pub title: String,
+    pub current_saved_revision: Option<i64>,
+    pub draft_snapshot_path: Option<String>,
+    pub draft_snapshot_hash: Option<String>,
+    pub draft_updated_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasRevisionInfo {
+    pub id: String,
+    pub canvas_id: String,
+    pub revision: i64,
+    pub snapshot_path: String,
+    pub snapshot_hash: String,
+    pub snapshot_size_bytes: i64,
+    pub source: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasBlockRecord {
+    pub id: String,
+    pub canvas_id: String,
+    pub block_id: String,
+    pub block_kind: CanvasBlockKind,
+    pub source_type: CanvasBlockSourceType,
+    pub source_key: Option<String>,
+    pub source_path: Option<String>,
+    pub metadata_json: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasContextAnchor {
+    pub id: String,
+    pub canvas_id: String,
+    pub anchor_block_id: Option<String>,
+    pub selection_block_ids_json: String,
+    pub selection_element_ids_json: String,
+    pub turn_id: String,
+    pub summary: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasDocumentState {
+    pub document: CanvasDocumentInfo,
+    pub draft_snapshot: Option<String>,
+    pub saved_revision: Option<CanvasRevisionInfo>,
+    pub saved_snapshot: Option<String>,
+    pub block_records: Vec<CanvasBlockRecord>,
+    pub anchors: Vec<CanvasContextAnchor>,
+}
+
 pub fn normalize_preview(s: &str) -> String {
     const MAX_PREVIEW_CHARS: usize = 50;
     let trimmed = s.trim();

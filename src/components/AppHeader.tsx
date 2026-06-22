@@ -1,4 +1,4 @@
-import { FileCodeCorner, ListChevronsDownUp, ListChevronsUpDown, MessageSquare, PanelLeftOpen, PanelRightClose, type LucideIcon } from "lucide-react";
+import { FileCodeCorner, ListChevronsDownUp, ListChevronsUpDown, MessageSquare, PanelBottomClose, PanelBottomOpen, PanelLeftOpen, PanelRightClose, Presentation, type LucideIcon } from "lucide-react";
 import type { ProjectInfo, SessionInfo } from "../api";
 import type { ChatView } from "../navigation";
 import { useI18n } from "../i18n";
@@ -20,10 +20,13 @@ interface AppHeaderProps {
   } | null;
   metaPopoverOpen: boolean;
   rightSidebarOpen?: boolean;
+  terminalDockOpen?: boolean;
+  terminalDockVisible?: boolean;
   chatView?: ChatView;
   chatViewVisible?: boolean;
   onOpenSidebar: () => void;
   onToggleMetaPopover: () => void;
+  onToggleTerminalDock?: () => void;
   onToggleRightSidebar?: () => void;
   onChatViewChange?: (view: ChatView) => void;
 }
@@ -39,10 +42,13 @@ export default function AppHeader({
   activeMessageMeta,
   metaPopoverOpen,
   rightSidebarOpen,
+  terminalDockOpen = false,
+  terminalDockVisible = false,
   chatView = "chat",
   chatViewVisible = false,
   onOpenSidebar,
   onToggleMetaPopover,
+  onToggleTerminalDock,
   onToggleRightSidebar,
   onChatViewChange,
 }: AppHeaderProps) {
@@ -51,6 +57,9 @@ export default function AppHeader({
   const rightPanelLabel = rightSidebarOpen
     ? t("sidebar.right_close")
     : t("sidebar.right_open");
+  const terminalDockLabel = terminalDockOpen
+    ? t("terminal_dock.hide")
+    : t("terminal_dock.show");
 
   return (
     <div
@@ -134,6 +143,24 @@ export default function AppHeader({
         {chatViewVisible && onChatViewChange && (
           <ChatViewToggle value={chatView} onChange={onChatViewChange} />
         )}
+        {terminalDockVisible && onToggleTerminalDock && (
+          <Tooltip content={terminalDockLabel} placement="bottom">
+            <button
+              type="button"
+              aria-label={terminalDockLabel}
+              aria-pressed={terminalDockOpen}
+              data-tauri-drag-region="false"
+              onClick={onToggleTerminalDock}
+              className="rounded-md p-1 text-ink/55 transition-colors hover:bg-ink/5 hover:text-ink"
+            >
+              {terminalDockOpen ? (
+                <PanelBottomClose className="h-4 w-4" />
+              ) : (
+                <PanelBottomOpen className="h-4 w-4" />
+              )}
+            </button>
+          </Tooltip>
+        )}
         {onToggleRightSidebar && !rightSidebarOpen && (
           <div className={isMac ? "" : "mr-[138px]"}>
             <Tooltip content={rightPanelLabel} placement="bottom">
@@ -169,6 +196,7 @@ function ChatViewToggle({
   const items: { value: ChatView; icon: LucideIcon; label: string }[] = [
     { value: "chat", icon: MessageSquare, label: t("header.view_chat") },
     { value: "file", icon: FileCodeCorner, label: t("header.view_file") },
+    { value: "canvas", icon: Presentation, label: t("header.view_canvas") },
   ];
   return (
     <div

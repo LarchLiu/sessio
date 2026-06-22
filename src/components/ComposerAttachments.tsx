@@ -104,6 +104,8 @@ type ComposerAttachmentDraft = {
   displayName?: string | null;
 };
 
+export type { ComposerAttachmentDraft };
+
 export function useComposerAttachments({
   capabilities,
   onError,
@@ -289,6 +291,7 @@ export function useComposerAttachments({
     supportsAttachments,
     supportsImageAttachments,
     supportsEmbeddedContext,
+    addAttachments,
     removeAttachment,
     clearAttachments,
     pickAttachments,

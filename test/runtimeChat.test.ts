@@ -5,6 +5,7 @@ import {
   applyRuntimeAction,
   emptyAcpSessionState,
   emptyLiveRuntimeState,
+  effectiveRuntimeCapabilities,
   liveThreadActivity,
   liveSessionActivity,
   normalizeRuntimeTurnSnapshot,
@@ -236,5 +237,18 @@ describe("runtimeChat", () => {
         {},
       ),
     ).toBe("running");
+  });
+
+  it("prefers fallback capabilities when a live session only has placeholder capabilities", () => {
+    const fallback: RuntimeCapabilitySet = {
+      ...capabilities,
+      supportsImageAttachments: true,
+      supportsEmbeddedContext: true,
+      supportsAttachments: true,
+    };
+
+    expect(effectiveRuntimeCapabilities(capabilities, fallback)).toEqual(fallback);
+    expect(effectiveRuntimeCapabilities(fallback, capabilities)).toEqual(fallback);
+    expect(effectiveRuntimeCapabilities(null, fallback)).toEqual(fallback);
   });
 });

@@ -56,6 +56,7 @@ import Tooltip from "../components/Tooltip";
 import AssistantBotIcon from "../components/AssistantBotIcon";
 import SharedChatComposer, {
   AssistantModeChip,
+  SlashCommandModeChip,
   resizeTextareaToContent,
 } from "../components/ChatComposer";
 import ComposerCommandMenu from "../components/ComposerCommandMenu";
@@ -93,6 +94,7 @@ import {
   type AcpSessionState,
   type AcpToolCall,
   dispatchSessionStartedFallback,
+  effectiveRuntimeCapabilities,
   historyTurnsToAcpViewModel,
   liveSessionToAcpViewModel,
   type LiveRuntimeAction,
@@ -102,13 +104,13 @@ import {
 } from "../runtimeChat";
 import { buildCrossPromptFromTurns } from "../cross";
 import {
+  formatChatSlashCommandText,
   parseSelectedSlashCommandName,
   parseRuntimeSessionAvailableCommands,
 } from "../chatSlashCommands";
 import {
   filterAssistantCommandItems,
   filterComposerSlashCommands,
-  formatSlashCommandText,
   normalizeAssistantAgent,
   parseComposerCommandTrigger,
   slashCommandItems,
@@ -138,6 +140,7 @@ import {
   type AcpRenderItem,
 } from "../acpRenderItems";
 import ChatFilesView, { type ChatFilesSubview } from "../components/ChatFilesView";
+import ChatCanvasView from "../components/ChatCanvasView";
 import {
   ComposerTopAttachments,
   EditedFilesBar,
@@ -157,7 +160,14 @@ export interface ChatPageProps {
     path: string;
     requestId: number;
   } | null;
+  selectedCanvasFileRequest?: {
+    paths: string[];
+    requestId: number;
+  } | null;
   onOpenProjectFile?: (path: string) => void;
+  onAddProjectFileToCanvas?: (paths: string[] | string) => void;
+  onOpenThreadMultiSessionChat?: (threadId: string) => void;
+  sessionThreadId?: string | null;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
   rememberRuntimeAgentSelection?: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
@@ -306,30 +316,33 @@ function snapshotGroupsToAncestorHistoryGroups(
   }));
 }
 
-function ChatPage({
-  session,
-  assistants = [],
-  viewMode,
-  chatView = "chat",
-  filesSubview = "code",
-  onFilesSubviewChange = () => {},
-  projectFilesReloadKey = 0,
-  selectedProjectFileRequest = null,
-  onOpenProjectFile,
-  liveState,
-  runtimeAgents,
-  rememberRuntimeAgentSelection,
-  debugAcpConfig = false,
-  runtimeSessionAliases = {},
-  ancestorSessions = [],
-  dispatchLiveEvent,
-  onPendingSession,
-  onMessageCount,
-  onActiveMessageMeta,
-  beforeMessages,
-  showThreadPromptPlaceholders = false,
-  threadPromptFallbacks = [],
-}: ChatPageProps) {
+function ChatPage(props: ChatPageProps) {
+  const {
+    session,
+    assistants = [],
+    viewMode,
+    chatView = "chat",
+    filesSubview = "code",
+    onFilesSubviewChange = () => {},
+    projectFilesReloadKey = 0,
+    selectedProjectFileRequest = null,
+    onOpenProjectFile,
+    onOpenThreadMultiSessionChat,
+    sessionThreadId = null,
+    liveState,
+    runtimeAgents,
+    rememberRuntimeAgentSelection,
+    debugAcpConfig = false,
+    runtimeSessionAliases = {},
+    ancestorSessions = [],
+    dispatchLiveEvent,
+    onPendingSession,
+    onMessageCount,
+    onActiveMessageMeta,
+    beforeMessages,
+    showThreadPromptPlaceholders = false,
+    threadPromptFallbacks = [],
+  } = props;
   const { t } = useI18n();
   const defaultTab: Tab = useMemo(
     () =>
@@ -456,12 +469,14 @@ function ChatPage({
           onMessageCount={onMessageCount}
           messageCount={activeMessageMeta.count}
           workspacePath={session.projectPath}
-            projectFilesReloadKey={projectFilesReloadKey}
-            selectedProjectFileRequest={selectedProjectFileRequest}
-            onOpenProjectFile={onOpenProjectFile}
-            skipHistoryLoad={tab.kind === "main" && !session.filePath && hasMainLiveSession}
-            beforeMessages={tab.kind === "main" ? beforeMessages : null}
-            showThreadPromptPlaceholders={showThreadPromptPlaceholders}
+          projectFilesReloadKey={projectFilesReloadKey}
+          selectedProjectFileRequest={selectedProjectFileRequest}
+          onOpenProjectFile={onOpenProjectFile}
+          onOpenThreadMultiSessionChat={onOpenThreadMultiSessionChat}
+          sessionThreadId={sessionThreadId}
+          skipHistoryLoad={tab.kind === "main" && !session.filePath && hasMainLiveSession}
+          beforeMessages={tab.kind === "main" ? beforeMessages : null}
+          showThreadPromptPlaceholders={showThreadPromptPlaceholders}
           threadPromptFallbacks={tab.kind === "main" ? threadPromptFallbacks : []}
         />
 
@@ -565,7 +580,14 @@ export interface AcpTranscriptPanelProps {
     path: string;
     requestId: number;
   } | null;
+  selectedCanvasFileRequest?: {
+    paths: string[];
+    requestId: number;
+  } | null;
   onOpenProjectFile?: (path: string) => void;
+  onAddProjectFileToCanvas?: (paths: string[] | string) => void;
+  onOpenThreadMultiSessionChat?: (threadId: string) => void;
+  sessionThreadId?: string | null;
   skipHistoryLoad?: boolean;
   scrollKey?: string;
   beforeMessages?: ReactNode | null;
@@ -600,7 +622,11 @@ export function AcpTranscriptPanel({
   workspacePath,
   projectFilesReloadKey = 0,
   selectedProjectFileRequest = null,
+  selectedCanvasFileRequest = null,
   onOpenProjectFile,
+  onAddProjectFileToCanvas,
+  onOpenThreadMultiSessionChat,
+  sessionThreadId = null,
   skipHistoryLoad = false,
   scrollKey,
   beforeMessages = null,
@@ -663,6 +689,7 @@ export function AcpTranscriptPanel({
   const [composerEffort, setComposerEffort] = useState("");
   const [composerPermissionMode, setComposerPermissionMode] = useState("");
   const [cachedAvailableCommands, setCachedAvailableCommands] = useState<AcpAvailableCommand[]>([]);
+  const [selectedSlashCommand, setSelectedSlashCommand] = useState<AcpAvailableCommand | null>(null);
   const [selectedAssistant, setSelectedAssistant] = useState<AssistantInfo | null>(null);
   const [historyRenderReady, setHistoryRenderReady] = useState(hasCachedHistory);
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
@@ -734,13 +761,16 @@ export function AcpTranscriptPanel({
   const fallbackCapabilities = fallbackRuntimeAgent?.capabilities ?? null;
   const fallbackComposerCapabilities =
     selectedComposerAgent?.capabilities ?? (composerAgent === agent ? fallbackCapabilities : null);
-  const attachmentCapabilities =
-    (composerAgent === agent ? liveSession?.capabilities : null) ?? fallbackComposerCapabilities;
+  const attachmentCapabilities = effectiveRuntimeCapabilities(
+    composerAgent === agent ? liveSession?.capabilities : null,
+    fallbackComposerCapabilities,
+  );
   const {
     attachments,
     supportsAttachments,
     supportsImageAttachments,
     supportsEmbeddedContext,
+    addAttachments,
     removeAttachment,
     clearAttachments,
     pickAttachments,
@@ -765,7 +795,7 @@ export function AcpTranscriptPanel({
   const commandMenu = useComposerCommandMenuState({
     trigger: commandTrigger,
     items: commandItems,
-    disabled: Boolean(activeTurnId) || sending,
+    disabled: sending,
   });
 
   const refreshCachedCommands = useCallback(() => {
@@ -1032,6 +1062,9 @@ export function AcpTranscriptPanel({
       .join("|");
   }, [liveSession]);
   const isFilesView = chatView === "file";
+  const isCanvasView = chatView === "canvas";
+  const isTranscriptView = chatView === "chat";
+  const showSharedStrips = isFilesView || isCanvasView;
   const initialPositionMode = useMemo(() => {
     if (!available || !filePath || skipHistoryLoad) {
       return skipHistoryLoad ? "bottom" : null;
@@ -1053,7 +1086,7 @@ export function AcpTranscriptPanel({
     sourceKey,
     available,
     filePath,
-    viewportActive: !isFilesView,
+    viewportActive: isTranscriptView,
     skipHistoryLoad,
     loading: loading || ancestorsLoading,
     visibleDisplayItemCount: visibleDisplayItems.length,
@@ -1187,15 +1220,16 @@ export function AcpTranscriptPanel({
     rawText: string,
     clearComposer = false,
     inputAttachments: ComposerAttachment[] = [],
-  ) => {
-    const text = rawText.trim();
-    if (!text || sending) return;
+    runtimeOptions?: Record<string, unknown>,
+  ): Promise<string | null> => {
+    const text = buildPromptText(selectedSlashCommand, rawText).trim();
+    if (!text || sending) return null;
     const slashName = parseSelectedSlashCommandName(text);
     if (slashName) {
       const slashCommand = cachedAvailableCommands.find((item) => item.name === slashName);
       if (slashCommand && (slashCommand.commandType ?? "agent_builtin") !== "agent_builtin") {
         setComposerError(`Unsupported app command: ${slashCommand.name}`);
-        return;
+        return null;
       }
     }
     const agentAttachments: AgentAttachment[] = await Promise.all(
@@ -1230,7 +1264,7 @@ export function AcpTranscriptPanel({
     );
     if (!workspacePath) {
       setComposerError("This session has no workspace path, so live chat cannot start yet.");
-      return;
+      return null;
     }
     setSending(true);
     setComposerError(null);
@@ -1367,28 +1401,37 @@ export function AcpTranscriptPanel({
       const turn = await sendAgentInput(handle.sessioRuntimeSessionId, {
         text,
         attachments: inputAttachmentsWithContext,
+        options: runtimeOptions,
       });
       activeRuntimeTurnIdRef.current = turn.turnId;
       resetComposerInputHistory();
       if (clearComposer) {
         setComposerText("");
+        setSelectedSlashCommand(null);
         clearAttachments();
       }
       window.requestAnimationFrame(() => composerRef.current?.focus());
+      return turn.turnId;
     } catch (err) {
       const message = String(err);
       setComposerError(message);
+      return null;
     } finally {
       setSending(false);
     }
-  }, [agent, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, resetComposerInputHistory, runtimeSessionId, scrollChatToBottom, sending, sessionId, cachedAvailableCommands, workspacePath]);
+  }, [agent, beginFollowingLiveStream, cachedAvailableCommands, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, resetComposerInputHistory, runtimeSessionId, scrollChatToBottom, selectedSlashCommand, sending, sessionId, workspacePath]);
+
+  const runCommandText = useCallback(async (text: string) => {
+    await handleSendText(text);
+  }, [handleSendText]);
 
   const handleCommandSelect = useCallback((key: string) => {
     if (!commandTrigger) return;
     if (commandTrigger.kind === "slash") {
       const command = cachedAvailableCommands.find((item) => item.name === key);
       if (!command) return;
-      setComposerText(formatSlashCommandText(command));
+      setSelectedSlashCommand(command);
+      setComposerText(commandTrigger.rest);
     } else {
       const assistant = assistants.find((item) => item.id === key);
       if (!assistant) return;
@@ -1441,6 +1484,36 @@ export function AcpTranscriptPanel({
       setComposerError(String(err));
     }
   }, [activeTurnId, runtimeSessionId]);
+
+  const sendWithContext = useCallback(
+    async (
+      prompt: string,
+      options?: {
+        clearComposer?: boolean;
+        attachments?: ComposerAttachment[];
+        runtimeOptions?: Record<string, unknown>;
+      },
+    ) => {
+      const nextPrompt = prompt.trim();
+      if (!nextPrompt) return { ok: false, turnId: null };
+      try {
+        const turnId = await handleSendText(
+          nextPrompt,
+          options?.clearComposer ?? true,
+          options?.attachments ?? attachments,
+          options?.runtimeOptions,
+        );
+        return {
+          ok: Boolean(turnId),
+          turnId,
+        };
+      } catch {
+        return { ok: false, turnId: null };
+      }
+    },
+    [attachments, handleSendText],
+  );
+
   const chatComposerController = useMemo<ChatComposerController>(() => ({
     text: composerText,
     setText: setComposerText,
@@ -1458,6 +1531,7 @@ export function AcpTranscriptPanel({
     supportsAttachments,
     supportsImageAttachments,
     supportsEmbeddedContext,
+    appendAttachments: addAttachments,
     removeAttachment,
     pickAttachments,
     pasteAttachments,
@@ -1466,6 +1540,7 @@ export function AcpTranscriptPanel({
     setComposerError,
     canSend: composerText.trim().length > 0 && !sending && !activeTurnId,
     canSendWithWorkspace: (path: string | null | undefined) => Boolean(path),
+    sendWithContext,
     selectedAgent: composerAgent,
     selectedRuntimeAgent: selectedComposerAgent,
     selectedModel: composerModel,
@@ -1482,6 +1557,7 @@ export function AcpTranscriptPanel({
     activeTurnId,
     agentModelOptions,
     attachments,
+    addAttachments,
     composerAttachmentMenuOpen,
     composerAttachmentButtonRef,
     composerAgent,
@@ -1496,6 +1572,7 @@ export function AcpTranscriptPanel({
     pasteAttachments,
     pickAttachments,
     removeAttachment,
+    sendWithContext,
     setComposerAttachmentMenuOpen,
     selectedAgentModelValue,
     selectedComposerAgent,
@@ -1528,6 +1605,8 @@ export function AcpTranscriptPanel({
       ...sessionFileEdits.edits,
     ];
   }, [selectedProjectFilePath, sessionFileEdits.edits]);
+  const canvasSessionThreadId = sessionThreadId;
+  const openCanvasThreadMultiSessionChat = onOpenThreadMultiSessionChat;
   const pendingPermissions = useMemo(() => {
     const permissions: AcpPermissionRequest[] = [];
     for (const turn of acpViewModel.turns) {
@@ -1572,6 +1651,22 @@ export function AcpTranscriptPanel({
               }
             />
           </div>
+        ) : isCanvasView ? (
+          <ChatCanvasView
+            sessionId={sessionId}
+            sessionAgent={agent}
+            sessionTitle={sessionId}
+            workspacePath={workspacePath}
+            editedFiles={sessionFileEdits.edits
+              .map((edit) => edit.path ?? edit.displayPath)
+              .filter((path): path is string => Boolean(path))}
+            selectedCanvasFileRequest={selectedCanvasFileRequest}
+            composer={chatComposerController}
+            onError={setComposerError}
+            onOpenProjectFile={onOpenProjectFile}
+            sessionThreadId={canvasSessionThreadId}
+            onOpenThreadMultiSessionChat={openCanvasThreadMultiSessionChat}
+          />
         ) : (
           <>
             <ScrollArea
@@ -1602,7 +1697,7 @@ export function AcpTranscriptPanel({
                   state={acpViewModel.sessionState}
                   sessioRuntimeSessionId={sessionStateRuntimeSessionId}
                   debugAcpConfig={debugAcpConfig}
-                  onRunCommand={handleSendText}
+                  onRunCommand={runCommandText}
                 />
                 <AcpRenderItems
                   items={visibleDisplayItems}
@@ -1647,7 +1742,7 @@ export function AcpTranscriptPanel({
           </>
         )}
       </div>
-      {isFilesView && (
+      {showSharedStrips && (
         <ComposerTopAttachments>
           {pendingPermissions.map((permission) => (
             <FilesPermissionRow
@@ -1666,6 +1761,7 @@ export function AcpTranscriptPanel({
             deletions={currentTurnFileEdits.deletions}
             edits={currentTurnFileEdits.edits}
             onOpenFile={onOpenProjectFile}
+            onAddToCanvas={onAddProjectFileToCanvas}
           />
         </ComposerTopAttachments>
       )}
@@ -1673,20 +1769,28 @@ export function AcpTranscriptPanel({
         composer={chatComposerController}
         variant="chat"
         className="shrink-0 px-10 pb-4 bg-gradient-to-t from-surface-panel via-surface-panel to-surface-panel/80"
-        canSend={composerText.trim().length > 0 && !sending && !activeTurnId}
+        canSend={buildPromptText(selectedSlashCommand, composerText).trim().length > 0 && !sending && !activeTurnId}
         active={Boolean(activeTurnId)}
         onCancel={() => void handleCancelTurn()}
         placeholder="Ask, Search or Chat..."
         onTextareaKeyDown={handleComposerKeyDown}
         onSend={handleSend}
         modeActions={
-          selectedAssistant ? (
-            <AssistantModeChip
-              icon={<AssistantBotIcon color={selectedAssistant.color} className="h-4 w-4 shrink-0" />}
-              name={selectedAssistant.name}
-              onRemove={() => setSelectedAssistant(null)}
-            />
-          ) : undefined
+          <>
+            {selectedSlashCommand ? (
+              <SlashCommandModeChip
+                name={selectedSlashCommand.name}
+                onRemove={() => setSelectedSlashCommand(null)}
+              />
+            ) : null}
+            {selectedAssistant ? (
+              <AssistantModeChip
+                icon={<AssistantBotIcon color={selectedAssistant.color} className="h-4 w-4 shrink-0" />}
+                name={selectedAssistant.name}
+                onRemove={() => setSelectedAssistant(null)}
+              />
+            ) : null}
+          </>
         }
       />
       {commandMenu.open && commandTrigger && composerRef.current && (
@@ -5592,4 +5696,14 @@ function safeHref(rawHref: string): string | null {
   const href = rawHref.trim().replace(/^<|>$/g, "");
   if (/^(https?:|mailto:)/i.test(href)) return href;
   return null;
+}
+
+function buildPromptText(
+  slashCommand: Pick<AcpAvailableCommand, "name" | "input"> | null,
+  text: string,
+): string {
+  const body = text.trim();
+  if (!slashCommand) return body;
+  const commandText = formatChatSlashCommandText(slashCommand).trimEnd();
+  return body ? `${commandText} ${body}` : commandText;
 }

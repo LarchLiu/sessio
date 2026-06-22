@@ -30,6 +30,7 @@ import {
 } from "../components/AgentSelect";
 import {
   ComposerAttachmentPreviewList,
+  type ComposerAttachmentDraft,
   useComposerAttachments,
 } from "../components/ComposerAttachments";
 import { RuntimeEffortControl, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
@@ -69,6 +70,7 @@ export interface ChatComposerController {
   supportsAttachments: boolean;
   supportsImageAttachments: boolean;
   supportsEmbeddedContext: boolean;
+  appendAttachments: (items: ComposerAttachmentDraft[]) => Promise<void>;
   removeAttachment: ReturnType<typeof useComposerAttachments>["removeAttachment"];
   pickAttachments: ReturnType<typeof useComposerAttachments>["pickAttachments"];
   pasteAttachments: ReturnType<typeof useComposerAttachments>["pasteAttachments"];
@@ -77,6 +79,14 @@ export interface ChatComposerController {
   setComposerError: Dispatch<SetStateAction<string | null>>;
   canSend: boolean;
   canSendWithWorkspace: (workspacePath: string | null | undefined) => boolean;
+  sendWithContext: (
+    prompt: string,
+    options?: {
+      clearComposer?: boolean;
+      attachments?: ReturnType<typeof useComposerAttachments>["attachments"];
+      runtimeOptions?: Record<string, unknown>;
+    },
+  ) => Promise<{ ok: boolean; turnId: string | null }>;
   selectedAgent: Agent | null;
   selectedRuntimeAgent: RuntimeAgentMetadata | null;
   selectedModel: string;
@@ -188,6 +198,7 @@ export function useChatComposer({
     supportsAttachments,
     supportsImageAttachments,
     supportsEmbeddedContext,
+    addAttachments,
     removeAttachment,
     clearAttachments,
     pickAttachments,
@@ -419,6 +430,7 @@ export function useChatComposer({
     supportsAttachments,
     supportsImageAttachments,
     supportsEmbeddedContext,
+    appendAttachments: addAttachments,
     removeAttachment,
     pickAttachments,
     pasteAttachments,
@@ -428,6 +440,7 @@ export function useChatComposer({
     canSend: text.trim().length > 0 && agentModelOptions.length > 0 && !sending,
     canSendWithWorkspace: (workspacePath) =>
       text.trim().length > 0 && Boolean(workspacePath) && agentModelOptions.length > 0 && !sending,
+    sendWithContext: async () => ({ ok: false, turnId: null }),
     selectedAgent: agent || null,
     selectedRuntimeAgent,
     selectedModel: model,

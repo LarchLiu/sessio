@@ -43,6 +43,7 @@ import {
 } from "../api";
 import ChatComposer, {
   AssistantModeChip,
+  SlashCommandModeChip,
   resizeTextareaToContent,
 } from "../components/ChatComposer";
 import { AgentGlyph } from "../components/AgentIcon";
@@ -54,7 +55,6 @@ import { HashIcon } from "../components/IconifyIcon";
 import {
   filterAssistantCommandItems,
   filterComposerSlashCommands,
-  formatSlashCommandText,
   normalizeAssistantAgent,
   parseComposerCommandTrigger,
   slashCommandItems,
@@ -64,6 +64,7 @@ import { useChatComposer } from "../hooks/useChatComposer";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession } from "../navigation";
 import {
+  formatChatSlashCommandText,
   parseRuntimeSessionAvailableCommands,
   parseSelectedSlashCommandName,
 } from "../chatSlashCommands";
@@ -156,6 +157,7 @@ export default function ThreadMultiSessionChatPage({
   const [astraRuns, setAstraRuns] = useState<AstraHandle[]>([]);
   const [planRounds, setPlanRounds] = useState<PlanRoundInfo[]>([]);
   const [cachedAvailableCommands, setCachedAvailableCommands] = useState<AcpAvailableCommand[]>([]);
+  const [selectedSlashCommand, setSelectedSlashCommand] = useState<AcpAvailableCommand | null>(null);
   const [selectedAssistant, setSelectedAssistant] = useState<AssistantInfo | null>(null);
   const composer = useChatComposer({
     runtimeAgents,
@@ -448,7 +450,7 @@ export default function ThreadMultiSessionChatPage({
   };
 
   const handleSend = async () => {
-    const prompt = composer.text.trim();
+    const prompt = buildPromptText(selectedSlashCommand, composer.text).trim();
     if (!prompt) return;
     const slashName = parseSelectedSlashCommandName(prompt);
     if (slashName) {
@@ -526,7 +528,10 @@ export default function ThreadMultiSessionChatPage({
           pendingRuntimeCreated = true;
         },
       });
-      if (sent) setSelectedAssistant(null);
+      if (sent) {
+        setSelectedAssistant(null);
+        setSelectedSlashCommand(null);
+      }
       if (!sent && manualTask) {
         await updatePlanTaskStatus(manualTask.id, {
           status: "failed",
@@ -553,7 +558,8 @@ export default function ThreadMultiSessionChatPage({
     if (commandTrigger.kind === "slash") {
       const command = cachedAvailableCommands.find((item) => item.name === key);
       if (!command) return;
-      composer.setText(formatSlashCommandText(command));
+      setSelectedSlashCommand(command);
+      composer.setText(commandTrigger.rest);
     } else {
       const assistant = assistants.find((item) => item.id === key);
       if (!assistant) return;
@@ -651,6 +657,7 @@ export default function ThreadMultiSessionChatPage({
             variant="chat"
             canSend={
               Boolean(thread) &&
+              buildPromptText(selectedSlashCommand, composer.text).trim().length > 0 &&
               composer.canSendWithWorkspace(project.path) &&
               (!stageTaskMode || canRunStageTask) &&
               !stageTaskBusy
@@ -659,6 +666,12 @@ export default function ThreadMultiSessionChatPage({
             onTextareaKeyDown={handleComposerKeyDown}
             modeActions={
               <>
+                {selectedSlashCommand ? (
+                  <SlashCommandModeChip
+                    name={selectedSlashCommand.name}
+                    onRemove={() => setSelectedSlashCommand(null)}
+                  />
+                ) : null}
                 {selectedAssistant ? (
                   <AssistantModeChip
                     icon={<AssistantBotIcon color={selectedAssistant.color} className="h-4 w-4 shrink-0" />}
@@ -2447,4 +2460,14 @@ function manualStageTaskTitle(stage: StageInfo, prompt: string): string {
   const shortPrompt =
     compactPrompt.length > 72 ? `${compactPrompt.slice(0, 69)}...` : compactPrompt;
   return `${stageName}: ${shortPrompt || "Manual task"}`;
+}
+
+function buildPromptText(
+  slashCommand: Pick<AcpAvailableCommand, "name" | "input"> | null,
+  text: string,
+): string {
+  const body = text.trim();
+  if (!slashCommand) return body;
+  const commandText = formatChatSlashCommandText(slashCommand).trimEnd();
+  return body ? `${commandText} ${body}` : commandText;
 }

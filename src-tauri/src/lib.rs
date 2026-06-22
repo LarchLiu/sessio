@@ -13,6 +13,7 @@ pub mod polling;
 pub mod scheduled_tasks;
 pub mod shell_env;
 pub mod store;
+pub mod terminal;
 pub mod turns;
 pub mod watch;
 
@@ -33,7 +34,7 @@ use agents::runtime::types::{
 use agents::runtime::RuntimeManager;
 use app_paths::{
     app_home, cross_context_dir, db_path as default_db_path, paste_cache_dir, projects_dir,
-    removed_sessions_dir,
+    removed_sessions_dir, session_canvas_dir,
 };
 use astra::{AstraHandle, AstraService, CancelAstraRunRequest, CreateAstraRunRequest};
 use indexer::{IndexTask, IndexerHandle};
@@ -42,7 +43,8 @@ use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
-    AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
+    AstraConfig, CanvasBlockKind, CanvasBlockRecord, CanvasBlockSourceType, CanvasContextAnchor,
+    CanvasDocumentState, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
     ProjectStageInfo, RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
@@ -54,7 +56,7 @@ use store::sqlite::SqliteStore;
 use store::{
     AgentPreferencesPatch, AstraConfigPatch, NewAssistant, NewPlanRound, NewPlanTask,
     NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, SessionHistorySnapshotRecord,
-    SessionStore, ThreadWorkSnapshotRecord,
+    SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
 };
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
@@ -62,6 +64,10 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent,
+};
+use terminal::{
+    CloseTerminalRequest, CreateTerminalRequest, ResizeTerminalRequest, TerminalService,
+    TerminalSessionSummary, WriteTerminalInputRequest,
 };
 
 const HISTORY_CACHE_VERSION: i64 = 1;
@@ -150,6 +156,74 @@ struct SavePastedAttachmentRequest {
 #[serde(rename_all = "camelCase")]
 struct SavedPastedAttachment {
     path: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveCanvasDraftRequest {
+    session_id: String,
+    title: Option<String>,
+    snapshot_json: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveCanvasRevisionRequest {
+    session_id: String,
+    title: Option<String>,
+    snapshot_json: String,
+    source: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertCanvasBlockRecordInput {
+    block_id: String,
+    block_kind: CanvasBlockKind,
+    source_type: CanvasBlockSourceType,
+    source_key: Option<String>,
+    source_path: Option<String>,
+    metadata_json: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCanvasBlocksRequest {
+    session_id: String,
+    blocks: Vec<UpsertCanvasBlockRecordInput>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertCanvasAnchorRequest {
+    session_id: String,
+    anchor_block_id: Option<String>,
+    selection_block_ids_json: String,
+    selection_element_ids_json: String,
+    turn_id: String,
+    summary: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildCanvasContextFileRequest {
+    session_id: String,
+    kind: String,
+    file_name_prefix: String,
+    content: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedCanvasDraft {
+    document: crate::models::CanvasDocumentInfo,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedCanvasRevision {
+    document: crate::models::CanvasDocumentInfo,
+    revision: crate::models::CanvasRevisionInfo,
 }
 
 #[derive(serde::Deserialize)]
@@ -310,6 +384,45 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[tauri::command]
+fn list_terminals(
+    terminal_service: State<'_, TerminalService>,
+) -> Result<Vec<TerminalSessionSummary>, String> {
+    terminal_service.list_sessions()
+}
+
+#[tauri::command]
+fn create_terminal(
+    req: CreateTerminalRequest,
+    terminal_service: State<'_, TerminalService>,
+) -> Result<TerminalSessionSummary, String> {
+    terminal_service.create_session(req)
+}
+
+#[tauri::command]
+fn write_terminal_input(
+    req: WriteTerminalInputRequest,
+    terminal_service: State<'_, TerminalService>,
+) -> Result<(), String> {
+    terminal_service.write_input(req)
+}
+
+#[tauri::command]
+fn resize_terminal(
+    req: ResizeTerminalRequest,
+    terminal_service: State<'_, TerminalService>,
+) -> Result<(), String> {
+    terminal_service.resize_session(req)
+}
+
+#[tauri::command]
+fn close_terminal(
+    req: CloseTerminalRequest,
+    terminal_service: State<'_, TerminalService>,
+) -> Result<(), String> {
+    terminal_service.close_session(req)
 }
 
 #[tauri::command]
@@ -2116,6 +2229,24 @@ mod ancestor_tests {
     }
 
     #[test]
+    fn workspace_text_file_path_accepts_relative_paths_inside_workspace() {
+        let workspace = temp_workspace("relative-path-ok");
+        let nested = workspace.join("docs");
+        let path = nested.join("note.md");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        std::fs::write(&path, "# hello").expect("write nested file");
+
+        let loaded = read_workspace_text_file(
+            workspace.to_string_lossy().into_owned(),
+            "docs/note.md".to_string(),
+        )
+        .expect("relative workspace file should load");
+
+        assert_eq!(loaded.content, "# hello");
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
     fn workspace_text_file_path_rejects_outside_workspace() {
         let workspace = temp_workspace("path-guard");
         let outside = temp_workspace("outside").join("note.txt");
@@ -2330,6 +2461,11 @@ fn matches_scope(scope: &SessionScope, session: &SessionInfo) -> bool {
 fn remove_session_files_inner(session: SessionInfo) -> anyhow::Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
     let removed_root = removed_sessions_dir()?;
+    if let Ok(canvas_dir) = session_canvas_dir(&session.id) {
+        if canvas_dir.exists() {
+            let _ = std::fs::remove_dir_all(canvas_dir);
+        }
+    }
 
     if session.agent == Agent::Gemini {
         if crate::agents::sources::gemini::parser::remove_session_from_logs(
@@ -3824,17 +3960,101 @@ fn workspace_text_file_path(workspace_path: &str, path: &str) -> Result<PathBuf,
     if !workspace.is_absolute() || !workspace.is_dir() {
         return Err("Invalid workspace path".to_string());
     }
-    let file = PathBuf::from(path);
-    if !file.is_absolute() {
-        return Err("Only absolute file paths can be loaded".to_string());
-    }
-
     let workspace = workspace.canonicalize().map_err(|e| e.to_string())?;
+    let file = PathBuf::from(path);
+    let file = if file.is_absolute() {
+        file
+    } else {
+        workspace.join(file)
+    };
     let file = file.canonicalize().map_err(|e| e.to_string())?;
     if !file.starts_with(&workspace) {
         return Err("File path is outside the workspace".to_string());
     }
     Ok(file)
+}
+
+fn safe_canvas_file_component(raw: &str, fallback: &str) -> String {
+    let sanitized: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let compact = sanitized.trim_matches('-');
+    if compact.is_empty() {
+        fallback.to_string()
+    } else {
+        compact.to_string()
+    }
+}
+
+fn canvas_draft_path(session_id: &str) -> Result<PathBuf, String> {
+    Ok(session_canvas_dir(session_id)
+        .map_err(|e| e.to_string())?
+        .join("draft.canvas.json"))
+}
+
+fn canvas_revisions_dir(session_id: &str) -> Result<PathBuf, String> {
+    Ok(session_canvas_dir(session_id)
+        .map_err(|e| e.to_string())?
+        .join("revisions"))
+}
+
+fn canvas_context_dir(session_id: &str) -> Result<PathBuf, String> {
+    Ok(session_canvas_dir(session_id)
+        .map_err(|e| e.to_string())?
+        .join("context"))
+}
+
+const CANVAS_REVISION_RETENTION_LIMIT: usize = 24;
+const CANVAS_CONTEXT_FILE_RETENTION_LIMIT: usize = 24;
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn read_optional_text_file(path: Option<&str>) -> Option<String> {
+    path.and_then(|value| std::fs::read_to_string(value).ok())
+}
+
+fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Target path has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Target path has no file name".to_string())?;
+    let temp_path = parent.join(format!(".{file_name}.tmp"));
+    std::fs::write(&temp_path, bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&temp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp_path);
+        e.to_string()
+    })
+}
+
+fn prune_canvas_context_files(session_id: &str, keep_latest: usize) -> Result<(), String> {
+    let dir = canvas_context_dir(session_id)?;
+    let entries = std::fs::read_dir(&dir);
+    let Ok(entries) = entries else {
+        return Ok(());
+    };
+    let mut files = entries
+        .filter_map(|entry| entry.ok().map(|item| item.path()))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| right.cmp(left));
+    for stale in files.into_iter().skip(keep_latest) {
+        let _ = std::fs::remove_file(stale);
+    }
+    Ok(())
 }
 
 fn file_mtime_ms(meta: &std::fs::Metadata) -> Result<u64, String> {
@@ -4005,6 +4225,139 @@ fn write_cross_prompt(session_id: String, content: String) -> Result<String, Str
         })
         .map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn get_session_canvas(
+    session_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<CanvasDocumentState, String> {
+    let mut state = store
+        .get_canvas_document_state(&session_id)
+        .map_err(|e| e.to_string())?;
+    state.draft_snapshot = read_optional_text_file(state.document.draft_snapshot_path.as_deref());
+    state.saved_snapshot = read_optional_text_file(
+        state.saved_revision
+            .as_ref()
+            .map(|revision| revision.snapshot_path.as_str()),
+    );
+    Ok(state)
+}
+
+#[tauri::command]
+fn save_canvas_draft(
+    req: SaveCanvasDraftRequest,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<SavedCanvasDraft, String> {
+    let path = canvas_draft_path(&req.session_id)?;
+    write_atomic_bytes(&path, req.snapshot_json.as_bytes())?;
+    let hash = sha256_hex(req.snapshot_json.as_bytes());
+    let document = store
+        .save_canvas_draft(
+            &req.session_id,
+            req.title.as_deref(),
+            &path.to_string_lossy(),
+            &hash,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(SavedCanvasDraft { document })
+}
+
+#[tauri::command]
+fn save_canvas_revision(
+    req: SaveCanvasRevisionRequest,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<SavedCanvasRevision, String> {
+    let revisions_dir = canvas_revisions_dir(&req.session_id)?;
+    std::fs::create_dir_all(&revisions_dir).map_err(|e| e.to_string())?;
+    let snapshot_bytes = req.snapshot_json.into_bytes();
+    let hash = sha256_hex(&snapshot_bytes);
+    let current = store
+        .get_canvas_document_state(&req.session_id)
+        .map_err(|e| e.to_string())?;
+    let next_revision = current.document.current_saved_revision.unwrap_or(0) + 1;
+    let path = revisions_dir.join(format!("{next_revision:06}.canvas.json"));
+    write_atomic_bytes(&path, &snapshot_bytes)?;
+    let (document, revision) = store
+        .save_canvas_revision(
+            &req.session_id,
+            req.title.as_deref(),
+            &path.to_string_lossy(),
+            &hash,
+            snapshot_bytes.len() as i64,
+            req.source.trim(),
+        )
+        .map_err(|e| e.to_string())?;
+    let stale_paths = store
+        .prune_canvas_revisions(&req.session_id, CANVAS_REVISION_RETENTION_LIMIT)
+        .map_err(|e| e.to_string())?;
+    for stale_path in stale_paths {
+        let _ = std::fs::remove_file(stale_path);
+    }
+    Ok(SavedCanvasRevision { document, revision })
+}
+
+#[tauri::command]
+fn update_canvas_blocks(
+    req: UpdateCanvasBlocksRequest,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<CanvasBlockRecord>, String> {
+    let blocks = req
+        .blocks
+        .into_iter()
+        .map(|item| UpsertCanvasBlockRecord {
+            block_id: item.block_id,
+            block_kind: item.block_kind,
+            source_type: item.source_type,
+            source_key: item.source_key,
+            source_path: item.source_path,
+            metadata_json: item.metadata_json.unwrap_or_else(|| "{}".to_string()),
+        })
+        .collect::<Vec<_>>();
+    store
+        .replace_canvas_blocks(&req.session_id, &blocks)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_canvas_context_file(req: BuildCanvasContextFileRequest) -> Result<String, String> {
+    let dir = canvas_context_dir(&req.session_id)?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let prefix = safe_canvas_file_component(&req.file_name_prefix, "canvas");
+    let kind = safe_canvas_file_component(&req.kind, "selection");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = dir.join(format!("{prefix}-{kind}-{ts}.md"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(req.content.as_bytes())
+        })
+        .map_err(|e| e.to_string())?;
+    prune_canvas_context_files(&req.session_id, CANVAS_CONTEXT_FILE_RETENTION_LIMIT)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn create_canvas_anchor(
+    req: UpsertCanvasAnchorRequest,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<CanvasContextAnchor, String> {
+    store
+        .create_canvas_context_anchor(
+            &req.session_id,
+            req.anchor_block_id.as_deref(),
+            &req.selection_block_ids_json,
+            &req.selection_element_ids_json,
+            &req.turn_id,
+            req.summary.as_deref(),
+        )
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -4727,6 +5080,7 @@ pub fn run() {
             network::apply_network_proxy_env(&app_config.network.proxy);
             let runtime = RuntimeManager::new(app.handle().clone());
             app.manage(runtime.clone());
+            app.manage(TerminalService::new(app.handle().clone()));
             let preview_file_watcher =
                 file_preview_watch::PreviewFileWatcher::new(app.handle().clone())?;
             app.manage(preview_file_watcher);
@@ -4855,6 +5209,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            list_terminals,
+            create_terminal,
+            write_terminal_input,
+            resize_terminal,
+            close_terminal,
             list_sessions,
             list_channel_sessions,
             list_process_templates,
@@ -4931,6 +5290,12 @@ pub fn run() {
             read_local_text_file,
             read_workspace_text_file,
             write_workspace_text_file,
+            get_session_canvas,
+            save_canvas_draft,
+            save_canvas_revision,
+            update_canvas_blocks,
+            create_canvas_context_file,
+            create_canvas_anchor,
             get_file_git_diff,
             watch_preview_file,
             unwatch_preview_file,

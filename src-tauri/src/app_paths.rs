@@ -58,6 +58,14 @@ pub fn cross_context_dir() -> Result<PathBuf> {
     Ok(projects_dir()?.join(".cross-context"))
 }
 
+pub fn canvas_root_dir() -> Result<PathBuf> {
+    Ok(projects_dir()?.join(".canvas"))
+}
+
+pub fn session_canvas_dir(session_id: &str) -> Result<PathBuf> {
+    Ok(canvas_root_dir()?.join(session_id))
+}
+
 pub fn paste_cache_dir() -> Result<PathBuf> {
     Ok(app_home()?.join("paste-cache"))
 }
