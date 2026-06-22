@@ -4401,6 +4401,7 @@ dependencies = [
  "ecb",
  "futures",
  "hex",
+ "image",
  "libc",
  "log",
  "md-5",
@@ -4434,6 +4435,8 @@ dependencies = [
  "tungstenite",
  "uuid",
  "walkdir",
+ "webview2-com",
+ "windows",
 ]
 
 [[package]]

@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "macos")]
 use std::{thread, time::Duration};
+#[cfg(windows)]
+use std::time::Duration;
 
 use agents::runtime::metadata::{
     runtime_agents_from_db, startup_probe_runtime_agents, RuntimeAgentsCache,
@@ -3168,13 +3170,239 @@ async fn capture_webview_area_png(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+#[tauri::command]
+async fn capture_window_area_png(
+    window: WebviewWindow,
+    req: CaptureWindowAreaRequest,
+) -> Result<SavedPastedAttachment, String> {
+    if !req.x.is_finite()
+        || !req.y.is_finite()
+        || !req.width.is_finite()
+        || !req.height.is_finite()
+        || req.width <= 0.0
+        || req.height <= 0.0
+    {
+        return Err("Invalid snapshot capture area".to_string());
+    }
+
+    let dir = paste_cache_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file_name = safe_pasted_attachment_file_name(req.file_name.as_deref(), Some("image/png"));
+    let path = dir.join(format!(
+        "native-window-area-{}-{file_name}",
+        chrono::Utc::now().timestamp_millis()
+    ));
+
+    let saved = capture_webview2_area_png(&window, &req, &path).await?;
+    let meta = std::fs::metadata(&saved.path).map_err(|e| e.to_string())?;
+    if meta.len() == 0 {
+        let _ = std::fs::remove_file(&saved.path);
+        return Err("WebView2 snapshot produced an empty PNG".to_string());
+    }
+    Ok(saved)
+}
+
+#[cfg(windows)]
+async fn capture_webview2_area_png(
+    window: &WebviewWindow,
+    req: &CaptureWindowAreaRequest,
+    path: &Path,
+) -> Result<SavedPastedAttachment, String> {
+    use image::GenericImageView;
+    use webview2_com::{
+        CapturePreviewCompletedHandler,
+        Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+    };
+    use windows::Win32::{
+        Foundation::HGLOBAL,
+        System::Com::StructuredStorage::CreateStreamOnHGlobal,
+    };
+
+    let device_scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let device_scale = if device_scale.is_finite() && device_scale > 0.0 {
+        device_scale
+    } else {
+        1.0
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<(Vec<u8>, u32, u32), String>>();
+    let sender = Arc::new(Mutex::new(Some(tx)));
+
+    window
+        .with_webview(move |platform_webview| {
+            let immediate_sender = Arc::clone(&sender);
+
+            unsafe {
+                let result = (|| -> Result<(), String> {
+                    let controller = platform_webview.controller();
+                    let mut bounds = windows::Win32::Foundation::RECT::default();
+                    controller
+                        .Bounds(&mut bounds)
+                        .map_err(|e| format!("WebView2 bounds query failed: {e}"))?;
+                    let webview_width = (bounds.right - bounds.left).max(0) as u32;
+                    let webview_height = (bounds.bottom - bounds.top).max(0) as u32;
+                    if webview_width == 0 || webview_height == 0 {
+                        return Err("WebView2 snapshot bounds are empty".to_string());
+                    }
+
+                    let webview = controller
+                        .CoreWebView2()
+                        .map_err(|e| format!("WebView2 instance query failed: {e}"))?;
+                    let stream = CreateStreamOnHGlobal(HGLOBAL::default(), true)
+                        .map_err(|e| format!("WebView2 snapshot stream creation failed: {e}"))?;
+                    let stream_for_callback = stream.clone();
+                    let callback_sender = Arc::clone(&sender);
+                    let handler = CapturePreviewCompletedHandler::create(Box::new(move |result| {
+                        if let Err(error) = result {
+                            send_webview2_snapshot_result(
+                                &callback_sender,
+                                Err(format!("WebView2 snapshot capture failed: {error}")),
+                            );
+                            return Ok(());
+                        }
+
+                        match read_windows_stream_to_vec(&stream_for_callback) {
+                            Ok(bytes) if !bytes.is_empty() => send_webview2_snapshot_result(
+                                &callback_sender,
+                                Ok((bytes, webview_width, webview_height)),
+                            ),
+                            Ok(_) => send_webview2_snapshot_result(
+                                &callback_sender,
+                                Err("WebView2 snapshot returned an empty stream".to_string()),
+                            ),
+                            Err(error) => send_webview2_snapshot_result(&callback_sender, Err(error)),
+                        }
+                        Ok(())
+                    }));
+                    webview
+                        .CapturePreview(
+                            COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+                            &stream,
+                            &handler,
+                        )
+                        .map_err(|e| format!("WebView2 snapshot capture failed to start: {e}"))?;
+                    Ok(())
+                })();
+
+                if let Err(error) = result {
+                    send_webview2_snapshot_result(&immediate_sender, Err(error));
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    let (png_bytes, webview_width, webview_height) =
+        match tokio::time::timeout(Duration::from_secs(6), rx).await {
+            Ok(Ok(Ok(result))) => result,
+            Ok(Ok(Err(error))) => return Err(error),
+            Ok(Err(_)) => return Err("WebView2 snapshot callback was cancelled".to_string()),
+            Err(_) => return Err("WebView2 snapshot timed out".to_string()),
+        };
+
+    let image = image::load_from_memory(&png_bytes)
+        .map_err(|e| format!("WebView2 snapshot PNG decode failed: {e}"))?;
+    let (image_width, image_height) = image.dimensions();
+    if image_width == 0 || image_height == 0 {
+        return Err("WebView2 snapshot PNG was empty".to_string());
+    }
+
+    let viewport_css_width = (webview_width.max(1) as f64 / device_scale).max(1.0);
+    let viewport_css_height = (webview_height.max(1) as f64 / device_scale).max(1.0);
+    let scale_x = image_width as f64 / viewport_css_width;
+    let scale_y = image_height as f64 / viewport_css_height;
+    let left = (req.x.max(0.0) * scale_x).floor().max(0.0) as u32;
+    let top = (req.y.max(0.0) * scale_y).floor().max(0.0) as u32;
+    if left >= image_width || top >= image_height {
+        return Err("WebView2 snapshot crop area is outside the webview bounds".to_string());
+    }
+    let crop_width = (req.width * scale_x)
+        .ceil()
+        .max(1.0)
+        .min((image_width - left) as f64) as u32;
+    let crop_height = (req.height * scale_y)
+        .ceil()
+        .max(1.0)
+        .min((image_height - top) as f64) as u32;
+    if crop_width == 0 || crop_height == 0 {
+        return Err("WebView2 snapshot crop area is empty".to_string());
+    }
+
+    let cropped = image.crop_imm(left, top, crop_width, crop_height);
+    cropped
+        .save_with_format(path, image::ImageFormat::Png)
+        .map_err(|e| format!("WebView2 snapshot PNG write failed: {e}"))?;
+    Ok(SavedPastedAttachment {
+        path: path.to_string_lossy().to_string(),
+    })
+}
+
+#[cfg(windows)]
+type WebView2SnapshotSender =
+    Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<(Vec<u8>, u32, u32), String>>>>>;
+
+#[cfg(windows)]
+fn send_webview2_snapshot_result(
+    sender: &WebView2SnapshotSender,
+    result: Result<(Vec<u8>, u32, u32), String>,
+) {
+    if let Ok(mut tx) = sender.lock() {
+        if let Some(tx) = tx.take() {
+            let _ = tx.send(result);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn read_windows_stream_to_vec(
+    stream: &windows::Win32::System::Com::IStream,
+) -> Result<Vec<u8>, String> {
+    use windows::Win32::System::Com::{STATFLAG_NONAME, STATSTG, STREAM_SEEK_SET};
+
+    unsafe {
+        let mut stat = STATSTG::default();
+        stream
+            .Stat(&mut stat, STATFLAG_NONAME)
+            .map_err(|e| format!("WebView2 snapshot stream stat failed: {e}"))?;
+        if stat.cbSize == 0 {
+            return Ok(Vec::new());
+        }
+        if stat.cbSize > u32::MAX as u64 {
+            return Err("WebView2 snapshot stream is too large".to_string());
+        }
+        stream
+            .Seek(0, STREAM_SEEK_SET, None)
+            .map_err(|e| format!("WebView2 snapshot stream seek failed: {e}"))?;
+        let mut bytes = vec![0_u8; stat.cbSize as usize];
+        let mut total_read = 0_usize;
+        while total_read < bytes.len() {
+            let remaining = bytes.len() - total_read;
+            let request = remaining.min(u32::MAX as usize) as u32;
+            let mut read = 0_u32;
+            stream
+                .Read(
+                    bytes[total_read..].as_mut_ptr() as *mut core::ffi::c_void,
+                    request,
+                    Some(&mut read),
+                )
+                .ok()
+                .map_err(|e| format!("WebView2 snapshot stream read failed: {e}"))?;
+            if read == 0 {
+                break;
+            }
+            total_read += read as usize;
+        }
+        bytes.truncate(total_read);
+        Ok(bytes)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 #[tauri::command]
 fn capture_window_area_png(
     _window: WebviewWindow,
     _req: CaptureWindowAreaRequest,
 ) -> Result<SavedPastedAttachment, String> {
-    Err("Native area screenshot is only implemented on macOS for now".to_string())
+    Err("Native area screenshot is only implemented on macOS and Windows for now".to_string())
 }
 
 #[tauri::command]

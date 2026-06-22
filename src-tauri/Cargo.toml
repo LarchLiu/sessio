@@ -61,5 +61,10 @@ objc2-core-foundation = "0.3"
 objc2-foundation = "0.3"
 objc2-web-kit = { version = "0.3", features = ["block2", "objc2-app-kit", "objc2-core-foundation", "WKSnapshotConfiguration", "WKWebView"] }
 
+[target.'cfg(windows)'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Memory"] }
+
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
