@@ -4393,6 +4393,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "block2",
+ "cairo-rs",
  "chrono",
  "cipher",
  "croner",
@@ -4400,6 +4401,7 @@ dependencies = [
  "dirs 5.0.1",
  "ecb",
  "futures",
+ "gtk",
  "hex",
  "image",
  "libc",
@@ -4435,6 +4437,7 @@ dependencies = [
  "tungstenite",
  "uuid",
  "walkdir",
+ "webkit2gtk",
  "webview2-com",
  "windows",
 ]

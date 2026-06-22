@@ -21,8 +21,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "macos")]
-use std::{thread, time::Duration};
-#[cfg(windows)]
+use std::thread;
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 use std::time::Duration;
 
 use agents::runtime::metadata::{
@@ -3396,13 +3396,161 @@ fn read_windows_stream_to_vec(
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(target_os = "linux")]
+#[tauri::command]
+async fn capture_window_area_png(
+    window: WebviewWindow,
+    req: CaptureWindowAreaRequest,
+) -> Result<SavedPastedAttachment, String> {
+    if !req.x.is_finite()
+        || !req.y.is_finite()
+        || !req.width.is_finite()
+        || !req.height.is_finite()
+        || req.width <= 0.0
+        || req.height <= 0.0
+    {
+        return Err("Invalid snapshot capture area".to_string());
+    }
+
+    let dir = paste_cache_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file_name = safe_pasted_attachment_file_name(req.file_name.as_deref(), Some("image/png"));
+    let path = dir.join(format!(
+        "native-window-area-{}-{file_name}",
+        chrono::Utc::now().timestamp_millis()
+    ));
+
+    let saved = capture_webkitgtk_area_png(&window, &req, &path).await?;
+    let meta = std::fs::metadata(&saved.path).map_err(|e| e.to_string())?;
+    if meta.len() == 0 {
+        let _ = std::fs::remove_file(&saved.path);
+        return Err("WebKitGTK snapshot produced an empty PNG".to_string());
+    }
+    Ok(saved)
+}
+
+#[cfg(target_os = "linux")]
+async fn capture_webkitgtk_area_png(
+    window: &WebviewWindow,
+    req: &CaptureWindowAreaRequest,
+    path: &Path,
+) -> Result<SavedPastedAttachment, String> {
+    use gtk::prelude::WidgetExt;
+    use image::GenericImageView;
+    use webkit2gtk::{SnapshotOptions, SnapshotRegion, WebViewExt};
+
+    let (tx, rx) =
+        tokio::sync::oneshot::channel::<Result<(Vec<u8>, i32, i32), String>>();
+    let sender = Arc::new(Mutex::new(Some(tx)));
+
+    window
+        .with_webview(move |platform_webview| {
+            let webview = platform_webview.inner();
+            let allocation = webview.allocation();
+            let webview_width = allocation.width().max(0);
+            let webview_height = allocation.height().max(0);
+            let immediate_sender = Arc::clone(&sender);
+            if webview_width == 0 || webview_height == 0 {
+                send_webkitgtk_snapshot_result(
+                    &immediate_sender,
+                    Err("WebKitGTK snapshot bounds are empty".to_string()),
+                );
+                return;
+            }
+
+            let callback_sender = Arc::clone(&sender);
+            webview.snapshot(
+                SnapshotRegion::Visible,
+                SnapshotOptions::NONE,
+                None::<&webkit2gtk::gio::Cancellable>,
+                move |result| {
+                    let result = result
+                        .map_err(|error| format!("WebKitGTK snapshot failed: {error}"))
+                        .and_then(|surface| {
+                            let mut bytes = Vec::new();
+                            surface.write_to_png(&mut bytes).map_err(|error| {
+                                format!("WebKitGTK snapshot PNG encoding failed: {error}")
+                            })?;
+                            if bytes.is_empty() {
+                                Err("WebKitGTK snapshot returned an empty PNG".to_string())
+                            } else {
+                                Ok((bytes, webview_width, webview_height))
+                            }
+                        });
+                    send_webkitgtk_snapshot_result(&callback_sender, result);
+                },
+            );
+        })
+        .map_err(|e| e.to_string())?;
+
+    let (png_bytes, webview_width, webview_height) =
+        match tokio::time::timeout(Duration::from_secs(6), rx).await {
+            Ok(Ok(Ok(result))) => result,
+            Ok(Ok(Err(error))) => return Err(error),
+            Ok(Err(_)) => return Err("WebKitGTK snapshot callback was cancelled".to_string()),
+            Err(_) => return Err("WebKitGTK snapshot timed out".to_string()),
+        };
+
+    let image = image::load_from_memory(&png_bytes)
+        .map_err(|e| format!("WebKitGTK snapshot PNG decode failed: {e}"))?;
+    let (image_width, image_height) = image.dimensions();
+    if image_width == 0 || image_height == 0 {
+        return Err("WebKitGTK snapshot PNG was empty".to_string());
+    }
+
+    let viewport_css_width = webview_width.max(1) as f64;
+    let viewport_css_height = webview_height.max(1) as f64;
+    let scale_x = image_width as f64 / viewport_css_width;
+    let scale_y = image_height as f64 / viewport_css_height;
+    let left = (req.x.max(0.0) * scale_x).floor().max(0.0) as u32;
+    let top = (req.y.max(0.0) * scale_y).floor().max(0.0) as u32;
+    if left >= image_width || top >= image_height {
+        return Err("WebKitGTK snapshot crop area is outside the webview bounds".to_string());
+    }
+    let crop_width = (req.width * scale_x)
+        .ceil()
+        .max(1.0)
+        .min((image_width - left) as f64) as u32;
+    let crop_height = (req.height * scale_y)
+        .ceil()
+        .max(1.0)
+        .min((image_height - top) as f64) as u32;
+    if crop_width == 0 || crop_height == 0 {
+        return Err("WebKitGTK snapshot crop area is empty".to_string());
+    }
+
+    let cropped = image.crop_imm(left, top, crop_width, crop_height);
+    cropped
+        .save_with_format(path, image::ImageFormat::Png)
+        .map_err(|e| format!("WebKitGTK snapshot PNG write failed: {e}"))?;
+    Ok(SavedPastedAttachment {
+        path: path.to_string_lossy().to_string(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+type WebKitGtkSnapshotSender =
+    Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<(Vec<u8>, i32, i32), String>>>>>;
+
+#[cfg(target_os = "linux")]
+fn send_webkitgtk_snapshot_result(
+    sender: &WebKitGtkSnapshotSender,
+    result: Result<(Vec<u8>, i32, i32), String>,
+) {
+    if let Ok(mut tx) = sender.lock() {
+        if let Some(tx) = tx.take() {
+            let _ = tx.send(result);
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 #[tauri::command]
 fn capture_window_area_png(
     _window: WebviewWindow,
     _req: CaptureWindowAreaRequest,
 ) -> Result<SavedPastedAttachment, String> {
-    Err("Native area screenshot is only implemented on macOS and Windows for now".to_string())
+    Err("Native area screenshot is not implemented on this platform yet".to_string())
 }
 
 #[tauri::command]
