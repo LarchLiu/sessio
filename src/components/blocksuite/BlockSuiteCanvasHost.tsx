@@ -1958,32 +1958,25 @@ export default function BlockSuiteCanvasHost({
 
   const attachSelectionSnapshot = useCallback(async (elementIds?: string[] | null) => {
     setBridgeBusy("snapshot");
-    showSnapshotToast("Exporting BlockSuite snapshot...");
     try {
-      const snapshotResult = await exportSelectionSnapshot(elementIds, (message) => {
-        showSnapshotToast(message);
-      });
+      const snapshotResult = await exportSelectionSnapshot(elementIds);
       if (!snapshotResult.ok) {
-        const message = snapshotExportFailureMessage(snapshotResult.reason);
-        showSnapshotToast(message, "error");
-        onError(message);
+        showSnapshotToast(snapshotExportFailureMessage(snapshotResult.reason), "error");
         return;
       }
       if (composer.supportsImageAttachments) {
         await composer.appendAttachments([snapshotResult.snapshot.attachment]);
-        showSnapshotToast(`Attached snapshot: ${snapshotResult.snapshot.path}`);
+        showSnapshotToast(`Snapshot captured: ${snapshotResult.snapshot.path}`);
       } else {
-        showSnapshotToast(`Saved snapshot: ${snapshotResult.snapshot.path}`);
-        onError("Snapshot PNG was saved locally, but the selected agent does not support image attachments.");
+        showSnapshotToast(`Snapshot saved locally: ${snapshotResult.snapshot.path}`);
       }
     } catch (error) {
-      const message = `Failed to attach selection snapshot: ${String(error)}`;
-      showSnapshotToast(message, "error");
-      onError(message);
+      console.warn("Failed to attach selection snapshot.", error);
+      showSnapshotToast("Failed to capture snapshot.", "error");
     } finally {
       setBridgeBusy(null);
     }
-  }, [composer, exportSelectionSnapshot, onError, showSnapshotToast]);
+  }, [composer, exportSelectionSnapshot, showSnapshotToast]);
 
   const askSelection = async () => {
     setBridgeBusy("ask");
