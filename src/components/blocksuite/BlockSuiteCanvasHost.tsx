@@ -8,6 +8,7 @@ import { ExportManager, type SurfaceElementModel } from "@blocksuite/affine/bloc
 import { NoteDisplayMode, type GroupElementModel, DEFAULT_NOTE_HEIGHT, DEFAULT_NOTE_WIDTH } from "@blocksuite/affine/model";
 import { createGroupFromSelectedCommand, ungroupCommand } from "@blocksuite/affine/gfx/group";
 import { Bound, serializeXYWH } from "@blocksuite/global/gfx";
+import { BLOCKSUITE_STYLE_SCOPE_CLASS } from "@blocksuite/std";
 import { GfxControllerIdentifier, type GfxBlockElementModel } from "@blocksuite/std/gfx";
 import { createPortal } from "react-dom";
 import { Camera, Check, FileImage, FilePlus2, FolderOpen, Layers3, LoaderCircle, MessageCircleQuestionMark, RefreshCcw, Save, StickyNote, Workflow, X } from "lucide-react";
@@ -1625,7 +1626,7 @@ export default function BlockSuiteCanvasHost({
         </div>
       )}
       <div className="relative min-h-0 flex-1">
-        <div ref={hostRef} className="absolute inset-0" />
+        <div ref={hostRef} className={`${BLOCKSUITE_STYLE_SCOPE_CLASS} absolute inset-0`} />
       </div>
       {overlayMountElement && createPortal(
         <CanvasCustomBlockOverlay

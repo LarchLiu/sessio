@@ -8,3 +8,4 @@ export const serviceContext = createContext<BlockService>('service');
 export const blockComponentSymbol = Symbol('blockComponent');
 export const WIDGET_ID_ATTR = 'data-widget-id';
 export const BLOCK_ID_ATTR = 'data-block-id';
+export const BLOCKSUITE_STYLE_SCOPE_CLASS = 'sessio-blocksuite-style-scope';

@@ -1,4 +1,5 @@
 import { BlockSuiteError } from '@blocksuite/global/exceptions';
+import { BLOCKSUITE_STYLE_SCOPE_CLASS } from '@blocksuite/std';
 import {
   autoUpdate,
   computePosition,
@@ -27,7 +28,9 @@ export function createSimplePortal({
 }: PortalOptions) {
   const portalRoot = document.createElement('div');
   if (identifyWrapper) {
-    portalRoot.classList.add('blocksuite-portal');
+    portalRoot.classList.add('blocksuite-portal', BLOCKSUITE_STYLE_SCOPE_CLASS);
+  } else {
+    portalRoot.classList.add(BLOCKSUITE_STYLE_SCOPE_CLASS);
   }
   if (shadowDom) {
     portalRoot.attachShadow({

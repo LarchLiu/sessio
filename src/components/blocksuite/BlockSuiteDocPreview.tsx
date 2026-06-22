@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { BLOCKSUITE_STYLE_SCOPE_CLASS } from "@blocksuite/std";
 import { LoaderCircle } from "lucide-react";
 import {
   createPageDocFromMarkdown,
@@ -84,7 +85,7 @@ export default function BlockSuiteDocPreview({
       )}
       <div
         ref={hostRef}
-        className={loading || error ? "hidden" : "h-[320px] overflow-hidden"}
+        className={loading || error ? `hidden ${BLOCKSUITE_STYLE_SCOPE_CLASS}` : `${BLOCKSUITE_STYLE_SCOPE_CLASS} h-[320px] overflow-hidden`}
       />
     </div>
   );

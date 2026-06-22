@@ -1,3 +1,4 @@
+import { BLOCKSUITE_STYLE_SCOPE_CLASS } from '@blocksuite/std';
 import { html, LitElement, type TemplateResult } from 'lit';
 import { property } from 'lit/decorators.js';
 
@@ -28,7 +29,7 @@ export class Portal extends LitElement {
           ...(typeof this.shadowDom !== 'boolean' ? this.shadowDom : {}),
         })
       : portalRoot;
-    portalRoot.classList.add('blocksuite-portal');
+    portalRoot.classList.add('blocksuite-portal', BLOCKSUITE_STYLE_SCOPE_CLASS);
     this.container.append(portalRoot);
     this._portalRoot = portalRoot;
     return renderRoot;

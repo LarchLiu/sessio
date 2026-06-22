@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { BLOCKSUITE_STYLE_SCOPE_CLASS } from "@blocksuite/std";
 import {
   createBlockSuiteDoc,
   createEdgelessEditor,
@@ -108,7 +109,7 @@ export default function BlockSuiteSpike({ docId }: BlockSuiteSpikeProps) {
           </button>
         </div>
       </div>
-      <div ref={hostRef} className="min-h-0 flex-1" />
+      <div ref={hostRef} className={`${BLOCKSUITE_STYLE_SCOPE_CLASS} min-h-0 flex-1`} />
     </div>
   );
 }
