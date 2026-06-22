@@ -1663,6 +1663,7 @@ export function AcpTranscriptPanel({
             selectedCanvasFileRequest={selectedCanvasFileRequest}
             composer={chatComposerController}
             onError={setComposerError}
+            onOpenProjectFile={onOpenProjectFile}
             sessionThreadId={canvasSessionThreadId}
             onOpenThreadMultiSessionChat={openCanvasThreadMultiSessionChat}
           />

@@ -25,7 +25,7 @@ export const MarkdownPreviewBlockSchema = defineBlockSchema({
     sourcePath: "",
     sourceType: "workspace_file",
     excerpt: "",
-    renderMode: "summary",
+    renderMode: "preview",
     collapsed: false,
     contentVersion: "",
     cachedContent: "",
@@ -51,21 +51,69 @@ export class MarkdownPreviewBlockModel
   extends MarkdownPreviewBlockBase
   implements GfxElementGeometry
 {
-  declare title: string;
+  get title() {
+    return this.props.title;
+  }
 
-  declare sourcePath: string;
+  set title(value: string) {
+    this.props.title = value;
+  }
 
-  declare sourceType: string;
+  get sourcePath() {
+    return this.props.sourcePath;
+  }
 
-  declare excerpt: string;
+  set sourcePath(value: string) {
+    this.props.sourcePath = value;
+  }
 
-  declare renderMode: MarkdownPreviewRenderMode;
+  get sourceType() {
+    return this.props.sourceType;
+  }
 
-  declare collapsed: boolean;
+  set sourceType(value: string) {
+    this.props.sourceType = value;
+  }
 
-  declare contentVersion: string;
+  get excerpt() {
+    return this.props.excerpt;
+  }
 
-  declare cachedContent: string;
+  set excerpt(value: string) {
+    this.props.excerpt = value;
+  }
+
+  get renderMode() {
+    return this.props.renderMode;
+  }
+
+  set renderMode(value: MarkdownPreviewRenderMode) {
+    this.props.renderMode = value;
+  }
+
+  get collapsed() {
+    return this.props.collapsed;
+  }
+
+  set collapsed(value: boolean) {
+    this.props.collapsed = value;
+  }
+
+  get contentVersion() {
+    return this.props.contentVersion;
+  }
+
+  set contentVersion(value: string) {
+    this.props.contentVersion = value;
+  }
+
+  get cachedContent() {
+    return this.props.cachedContent;
+  }
+
+  set cachedContent(value: string) {
+    this.props.cachedContent = value;
+  }
 }
 
 declare global {

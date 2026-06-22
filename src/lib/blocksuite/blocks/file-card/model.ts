@@ -47,19 +47,61 @@ export class FileCardBlockModel
   extends FileCardBlockBase
   implements GfxElementGeometry
 {
-  declare title: string;
+  get title() {
+    return this.props.title;
+  }
 
-  declare sourcePath: string;
+  set title(value: string) {
+    this.props.title = value;
+  }
 
-  declare sourceType: string;
+  get sourcePath() {
+    return this.props.sourcePath;
+  }
 
-  declare subtitle: string;
+  set sourcePath(value: string) {
+    this.props.sourcePath = value;
+  }
 
-  declare summary: string;
+  get sourceType() {
+    return this.props.sourceType;
+  }
 
-  declare status: string;
+  set sourceType(value: string) {
+    this.props.sourceType = value;
+  }
 
-  declare contentVersion: string;
+  get subtitle() {
+    return this.props.subtitle;
+  }
+
+  set subtitle(value: string) {
+    this.props.subtitle = value;
+  }
+
+  get summary() {
+    return this.props.summary;
+  }
+
+  set summary(value: string) {
+    this.props.summary = value;
+  }
+
+  get status() {
+    return this.props.status;
+  }
+
+  set status(value: string) {
+    this.props.status = value;
+  }
+
+  get contentVersion() {
+    return this.props.contentVersion;
+  }
+
+  set contentVersion(value: string) {
+    this.props.contentVersion = value;
+  }
 }
 
 declare global {

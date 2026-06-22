@@ -17,6 +17,7 @@
     "core:window:allow-set-badge-label",
     "updater:default",
     "process:allow-restart",
+    "opener:allow-open-path",
     {
       "identifier": "opener:allow-open-url",
       "allow": [

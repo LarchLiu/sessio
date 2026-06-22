@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { addImages } from "@blocksuite/affine/blocks/image";
@@ -136,6 +137,7 @@ export interface BlockSuiteCanvasHostProps {
   composer: ChatComposerController;
   onStateLoaded: (state: CanvasDocumentState) => void;
   onError: (message: string) => void;
+  onOpenProjectFile?: (path: string) => void;
   onOpenThreadMultiSessionChat?: (threadId: string) => void;
 }
 
@@ -190,6 +192,7 @@ export default function BlockSuiteCanvasHost({
   composer,
   onStateLoaded,
   onError,
+  onOpenProjectFile,
   onOpenThreadMultiSessionChat,
 }: BlockSuiteCanvasHostProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -277,14 +280,15 @@ export default function BlockSuiteCanvasHost({
     props: Record<string, unknown>,
   ) => {
     const rootService = getRootService();
-    if (!rootService) {
+    const doc = getDoc();
+    if (!rootService || !doc) {
       throw new Error("Canvas root service is not ready");
     }
     if (!rootService.surface) {
       throw new Error("Canvas surface is not ready");
     }
-    return rootService.crud.addBlock(flavour, props, rootService.surface.id);
-  }, [getRootService]);
+    return doc.addBlock(flavour as never, props, rootService.surface.id);
+  }, [getDoc, getRootService]);
 
   const commitSelectionState = useCallback((count: number, canUngroup: boolean) => {
     const current = selectionUiStateRef.current;
@@ -423,9 +427,8 @@ export default function BlockSuiteCanvasHost({
         excerpt: markdownPreviewModel.excerpt || "",
         contentVersion: markdownPreviewModel.contentVersion || "",
         renderMode:
-          selectedIds.has(entry.model.id)
-          && !markdownPreviewModel.collapsed
-          && markdownPreviewModel.renderMode === "preview"
+          !markdownPreviewModel.collapsed &&
+          markdownPreviewModel.renderMode === "preview"
             ? "preview"
             : "summary",
         workspacePath,
@@ -754,10 +757,9 @@ export default function BlockSuiteCanvasHost({
   const addNoteNode = useCallback(async () => {
     const rootService = getRootService();
     const editor = getEditor();
-    if (!rootService || !editor) return;
-    const noteId = addEdgelessNote(rootService, editor);
     const doc = getDoc();
-    if (!doc) return;
+    if (!rootService || !editor || !doc) return;
+    const noteId = addEdgelessNote(rootService, editor);
     const note = doc.getModelById(noteId);
     if (note) {
       doc.updateBlock(note, {
@@ -861,7 +863,7 @@ export default function BlockSuiteCanvasHost({
         sourcePath: model.sourcePath || "",
         sourceType: model.sourceType || "workspace_file",
         excerpt: model.summary || "",
-        renderMode: "summary",
+        renderMode: "preview",
         collapsed: false,
         contentVersion: model.contentVersion || model.sourcePath || "",
         cachedContent: "",
@@ -870,8 +872,87 @@ export default function BlockSuiteCanvasHost({
     );
     rootService.removeElement(blockId);
     scheduleSyncBlocks();
+    scheduleCustomBlockOverlaySync();
     updateSelectionState();
-  }, [getDoc, getRootService, insertEdgelessBlock, scheduleSyncBlocks, updateSelectionState]);
+  }, [
+    getDoc,
+    getRootService,
+    insertEdgelessBlock,
+    scheduleCustomBlockOverlaySync,
+    scheduleSyncBlocks,
+    updateSelectionState,
+  ]);
+
+  const dragMarkdownPreviewFromHeader = useCallback((
+    blockId: string,
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    if (event.button !== 0) return;
+
+    const doc = getDoc();
+    const rootService = getRootService();
+    if (!doc || !rootService) return;
+
+    const model = doc.getModelById(blockId) as MarkdownPreviewBlockModel | null;
+    if (!model?.xywh) return;
+
+    const startBound = Bound.deserialize(model.xywh);
+    const startClientX = event.clientX;
+    const startClientY = event.clientY;
+    const startZoom = rootService.viewport.zoom || 1;
+    let moved = false;
+
+    rootService.selection.set({
+      editing: false,
+      elements: [blockId],
+    });
+    scheduleSelectionStateUpdate();
+    event.preventDefault();
+    event.stopPropagation();
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const dx = (moveEvent.clientX - startClientX) / startZoom;
+      const dy = (moveEvent.clientY - startClientY) / startZoom;
+      if (!moved && Math.abs(dx) < 1 && Math.abs(dy) < 1) {
+        return;
+      }
+      moved = true;
+      doc.updateBlock(model, {
+        xywh: serializeXYWH(
+          startBound.x + dx,
+          startBound.y + dy,
+          startBound.w,
+          startBound.h,
+        ),
+      });
+      scheduleCustomBlockOverlaySync();
+    };
+
+    const finishDrag = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp, true);
+      window.removeEventListener("pointercancel", onPointerUp, true);
+      if (moved) {
+        scheduleSyncBlocks();
+      }
+      scheduleCustomBlockOverlaySync();
+      scheduleSelectionStateUpdate();
+    };
+
+    const onPointerUp = () => {
+      finishDrag();
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp, true);
+    window.addEventListener("pointercancel", onPointerUp, true);
+  }, [
+    getDoc,
+    getRootService,
+    scheduleCustomBlockOverlaySync,
+    scheduleSelectionStateUpdate,
+    scheduleSyncBlocks,
+  ]);
 
   const runWorkflowBlock = useCallback(async (blockId: string) => {
     const doc = getDoc();
@@ -1001,7 +1082,7 @@ export default function BlockSuiteCanvasHost({
       if (mountPoint) {
         mountPoint.style.position = "absolute";
         mountPoint.style.inset = "0";
-        mountPoint.style.pointerEvents = "none";
+        mountPoint.style.pointerEvents = "auto";
       }
       setOverlayMountElement(mountPoint);
     };
@@ -1554,6 +1635,8 @@ export default function BlockSuiteCanvasHost({
             void runWorkflowBlock(blockId);
           }}
           onOpenWorkflowThread={openWorkflowThread}
+          onOpenFile={onOpenProjectFile}
+          onDragMarkdownPreviewFromHeader={dragMarkdownPreviewFromHeader}
           onUpdateMarkdownRenderMode={(blockId, nextMode) => {
             const doc = getDoc();
             const model = doc?.getModelById(blockId) ?? null;

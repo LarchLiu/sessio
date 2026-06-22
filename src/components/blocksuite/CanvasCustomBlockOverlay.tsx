@@ -54,6 +54,11 @@ export interface CanvasCustomBlockOverlayProps {
   onPromoteFileCardToMarkdown: (blockId: string) => void;
   onRunWorkflow: (blockId: string) => void;
   onOpenWorkflowThread: (blockId: string) => void;
+  onOpenFile?: (path: string) => void;
+  onDragMarkdownPreviewFromHeader?: (
+    blockId: string,
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => void;
   onUpdateMarkdownRenderMode: (
     blockId: string,
     nextMode: "summary" | "preview",
@@ -65,6 +70,8 @@ export function CanvasCustomBlockOverlay({
   onPromoteFileCardToMarkdown,
   onRunWorkflow,
   onOpenWorkflowThread,
+  onOpenFile,
+  onDragMarkdownPreviewFromHeader,
   onUpdateMarkdownRenderMode,
 }: CanvasCustomBlockOverlayProps) {
   if (items.length === 0) {
@@ -102,6 +109,7 @@ export function CanvasCustomBlockOverlay({
                   summary={item.summary}
                   status={item.status}
                   onPromoteToMarkdown={() => onPromoteFileCardToMarkdown(item.blockId)}
+                  onOpenFile={onOpenFile}
                   interactionMode="overlay"
                 />
               </div>
@@ -141,7 +149,10 @@ export function CanvasCustomBlockOverlay({
                 excerpt={item.excerpt}
                 contentVersion={item.contentVersion}
                 renderMode={item.renderMode}
-                focused={item.selected}
+                onOpenFile={onOpenFile}
+                onHeaderPointerDown={(event) =>
+                  onDragMarkdownPreviewFromHeader?.(item.blockId, event)
+                }
                 onToggleRenderMode={(nextMode) =>
                   onUpdateMarkdownRenderMode(item.blockId, nextMode)
                 }

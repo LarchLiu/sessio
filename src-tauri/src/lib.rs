@@ -2229,6 +2229,24 @@ mod ancestor_tests {
     }
 
     #[test]
+    fn workspace_text_file_path_accepts_relative_paths_inside_workspace() {
+        let workspace = temp_workspace("relative-path-ok");
+        let nested = workspace.join("docs");
+        let path = nested.join("note.md");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        std::fs::write(&path, "# hello").expect("write nested file");
+
+        let loaded = read_workspace_text_file(
+            workspace.to_string_lossy().into_owned(),
+            "docs/note.md".to_string(),
+        )
+        .expect("relative workspace file should load");
+
+        assert_eq!(loaded.content, "# hello");
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
     fn workspace_text_file_path_rejects_outside_workspace() {
         let workspace = temp_workspace("path-guard");
         let outside = temp_workspace("outside").join("note.txt");
@@ -3942,12 +3960,13 @@ fn workspace_text_file_path(workspace_path: &str, path: &str) -> Result<PathBuf,
     if !workspace.is_absolute() || !workspace.is_dir() {
         return Err("Invalid workspace path".to_string());
     }
-    let file = PathBuf::from(path);
-    if !file.is_absolute() {
-        return Err("Only absolute file paths can be loaded".to_string());
-    }
-
     let workspace = workspace.canonicalize().map_err(|e| e.to_string())?;
+    let file = PathBuf::from(path);
+    let file = if file.is_absolute() {
+        file
+    } else {
+        workspace.join(file)
+    };
     let file = file.canonicalize().map_err(|e| e.to_string())?;
     if !file.starts_with(&workspace) {
         return Err("File path is outside the workspace".to_string());

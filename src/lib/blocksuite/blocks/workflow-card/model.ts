@@ -53,25 +53,85 @@ export class WorkflowCardBlockModel
   extends WorkflowCardBlockBase
   implements GfxElementGeometry
 {
-  declare title: string;
+  get title() {
+    return this.props.title;
+  }
 
-  declare threadId: string;
+  set title(value: string) {
+    this.props.title = value;
+  }
 
-  declare threadStageId: string;
+  get threadId() {
+    return this.props.threadId;
+  }
 
-  declare sourceType: string;
+  set threadId(value: string) {
+    this.props.threadId = value;
+  }
 
-  declare workflowSummaryMarkdown: string;
+  get threadStageId() {
+    return this.props.threadStageId;
+  }
 
-  declare executionState: string;
+  set threadStageId(value: string) {
+    this.props.threadStageId = value;
+  }
 
-  declare lastRunId: string;
+  get sourceType() {
+    return this.props.sourceType;
+  }
 
-  declare workflowSnapshotJson: string;
+  set sourceType(value: string) {
+    this.props.sourceType = value;
+  }
 
-  declare threadGoal: string;
+  get workflowSummaryMarkdown() {
+    return this.props.workflowSummaryMarkdown;
+  }
 
-  declare status: string;
+  set workflowSummaryMarkdown(value: string) {
+    this.props.workflowSummaryMarkdown = value;
+  }
+
+  get executionState() {
+    return this.props.executionState;
+  }
+
+  set executionState(value: string) {
+    this.props.executionState = value;
+  }
+
+  get lastRunId() {
+    return this.props.lastRunId;
+  }
+
+  set lastRunId(value: string) {
+    this.props.lastRunId = value;
+  }
+
+  get workflowSnapshotJson() {
+    return this.props.workflowSnapshotJson;
+  }
+
+  set workflowSnapshotJson(value: string) {
+    this.props.workflowSnapshotJson = value;
+  }
+
+  get threadGoal() {
+    return this.props.threadGoal;
+  }
+
+  set threadGoal(value: string) {
+    this.props.threadGoal = value;
+  }
+
+  get status() {
+    return this.props.status;
+  }
+
+  set status(value: string) {
+    this.props.status = value;
+  }
 }
 
 declare global {

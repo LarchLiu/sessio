@@ -1,4 +1,10 @@
-import { openPath } from "@tauri-apps/plugin-opener";
+function stopOverlayInteraction(event: {
+  preventDefault: () => void;
+  stopPropagation: () => void;
+}) {
+  event.preventDefault();
+  event.stopPropagation();
+}
 
 export interface FileCardHostProps {
   title: string;
@@ -8,6 +14,7 @@ export interface FileCardHostProps {
   summary: string;
   status: string;
   onPromoteToMarkdown: () => void;
+  onOpenFile?: (path: string) => void;
   interactionMode?: "block" | "overlay";
 }
 
@@ -19,6 +26,7 @@ export function FileCardHost({
   summary,
   status,
   onPromoteToMarkdown,
+  onOpenFile,
   interactionMode = "block",
 }: FileCardHostProps) {
   const overlayRootClassName =
@@ -36,8 +44,11 @@ export function FileCardHost({
         <div className="flex shrink-0 items-center gap-2">
           <button
             type="button"
-            onClick={() => {
-              void openPath(sourcePath).catch(() => {});
+            onPointerDown={stopOverlayInteraction}
+            onMouseDown={stopOverlayInteraction}
+            onClick={(event) => {
+              stopOverlayInteraction(event);
+              onOpenFile?.(sourcePath);
             }}
             className={"rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5 " + overlayActionClassName}
           >
@@ -45,7 +56,12 @@ export function FileCardHost({
           </button>
           <button
             type="button"
-            onClick={onPromoteToMarkdown}
+            onPointerDown={stopOverlayInteraction}
+            onMouseDown={stopOverlayInteraction}
+            onClick={(event) => {
+              stopOverlayInteraction(event);
+              onPromoteToMarkdown();
+            }}
             className={"rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5 " + overlayActionClassName}
           >
             Preview

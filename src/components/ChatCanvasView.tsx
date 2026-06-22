@@ -21,6 +21,7 @@ export interface ChatCanvasViewProps {
   } | null;
   composer: ChatComposerController;
   onError: (message: string) => void;
+  onOpenProjectFile?: (path: string) => void;
   onOpenThreadMultiSessionChat?: (threadId: string) => void;
 }
 
@@ -34,6 +35,7 @@ export default function ChatCanvasView({
   selectedCanvasFileRequest = null,
   composer,
   onError,
+  onOpenProjectFile,
   onOpenThreadMultiSessionChat,
 }: ChatCanvasViewProps) {
   const [state, setState] = useState<CanvasDocumentState | null>(null);
@@ -124,6 +126,7 @@ export default function ChatCanvasView({
             initialState={state}
             initialSnapshot={initialSnapshot}
             composer={composer}
+            onOpenProjectFile={onOpenProjectFile}
             onOpenThreadMultiSessionChat={onOpenThreadMultiSessionChat}
             onStateLoaded={setState}
             onError={onError}

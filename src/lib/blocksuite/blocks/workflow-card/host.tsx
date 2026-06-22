@@ -11,6 +11,14 @@ export interface WorkflowCardHostProps {
   interactionMode?: "block" | "overlay";
 }
 
+function stopOverlayInteraction(event: {
+  preventDefault: () => void;
+  stopPropagation: () => void;
+}) {
+  event.preventDefault();
+  event.stopPropagation();
+}
+
 export function WorkflowCardHost({
   title,
   threadId,
@@ -45,14 +53,24 @@ export function WorkflowCardHost({
         <div className="flex shrink-0 items-center gap-2">
           <button
             type="button"
-            onClick={onRunWorkflow}
+            onPointerDown={stopOverlayInteraction}
+            onMouseDown={stopOverlayInteraction}
+            onClick={(event) => {
+              stopOverlayInteraction(event);
+              onRunWorkflow();
+            }}
             className={"rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5 " + overlayActionClassName}
           >
             Run
           </button>
           <button
             type="button"
-            onClick={onOpenThread}
+            onPointerDown={stopOverlayInteraction}
+            onMouseDown={stopOverlayInteraction}
+            onClick={(event) => {
+              stopOverlayInteraction(event);
+              onOpenThread();
+            }}
             className={"rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5 " + overlayActionClassName}
           >
             Thread

@@ -1,8 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
-import { openPath } from "@tauri-apps/plugin-opener";
 import { PlainMarkdownPreviewContent } from "../../../../components/PlainMarkdownPreview";
 import { useEffectiveThemeType } from "../../../../components/shikiHighlight";
 import { readWorkspaceTextFile } from "../../../../api";
+
+function stopOverlayInteraction(event: {
+  preventDefault: () => void;
+  stopPropagation: () => void;
+}) {
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function stopOverlayPropagation(event: {
+  stopPropagation: () => void;
+}) {
+  event.stopPropagation();
+}
 
 export interface MarkdownPreviewHostProps {
   workspacePath: string | null;
@@ -12,8 +25,9 @@ export interface MarkdownPreviewHostProps {
   excerpt: string;
   contentVersion: string;
   renderMode: "summary" | "preview";
-  focused: boolean;
   onToggleRenderMode: (nextMode: "summary" | "preview") => void;
+  onOpenFile?: (path: string) => void;
+  onHeaderPointerDown?: (event: React.PointerEvent<HTMLDivElement>) => void;
   interactionMode?: "block" | "overlay";
 }
 
@@ -24,28 +38,35 @@ export function MarkdownPreviewHost({
   excerpt,
   contentVersion,
   renderMode,
-  focused,
   onToggleRenderMode,
+  onOpenFile,
+  onHeaderPointerDown,
   interactionMode = "block",
 }: MarkdownPreviewHostProps) {
   const overlayRootClassName =
     interactionMode === "overlay" ? "pointer-events-none" : "";
   const overlayActionClassName =
     interactionMode === "overlay" ? "pointer-events-auto" : "";
+  const overlayContentClassName =
+    interactionMode === "overlay" ? "pointer-events-auto" : "";
 
   const themeType = useEffectiveThemeType();
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const shouldLoadPreview = focused && renderMode === "preview";
+  const shouldLoadPreview = renderMode === "preview";
+  const resolvedSourcePath = useMemo(
+    () => resolveWorkspaceFilePath(sourcePath, workspacePath),
+    [sourcePath, workspacePath],
+  );
 
   useEffect(() => {
     if (!shouldLoadPreview) return;
-    if (!workspacePath || !sourcePath) return;
+    if (!workspacePath || !resolvedSourcePath) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
-    readWorkspaceTextFile(workspacePath, sourcePath)
+    readWorkspaceTextFile(workspacePath, resolvedSourcePath)
       .then((file) => {
         if (cancelled) return;
         setContent(file.content);
@@ -60,21 +81,34 @@ export function MarkdownPreviewHost({
     return () => {
       cancelled = true;
     };
-  }, [contentVersion, shouldLoadPreview, sourcePath, workspacePath]);
+  }, [contentVersion, resolvedSourcePath, shouldLoadPreview, workspacePath]);
 
-  const summary = useMemo(() => excerpt.trim() || "Open preview to load markdown content.", [excerpt]);
+  const summary = useMemo(
+    () => excerpt.trim() || "No markdown summary available.",
+    [excerpt],
+  );
 
   return (
     <div className={"h-full w-full overflow-hidden rounded-[20px] border border-ink/10 bg-surface-panel/95 text-ink/80 shadow-[0_16px_40px_rgba(18,24,33,0.08)] " + overlayRootClassName}>
-      <div className="flex items-start justify-between gap-3 border-b border-ink/8 px-4 py-3">
+      <div
+        onPointerDown={onHeaderPointerDown}
+        className={"flex items-start justify-between gap-3 border-b border-ink/8 px-4 py-3 " + overlayContentClassName}
+      >
         <div className="min-w-0">
           <div className="truncate text-body-sm font-medium text-ink/88">{title || "Markdown preview"}</div>
           <div className="truncate font-mono text-[11px] text-ink/48">{sourcePath}</div>
         </div>
         <button
           type="button"
-          onClick={() => {
-            void openPath(sourcePath).catch(() => {});
+          onPointerDown={stopOverlayInteraction}
+          onMouseDown={stopOverlayInteraction}
+          onClick={(event) => {
+            stopOverlayInteraction(event);
+            if (!resolvedSourcePath) {
+              setError("Markdown source path is unavailable.");
+              return;
+            }
+            onOpenFile?.(resolvedSourcePath);
           }}
           className={"shrink-0 rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5 " + overlayActionClassName}
         >
@@ -82,7 +116,12 @@ export function MarkdownPreviewHost({
         </button>
         <button
           type="button"
-          onClick={() => onToggleRenderMode(renderMode === "preview" ? "summary" : "preview")}
+          onPointerDown={stopOverlayInteraction}
+          onMouseDown={stopOverlayInteraction}
+          onClick={(event) => {
+            stopOverlayInteraction(event);
+            onToggleRenderMode(renderMode === "preview" ? "summary" : "preview");
+          }}
           className={"shrink-0 rounded-md border border-ink/10 px-2 py-1 text-[11px] text-ink/62 transition hover:bg-ink/5 " + overlayActionClassName}
         >
           {renderMode === "preview" ? "Summary" : "Preview"}
@@ -94,14 +133,25 @@ export function MarkdownPreviewHost({
         </div>
       )}
       {shouldLoadPreview && (
-        <div className="h-[calc(100%-57px)] overflow-auto px-4 py-3">
+        <div
+          onPointerDown={stopOverlayPropagation}
+          onMouseDown={stopOverlayPropagation}
+          onClick={stopOverlayPropagation}
+          onWheel={stopOverlayPropagation}
+          onTouchStart={stopOverlayPropagation}
+          onTouchMove={stopOverlayPropagation}
+          className={
+            "h-[calc(100%-57px)] overflow-auto overscroll-contain px-4 py-3 " +
+            overlayContentClassName
+          }
+        >
           {loading && <div className="text-caption text-ink/52">Loading markdown preview…</div>}
           {!loading && error && <div className="text-caption text-status-error">{error}</div>}
           {!loading && !error && content !== null && (
             <article className="markdown-content" data-theme-type={themeType}>
               <PlainMarkdownPreviewContent
                 text={content}
-                filePath={sourcePath}
+                filePath={resolvedSourcePath}
                 themeType={themeType}
               />
             </article>
@@ -110,4 +160,17 @@ export function MarkdownPreviewHost({
       )}
     </div>
   );
+}
+
+function resolveWorkspaceFilePath(
+  path: string,
+  workspacePath: string | null,
+): string | null {
+  if (!path) return null;
+  if (/^([a-zA-Z]:[\\/]|\/)/.test(path)) return path;
+  if (!workspacePath) return null;
+  const separator = workspacePath.includes("\\") ? "\\" : "/";
+  const trimmedRoot = workspacePath.replace(/[\\/]+$/, "");
+  const trimmedPath = path.replace(/^[\\/]+/, "");
+  return `${trimmedRoot}${separator}${trimmedPath}`;
 }
