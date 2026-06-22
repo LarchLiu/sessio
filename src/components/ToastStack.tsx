@@ -1,16 +1,30 @@
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
-type Toast = { id: number; message: string; entering: boolean };
+export type ToastTone = "info" | "error";
+
+export type ToastStackMessage = {
+  message: string;
+  tone?: ToastTone;
+};
+
+type Toast = {
+  id: number;
+  message: string;
+  tone: ToastTone;
+  entering: boolean;
+};
 
 function ToastItem({
   id,
   message,
+  tone,
   entering,
   durationMs,
   onDismiss,
 }: {
   id: number;
   message: string;
+  tone: ToastTone;
   entering: boolean;
   durationMs: number;
   onDismiss: (id: number) => void;
@@ -20,11 +34,22 @@ function ToastItem({
     return () => window.clearTimeout(timeout);
   }, [durationMs, id, onDismiss]);
 
+  const toneClassName =
+    tone === "error"
+      ? "border-status-error/25 bg-surface-panel text-status-error"
+      : "border-ink/10 bg-surface-panel text-ink/76";
+  const closeClassName =
+    tone === "error"
+      ? "text-status-error/70 hover:bg-status-error/10 hover:text-status-error"
+      : "text-ink/45 hover:bg-ink/8 hover:text-ink/75";
+
   return (
     <div
       data-toast-id={id}
       className={
-        "flex items-start gap-2 rounded-md border border-status-error/25 bg-surface-panel px-3 py-2 text-body-sm text-status-error shadow-xl transition-[opacity,transform] duration-180 ease-out " +
+        "flex items-start gap-2 rounded-md border px-3 py-2 text-body-sm shadow-xl transition-[opacity,transform] duration-180 ease-out " +
+        toneClassName +
+        " " +
         (entering ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100")
       }
     >
@@ -32,7 +57,7 @@ function ToastItem({
       <button
         type="button"
         onClick={() => onDismiss(id)}
-        className="pointer-events-auto rounded px-1 text-caption text-status-error/70 hover:bg-status-error/10 hover:text-status-error"
+        className={"pointer-events-auto rounded px-1 text-caption " + closeClassName}
       >
         x
       </button>
@@ -45,7 +70,7 @@ export default function ToastStack({
   onMessageConsumed,
   durationMs = 6000,
 }: {
-  message: string | null;
+  message: string | ToastStackMessage | null;
   onMessageConsumed: () => void;
   durationMs?: number;
 }) {
@@ -58,7 +83,11 @@ export default function ToastStack({
   useLayoutEffect(() => {
     if (!message) return;
     const id = ++toastIdRef.current;
-    setToasts((prev) => [...prev, { id, message, entering: true }]);
+    const next =
+      typeof message === "string"
+        ? { message, tone: "error" as const }
+        : { message: message.message, tone: message.tone ?? "info" };
+    setToasts((prev) => [...prev, { id, ...next, entering: true }]);
     onMessageConsumed();
   }, [message, onMessageConsumed]);
 
@@ -116,12 +145,17 @@ export default function ToastStack({
   if (toasts.length === 0) return null;
 
   return (
-    <div ref={stackRef} className="pointer-events-none absolute left-1/2 top-4 z-50 flex w-[min(520px,calc(100%-2rem))] -translate-x-1/2 flex-col gap-2">
+    <div
+      ref={stackRef}
+      data-sessio-snapshot-ignore="true"
+      className="pointer-events-none absolute left-1/2 top-4 z-50 flex w-[min(520px,calc(100%-2rem))] -translate-x-1/2 flex-col gap-2"
+    >
       {toasts.map((toast) => (
         <ToastItem
           key={toast.id}
           id={toast.id}
           message={toast.message}
+          tone={toast.tone}
           entering={toast.entering}
           durationMs={durationMs}
           onDismiss={dismiss}

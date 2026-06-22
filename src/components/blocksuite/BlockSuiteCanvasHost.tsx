@@ -4,12 +4,11 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { addImages } from "@blocksuite/affine/blocks/image";
 import { EdgelessRootService } from "@blocksuite/affine/blocks/root";
-import { ExportManager, type SurfaceElementModel } from "@blocksuite/affine/blocks/surface";
 import { NoteDisplayMode, type GroupElementModel, DEFAULT_NOTE_HEIGHT, DEFAULT_NOTE_WIDTH } from "@blocksuite/affine/model";
 import { createGroupFromSelectedCommand, ungroupCommand } from "@blocksuite/affine/gfx/group";
 import { Bound, serializeXYWH } from "@blocksuite/global/gfx";
 import { BLOCKSUITE_STYLE_SCOPE_CLASS } from "@blocksuite/std";
-import { GfxControllerIdentifier, type GfxBlockElementModel } from "@blocksuite/std/gfx";
+import { GfxControllerIdentifier } from "@blocksuite/std/gfx";
 import { createPortal } from "react-dom";
 import { Camera, Check, FileImage, FilePlus2, FolderOpen, Layers3, LoaderCircle, MessageCircleQuestionMark, RefreshCcw, Save, StickyNote, Workflow, X } from "lucide-react";
 import type { ComposerAttachment } from "../ComposerAttachments";
@@ -22,6 +21,7 @@ import type {
   CanvasDocumentState,
 } from "../../canvasTypes";
 import {
+  captureWindowAreaPng,
   createAstraRun,
   createCanvasAnchor,
   createCanvasContextFile,
@@ -46,6 +46,7 @@ import {
   CanvasCustomBlockOverlay,
   type CanvasCustomBlockOverlayItem,
 } from "./CanvasCustomBlockOverlay";
+import ToastStack, { type ToastStackMessage } from "../ToastStack";
 import { setBlockSuitePortalBridge } from "../../lib/blocksuite/portalBridge";
 import {
   canvasBlockRecordToContextRef,
@@ -59,12 +60,17 @@ import {
 import type { MarkdownPreviewBlockModel } from "../../lib/blocksuite/blocks/markdown-preview";
 import type { FileCardBlockModel } from "../../lib/blocksuite/blocks/file-card";
 import type { WorkflowCardBlockModel } from "../../lib/blocksuite/blocks/workflow-card";
+import {
+  CANVAS_SNAPSHOT_SELECTION_EVENT,
+  type CanvasSnapshotSelectionEventDetail,
+} from "../../lib/blocksuite/toolbar";
 
 const CANVAS_ADD_FILES_EVENT = "sessio:canvas-add-files";
 const AUTOSAVE_DEBOUNCE_MS = 900;
 const ROOT_SERVICE_RETRY_MS = 80;
 const ROOT_SERVICE_RETRY_LIMIT = 125;
 const BOX_SELECTING_CLASS_NAME = "sessio-box-selecting";
+const SNAPSHOT_CAPTURING_CLASS_NAME = "sessio-snapshot-capturing";
 
 type CanvasSelectionRef = {
   blockId: string;
@@ -82,6 +88,7 @@ type CanvasSelectionContext = {
 type BlockSuiteEditor = HTMLElement & {
   std?: {
     get?: <T>(token: unknown) => T;
+    getOptional?: <T>(token: unknown) => T | null;
     command?: {
       exec: <TArgs extends object, TResult extends object>(
         command: unknown,
@@ -109,19 +116,454 @@ type SelectionElementLike = {
 
 type EdgelessSelectable = {
   id: string;
-  xywh: string;
+  xywh?: string;
+  elementBound?: Bound;
+  responseBound?: Bound;
   flavour?: string;
+  props?: {
+    xywh?: string;
+  };
 };
 
 type GfxControllerLike = {
   viewport: {
     toViewCoord: (x: number, y: number) => [number, number];
+    toViewBound: (bound: Bound) => Bound;
     toModelCoord: (x: number, y: number) => [number, number];
     viewportUpdated?: {
       subscribe: (listener: () => void) => { unsubscribe: () => void };
     };
   };
+  surfaceComponent?: {
+    renderer?: unknown;
+  } | null;
+  selection?: {
+    selectedIds?: string[];
+    selectedElements?: EdgelessSelectable[];
+    slots?: {
+      updated?: {
+        subscribe: (listener: () => void) => { unsubscribe: () => void };
+      };
+    };
+  };
+  getElementById?: (id: string) => EdgelessSelectable | null;
+  getElementsByBound?: (
+    bound: Bound,
+    options: { type: "canvas" | "block" | "all" },
+  ) => EdgelessSelectable[];
 };
+
+type SnapshotExport = {
+  path: string;
+  attachment: ComposerAttachment;
+};
+
+type SnapshotExportFailureReason =
+  | "empty"
+  | "unavailable"
+  | "render-failed"
+  | "blob-failed"
+  | "save-failed";
+
+type SnapshotProgress = (message: string) => void;
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise
+      .then((value) => resolve(value))
+      .catch((error) => reject(error))
+      .finally(() => window.clearTimeout(timeout));
+  });
+}
+
+function waitForNextFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
+async function reportSnapshotProgress(
+  onProgress: SnapshotProgress | undefined,
+  message: string,
+) {
+  onProgress?.(message);
+  if (onProgress) await waitForNextFrame();
+}
+
+function getGfxController(editor: BlockSuiteEditor | null): GfxControllerLike | null {
+  return editor?.std?.get?.<GfxControllerLike>(GfxControllerIdentifier) ?? null;
+}
+
+function getSelectableXYWH(item: EdgelessSelectable): string | null {
+  return typeof item.xywh === "string" && item.xywh
+    ? item.xywh
+    : typeof item.props?.xywh === "string" && item.props.xywh
+      ? item.props.xywh
+      : null;
+}
+
+function boundFromUnknown(value: unknown): Bound | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as {
+    x?: unknown;
+    y?: unknown;
+    w?: unknown;
+    h?: unknown;
+    width?: unknown;
+    height?: unknown;
+    toXYWH?: () => unknown;
+  };
+  if (typeof candidate.toXYWH === "function") {
+    const xywh = candidate.toXYWH();
+    if (
+      Array.isArray(xywh) &&
+      xywh.length >= 4 &&
+      xywh.every((item) => typeof item === "number" && Number.isFinite(item))
+    ) {
+      return new Bound(xywh[0], xywh[1], xywh[2], xywh[3]);
+    }
+  }
+  if (
+    typeof candidate.x === "number" &&
+    typeof candidate.y === "number" &&
+    typeof candidate.w === "number" &&
+    typeof candidate.h === "number"
+  ) {
+    return new Bound(candidate.x, candidate.y, candidate.w, candidate.h);
+  }
+  if (
+    typeof candidate.x === "number" &&
+    typeof candidate.y === "number" &&
+    typeof candidate.width === "number" &&
+    typeof candidate.height === "number"
+  ) {
+    return new Bound(candidate.x, candidate.y, candidate.width, candidate.height);
+  }
+  return null;
+}
+
+function getSelectableBound(item: EdgelessSelectable): Bound | null {
+  const elementBound = boundFromUnknown(item.elementBound);
+  if (elementBound) return elementBound;
+  const responseBound = boundFromUnknown(item.responseBound);
+  if (responseBound) return responseBound;
+  const xywh = getSelectableXYWH(item);
+  if (!xywh) return null;
+  try {
+    return Bound.deserialize(xywh);
+  } catch {
+    return null;
+  }
+}
+
+function isEdgelessSelectable(item: EdgelessSelectable | null | undefined): item is EdgelessSelectable {
+  return Boolean(item?.id && getSelectableBound(item));
+}
+
+function getCanvasElementById(
+  gfx: GfxControllerLike | null,
+  rootService: EdgelessRootService | null,
+  id: string,
+): EdgelessSelectable | null {
+  const fromGfx = gfx?.getElementById?.(id);
+  if (fromGfx) return fromGfx;
+  const crud = (rootService as unknown as {
+    crud?: {
+      getElementById?: (elementId: string) => EdgelessSelectable | null;
+    };
+  } | null)?.crud;
+  return crud?.getElementById?.(id) ?? null;
+}
+
+function snapshotExportFailureMessage(reason: SnapshotExportFailureReason): string {
+  switch (reason) {
+    case "empty":
+      return "Select one or more blocks before attaching a snapshot.";
+    case "unavailable":
+      return "Canvas editor is not ready for snapshot export yet.";
+    case "render-failed":
+      return "Could not render a visible PNG for the selected canvas nodes.";
+    case "blob-failed":
+      return "BlockSuite rendered the snapshot, but PNG encoding failed.";
+    case "save-failed":
+      return "BlockSuite rendered the snapshot, but saving the PNG attachment failed.";
+  }
+}
+
+async function snapshotExportFromPath(path: string): Promise<SnapshotExport> {
+  const previewDataUrl = await readLocalImageDataUrl(path).catch(() => null);
+  return {
+    path,
+    attachment: {
+      path,
+      kind: "image",
+      mimeType: "image/png",
+      previewDataUrl,
+      displayName: "Canvas selection",
+      name: "Canvas selection",
+    },
+  };
+}
+
+function isCanvasVisuallyEmpty(canvas: HTMLCanvasElement): boolean {
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context || canvas.width <= 0 || canvas.height <= 0) return true;
+  const sampleWidth = Math.min(canvas.width, 260);
+  const sampleHeight = Math.min(canvas.height, 260);
+  const stepX = Math.max(1, Math.floor(canvas.width / sampleWidth));
+  const stepY = Math.max(1, Math.floor(canvas.height / sampleHeight));
+  const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  for (let y = 0; y < canvas.height; y += stepY) {
+    for (let x = 0; x < canvas.width; x += stepX) {
+      const offset = (y * canvas.width + x) * 4;
+      const alpha = data[offset + 3] ?? 0;
+      if (alpha > 4) return false;
+    }
+  }
+  return true;
+}
+
+function unionDOMRects(rects: DOMRect[]): DOMRect | null {
+  if (rects.length === 0) return null;
+  let left = rects[0].left;
+  let top = rects[0].top;
+  let right = rects[0].right;
+  let bottom = rects[0].bottom;
+  for (const rect of rects.slice(1)) {
+    left = Math.min(left, rect.left);
+    top = Math.min(top, rect.top);
+    right = Math.max(right, rect.right);
+    bottom = Math.max(bottom, rect.bottom);
+  }
+  return new DOMRect(left, top, right - left, bottom - top);
+}
+
+function shouldIgnoreSnapshotElement(element: Element): boolean {
+  const tagName = element.tagName.toLowerCase();
+  if (tagName === "editor-toolbar") return true;
+  return Boolean(
+    element.closest("editor-toolbar") ||
+      element.closest("[data-sessio-snapshot-ignore='true']") ||
+      element.closest(".widgets-container") ||
+      element.closest("[class*='toolbar' i]") ||
+      element.closest("[class*='popover' i]") ||
+      element.closest("[class*='menu' i]") ||
+      element.closest("[class*='selection' i]") ||
+      element.closest("[class*='resize' i]"),
+  );
+}
+
+function getSnapshotCropBounds(
+  shell: HTMLElement,
+  selectionRect: DOMRect,
+  padding: number,
+) {
+  const shellRect = shell.getBoundingClientRect();
+  const left = Math.max(0, selectionRect.left - shellRect.left - padding);
+  const top = Math.max(0, selectionRect.top - shellRect.top - padding);
+  const right = Math.min(shellRect.width, selectionRect.right - shellRect.left + padding);
+  const bottom = Math.min(shellRect.height, selectionRect.bottom - shellRect.top + padding);
+  if (right <= left || bottom <= top) return null;
+  return {
+    left,
+    top,
+    width: right - left,
+    height: bottom - top,
+    shellWidth: shellRect.width,
+    shellHeight: shellRect.height,
+  };
+}
+
+function cropCanvas(
+  source: HTMLCanvasElement,
+  crop: { left: number; top: number; width: number; height: number },
+  scale: number,
+): HTMLCanvasElement | null {
+  const width = Math.max(1, Math.ceil(crop.width * scale));
+  const height = Math.max(1, Math.ceil(crop.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  canvas.style.width = `${Math.ceil(crop.width)}px`;
+  canvas.style.height = `${Math.ceil(crop.height)}px`;
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  context.drawImage(
+    source,
+    Math.max(0, Math.floor(crop.left * scale)),
+    Math.max(0, Math.floor(crop.top * scale)),
+    width,
+    height,
+    0,
+    0,
+    width,
+    height,
+  );
+  return canvas;
+}
+
+async function renderCanvasDomSnapshot(
+  shell: HTMLElement,
+  selectionRect: DOMRect,
+  padding = 16,
+): Promise<HTMLCanvasElement | null> {
+  const html2canvas = (await import("html2canvas")).default;
+  const crop = getSnapshotCropBounds(shell, selectionRect, padding);
+  if (!crop) return null;
+  const scale = window.devicePixelRatio || 1;
+  const fullCanvas = await html2canvas(shell, {
+    backgroundColor: null,
+    height: Math.ceil(crop.shellHeight),
+    ignoreElements: (element) => {
+      if (element === shell) return false;
+      return shouldIgnoreSnapshotElement(element);
+    },
+    logging: false,
+    scale,
+    width: Math.ceil(crop.shellWidth),
+    useCORS: true,
+  });
+  return cropCanvas(fullCanvas, crop, scale);
+}
+
+async function withSnapshotCaptureMode<T>(
+  shell: HTMLElement,
+  task: () => Promise<T>,
+): Promise<T> {
+  shell.classList.add(SNAPSHOT_CAPTURING_CLASS_NAME);
+  document.documentElement.classList.add(SNAPSHOT_CAPTURING_CLASS_NAME);
+  try {
+    await waitForNextFrame();
+    await waitForNextFrame();
+    return await task();
+  } finally {
+    shell.classList.remove(SNAPSHOT_CAPTURING_CLASS_NAME);
+    document.documentElement.classList.remove(SNAPSHOT_CAPTURING_CLASS_NAME);
+  }
+}
+
+async function captureNativeWindowSnapshot(
+  shell: HTMLElement,
+  selectionRect: DOMRect,
+  padding = 16,
+): Promise<SnapshotExport | null> {
+  const crop = getSnapshotCropBounds(shell, selectionRect, padding);
+  if (!crop) return null;
+  const shellRect = shell.getBoundingClientRect();
+  const path = await captureWindowAreaPng({
+    fileName: `blocksuite-selection-${Date.now()}.png`,
+    x: shellRect.left + crop.left,
+    y: shellRect.top + crop.top,
+    width: crop.width,
+    height: crop.height,
+  })
+    .then((result) => result.path)
+    .catch((error) => {
+      console.warn("Native BlockSuite snapshot capture failed.", error);
+      return null;
+    });
+  return path ? snapshotExportFromPath(path) : null;
+}
+
+function getSelectedOverlayElements(
+  roots: HTMLElement[],
+  selected: EdgelessSelectable[],
+): HTMLElement[] {
+  const selectedIds = new Set(selected.map((item) => item.id));
+  const seen = new Set<HTMLElement>();
+  return roots
+    .flatMap((root) => Array.from(root.querySelectorAll<HTMLElement>("[data-sessio-overlay-block-id]")))
+    .filter((element) => {
+      if (seen.has(element)) return false;
+      seen.add(element);
+      return true;
+    })
+    .filter((element) => selectedIds.has(element.dataset.sessioOverlayBlockId ?? ""))
+    .sort((a, b) => {
+      const az = Number.parseFloat(window.getComputedStyle(a).zIndex || "0") || 0;
+      const bz = Number.parseFloat(window.getComputedStyle(b).zIndex || "0") || 0;
+      return az - bz;
+    });
+}
+
+function getVisibleSelectionRect(
+  roots: HTMLElement[],
+  baseRect: DOMRect,
+  selected: EdgelessSelectable[],
+): DOMRect {
+  const overlayRects = getSelectedOverlayElements(roots, selected)
+    .map((element) => element.getBoundingClientRect())
+    .filter((rect) => rect.width > 0 && rect.height > 0);
+  return unionDOMRects([baseRect, ...overlayRects]) ?? baseRect;
+}
+
+function getSelectionClientRect(
+  editor: BlockSuiteEditor,
+  gfx: GfxControllerLike | null,
+  selected: EdgelessSelectable[],
+): DOMRect | null {
+  const hostRect = editor.getBoundingClientRect();
+  const rects = selected
+    .map((item) => {
+      const block = editor.std?.host?.view?.getBlock?.(item.id);
+      if (block?.isConnected) {
+        const rect = block.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) return rect;
+      }
+      const bound = getSelectableBound(item);
+      if (!bound || !gfx?.viewport) return null;
+      const viewBound = gfx.viewport.toViewBound(bound);
+      const [x, y, width, height] = viewBound.toXYWH();
+      return new DOMRect(hostRect.left + x, hostRect.top + y, width, height);
+    })
+    .filter((rect): rect is DOMRect => Boolean(rect && rect.width > 0 && rect.height > 0));
+  return unionDOMRects(rects);
+}
+
+function getSelectedCanvasElements(
+  editor: BlockSuiteEditor | null,
+  rootService: EdgelessRootService | null,
+  elementIds?: string[] | null,
+) {
+  const gfx = getGfxController(editor);
+  const gfxSelected = (gfx?.selection?.selectedElements ?? []).filter(isEdgelessSelectable);
+  const rootSelected = ((rootService?.selection.selectedElements ?? []) as EdgelessSelectable[])
+    .filter(isEdgelessSelectable);
+  if (elementIds?.length) {
+    const selectedById = new Map(
+      [...gfxSelected, ...rootSelected].map((item) => [item.id, item]),
+    );
+    const elements = elementIds
+      .map((id) => getCanvasElementById(gfx, rootService, id) ?? selectedById.get(id) ?? null)
+      .filter(isEdgelessSelectable);
+    if (elements.length > 0) {
+      return {
+        ids: elements.map((item) => item.id),
+        elements,
+        gfx,
+      };
+    }
+  }
+  if (gfxSelected.length > 0) {
+    return {
+      ids: gfx?.selection?.selectedIds ?? gfxSelected.map((item) => item.id),
+      elements: gfxSelected,
+      gfx,
+    };
+  }
+  return {
+    ids: (rootService?.selection.selectedIds ?? rootSelected.map((item) => item.id)) as string[],
+    elements: rootSelected,
+    gfx,
+  };
+}
 
 export interface BlockSuiteCanvasHostProps {
   sessionId: string;
@@ -196,6 +638,7 @@ export default function BlockSuiteCanvasHost({
   onOpenProjectFile,
   onOpenThreadMultiSessionChat,
 }: BlockSuiteCanvasHostProps) {
+  const canvasShellRef = useRef<HTMLDivElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<BlockSuiteEditor | null>(null);
   const docRef = useRef<ReturnType<typeof createBlockSuiteDoc>["doc"] | null>(null);
@@ -223,6 +666,7 @@ export default function BlockSuiteCanvasHost({
   const editedFilesButtonRef = useRef<HTMLButtonElement>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [status, setStatus] = useState("Initializing BlockSuite canvas…");
+  const [snapshotToast, setSnapshotToast] = useState<ToastStackMessage | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [selectionCount, setSelectionCount] = useState(0);
@@ -247,6 +691,10 @@ export default function BlockSuiteCanvasHost({
     { key: "workflow", label: "Add workflow", icon: <Workflow className="h-4 w-4" /> },
     { key: "note", label: "Add note", icon: <StickyNote className="h-4 w-4" /> },
   ], []);
+
+  const showSnapshotToast = useCallback((message: string, tone: ToastStackMessage["tone"] = "info") => {
+    setSnapshotToast({ message, tone });
+  }, []);
 
   useEffect(() => {
     latestStateRef.current = initialState;
@@ -306,20 +754,21 @@ export default function BlockSuiteCanvasHost({
 
   const updateSelectionState = useCallback(() => {
     const rootService = getRootService();
-    if (!rootService) {
+    const editor = getEditor();
+    if (!rootService && !editor) {
       commitSelectionState(0, false);
       return;
     }
-    const selectedIds = rootService.selection.selectedIds ?? [];
+    const { ids: selectedIds, elements: selectedElements } = getSelectedCanvasElements(editor, rootService);
     const selectedElement =
       selectedIds.length === 1
-        ? (rootService.selection.selectedElements[0] as SelectionElementLike | undefined)
+        ? (selectedElements[0] as SelectionElementLike | undefined)
         : undefined;
     commitSelectionState(
       selectedIds.length,
       selectedIds.length === 1 && selectedElement?.type === "group",
     );
-  }, [commitSelectionState, getRootService]);
+  }, [commitSelectionState, getEditor, getRootService]);
 
   const scheduleSelectionStateUpdate = useCallback(() => {
     if (selectionUiFrameRef.current !== null) {
@@ -351,7 +800,7 @@ export default function BlockSuiteCanvasHost({
     }
 
     const hostRect = host.getBoundingClientRect();
-    const selectedIds = new Set(rootService.selection.selectedIds ?? []);
+    const selectedIds = new Set(getSelectedCanvasElements(editor, rootService).ids);
     const overlays: CanvasCustomBlockOverlayItem[] = [];
     const entries = [
       ...doc.getBlocksByFlavour("sessio:file-card"),
@@ -833,7 +1282,7 @@ export default function BlockSuiteCanvasHost({
   const groupSelection = useCallback(() => {
     const rootService = getRootService();
     const editor = getEditor();
-    if (!rootService || !editor?.std?.command || rootService.selection.selectedElements.length < 2) return;
+    if (!rootService || !editor?.std?.command || getSelectedCanvasElements(editor, rootService).elements.length < 2) return;
     editor.std.command.exec(createGroupFromSelectedCommand);
     scheduleSyncBlocks();
   }, [getEditor, getRootService, scheduleSyncBlocks]);
@@ -841,8 +1290,10 @@ export default function BlockSuiteCanvasHost({
   const ungroupSelection = useCallback(() => {
     const rootService = getRootService();
     const editor = getEditor();
-    if (!rootService || !editor?.std?.command || rootService.selection.selectedElements.length !== 1) return;
-    const selected = rootService.selection.selectedElements[0] as SelectionElementLike | undefined;
+    if (!rootService || !editor?.std?.command) return;
+    const selectedElements = getSelectedCanvasElements(editor, rootService).elements;
+    if (selectedElements.length !== 1) return;
+    const selected = selectedElements[0] as SelectionElementLike | undefined;
     if (!selected || selected.type !== "group") return;
     editor.std.command.exec(ungroupCommand, { group: selected as unknown as GroupElementModel });
     scheduleSyncBlocks();
@@ -1297,59 +1748,116 @@ export default function BlockSuiteCanvasHost({
     }
   };
 
-  const exportSelectionSnapshot = useCallback(async () => {
+  const exportSelectionSnapshot = useCallback(async (
+    elementIds?: string[] | null,
+    onProgress?: SnapshotProgress,
+  ): Promise<{ ok: true; snapshot: SnapshotExport } | { ok: false; reason: SnapshotExportFailureReason }> => {
     const editor = getEditor();
     const rootService = getRootService();
-    if (!editor || !rootService) return null;
-    const selected = rootService.selection.selectedElements as EdgelessSelectable[];
-    if (selected.length === 0) return null;
-    const bounds = selected
-      .map((item: EdgelessSelectable) => Bound.deserialize(item.xywh))
-      .filter(Boolean);
-    if (bounds.length === 0) return null;
-    const common = bounds.reduce((current: Bound, next: Bound) => current.unite(next));
-    const exportManager = editor.std?.get?.(ExportManager) as ExportManager | null;
-    const gfx = editor.std?.get?.(GfxControllerIdentifier) as GfxControllerLike | undefined;
-    const rootHost = editor.std?.host?.querySelector?.("affine-edgeless-root") as {
-      surface?: { renderer?: unknown };
-    } | null;
-    if (!exportManager || !rootHost?.surface?.renderer || !gfx) return null;
-    const blocks = selected.filter((item: EdgelessSelectable) => "flavour" in item) as GfxBlockElementModel[];
-    const shapes = selected.filter((item: EdgelessSelectable) => !("flavour" in item)) as SurfaceElementModel[];
-    const canvas = await exportManager.edgelessToCanvas(rootHost.surface.renderer as never, common, gfx as never, blocks, shapes, {
-      zoom: rootService.viewport.zoom,
-    });
-    if (!canvas) return null;
-    const blob: Blob = await new Promise((resolve, reject) =>
-      canvas.toBlob(
-        next => (next ? resolve(next) : reject(new Error("Canvas can not export blob"))),
-        "image/png",
+    if (!editor || !rootService) return { ok: false, reason: "unavailable" };
+    await reportSnapshotProgress(onProgress, "Resolving selected BlockSuite nodes...");
+    const { elements: selected, gfx } = getSelectedCanvasElements(editor, rootService, elementIds);
+    if (selected.length === 0) return { ok: false, reason: "empty" };
+    const shell = canvasShellRef.current;
+    const overlayRoots: HTMLElement[] = [];
+    if (shell?.isConnected) overlayRoots.push(shell);
+    if (overlayMountElement?.isConnected && overlayMountElement !== shell) {
+      overlayRoots.push(overlayMountElement);
+    }
+    const selectionRect = getSelectionClientRect(editor, gfx, selected);
+    console.info("BlockSuite snapshot selection resolved.", {
+      requestedElementIds: elementIds ?? null,
+      selectedIds: selected.map((item) => item.id),
+      hasShell: Boolean(shell),
+      hasSelectionRect: Boolean(selectionRect),
+      overlayCount: overlayRoots.reduce(
+        (count, root) => count + root.querySelectorAll("[data-sessio-overlay-block-id]").length,
+        0,
       ),
-    );
-    const path = await saveBlobAsAttachment(blob, `canvas-selection-${Date.now()}.png`);
-    const previewDataUrl = await readLocalImageDataUrl(path).catch(() => null);
-    return {
-      path,
-      attachment: {
-        path,
-        kind: "image",
-        mimeType: "image/png",
-        previewDataUrl,
-        displayName: "Canvas selection",
-        name: "Canvas selection",
-      } satisfies ComposerAttachment,
-    };
-  }, [getEditor, getRootService]);
+      hasOverlayMount: Boolean(overlayMountElement?.isConnected),
+    });
+    if (!shell || !selectionRect) {
+      console.warn("BlockSuite DOM snapshot skipped because selection bounds were unavailable.", {
+        hasShell: Boolean(shell),
+        hasSelectionRect: Boolean(selectionRect),
+        selectedIds: selected.map((item) => item.id),
+      });
+      await reportSnapshotProgress(onProgress, "Could not locate the selected nodes on screen.");
+      return { ok: false, reason: "render-failed" };
+    }
+    const visibleSelectionRect = getVisibleSelectionRect(overlayRoots, selectionRect, selected);
+    const captured = await withSnapshotCaptureMode(shell, async () => {
+      await reportSnapshotProgress(onProgress, "Capturing visible selection pixels...");
+      const nativeSnapshot = await captureNativeWindowSnapshot(shell, visibleSelectionRect);
+      if (nativeSnapshot) return { kind: "native" as const, snapshot: nativeSnapshot };
+      await reportSnapshotProgress(onProgress, "Trying DOM snapshot fallback...");
+      const domCanvas = await withTimeout(
+        renderCanvasDomSnapshot(shell, visibleSelectionRect),
+        5000,
+        "Visible canvas DOM snapshot",
+      ).catch((error) => {
+        console.warn("BlockSuite DOM snapshot failed.", error);
+        return null;
+      });
+      const nextCanvas = domCanvas && !isCanvasVisuallyEmpty(domCanvas) ? domCanvas : null;
+      return { kind: "canvas" as const, canvas: nextCanvas };
+    });
+    if (captured.kind === "native") {
+      await reportSnapshotProgress(onProgress, "Saved snapshot PNG.");
+      return { ok: true, snapshot: captured.snapshot };
+    }
+    const canvas = captured.canvas;
+    if (!canvas) return { ok: false, reason: "render-failed" };
+    if (isCanvasVisuallyEmpty(canvas)) {
+      console.warn("BlockSuite DOM snapshot was visually empty.", {
+        selectedIds: selected.map((item) => item.id),
+        selectionRect: {
+          left: visibleSelectionRect.left,
+          top: visibleSelectionRect.top,
+          width: visibleSelectionRect.width,
+          height: visibleSelectionRect.height,
+        },
+      });
+      await reportSnapshotProgress(onProgress, "Visible selection snapshot was empty.");
+      return { ok: false, reason: "render-failed" };
+    }
+    await reportSnapshotProgress(onProgress, "Encoding snapshot PNG...");
+    const blob = await withTimeout(
+      new Promise<Blob | null>((resolve) => {
+        canvas.toBlob((next: Blob | null) => resolve(next), "image/png");
+      }),
+      2000,
+      "Snapshot PNG encoding",
+    ).catch((error) => {
+      console.warn("BlockSuite snapshot PNG encoding failed.", error);
+      return null;
+    });
+    if (!blob) return { ok: false, reason: "blob-failed" };
+    await reportSnapshotProgress(onProgress, "Saving snapshot PNG...");
+    const path = await withTimeout(
+      saveBlobAsAttachment(blob, `blocksuite-selection-${Date.now()}.png`),
+      3000,
+      "Snapshot PNG save",
+    )
+      .catch((error) => {
+        console.warn("BlockSuite snapshot PNG save failed.", error);
+        return null;
+      });
+    if (!path) return { ok: false, reason: "save-failed" };
+    const snapshot = await snapshotExportFromPath(path);
+    return { ok: true, snapshot };
+  }, [getEditor, getRootService, overlayMountElement]);
 
   const getSelectedCanvasContext = useCallback((): CanvasSelectionContext => {
     const rootService = getRootService();
-    if (!rootService) {
+    const editor = getEditor();
+    if (!rootService && !editor) {
       return {
         refs: [],
         elementIds: [],
       };
     }
-    const selectedIds = (rootService.selection.selectedIds ?? []) as string[];
+    const selectedIds = getSelectedCanvasElements(editor, rootService).ids;
     const selectedSet = new Set(selectedIds);
     const refsById = new Map(blockRecords.map((ref) => [ref.blockId, ref]));
     const refs = selectedIds.map((id: string) => {
@@ -1379,7 +1887,7 @@ export default function BlockSuiteCanvasHost({
       refs,
       elementIds: selectedIds,
     };
-  }, [blockRecords, getDoc, getRootService]);
+  }, [blockRecords, getDoc, getEditor, getRootService]);
 
   const buildSelectionContext = useCallback(async () => {
     const { refs, elementIds } = getSelectedCanvasContext();
@@ -1419,14 +1927,14 @@ export default function BlockSuiteCanvasHost({
         name: `${workflow.title} workflow summary`,
       });
     }
-    const snapshot = await exportSelectionSnapshot();
-    if (snapshot) attachments.push(snapshot.attachment);
+    const snapshotResult = await exportSelectionSnapshot();
+    if (snapshotResult.ok) attachments.push(snapshotResult.snapshot.attachment);
     const canvasContext: CanvasContextOption = {
       canvasId: initialState.document.id,
       scope: "selection",
       blockIds: refs.map((ref) => ref.blockId),
       elementIds,
-      snapshotAttachmentPath: snapshot?.path ?? null,
+      snapshotAttachmentPath: snapshotResult.ok ? snapshotResult.snapshot.path : null,
       refs: refs.map((ref) => {
         const record = blockRecords.find((item) => item.blockId === ref.blockId);
         return record
@@ -1448,25 +1956,34 @@ export default function BlockSuiteCanvasHost({
     };
   }, [blockRecords, exportSelectionSnapshot, getSelectedCanvasContext, initialState.document.id, sessionId]);
 
-  const attachSelectionSnapshot = async () => {
-    if (!composer.supportsImageAttachments) {
-      onError("The selected agent does not support image attachments.");
-      return;
-    }
+  const attachSelectionSnapshot = useCallback(async (elementIds?: string[] | null) => {
     setBridgeBusy("snapshot");
+    showSnapshotToast("Exporting BlockSuite snapshot...");
     try {
-      const snapshot = await exportSelectionSnapshot();
-      if (!snapshot) {
-        onError("Select one or more blocks before attaching a snapshot.");
+      const snapshotResult = await exportSelectionSnapshot(elementIds, (message) => {
+        showSnapshotToast(message);
+      });
+      if (!snapshotResult.ok) {
+        const message = snapshotExportFailureMessage(snapshotResult.reason);
+        showSnapshotToast(message, "error");
+        onError(message);
         return;
       }
-      await composer.appendAttachments([snapshot.attachment]);
+      if (composer.supportsImageAttachments) {
+        await composer.appendAttachments([snapshotResult.snapshot.attachment]);
+        showSnapshotToast(`Attached snapshot: ${snapshotResult.snapshot.path}`);
+      } else {
+        showSnapshotToast(`Saved snapshot: ${snapshotResult.snapshot.path}`);
+        onError("Snapshot PNG was saved locally, but the selected agent does not support image attachments.");
+      }
     } catch (error) {
-      onError(`Failed to attach selection snapshot: ${String(error)}`);
+      const message = `Failed to attach selection snapshot: ${String(error)}`;
+      showSnapshotToast(message, "error");
+      onError(message);
     } finally {
       setBridgeBusy(null);
     }
-  };
+  }, [composer, exportSelectionSnapshot, onError, showSnapshotToast]);
 
   const askSelection = async () => {
     setBridgeBusy("ask");
@@ -1534,6 +2051,26 @@ export default function BlockSuiteCanvasHost({
     return () => window.removeEventListener(CANVAS_ADD_FILES_EVENT, handleCanvasAddFiles);
   }, [addFileCards, sessionId]);
 
+  useEffect(() => {
+    if (!isReady) return;
+    let lastHandledAt = 0;
+    const handleCanvasSnapshotSelection = (event: Event) => {
+      const now = Date.now();
+      if (now - lastHandledAt < 250) return;
+      lastHandledAt = now;
+      event.stopPropagation();
+      const detail = (event as CustomEvent<CanvasSnapshotSelectionEventDetail>).detail;
+      void attachSelectionSnapshot(detail?.elementIds ?? null);
+    };
+    const shell = canvasShellRef.current;
+    shell?.addEventListener(CANVAS_SNAPSHOT_SELECTION_EVENT, handleCanvasSnapshotSelection);
+    window.addEventListener(CANVAS_SNAPSHOT_SELECTION_EVENT, handleCanvasSnapshotSelection);
+    return () => {
+      shell?.removeEventListener(CANVAS_SNAPSHOT_SELECTION_EVENT, handleCanvasSnapshotSelection);
+      window.removeEventListener(CANVAS_SNAPSHOT_SELECTION_EVENT, handleCanvasSnapshotSelection);
+    };
+  }, [attachSelectionSnapshot, isReady]);
+
   return (
     <div className="absolute inset-0 flex min-h-0 flex-col">
       <div className="flex h-9 shrink-0 items-center justify-between gap-3 border-b border-ink/8 bg-surface-panel/90 px-4">
@@ -1574,7 +2111,7 @@ export default function BlockSuiteCanvasHost({
           <button
             type="button"
             onClick={() => void attachSelectionSnapshot()}
-            disabled={selectionCount === 0 || bridgeBusy !== null || !composer.supportsImageAttachments}
+            disabled={selectionCount === 0 || bridgeBusy !== null}
             className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-2.5 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Camera className="h-3.5 w-3.5" />
@@ -1625,9 +2162,14 @@ export default function BlockSuiteCanvasHost({
           </div>
         </div>
       )}
-      <div className="relative min-h-0 flex-1">
+      <div ref={canvasShellRef} className="relative min-h-0 flex-1">
         <div ref={hostRef} className={`${BLOCKSUITE_STYLE_SCOPE_CLASS} absolute inset-0`} />
       </div>
+      <ToastStack
+        message={snapshotToast}
+        durationMs={3600}
+        onMessageConsumed={() => setSnapshotToast(null)}
+      />
       {overlayMountElement && createPortal(
         <CanvasCustomBlockOverlay
           items={customOverlayItems}

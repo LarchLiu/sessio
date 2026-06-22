@@ -1139,6 +1139,14 @@ export interface SavedPastedAttachment {
   path: string;
 }
 
+export interface CaptureWindowAreaRequest {
+  fileName?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface AgentInput {
   text: string;
   attachments?: AgentAttachment[];
@@ -2294,6 +2302,12 @@ export async function savePastedAttachment(
   req: SavePastedAttachmentRequest,
 ): Promise<SavedPastedAttachment> {
   return invoke<SavedPastedAttachment>("save_pasted_attachment", { req });
+}
+
+export async function captureWindowAreaPng(
+  req: CaptureWindowAreaRequest,
+): Promise<SavedPastedAttachment> {
+  return invoke<SavedPastedAttachment>("capture_window_area_png", { req });
 }
 
 export async function readLocalTextFile(path: string): Promise<string> {

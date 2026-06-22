@@ -19,7 +19,7 @@ pub mod watch;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 #[cfg(target_os = "macos")]
 use std::{thread, time::Duration};
 
@@ -156,6 +156,16 @@ struct SavePastedAttachmentRequest {
 #[serde(rename_all = "camelCase")]
 struct SavedPastedAttachment {
     path: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureWindowAreaRequest {
+    file_name: Option<String>,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 }
 
 #[derive(serde::Deserialize)]
@@ -2982,6 +2992,191 @@ fn save_pasted_attachment(
     Err("Could not allocate pasted attachment path".to_string())
 }
 
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn capture_window_area_png(
+    window: WebviewWindow,
+    req: CaptureWindowAreaRequest,
+) -> Result<SavedPastedAttachment, String> {
+    if !req.x.is_finite()
+        || !req.y.is_finite()
+        || !req.width.is_finite()
+        || !req.height.is_finite()
+        || req.width <= 0.0
+        || req.height <= 0.0
+    {
+        return Err("Invalid snapshot capture area".to_string());
+    }
+
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let origin = window.inner_position().map_err(|e| e.to_string())?;
+    let x = origin.x as f64 + req.x * scale;
+    let y = origin.y as f64 + req.y * scale;
+    let width = req.width * scale;
+    let height = req.height * scale;
+    if width < 1.0 || height < 1.0 {
+        return Err("Snapshot capture area is too small".to_string());
+    }
+
+    let dir = paste_cache_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file_name = safe_pasted_attachment_file_name(
+        req.file_name.as_deref(),
+        Some("image/png"),
+    );
+    let path = dir.join(format!(
+        "native-window-area-{}-{file_name}",
+        chrono::Utc::now().timestamp_millis()
+    ));
+
+    if let Ok(saved) = capture_webview_area_png(&window, &req, &path).await {
+        return Ok(saved);
+    }
+
+    let rect = format!(
+        "{},{},{},{}",
+        x.floor() as i64,
+        y.floor() as i64,
+        width.ceil() as i64,
+        height.ceil() as i64
+    );
+    let status = std::process::Command::new("screencapture")
+        .arg("-x")
+        .arg("-t")
+        .arg("png")
+        .arg("-R")
+        .arg(rect)
+        .arg(&path)
+        .status()
+        .map_err(|e| format!("Failed to start native screenshot capture: {e}"))?;
+    if !status.success() {
+        return Err(format!("Native screenshot capture failed with status {status}"));
+    }
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    if meta.len() == 0 {
+        let _ = std::fs::remove_file(&path);
+        return Err("Native screenshot capture produced an empty PNG".to_string());
+    }
+    Ok(SavedPastedAttachment {
+        path: path.to_string_lossy().to_string(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+async fn capture_webview_area_png(
+    window: &WebviewWindow,
+    req: &CaptureWindowAreaRequest,
+    path: &Path,
+) -> Result<SavedPastedAttachment, String> {
+    use block2::RcBlock;
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage};
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_foundation::{NSDictionary, NSError};
+    use objc2_web_kit::{WKSnapshotConfiguration, WKWebView};
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+    let sender = Arc::new(Mutex::new(Some(tx)));
+    let path_string = path.to_string_lossy().to_string();
+    let x = req.x;
+    let y = req.y;
+    let width = req.width;
+    let height = req.height;
+
+    window
+        .with_webview(move |platform_webview| {
+            let sender = Arc::clone(&sender);
+            let send = move |result: Result<String, String>| {
+                if let Ok(mut tx) = sender.lock() {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(result);
+                    }
+                }
+            };
+            unsafe {
+                let webview = &*(platform_webview.inner() as *mut WKWebView);
+                let bounds = webview.bounds();
+                let origin_x = x.max(0.0);
+                let origin_y = y.max(0.0);
+                let max_width = bounds.size.width - origin_x;
+                let max_height = bounds.size.height - origin_y;
+                if max_width <= 0.0 || max_height <= 0.0 {
+                    send(Err("WKWebView snapshot area is outside the webview bounds".to_string()));
+                    return;
+                }
+                let crop = CGRect::new(
+                    CGPoint::new(origin_x, origin_y),
+                    CGSize::new(width.min(max_width).max(1.0), height.min(max_height).max(1.0)),
+                );
+                let config = WKSnapshotConfiguration::new(objc2::MainThreadMarker::new_unchecked());
+                config.setRect(crop);
+                config.setAfterScreenUpdates(true);
+                let block = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+                    if !error.is_null() {
+                        let error = &*error;
+                        send(Err(format!("WKWebView snapshot failed: {}", error.localizedDescription())));
+                        return;
+                    }
+                    if image.is_null() {
+                        send(Err("WKWebView snapshot returned no image".to_string()));
+                        return;
+                    }
+                    let image = &*image;
+                    let result = image
+                        .TIFFRepresentation()
+                        .ok_or_else(|| "WKWebView snapshot did not return image data".to_string())
+                        .and_then(|tiff| {
+                            NSBitmapImageRep::imageRepWithData(&tiff)
+                                .ok_or_else(|| "WKWebView snapshot image data was not decodable".to_string())
+                        })
+                        .and_then(|bitmap| {
+                            let properties = NSDictionary::<objc2_app_kit::NSBitmapImageRepPropertyKey, AnyObject>::dictionary();
+                            bitmap
+                                .representationUsingType_properties(
+                                    NSBitmapImageFileType::PNG,
+                                    &properties,
+                                )
+                                .ok_or_else(|| "WKWebView snapshot PNG encoding failed".to_string())
+                        })
+                        .and_then(|png| {
+                            let path = objc2_foundation::NSString::from_str(&path_string);
+                            if png.writeToFile_atomically(&path, true) {
+                                Ok(path_string.clone())
+                            } else {
+                                Err("WKWebView snapshot PNG write failed".to_string())
+                            }
+                        });
+                    send(result);
+                });
+                webview.takeSnapshotWithConfiguration_completionHandler(Some(&config), &block);
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    match tokio::time::timeout(Duration::from_secs(6), rx).await {
+        Ok(Ok(Ok(path))) => {
+            let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+            if meta.len() == 0 {
+                let _ = std::fs::remove_file(&path);
+                return Err("WKWebView snapshot produced an empty PNG".to_string());
+            }
+            Ok(SavedPastedAttachment { path })
+        }
+        Ok(Ok(Err(error))) => Err(error),
+        Ok(Err(_)) => Err("WKWebView snapshot callback was cancelled".to_string()),
+        Err(_) => Err("WKWebView snapshot timed out".to_string()),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn capture_window_area_png(
+    _window: WebviewWindow,
+    _req: CaptureWindowAreaRequest,
+) -> Result<SavedPastedAttachment, String> {
+    Err("Native area screenshot is only implemented on macOS for now".to_string())
+}
+
 #[tauri::command]
 fn list_project_files(path: String) -> Result<Vec<String>, String> {
     const MAX_FILES: usize = 20_000;
@@ -5287,6 +5482,7 @@ pub fn run() {
             update_session_rename_title,
             read_local_image_data_url,
             save_pasted_attachment,
+            capture_window_area_png,
             read_local_text_file,
             read_workspace_text_file,
             write_workspace_text_file,

@@ -3,8 +3,13 @@ import { getTestStoreManager } from "@blocksuite/integration-test/store";
 import { getInternalViewExtensions } from "@blocksuite/affine/extensions/view";
 import { ViewExtensionManager } from "@blocksuite/affine/ext-loader";
 import { SignalWatcher, WithDisposable } from "@blocksuite/affine/global/lit";
+import type { DocMode } from "@blocksuite/affine/model";
 import { noop } from "@blocksuite/global/utils";
-import { ThemeProvider } from "@blocksuite/affine/shared/services";
+import {
+  DocModeProvider,
+  type DocModeProvider as DocModeProviderType,
+  ThemeProvider,
+} from "@blocksuite/affine/shared/services";
 import { BlockStdScope, EditorHost, ShadowlessElement } from "@blocksuite/affine/std";
 import type { ExtensionType, Store, DocSnapshot } from "@blocksuite/store";
 import { Schema, Text, nanoid } from "@blocksuite/store";
@@ -41,6 +46,20 @@ const viewManager = new ViewExtensionManager([
 const nativeOnlyViewManager = new ViewExtensionManager(baseViewExtensions);
 
 noop(EditorHost);
+
+function patchEditorDocMode(std: BlockStdScope, mode: DocMode) {
+  const provider = std.get(DocModeProvider) as DocModeProviderType;
+  const docId = std.store.doc.id;
+  const setPrimaryMode = provider.setPrimaryMode.bind(provider);
+  let editorMode = mode;
+
+  provider.getEditorMode = () => editorMode;
+  provider.setEditorMode = (nextMode: DocMode) => {
+    editorMode = nextMode;
+    setPrimaryMode(nextMode, docId);
+  };
+  setPrimaryMode(mode, docId);
+}
 
 class SessioPageEditor extends SignalWatcher(
   WithDisposable(ShadowlessElement),
@@ -80,6 +99,7 @@ class SessioPageEditor extends SignalWatcher(
       store: this.doc,
       extensions: this.specs,
     });
+    patchEditorDocMode(this.std, "page");
   }
 
   override async getUpdateComplete(): Promise<boolean> {
@@ -109,6 +129,7 @@ class SessioPageEditor extends SignalWatcher(
         store: this.doc,
         extensions: this.specs,
       });
+      patchEditorDocMode(this.std, "page");
     }
   }
 
@@ -164,6 +185,7 @@ class SessioEdgelessEditor extends SignalWatcher(
       store: this.doc,
       extensions: this.specs,
     });
+    patchEditorDocMode(this.std, "edgeless");
   }
 
   override async getUpdateComplete(): Promise<boolean> {
@@ -193,6 +215,7 @@ class SessioEdgelessEditor extends SignalWatcher(
         store: this.doc,
         extensions: this.specs,
       });
+      patchEditorDocMode(this.std, "edgeless");
     }
   }
 

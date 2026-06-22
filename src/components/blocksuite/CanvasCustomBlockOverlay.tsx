@@ -90,17 +90,29 @@ export function CanvasCustomBlockOverlay({
           width: scaledWidth,
           height: scaledHeight,
         };
-        const contentStyle: CSSProperties & { zoom: number } = {
+        const contentStyle: CSSProperties = {
           width: item.baseWidth,
           height: item.baseHeight,
-          zoom: item.scale,
+          transform: `scale(${item.scale})`,
           transformOrigin: "top left",
         };
 
         if (item.kind === "file_card") {
           return (
-            <div key={item.blockId} className={shellClassName + " pointer-events-none"} style={shellStyle}>
-              <div style={contentStyle}>
+            <div
+              key={item.blockId}
+              className={shellClassName + " pointer-events-none"}
+              data-sessio-overlay-base-height={item.baseHeight}
+              data-sessio-overlay-base-width={item.baseWidth}
+              data-sessio-overlay-block-id={item.blockId}
+              data-sessio-overlay-scale={item.scale}
+              style={shellStyle}
+            >
+              <div
+                data-sessio-overlay-content="true"
+                data-sessio-overlay-content-id={item.blockId}
+                style={contentStyle}
+              >
                 <FileCardHost
                   title={item.title}
                   sourcePath={item.sourcePath}
@@ -119,8 +131,20 @@ export function CanvasCustomBlockOverlay({
 
         if (item.kind === "workflow_card") {
           return (
-            <div key={item.blockId} className={shellClassName + " pointer-events-none"} style={shellStyle}>
-              <div style={contentStyle}>
+            <div
+              key={item.blockId}
+              className={shellClassName + " pointer-events-none"}
+              data-sessio-overlay-base-height={item.baseHeight}
+              data-sessio-overlay-base-width={item.baseWidth}
+              data-sessio-overlay-block-id={item.blockId}
+              data-sessio-overlay-scale={item.scale}
+              style={shellStyle}
+            >
+              <div
+                data-sessio-overlay-content="true"
+                data-sessio-overlay-content-id={item.blockId}
+                style={contentStyle}
+              >
                 <WorkflowCardHost
                   title={item.title}
                   threadId={item.threadId}
@@ -139,8 +163,20 @@ export function CanvasCustomBlockOverlay({
         }
 
         return (
-          <div key={item.blockId} className={shellClassName + " pointer-events-none"} style={shellStyle}>
-            <div style={contentStyle}>
+          <div
+            key={item.blockId}
+            className={shellClassName + " pointer-events-none"}
+            data-sessio-overlay-base-height={item.baseHeight}
+            data-sessio-overlay-base-width={item.baseWidth}
+            data-sessio-overlay-block-id={item.blockId}
+            data-sessio-overlay-scale={item.scale}
+            style={shellStyle}
+          >
+            <div
+              data-sessio-overlay-content="true"
+              data-sessio-overlay-content-id={item.blockId}
+              style={contentStyle}
+            >
               <MarkdownPreviewHost
                 workspacePath={item.workspacePath}
                 blockId={item.blockId}

@@ -744,6 +744,19 @@ affine-edgeless-root .widgets-container {
   z-index: 2;
 }
 
+.sessio-snapshot-capturing affine-edgeless-root .widgets-container,
+.sessio-snapshot-capturing affine-edgeless-root editor-toolbar,
+.sessio-snapshot-capturing affine-edgeless-root edgeless-selected-rect,
+.sessio-snapshot-capturing affine-edgeless-root edgeless-hover-rect,
+.sessio-snapshot-capturing affine-edgeless-root .edgeless-toolbar,
+.sessio-snapshot-capturing [data-sessio-snapshot-ignore='true'] {
+  opacity: 0 !important;
+}
+
+.sessio-snapshot-capturing affine-edgeless-root .edgeless-background {
+  background-image: none !important;
+}
+
 /*
  * With gfx-viewport lifted above the card overlay, the invisible custom-block
  * placeholders (which carry `pointer-events: auto` while active) would sit over

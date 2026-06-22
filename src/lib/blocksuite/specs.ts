@@ -11,6 +11,7 @@ import { literal } from "lit/static-html.js";
 import { FileCardBlockSchema } from "./blocks/file-card";
 import { MarkdownPreviewBlockSchema } from "./blocks/markdown-preview";
 import { WorkflowCardBlockSchema } from "./blocks/workflow-card";
+import { SessioCanvasToolbarExtension } from "./toolbar";
 
 const SessioSurfaceBlockSchema = {
   ...SurfaceBlockSchema,
@@ -78,4 +79,6 @@ export const SessioCustomBlockViewExtensions = [
   SessioCustomBlocksViewExtension,
 ];
 
-export const SessioEdgelessSpecs: ExtensionType[] = [];
+export const SessioEdgelessSpecs: ExtensionType[] = [
+  SessioCanvasToolbarExtension,
+];

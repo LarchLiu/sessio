@@ -123,11 +123,6 @@ export default function ChatComposer({
           {title}
         </h1>
       )}
-      {composer.composerError && (
-        <div className="mb-2 rounded-md border border-status-error/25 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
-          {composer.composerError}
-        </div>
-      )}
       <div
         className={
           "overflow-hidden rounded-2xl bg-ink/[0.055] shadow-[inset_0_0_0_1px_rgb(var(--color-ink)/0.08)] transition-shadow " +
@@ -136,6 +131,11 @@ export default function ChatComposer({
             : "focus-within:shadow-[inset_0_0_0_1px_rgb(var(--color-ink)/0.20)]")
         }
       >
+        {composer.composerError && (
+          <div className="border-b border-status-error/20 bg-status-error/10 px-3.5 py-2 text-body-sm text-status-error">
+            {composer.composerError}
+          </div>
+        )}
         {composer.attachmentPreview}
         <textarea
           ref={composer.textareaRef}
