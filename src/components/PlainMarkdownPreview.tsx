@@ -205,9 +205,11 @@ function rewriteSrcsetValue(value: string, filePath?: string | null): string | n
 export default function PlainMarkdownPreview({
   text,
   filePath = null,
+  interactionMode = "default",
 }: {
   text: string;
   filePath?: string | null;
+  interactionMode?: "default" | "thumbs-only" | "capture-wheel";
 }) {
   const themeType = useEffectiveThemeType();
   const components = useMemo(
@@ -220,6 +222,7 @@ export default function PlainMarkdownPreview({
       className="sessio-plain-editor-preview min-h-0 flex-1"
       viewportClassName="sessio-plain-editor-preview-viewport"
       persistScrollbars
+      interactionMode={interactionMode}
     >
       <article
         className="sessio-plain-editor-preview-content markdown-content"

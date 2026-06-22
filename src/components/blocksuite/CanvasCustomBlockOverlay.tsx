@@ -144,6 +144,7 @@ export function CanvasCustomBlockOverlay({
               <MarkdownPreviewHost
                 workspacePath={item.workspacePath}
                 blockId={item.blockId}
+                selected={item.selected}
                 title={item.title}
                 sourcePath={item.sourcePath}
                 excerpt={item.excerpt}

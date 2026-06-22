@@ -28,6 +28,7 @@ type Props = {
   children: ReactNode;
   persistScrollbars?: boolean;
   orientation?: "vertical" | "horizontal" | "both";
+  interactionMode?: "default" | "thumbs-only" | "capture-wheel";
   onScroll?: (viewport: HTMLDivElement) => void;
 };
 
@@ -39,6 +40,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
     children,
     persistScrollbars = false,
     orientation = "vertical",
+    interactionMode = "default",
     onScroll,
   },
   ref,
@@ -57,6 +59,8 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
 
   const enableVertical = orientation === "vertical" || orientation === "both";
   const enableHorizontal = orientation === "horizontal" || orientation === "both";
+  const thumbsOnlyInteraction = interactionMode === "thumbs-only";
+  const captureWheelInteraction = interactionMode === "capture-wheel";
 
   const updateThumbs = useCallback(() => {
     const vp = viewportRef.current;
@@ -149,6 +153,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
       const vp = viewportRef.current;
       if (!vp) return;
       e.preventDefault();
+      e.stopPropagation();
       (e.target as Element).setPointerCapture(e.pointerId);
       dragStateRef.current = {
         axis,
@@ -162,6 +167,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
     const drag = dragStateRef.current;
     const vp = viewportRef.current;
     if (!drag || !vp) return;
+    e.stopPropagation();
 
     if (drag.axis === "y") {
       const thumb = verticalThumbRef.current;
@@ -185,6 +191,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
 
   const onThumbPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!dragStateRef.current) return;
+    e.stopPropagation();
     (e.target as Element).releasePointerCapture(e.pointerId);
     dragStateRef.current = null;
     flashVisible();
@@ -218,7 +225,11 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
   return (
     <div
       style={style}
-      className={"relative flex min-h-0 flex-col overflow-hidden " + (className ?? "")}
+      className={
+        "relative flex min-h-0 flex-col overflow-hidden " +
+        (thumbsOnlyInteraction ? "pointer-events-none " : "") +
+        (className ?? "")
+      }
       onPointerEnter={onRootPointerEnter}
       onPointerLeave={onRootPointerLeave}
     >
@@ -230,8 +241,16 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
           viewportFlexClass +
           " min-h-0 w-full hide-native-scrollbar " +
           overflowClass +
+          (thumbsOnlyInteraction ? " pointer-events-none " : " ") +
           " " +
           (viewportClassName ?? "")
+        }
+        onWheel={
+          captureWheelInteraction
+            ? (event) => {
+                event.stopPropagation();
+              }
+            : undefined
         }
       >
         {children}
@@ -240,7 +259,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
         <div
           aria-hidden
           className={
-            "absolute top-0 right-0.5 z-30 w-2 rounded-full bg-ink/30 hover:bg-ink/50 cursor-pointer transition-opacity " +
+            "pointer-events-auto absolute top-0 right-0.5 z-30 w-2 rounded-full bg-ink/30 hover:bg-ink/50 cursor-pointer transition-opacity " +
             visibilityClass
           }
           ref={verticalThumbRef}
@@ -255,7 +274,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
         <div
           aria-hidden
           className={
-            "absolute bottom-0.5 left-0 z-30 h-2 rounded-full bg-ink/30 hover:bg-ink/50 cursor-pointer transition-opacity " +
+            "pointer-events-auto absolute bottom-0.5 left-0 z-30 h-2 rounded-full bg-ink/30 hover:bg-ink/50 cursor-pointer transition-opacity " +
             visibilityClass
           }
           ref={horizontalThumbRef}

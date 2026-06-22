@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { PlainMarkdownPreviewContent } from "../../../../components/PlainMarkdownPreview";
-import { useEffectiveThemeType } from "../../../../components/shikiHighlight";
+import PlainMarkdownPreview from "../../../../components/PlainMarkdownPreview";
 import { readWorkspaceTextFile } from "../../../../api";
 
 function stopOverlayInteraction(event: {
@@ -11,15 +10,10 @@ function stopOverlayInteraction(event: {
   event.stopPropagation();
 }
 
-function stopOverlayPropagation(event: {
-  stopPropagation: () => void;
-}) {
-  event.stopPropagation();
-}
-
 export interface MarkdownPreviewHostProps {
   workspacePath: string | null;
   blockId: string;
+  selected?: boolean;
   title: string;
   sourcePath: string;
   excerpt: string;
@@ -33,6 +27,7 @@ export interface MarkdownPreviewHostProps {
 
 export function MarkdownPreviewHost({
   workspacePath,
+  selected = false,
   title,
   sourcePath,
   excerpt,
@@ -50,7 +45,6 @@ export function MarkdownPreviewHost({
   const overlayContentClassName =
     interactionMode === "overlay" ? "pointer-events-auto" : "";
 
-  const themeType = useEffectiveThemeType();
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -134,12 +128,6 @@ export function MarkdownPreviewHost({
       )}
       {shouldLoadPreview && (
         <div
-          onPointerDown={stopOverlayPropagation}
-          onMouseDown={stopOverlayPropagation}
-          onClick={stopOverlayPropagation}
-          onWheel={stopOverlayPropagation}
-          onTouchStart={stopOverlayPropagation}
-          onTouchMove={stopOverlayPropagation}
           className={
             "h-[calc(100%-57px)] overflow-auto overscroll-contain px-4 py-3 " +
             overlayContentClassName
@@ -148,13 +136,17 @@ export function MarkdownPreviewHost({
           {loading && <div className="text-caption text-ink/52">Loading markdown preview…</div>}
           {!loading && error && <div className="text-caption text-status-error">{error}</div>}
           {!loading && !error && content !== null && (
-            <article className="markdown-content" data-theme-type={themeType}>
-              <PlainMarkdownPreviewContent
-                text={content}
-                filePath={resolvedSourcePath}
-                themeType={themeType}
-              />
-            </article>
+            <PlainMarkdownPreview
+              text={content}
+              filePath={resolvedSourcePath}
+              interactionMode={
+                interactionMode !== "overlay"
+                  ? "default"
+                  : selected
+                    ? "capture-wheel"
+                    : "thumbs-only"
+              }
+            />
           )}
         </div>
       )}
