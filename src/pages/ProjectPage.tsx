@@ -1148,76 +1148,74 @@ function ProjectSourceControlPanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden py-4">
       <div className="shrink-0 px-4">
-        <div className="rounded-lg border border-ink/10 bg-ink/[0.025] p-3">
-          <div className="flex min-w-0 flex-col gap-2">
-            <div className="min-w-0">
-              <div className="flex min-w-0 items-center justify-between gap-2">
-                <div className="flex min-w-0 items-center gap-2 text-body-sm font-medium text-ink/85">
-                  <GitBranch className="h-4 w-4 shrink-0 text-ink/45" />
-                  <span className="min-w-0 truncate">{summary.branch ?? summary.head ?? "HEAD"}</span>
-                  {summary.ahead > 0 ? (
-                    <span className="inline-flex items-center gap-0.5 rounded bg-ink/[0.06] px-1.5 py-0.5 text-caption text-ink/60">
-                      <ArrowUp className="h-3 w-3" />
-                      {summary.ahead}
-                    </span>
-                  ) : null}
-                  {summary.behind > 0 ? (
-                    <span className="inline-flex items-center gap-0.5 rounded bg-ink/[0.06] px-1.5 py-0.5 text-caption text-ink/60">
-                      <ArrowDown className="h-3 w-3" />
-                      {summary.behind}
-                    </span>
-                  ) : null}
-                </div>
-                <GitIconButton
-                  label={t("project.source_control_refresh")}
-                  disabled={refreshing || gitActionBusy}
-                  onClick={() => void loadSourceControl({ background: true })}
-                  icon={refreshing ? LoaderCircle : RefreshCw}
-                  spin={refreshing}
-                />
+        <div className="flex min-w-0 flex-col gap-2">
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-2 text-body-sm font-medium text-ink/85">
+                <GitBranch className="h-4 w-4 shrink-0 text-ink/45" />
+                <span className="min-w-0 truncate">{summary.branch ?? summary.head ?? "HEAD"}</span>
+                {summary.ahead > 0 ? (
+                  <span className="inline-flex items-center gap-0.5 rounded bg-ink/[0.06] px-1.5 py-0.5 text-caption text-ink/60">
+                    <ArrowUp className="h-3 w-3" />
+                    {summary.ahead}
+                  </span>
+                ) : null}
+                {summary.behind > 0 ? (
+                  <span className="inline-flex items-center gap-0.5 rounded bg-ink/[0.06] px-1.5 py-0.5 text-caption text-ink/60">
+                    <ArrowDown className="h-3 w-3" />
+                    {summary.behind}
+                  </span>
+                ) : null}
               </div>
-              <div className="mt-1 min-w-0 truncate text-caption text-ink/45">
-                {[
-                  summary.upstream,
-                  t("project.source_control_change_count", { count: state?.changes.length ?? 0 }),
-                  summary.head,
-                ].filter(Boolean).join(" · ")}
-              </div>
-            </div>
-            <div className="flex items-center gap-1 leading-none">
               <GitIconButton
-                label={t("project.source_control_fetch")}
-                disabled={gitActionBusy}
-                onClick={() => void runAction("fetch")}
-                icon={activeGitAction === "fetch" ? LoaderCircle : ArrowDown}
-                spin={activeGitAction === "fetch"}
-                className="h-6 w-8"
-              />
-              <GitIconButton
-                label={t("project.source_control_sync")}
-                disabled={gitActionBusy}
-                onClick={() => void runAction("sync")}
-                icon={activeGitAction === "sync" ? LoaderCircle : GitCompareArrows}
-                spin={activeGitAction === "sync"}
-                className="h-6 w-8"
-              />
-              <GitIconButton
-                label={t("project.source_control_pull")}
-                disabled={gitActionBusy}
-                onClick={() => void runAction("pull")}
-                icon={activeGitAction === "pull" ? LoaderCircle : GitPullRequestArrow}
-                spin={activeGitAction === "pull"}
-                className="h-6 w-8"
-              />
-              <GitIconButton
-                label={t("project.source_control_push")}
-                disabled={gitActionBusy}
-                onClick={() => void runAction("push")}
-                icon={activeGitAction === "push" ? LoaderCircle : Upload}
-                spin={activeGitAction === "push"}
-                className="h-6 w-8"
+                label={t("project.source_control_refresh")}
+                disabled={refreshing || gitActionBusy}
+                onClick={() => void loadSourceControl({ background: true })}
+                icon={refreshing ? LoaderCircle : RefreshCw}
+                spin={refreshing}
               />
             </div>
+            <div className="mt-1 min-w-0 truncate text-caption text-ink/45">
+              {[
+                summary.upstream,
+                t("project.source_control_change_count", { count: state?.changes.length ?? 0 }),
+                summary.head,
+              ].filter(Boolean).join(" · ")}
+            </div>
+          </div>
+          <div className="flex items-center gap-1 leading-none">
+            <GitIconButton
+              label={t("project.source_control_fetch")}
+              disabled={gitActionBusy}
+              onClick={() => void runAction("fetch")}
+              icon={activeGitAction === "fetch" ? LoaderCircle : ArrowDown}
+              spin={activeGitAction === "fetch"}
+              className="h-6 w-8"
+            />
+            <GitIconButton
+              label={t("project.source_control_sync")}
+              disabled={gitActionBusy}
+              onClick={() => void runAction("sync")}
+              icon={activeGitAction === "sync" ? LoaderCircle : GitCompareArrows}
+              spin={activeGitAction === "sync"}
+              className="h-6 w-8"
+            />
+            <GitIconButton
+              label={t("project.source_control_pull")}
+              disabled={gitActionBusy}
+              onClick={() => void runAction("pull")}
+              icon={activeGitAction === "pull" ? LoaderCircle : GitPullRequestArrow}
+              spin={activeGitAction === "pull"}
+              className="h-6 w-8"
+            />
+            <GitIconButton
+              label={t("project.source_control_push")}
+              disabled={gitActionBusy}
+              onClick={() => void runAction("push")}
+              icon={activeGitAction === "push" ? LoaderCircle : Upload}
+              spin={activeGitAction === "push"}
+              className="h-6 w-8"
+            />
           </div>
           <div className="mt-3 grid gap-2">
             <ScrollArea
@@ -1470,7 +1468,7 @@ function ProjectSourceControlPanel({
           onToggle={() => toggleSection("history")}
         >
           <ScrollArea
-            className="max-h-[420px] min-h-[220px] rounded-md border border-ink/[0.08] bg-ink/[0.018]"
+            className="max-h-[420px] min-h-[220px]"
             viewportClassName="py-1"
             onScroll={handleGraphScroll}
           >
@@ -1529,20 +1527,28 @@ function GitChangeSection({
   children: ReactNode;
 }) {
   return (
-    <section className="mb-3 overflow-hidden rounded-lg border border-ink/[0.08] bg-ink/[0.018]" aria-labelledby={`git-section-${id}`}>
-      <div className="flex h-9 items-center gap-1 border-b border-ink/[0.06] px-1.5">
+    <section className="mb-3" aria-labelledby={`git-section-${id}`}>
+      <div className="group flex min-h-8 items-center gap-2 border-b border-ink/[0.06] px-2 py-1 text-body-sm text-ink/72 hover:bg-ink/[0.045]">
         <button
           type="button"
           onClick={onToggle}
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-1 text-left text-caption font-medium uppercase text-ink/55 transition hover:bg-ink/[0.04] hover:text-ink/75"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left outline-none"
           aria-expanded={expanded}
           id={`git-section-${id}`}
         >
-          {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          {expanded ? (
+            <ChevronDown className="h-4 w-4 shrink-0 text-ink/40" />
+          ) : (
+            <ChevronRight className="h-4 w-4 shrink-0 text-ink/40" />
+          )}
           <span className="min-w-0 truncate">{title}</span>
-          <span className="text-ink/35">{count}</span>
+          <span className="text-caption text-ink/35">{count}</span>
         </button>
-        {actions ? <div className="flex shrink-0 items-center gap-0.5">{actions}</div> : null}
+        {actions ? (
+          <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
+            {actions}
+          </div>
+        ) : null}
       </div>
       {expanded ? <div className="py-1">{children}</div> : null}
     </section>
