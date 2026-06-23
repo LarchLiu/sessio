@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Plus, X } from "lucide-react";
 import type { AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType } from "../api";
 import { createAssistant } from "../api";
 import { useI18n } from "../i18n";
@@ -55,11 +56,20 @@ export default function CreateAssistantDialog({
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 px-4" onClick={onClose}>
-      <div className="w-full max-w-[520px] rounded-lg border border-card-border/[0.12] bg-surface-panel p-4 shadow-[0_24px_80px_rgba(0,0,0,0.22)]" onClick={(event) => event.stopPropagation()}>
-        <div className="mb-3 text-body-sm font-semibold text-ink/[0.88]">{t("assistant.add")}</div>
-        <div className="grid gap-2">
+  return createPortal(
+    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/35 px-4" onClick={onClose}>
+      <div className="w-full max-w-[720px] rounded-xl border border-ink/10 bg-surface-panel p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div className="text-body font-medium text-ink">{t("assistant.add")}</div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md p-1 text-ink/45 hover:bg-ink/5 hover:text-ink"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="grid gap-3">
           <div className="grid gap-1.5">
             <div className="text-caption font-medium text-card-muted/60">{t("assistant.color")}</div>
             <AssistantColorPicker value={color} onChange={setColor} />
@@ -79,6 +89,7 @@ export default function CreateAssistantDialog({
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
