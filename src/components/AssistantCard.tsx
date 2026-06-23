@@ -6,6 +6,7 @@ import type { AssistantAgentInfo } from "../api";
 import AssistantAgentSelector from "./AssistantAgentSelector";
 import AssistantBotIcon from "./AssistantBotIcon";
 import SwitchControl from "./SwitchControl";
+import TruncatedTooltipText from "./TruncatedTooltipText";
 import Tooltip from "./Tooltip";
 import { useI18n } from "../i18n";
 
@@ -16,6 +17,7 @@ export default function AssistantCard({
   assistant,
   agents,
   sidebarMode = false,
+  compactMode = false,
   onUpdated,
   onDeleted,
   onError,
@@ -23,6 +25,7 @@ export default function AssistantCard({
   assistant: AssistantInfo;
   agents: AgentInfo[];
   sidebarMode?: boolean;
+  compactMode?: boolean;
   onUpdated: (assistant: AssistantInfo) => void;
   onDeleted: (assistantId: string) => void;
   onError: (error: string | null) => void;
@@ -74,7 +77,10 @@ export default function AssistantCard({
   };
 
   return (
-    <div className={`rounded-lg border border-card-border/[0.12] p-3 ${sidebarMode ? "bg-ink/[0.025]" : "bg-card"} ${assistant.enabled ? "" : "opacity-45"}`}>
+    <div
+      style={sidebarMode ? { minWidth: "var(--app-right-sidebar-content-min-width)" } : undefined}
+      className={`min-w-0 rounded-lg border border-card-border/[0.12] p-3 ${sidebarMode ? "bg-ink/[0.025]" : "bg-card"} ${assistant.enabled ? "" : "opacity-45"}`}
+    >
       {editing ? (
         <div className="grid gap-2">
           <input value={name} onChange={(event) => setName(event.target.value)} className={inputClassName} />
@@ -87,28 +93,29 @@ export default function AssistantCard({
       ) : (
         <div className="flex items-start gap-3">
           <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 items-center gap-2">
-              <AssistantBotIcon color={assistant.color} className="h-4 w-4 shrink-0 text-card-icon/55" />
-              <span className="truncate text-body-sm font-medium text-card-fg/75">{assistant.name}</span>
-              <span className="shrink-0 rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{assistant.type}</span>
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <AssistantBotIcon color={assistant.color} className="h-4 w-4 shrink-0 text-card-icon/55" />
+                <span className="truncate text-body-sm font-medium text-card-fg/75">{assistant.name}</span>
+              </div>
+              <div className="ml-auto flex shrink-0 items-center self-center gap-1">
+                <Tooltip content={t("assistant.edit")} placement="top">
+                  <button type="button" onClick={() => setEditing(true)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><Pencil className="h-4 w-4" /></button>
+                </Tooltip>
+                <SwitchControl
+                  checked={assistant.enabled}
+                  tooltip={assistant.enabled ? t("assistant.disable") : t("assistant.enable")}
+                  onToggle={() => void toggleEnabled()}
+                />
+                {deletable && (
+                  <button type="button" onClick={() => void remove()} className="rounded p-1 text-card-subtle/45 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-4 w-4" /></button>
+                )}
+              </div>
             </div>
-            {assistant.systemPrompt && <div className="ml-6 mt-2 line-clamp-3 whitespace-pre-wrap text-caption leading-relaxed text-card-muted/60">{assistant.systemPrompt}</div>}
+            {assistant.systemPrompt && <TruncatedTooltipText text={assistant.systemPrompt} className="ml-6 mt-2 line-clamp-3 whitespace-pre-wrap text-caption leading-relaxed text-card-muted/60" />}
             <div className="ml-6 mt-2 flex min-w-0 max-w-full">
-              <AssistantAgentSelector agent={assistant.agent} agents={agents} onChange={(agent) => void updateAgent(agent)} />
+              <AssistantAgentSelector agent={assistant.agent} agents={agents} compact={compactMode} onChange={(agent) => void updateAgent(agent)} />
             </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <Tooltip content={t("assistant.edit")} placement="top">
-              <button type="button" onClick={() => setEditing(true)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><Pencil className="h-4 w-4" /></button>
-            </Tooltip>
-            <SwitchControl
-              checked={assistant.enabled}
-              tooltip={assistant.enabled ? t("assistant.disable") : t("assistant.enable")}
-              onToggle={() => void toggleEnabled()}
-            />
-            {deletable && (
-              <button type="button" onClick={() => void remove()} className="rounded p-1 text-card-subtle/45 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-4 w-4" /></button>
-            )}
           </div>
         </div>
       )}

@@ -238,6 +238,8 @@ export default function AppLayout({
         {
           "--app-sidebar-width": `${sidebarWidth}px`,
           "--app-right-sidebar-width": `${rightSidebarWidth}px`,
+          "--app-right-sidebar-min-width": `${RIGHT_SIDEBAR_MIN_WIDTH}px`,
+          "--app-right-sidebar-content-min-width": `calc(${RIGHT_SIDEBAR_MIN_WIDTH}px - 2.5rem)`,
         } as CSSProperties
       }
     >

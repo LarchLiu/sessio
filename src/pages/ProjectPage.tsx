@@ -88,7 +88,7 @@ import MultiPicker from "../components/MultiPicker";
 import StageList from "../components/StageList";
 import StageSelectChip from "../components/StageSelectChip";
 import Tooltip from "../components/Tooltip";
-import { HashIcon, HashtagChatLinearIcon, Robot3LineIcon } from "../components/IconifyIcon";
+import { HashIcon, Robot3LineIcon } from "../components/IconifyIcon";
 import { localeTag, useI18n } from "../i18n";
 import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTabs";
@@ -102,6 +102,7 @@ type ThreadPanelView = "threads" | "thread-chats";
 const THREAD_KINDS: ThreadKind[] = ["process", "teamwork", "brainstorm", "debate"];
 const AGENT_PARTICIPANT_KINDS = new Set<ThreadKind>(["brainstorm", "debate"]);
 const GIT_COMMIT_PAGE_SIZE = 20;
+const RIGHT_SIDEBAR_COMPACT_BREAKPOINT = 360;
 
 function resizeGitCommitMessage(el: HTMLTextAreaElement) {
   el.style.height = "auto";
@@ -189,6 +190,35 @@ function threadAgentLabel(agent: AgentInfo): string {
 function threadParticipantLabel(participant: ThreadAgentInfo): string {
   const agentLabel = AGENT_LABEL[participant.agent] ?? participant.agent;
   return participant.model ? `${agentLabel} · ${participant.model}` : agentLabel;
+}
+
+function AssistantChoiceChip({
+  assistant,
+  selected,
+  onToggle,
+}: {
+  assistant: { value: string; label: string; icon?: ReactNode };
+  selected: boolean;
+  onToggle: (assistantId: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onToggle(assistant.value)}
+      className={
+        "inline-flex h-7 max-w-[220px] items-center gap-1.5 rounded-md border px-1.5 text-caption transition duration-150 " +
+        (selected
+          ? "border-ink/[0.14] bg-ink/[0.048] text-ink/70"
+          : "border-ink/[0.08] bg-surface-panel text-ink/45 hover:bg-ink/[0.04] hover:text-ink/65")
+      }
+    >
+      {assistant.icon}
+      <span className="min-w-0 truncate">{assistant.label}</span>
+      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-ink/[0.35] bg-ink/[0.04] text-ink/75">
+        {selected && <Check className="h-3 w-3" />}
+      </span>
+    </button>
+  );
 }
 
 function isRuntimeAgentId(value: string): value is Agent {
@@ -410,6 +440,8 @@ export function ProjectWorkbenchPage({
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [processLoading, setProcessTemplateLoading] = useState(true);
   const [internalView, setInternalView] = useState<ProjectView>("threads");
+  const [compactMode, setCompactMode] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const activeView = viewProp ?? internalView;
   const setActiveView = (next: ProjectView) => {
     if (onViewChange) onViewChange(next);
@@ -473,8 +505,25 @@ export function ProjectWorkbenchPage({
     setAssistants((prev) => prev.map((current) => (current.id === assistant.id ? assistant : current)));
   };
 
+  useLayoutEffect(() => {
+    if (!hideTabs) {
+      setCompactMode(false);
+      return;
+    }
+    const node = containerRef.current;
+    if (!node) return;
+    const update = () => {
+      setCompactMode(node.getBoundingClientRect().width < RIGHT_SIDEBAR_COMPACT_BREAKPOINT);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [hideTabs]);
+
   return (
     <div
+      ref={containerRef}
       className={
         "flex h-full min-h-0 flex-1 flex-col overflow-hidden " +
         (hideTabs ? "bg-transparent" : "bg-surface-panel")
@@ -524,7 +573,8 @@ export function ProjectWorkbenchPage({
                 assistants={assistants}
                 agents={agents}
                 loading={processLoading}
-                compact={hideTabs}
+                compact={compactMode}
+                sidebarMode={hideTabs}
                 onThreadCreated={(thread) => setThreads((prev) => [thread, ...prev])}
                 onThreadUpdated={patchThread}
                 onThreadDeleted={(threadId) => setThreads((prev) => prev.filter((thread) => thread.id !== threadId))}
@@ -557,7 +607,8 @@ export function ProjectWorkbenchPage({
                 project={project}
                 stages={projectStages}
                 assistants={assistants}
-                compact={hideTabs}
+                compact={compactMode}
+                sidebarMode={hideTabs}
                 onCreated={(stage) => setProjectStages((prev) => [...prev, stage].sort((a, b) => a.order - b.order))}
                 onUpdated={patchProjectStage}
                 onDeleted={(stageId) => setProjectStages((prev) => prev.filter((stage) => stage.id !== stageId))}
@@ -573,7 +624,9 @@ export function ProjectWorkbenchPage({
                 assistants={assistants}
                 agents={agents}
                 loading={processLoading}
+                compact={compactMode}
                 sidebarMode={hideTabs}
+                compactMode={compactMode}
                 onAssistantCreated={(assistant) => setAssistants((prev) => [...prev, assistant])}
                 onAssistantUpdated={patchAssistant}
                 onAssistantDeleted={(assistantId) => setAssistants((prev) => prev.filter((assistant) => assistant.id !== assistantId))}
@@ -1753,6 +1806,7 @@ function ThreadProcessTemplatePanel({
   agents,
   loading,
   compact = false,
+  sidebarMode = false,
   onThreadCreated,
   onThreadUpdated,
   onThreadDeleted,
@@ -1769,6 +1823,7 @@ function ThreadProcessTemplatePanel({
   agents: AgentInfo[];
   loading: boolean;
   compact?: boolean;
+  sidebarMode?: boolean;
   onThreadCreated: (thread: ThreadInfo) => void;
   onThreadUpdated: (thread: ThreadInfo) => void;
   onThreadDeleted: (threadId: string) => void;
@@ -1830,10 +1885,10 @@ function ThreadProcessTemplatePanel({
   }, [threads]);
   const threadPanelTabs = useMemo<SegmentedTabItem<ThreadPanelView>[]>(
     () => [
-      { value: "threads", label: t("thread.title"), icon: HashIcon, badge: threads.length },
-      { value: "thread-chats", label: t("thread.chats"), icon: HashtagChatLinearIcon, badge: linkedSessionKeys.size },
+      { value: "threads", label: "Threads", badge: threads.length },
+      { value: "thread-chats", label: "Chats", badge: linkedSessionKeys.size },
     ],
-    [linkedSessionKeys.size, t, threads.length],
+    [linkedSessionKeys.size, threads.length],
   );
   const threadChatSessions = useMemo(() => {
     const byKey = new Map<string, SessionInfo>();
@@ -1966,7 +2021,7 @@ function ThreadProcessTemplatePanel({
   };
 
   return (
-    <div className={compact ? "min-w-0" : "min-w-0 rounded-lg border border-card-border/[0.12] bg-ink/[0.025] p-5"}>
+    <div className={sidebarMode || compact ? "min-w-0" : "min-w-0 rounded-lg border border-card-border/[0.12] bg-ink/[0.025] p-5"}>
         <SegmentedTabs
           items={threadPanelTabs}
           value={panelView}
@@ -1980,14 +2035,16 @@ function ThreadProcessTemplatePanel({
           className="mb-4"
           endAdornment={
             panelView === "threads" ? (
-              <button
-                type="button"
-                onClick={() => setCreateOpen(true)}
-                className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-body-sm font-medium text-card-fg/75 transition hover:text-card-fg/90"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                {t("thread.add")}
-              </button>
+              <Tooltip content={t("thread.add")} placement="top">
+                <button
+                  type="button"
+                  aria-label={t("thread.add")}
+                  onClick={() => setCreateOpen(true)}
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-card-fg/75 transition hover:bg-ink/5 hover:text-card-fg/90"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+              </Tooltip>
             ) : null
           }
         />
@@ -2033,14 +2090,21 @@ function ThreadProcessTemplatePanel({
                     className="w-max"
                   />
                   {createKind === "teamwork" && assistantOptions.length > 0 && (
-                    <div className="inline-flex h-8 w-max min-w-0 items-center overflow-hidden rounded-md border border-ink/10 bg-ink/[0.035]">
-                      <MultiPicker
-                        selectedValues={createAssistantIds}
-                        options={assistantOptions}
-                        onChange={setCreateAssistantIds}
-                        placeholder={t("thread.assistants_placeholder")}
-                        className="h-8 max-w-[340px]"
-                      />
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {assistantOptions.map((assistant) => (
+                        <AssistantChoiceChip
+                          key={assistant.value}
+                          assistant={assistant}
+                          selected={createAssistantIds.includes(assistant.value)}
+                          onToggle={(assistantId) => {
+                            setCreateAssistantIds((current) =>
+                              current.includes(assistantId)
+                                ? current.filter((id) => id !== assistantId)
+                                : [...current, assistantId],
+                            );
+                          }}
+                        />
+                      ))}
                     </div>
                   )}
                   {AGENT_PARTICIPANT_KINDS.has(createKind) && agentParticipantOptions.length > 0 && (
@@ -2371,10 +2435,6 @@ function ThreadCard({
   const [selectedStageIds, setSelectedStageIds] = useState<string[]>([]);
   const goalRef = useRef<HTMLDivElement>(null);
   const descriptionRef = useRef<HTMLDivElement>(null);
-  const threadKindTabs = useMemo<SegmentedTabItem<ThreadKind>[]>(
-    () => THREAD_KINDS.map((kind) => ({ value: kind, label: t(`thread.kind.${kind}`) })),
-    [t],
-  );
   const assistantOptions = useMemo(
     () =>
       assistants
@@ -2554,61 +2614,29 @@ function ThreadCard({
     >
       {editing ? (
         <div className="grid gap-2">
-          <div className="flex items-center gap-3">
+          <div className="flex">
             <input
               value={goal}
               onChange={(event) => setGoal(event.target.value)}
-              className="min-w-0 flex-1 rounded-md border border-ink/10 bg-ink/5 px-2 py-1.5 text-body-sm text-ink outline-none"
+              className="min-w-0 flex-1 rounded-md border border-ink/10 bg-ink/5 px-3 py-2 text-body-sm text-ink outline-none"
             />
-            <div className="flex shrink-0 items-center gap-1">
-              <button type="button" onClick={() => setEditing(false)} className="rounded px-2 py-1 text-caption text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
-              <button
-                type="button"
-                disabled={threadCreateBlocked(editKind, editAssistantIds, editAgentParticipantIds, agents)}
-                onClick={() => void save()}
-                className="rounded bg-ink px-2 py-1 text-caption text-[rgb(var(--color-bg-panel))] disabled:opacity-35"
-              >
-                {t("project.save")}
-              </button>
-            </div>
           </div>
           <textarea
             value={description}
             onChange={(event) => setDescription(event.target.value)}
             rows={2}
-            className="min-w-0 resize-none rounded-md border border-ink/10 bg-ink/5 px-2 py-1.5 text-body-sm text-ink outline-none"
+            className="min-w-0 resize-none rounded-md border border-ink/10 bg-ink/5 px-3 py-2 text-body-sm text-ink outline-none"
           />
-          <div className="flex flex-wrap items-center gap-2">
-            <SegmentedTabs
-              items={threadKindTabs}
-              value={editKind}
-              onChange={setEditKind}
-              itemWidth={112}
-              itemHeight={28}
-              className="w-max"
-            />
-            {editKind === "teamwork" && assistantOptions.length > 0 && (
-              <div className="inline-flex h-7 min-w-0 items-center overflow-hidden rounded-md border border-ink/10 bg-ink/[0.035]">
-                <MultiPicker
-                  selectedValues={editAssistantIds}
-                  options={assistantOptions}
-                  onChange={setEditAssistantIds}
-                  placeholder={t("thread.assistants_placeholder")}
-                  className="max-w-[300px]"
-                />
-              </div>
-            )}
-            {AGENT_PARTICIPANT_KINDS.has(editKind) && agentParticipantOptions.length > 0 && (
-              <div className="inline-flex h-7 min-w-0 items-center overflow-hidden rounded-md border border-ink/10 bg-ink/[0.035]">
-                <MultiPicker
-                  selectedValues={editAgentParticipantIds}
-                  options={agentParticipantOptions}
-                  onChange={(values) => setEditAgentParticipantIds(editKind === "debate" ? values.slice(0, 2) : values)}
-                  placeholder={t("new_chat.add_participant")}
-                  className="max-w-[300px]"
-                />
-              </div>
-            )}
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => setEditing(false)} className="inline-flex h-8 items-center justify-center rounded-md px-3 text-body-sm text-ink/50 transition hover:bg-ink/5 hover:text-ink">{t("delete.cancel")}</button>
+            <button
+              type="button"
+              disabled={threadCreateBlocked(editKind, editAssistantIds, editAgentParticipantIds, agents)}
+              onClick={() => void save()}
+              className="inline-flex h-8 items-center justify-center rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] hover:text-card-fg/90 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-card-border/[0.12] disabled:hover:bg-card-chip/[0.08] disabled:hover:text-card-fg/75"
+            >
+              {t("project.save")}
+            </button>
           </div>
         </div>
       ) : (
@@ -2768,6 +2796,7 @@ function ProjectStagePicker({
   stages,
   assistants,
   compact = false,
+  sidebarMode = false,
   onCreated,
   onUpdated,
   onDeleted,
@@ -2778,6 +2807,7 @@ function ProjectStagePicker({
   stages: ProjectStageInfo[];
   assistants: AssistantInfo[];
   compact?: boolean;
+  sidebarMode?: boolean;
   onCreated: (stage: ProjectStageInfo) => void;
   onUpdated: (stage: ProjectStageInfo) => void;
   onDeleted: (stageId: string) => void;
@@ -2796,21 +2826,27 @@ function ProjectStagePicker({
   );
 
   return (
-    <div className={compact ? "" : "mb-3 rounded-lg border border-ink/10 bg-ink/[0.025] p-5"}>
+    <div className={sidebarMode || compact ? "" : "mb-3 rounded-lg border border-ink/10 bg-ink/[0.025] p-5"}>
       <div className="grid gap-3">
         <div className="flex items-center justify-between gap-3">
           <div className="text-body-sm font-semibold text-card-fg/85">{t("stage.project_stages")}</div>
-          <button type="button" onClick={() => setShowCreate((value) => !value)} className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-body-sm font-medium text-card-fg/75 transition hover:text-card-fg/90">
-            <Plus className="h-3.5 w-3.5" />
-            {t("stage.add")}
-          </button>
+          <Tooltip content={t("stage.add")} placement="top">
+            <button
+              type="button"
+              aria-label={t("stage.add")}
+              onClick={() => setShowCreate((value) => !value)}
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-card-fg/75 transition hover:bg-ink/5 hover:text-card-fg/90"
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
         </div>
         <StageList
           stages={stages}
           assistants={enabledAssistants}
           loading={false}
           dragGroup="project-stages"
-          sidebarMode={compact}
+          sidebarMode={sidebarMode}
           onUpdated={onUpdated}
           onDeleted={onDeleted}
           onReload={onReload}
@@ -2836,6 +2872,7 @@ function AssistantManagementPanel({
   loading,
   compact = false,
   sidebarMode = false,
+  compactMode = false,
   onAssistantCreated,
   onAssistantUpdated,
   onAssistantDeleted,
@@ -2847,6 +2884,7 @@ function AssistantManagementPanel({
   loading: boolean;
   compact?: boolean;
   sidebarMode?: boolean;
+  compactMode?: boolean;
   onAssistantCreated: (assistant: AssistantInfo) => void;
   onAssistantUpdated: (assistant: AssistantInfo) => void;
   onAssistantDeleted: (assistantId: string) => void;
@@ -2861,42 +2899,51 @@ function AssistantManagementPanel({
   const visible = tab === "builtin" ? builtin : custom;
 
   return (
-    <aside className={compact ? "min-w-0 rounded-lg border border-ink/10 bg-surface-panel p-3" : "min-w-0"}>
+    <>
       {loading ? (
         <div className="py-8 text-center text-body-sm text-ink/40">{t("memory_search.searching")}</div>
       ) : (
-        <div className={sidebarMode ? "" : "rounded-lg border border-card-border/[0.12] bg-ink/[0.025] p-5"}>
-          <SegmentedTabs
-            items={[
-              { value: "builtin", label: t("assistant.builtin"), badge: builtin.length },
-              { value: "custom", label: t("assistant.custom"), badge: custom.length },
-            ]}
-            value={tab}
-            onChange={setTab}
-            variant="underline"
-            itemWidth={132}
-            itemHeight={34}
-            className="mb-4"
-            endAdornment={
-              <button type="button" onClick={() => setShowCreate(true)} className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-body-sm font-medium text-card-fg/75 transition hover:text-card-fg/90">
-                <Plus className="h-3.5 w-3.5" />
-                {t("assistant.add")}
-              </button>
-            }
-          />
-          <div className="grid gap-3">
-            {visible.map((assistant) => (
-              <AssistantCard
-                key={assistant.id}
-                assistant={assistant}
-                agents={agents}
-                sidebarMode={sidebarMode}
-                onUpdated={onAssistantUpdated}
-                onDeleted={onAssistantDeleted}
-                onError={onError}
-              />
-            ))}
-            {visible.length === 0 && <div className="rounded-md border border-dashed border-ink/10 py-8 text-center text-body-sm text-ink/35">{t("assistant.empty")}</div>}
+        <div className={sidebarMode || compact ? "min-w-0" : "min-w-0"}>
+          <div className={sidebarMode ? "" : "rounded-lg border border-card-border/[0.12] bg-ink/[0.025] p-5"}>
+            <SegmentedTabs
+              items={[
+                { value: "builtin", label: t("assistant.builtin"), badge: builtin.length },
+                { value: "custom", label: t("assistant.custom"), badge: custom.length },
+              ]}
+              value={tab}
+              onChange={setTab}
+              variant="underline"
+              itemWidth={132}
+              itemHeight={34}
+              className="mb-4"
+              endAdornment={
+                <Tooltip content={t("assistant.add")} placement="top">
+                  <button
+                    type="button"
+                    aria-label={t("assistant.add")}
+                    onClick={() => setShowCreate(true)}
+                    className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-card-fg/75 transition hover:bg-ink/5 hover:text-card-fg/90"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                  </button>
+                </Tooltip>
+              }
+            />
+            <div className="grid gap-3">
+              {visible.map((assistant) => (
+                <AssistantCard
+                  key={assistant.id}
+                  assistant={assistant}
+                  agents={agents}
+                  sidebarMode={sidebarMode}
+                  compactMode={compactMode}
+                  onUpdated={onAssistantUpdated}
+                  onDeleted={onAssistantDeleted}
+                  onError={onError}
+                />
+              ))}
+              {visible.length === 0 && <div className="rounded-md border border-dashed border-ink/10 py-8 text-center text-body-sm text-ink/35">{t("assistant.empty")}</div>}
+            </div>
           </div>
         </div>
       )}
@@ -2909,6 +2956,6 @@ function AssistantManagementPanel({
           onError={onError}
         />
       )}
-    </aside>
+    </>
   );
 }

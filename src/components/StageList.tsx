@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import { Check, ChevronDown, Circle, GripVertical, Trash2 } from "lucide-react";
+import { Check, Circle, GripVertical, Trash2 } from "lucide-react";
 import type { AssistantInfo, ProjectStageInfo, StageAssistantInfo } from "../api";
 import {
   deleteProjectStage,
@@ -12,6 +12,7 @@ import { useI18n } from "../i18n";
 import { projectStageIcon, projectStageLabel } from "../utils/stageDisplay";
 import AssistantBotIcon from "./AssistantBotIcon";
 import SwitchControl from "./SwitchControl";
+import TruncatedTooltipText from "./TruncatedTooltipText";
 import Tooltip from "./Tooltip";
 
 const inputClassName = "h-9 min-w-0 rounded-md border border-input-border/[0.16] bg-input px-3 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30";
@@ -40,18 +41,6 @@ export default function StageList({
 }) {
   const { t } = useI18n();
   const orderedStages = [...stages].sort((a, b) => a.order - b.order);
-
-  const moveStage = async (stage: ProjectStageInfo, direction: -1 | 1) => {
-    const index = orderedStages.findIndex((item) => item.id === stage.id);
-    const next = orderedStages[index + direction];
-    if (!next) return;
-    try {
-      onUpdated(await updateProjectStage(stage.id, { order: next.order }));
-      await onReload();
-    } catch (err) {
-      onError(String(err));
-    }
-  };
 
   const reorderStage = async (stage: ProjectStageInfo, target: ProjectStageInfo) => {
     if (stage.id === target.id) return;
@@ -86,7 +75,6 @@ export default function StageList({
             assistants={assistants}
             dragGroup={dragGroup}
             sidebarMode={sidebarMode}
-            onMove={moveStage}
             onUpdated={onUpdated}
             onDeleted={onDeleted}
             onError={onError}
@@ -104,7 +92,6 @@ function StageListItem({
   assistants,
   dragGroup,
   sidebarMode,
-  onMove,
   onUpdated,
   onDeleted,
   onError,
@@ -114,7 +101,6 @@ function StageListItem({
   assistants: AssistantInfo[];
   dragGroup: string;
   sidebarMode: boolean;
-  onMove: (stage: ProjectStageInfo, direction: -1 | 1) => Promise<void>;
   onUpdated: (stage: ProjectStageInfo) => void;
   onDeleted: (stageId: string) => void;
   onError: (error: string | null) => void;
@@ -149,6 +135,7 @@ function StageListItem({
     agentId: assistant.agent.id,
     description: `${assistant.agent.name} · ${assistant.agent.model}`,
   }));
+  const toggleExpanded = () => setExpanded((value) => !value);
 
   const save = async () => {
     if (!custom) return;
@@ -200,8 +187,9 @@ function StageListItem({
     <div
       ref={ref}
       data-stage-template-id={stage.id}
+      style={sidebarMode ? { minWidth: "var(--app-right-sidebar-content-min-width)" } : undefined}
       className={
-        "relative rounded-lg border p-3 transition duration-150 " +
+        "relative min-w-0 rounded-lg border p-3 transition duration-150 " +
         (isDragSource
           ? `z-20 cursor-grabbing border-card-border/25 ${sidebarMode ? "bg-ink/[0.025]" : "bg-card"} shadow-[0_16px_36px_rgba(0,0,0,0.24)]`
           : isDropTarget
@@ -210,36 +198,39 @@ function StageListItem({
       }
     >
       <div className="flex items-start gap-3">
-        <button ref={handleRef} type="button" className="mt-1.5 cursor-grab touch-none rounded p-0.5 text-card-subtle/35 hover:bg-card-action-hover/5 hover:text-card-fg/60 active:cursor-grabbing">
+        <button ref={handleRef} type="button" className="mt-0.5 self-start cursor-grab touch-none rounded p-0.5 text-card-subtle/35 hover:bg-card-action-hover/5 hover:text-card-fg/60 active:cursor-grabbing">
           <GripVertical className="h-4 w-4" />
         </button>
-        <button type="button" onClick={() => setExpanded((value) => !value)} className="min-w-0 flex-1 text-left">
-          <div className="flex min-w-0 items-center gap-2">
-            {projectStageIcon(stage, "h-4 w-4 shrink-0 text-card-icon/55")}
-            <span className="truncate text-body-sm font-medium text-card-fg/85">{label}</span>
-            <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{stage.type}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+            <button type="button" onClick={toggleExpanded} className="min-w-0 flex-1 text-left">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                {projectStageIcon(stage, "h-4 w-4 shrink-0 text-card-icon/55")}
+                <span className="truncate text-body-sm font-medium text-card-fg/85">{label}</span>
+              </div>
+            </button>
+            <div className="ml-auto flex shrink-0 items-center self-center gap-1">
+              {custom && (
+                <button type="button" onClick={() => void remove()} className="rounded p-1 text-card-subtle/45 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-4 w-4" /></button>
+              )}
+              <StageToggle
+                checked={stage.allowEmptyAssistants}
+                tooltip={t("stage.allow_empty_assistants")}
+                onToggle={() => void toggleAllowEmptyAssistants()}
+                variant="icon"
+              />
+              <StageToggle
+                checked={stage.enabled}
+                tooltip={stage.enabled ? t("stage.enabled") : t("stage.disabled")}
+                onToggle={() => void toggleEnabled()}
+                variant="track"
+              />
+            </div>
           </div>
-          {stage.description && <div className="mt-1 line-clamp-2 text-caption leading-relaxed text-card-muted/60">{stage.description}</div>}
-          <AssistantSummary assistants={stage.assistants} sidebarMode={sidebarMode} />
-        </button>
-        <div className="flex shrink-0 items-center gap-1">
-          <button type="button" onClick={() => void onMove(stage, -1)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><ChevronDown className="h-4 w-4 rotate-180" /></button>
-          <button type="button" onClick={() => void onMove(stage, 1)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><ChevronDown className="h-4 w-4" /></button>
-          {custom && (
-            <button type="button" onClick={() => void remove()} className="rounded p-1 text-card-subtle/45 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-4 w-4" /></button>
-          )}
-          <StageToggle
-            checked={stage.allowEmptyAssistants}
-            tooltip={t("stage.allow_empty_assistants")}
-            onToggle={() => void toggleAllowEmptyAssistants()}
-            variant="icon"
-          />
-          <StageToggle
-            checked={stage.enabled}
-            tooltip={stage.enabled ? t("stage.enabled") : t("stage.disabled")}
-            onToggle={() => void toggleEnabled()}
-            variant="track"
-          />
+          <button type="button" onClick={toggleExpanded} className="mt-2 block w-full min-w-0 text-left">
+            {stage.description && <TruncatedTooltipText text={stage.description} className="line-clamp-2 text-caption leading-relaxed text-card-muted/60" />}
+            <AssistantSummary assistants={stage.assistants} sidebarMode={sidebarMode} />
+          </button>
         </div>
       </div>
       {expanded && (
