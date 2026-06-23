@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
@@ -30,6 +31,7 @@ import { useI18n } from "../i18n";
 import type { ChatComposerController } from "../hooks/useChatComposer";
 
 const PROJECT_NAME_SCRAMBLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const CHAT_COMPOSER_COMPACT_BREAKPOINT = 400;
 
 export default function ChatComposer({
   composer,
@@ -74,6 +76,8 @@ export default function ChatComposer({
   const [astraSweep, setAstraSweep] = useState(false);
   const previousSendButtonVariantRef = useRef(sendButtonVariant);
   const imeCompositionRef = useRef(createImeCompositionState());
+  const composerBoxRef = useRef<HTMLDivElement>(null);
+  const [compactControls, setCompactControls] = useState(false);
   const sendEnabled = canSend ?? composer.canSend;
   const sendBusy = sendButtonBusy ?? composer.sending;
   const canCancel = active && !sendBusy;
@@ -94,8 +98,26 @@ export default function ChatComposer({
   const outerClassName = variant === "chat" ? "w-full" : "w-full max-w-[730px]";
   const rootClassName = className ? `${outerClassName} ${className}` : outerClassName;
   const controlsClassName =
-    "flex h-12 items-center justify-between gap-3 px-3 pb-2 " +
+    "flex min-h-12 items-center px-3 pb-2 " +
+    (compactControls ? "gap-1 " : "gap-3 ") +
+    (compactControls ? "flex-wrap " : "justify-between ") +
     (bottomRow ? "border-b border-ink/10" : "");
+  const leadingControlsClassName =
+    "flex min-w-0 items-center " + (compactControls ? "flex-wrap gap-1" : "gap-3");
+  const trailingControlsClassName =
+    "flex shrink-0 items-center " + (compactControls ? "ml-auto gap-1" : "gap-2.5");
+
+  useLayoutEffect(() => {
+    const node = composerBoxRef.current;
+    if (!node || typeof ResizeObserver === "undefined") return;
+    const update = () => {
+      setCompactControls(node.getBoundingClientRect().width < CHAT_COMPOSER_COMPACT_BREAKPOINT);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const previous = previousSendButtonVariantRef.current;
@@ -124,6 +146,7 @@ export default function ChatComposer({
         </h1>
       )}
       <div
+        ref={composerBoxRef}
         className={
           "overflow-hidden rounded-2xl bg-ink/[0.055] shadow-[inset_0_0_0_1px_rgb(var(--color-ink)/0.08)] transition-shadow " +
           (composer.composerError
@@ -174,7 +197,7 @@ export default function ChatComposer({
           </div>
         )}
         <div className={controlsClassName}>
-          <div className="flex min-w-0 items-center gap-3">
+          <div className={leadingControlsClassName}>
             {composer.supportsAttachments && (
               <Tooltip content={t("new_chat.add_context")} placement="top">
                 <button
@@ -198,17 +221,23 @@ export default function ChatComposer({
                 onChange={(value) => void composer.handlePermissionModeChange(value)}
                 disabled={runtimeControlsDisabled || !composer.selectedRuntimeAgent}
                 options={composer.permissionOptions}
+                triggerDisplay={compactControls ? "icon" : "full"}
+                minMenuWidth={220}
+                maxWidthClassName={compactControls ? "max-w-[150px]" : "max-w-[260px]"}
               />
             )}
             {modeActions}
           </div>
-          <div className="flex shrink-0 items-center gap-2.5">
+          <div className={trailingControlsClassName}>
             <RuntimeMenuSelect
               ariaLabel={t("new_chat.agent")}
               value={composer.selectedAgentModelValue}
               onChange={(value) => void composer.handleAgentModelChange(value)}
               disabled={runtimeControlsDisabled || composer.agentModelOptions.length === 0}
               options={composer.agentModelOptions}
+              triggerDisplay={compactControls ? "icon" : "full"}
+              minMenuWidth={220}
+              maxWidthClassName={compactControls ? "max-w-[210px]" : "max-w-[260px]"}
             />
             <Tooltip content={sendLabel} placement="top">
               <button
