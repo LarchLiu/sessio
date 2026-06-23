@@ -1,4 +1,5 @@
 import {
+  CSSProperties,
   ReactNode,
   useCallback,
   useEffect,
@@ -15,7 +16,7 @@ const MENU_MARGIN = 8;
 const MENU_MAX_HEIGHT = 260;
 
 type MenuPlacement = "auto" | "bottom" | "top" | "left" | "right";
-type MenuPosition = { top: number; left: number; width: number };
+type MenuPosition = { top: number; left: number; width: number; minWidth: number };
 
 export interface InlineMenuSelectOption {
   value: string;
@@ -40,6 +41,7 @@ export interface InlineMenuSelectProps {
   value: string;
   options: InlineMenuSelectOption[];
   onChange: (value: string) => void;
+  triggerDisplay?: "full" | "icon";
   menuAlign?: "trigger" | "parent";
   menuPlacement?: MenuPlacement;
   placeholder?: string;
@@ -56,6 +58,7 @@ export default function InlineMenuSelect({
   value,
   options,
   onChange,
+  triggerDisplay = "full",
   menuAlign = "trigger",
   menuPlacement = "auto",
   placeholder,
@@ -74,9 +77,12 @@ export default function InlineMenuSelect({
   const selectedItemRef = useRef<HTMLButtonElement>(null);
   const selected = options.find((option) => option.value === value);
   const selectedIcon = selected?.icon ?? selected?.group?.icon;
+  const iconOnlyTrigger = triggerDisplay === "icon" && Boolean(selectedIcon);
+  const triggerTitle = [selected?.label ?? placeholder ?? "", selected?.suffix].filter(Boolean).join(" ");
   const menuSections = groupedMenuSections(options);
   const estimatedRowCount =
     options.length + menuSections.filter((section) => section.group).length;
+  const [menuNaturalWidth, setMenuNaturalWidth] = useState<number>(minMenuWidth);
 
   const applyPosition = useCallback((next: MenuPosition) => {
     setPos((current) =>
@@ -103,7 +109,7 @@ export default function InlineMenuSelect({
     const viewportMaxWidth = Math.max(120, vw - MENU_MARGIN * 2);
     const width = Math.round(
       Math.min(
-        Math.max(rect.width, minMenuWidth),
+        Math.max(rect.width, minMenuWidth, menuNaturalWidth),
         viewportMaxWidth,
       ),
     );
@@ -140,8 +146,9 @@ export default function InlineMenuSelect({
       top: Math.round(Math.max(MENU_MARGIN, Math.min(top, maxTop))),
       left: Math.round(Math.max(MENU_MARGIN, Math.min(left, maxLeft))),
       width,
+      minWidth: Math.round(Math.max(rect.width, minMenuWidth)),
     });
-  }, [applyPosition, open, estimatedRowCount, minMenuWidth, menuAlign, menuPlacement]);
+  }, [applyPosition, open, estimatedRowCount, menuNaturalWidth, minMenuWidth, menuAlign, menuPlacement]);
 
   useLayoutEffect(() => {
     updatePosition();
@@ -182,6 +189,18 @@ export default function InlineMenuSelect({
     selectedItemRef.current?.scrollIntoView({ block: "center" });
   }, [open, pos, value]);
 
+  useLayoutEffect(() => {
+    if (!open) return;
+    const menu = menuRef.current;
+    if (!menu) return;
+    const frame = window.requestAnimationFrame(() => {
+      const nextWidth = Math.ceil(menu.scrollWidth);
+      if (!Number.isFinite(nextWidth) || nextWidth <= 0) return;
+      setMenuNaturalWidth((current) => (Math.abs(current - nextWidth) <= 1 ? current : nextWidth));
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, options, value, menuSections]);
+
   const select = (nextValue: string) => {
     onChange(nextValue);
     setOpen(false);
@@ -193,10 +212,11 @@ export default function InlineMenuSelect({
         ref={anchorRef}
         type="button"
         aria-label={ariaLabel}
+        title={iconOnlyTrigger ? triggerTitle || ariaLabel : undefined}
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
         className={
-          "group inline-flex h-7 max-w-[128px] shrink-0 items-center gap-1 border-r border-ink/10 pr-2 text-body-sm text-ink/70 outline-none hover:text-ink transition " +
+          "group inline-flex h-7 min-w-0 shrink-0 items-center gap-1 border-r border-ink/10 pr-2 text-body-sm text-ink/70 outline-none hover:text-ink transition " +
           (disabled ? "cursor-not-allowed opacity-45 hover:text-ink/70 " : "") +
           className
         }
@@ -206,15 +226,21 @@ export default function InlineMenuSelect({
             {selectedIcon}
           </span>
         )}
-        <span className="min-w-0 flex-1 truncate">
-          {selected?.label ?? placeholder ?? ""}
-          {selected?.suffix && (
-            <span className="ml-1 text-ink/40 transition group-hover:text-ink/60">
-              {selected.suffix}
+        {iconOnlyTrigger ? (
+          <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+        ) : (
+          <>
+            <span className="min-w-0 flex-1 truncate">
+              {selected?.label ?? placeholder ?? ""}
+              {selected?.suffix && (
+                <span className="ml-1 text-ink/40 transition group-hover:text-ink/60">
+                  {selected.suffix}
+                </span>
+              )}
             </span>
-          )}
-        </span>
-        <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+            <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+          </>
+        )}
       </button>
       {open &&
         pos &&
@@ -241,9 +267,10 @@ export default function InlineMenuSelect({
               top: pos.top,
               left: pos.left,
               width: pos.width,
+              minWidth: pos.minWidth,
               maxHeight: MENU_MAX_HEIGHT,
               zIndex: portalZIndex,
-            }}
+            } as CSSProperties}
           >
             <ScrollArea
               className="max-h-[260px] overscroll-contain"
@@ -303,7 +330,7 @@ export default function InlineMenuSelect({
                             </span>
                           )}
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate">{option.label}</span>
+                            <span className="block whitespace-normal break-words">{option.label}</span>
                             {option.description && (
                               <span className="mt-0.5 block line-clamp-2 text-caption leading-snug text-ink/40">
                                 {option.description}

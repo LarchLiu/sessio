@@ -8,6 +8,7 @@ export interface RuntimeMenuSelectProps {
   value: string;
   options: InlineMenuSelectOption[];
   onChange: (value: string) => void;
+  triggerDisplay?: "full" | "icon";
   disabled?: boolean;
   menuPlacement?: "auto" | "bottom" | "top" | "left" | "right";
   minMenuWidth?: number;
@@ -20,16 +21,18 @@ export function RuntimeMenuSelect({
   value,
   options,
   onChange,
+  triggerDisplay = "full",
   disabled = false,
   menuPlacement = "auto",
   minMenuWidth = 180,
   maxWidthClassName = "max-w-[220px]",
   portalZIndex,
 }: RuntimeMenuSelectProps) {
+  const iconOnly = triggerDisplay === "icon";
   return (
     <div
       className={
-        `flex min-w-0 ${maxWidthClassName} items-center rounded-md text-ink/55 transition ` +
+        `flex ${iconOnly ? "w-auto max-w-none" : `min-w-0 ${maxWidthClassName}`} items-center rounded-md text-ink/55 transition ` +
         (disabled ? "opacity-60" : "hover:bg-ink/8 hover:text-ink")
       }
     >
@@ -37,12 +40,17 @@ export function RuntimeMenuSelect({
         value={value}
         options={disabled ? options.map((option) => ({ ...option, disabled: true })) : options}
         onChange={onChange}
+        triggerDisplay={triggerDisplay}
         disabled={disabled}
         menuAlign="trigger"
         menuPlacement={menuPlacement}
         placeholder={ariaLabel}
         ariaLabel={ariaLabel}
-        className={`h-7 ${maxWidthClassName} border-r-0 px-1.5 py-1 text-ink/60 hover:text-ink`}
+        className={
+          iconOnly
+            ? "h-7 min-w-[2.25rem] gap-0.5 border-r-0 px-1 text-ink/60 hover:text-ink justify-center"
+            : `h-7 min-w-0 ${maxWidthClassName} border-r-0 px-1.5 py-1 text-ink/60 hover:text-ink`
+        }
         menuClassName="bg-surface-panel"
         minMenuWidth={minMenuWidth}
         emptyContent={ariaLabel}

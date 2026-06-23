@@ -122,8 +122,24 @@ export default function AssistantAgentSelector({
 
   return (
     <div className="inline-flex min-w-0 max-w-full items-center gap-0.5">
-      <RuntimeMenuSelect ariaLabel={t("agent.title")} value={agentModelValue} options={agentModelOptions} onChange={selectAgentModel} minMenuWidth={220} maxWidthClassName={compact ? "max-w-[210px]" : "max-w-[260px]"} />
-      <RuntimeMenuSelect ariaLabel={t("assistant.permission_mode")} value={agent.mode} options={permissionOptions} onChange={(mode) => onChange({ ...agent, mode })} minMenuWidth={180} maxWidthClassName={compact ? "max-w-[150px]" : "max-w-[190px]"} />
+      <RuntimeMenuSelect
+        ariaLabel={t("agent.title")}
+        value={agentModelValue}
+        options={agentModelOptions}
+        onChange={selectAgentModel}
+        triggerDisplay={compact ? "icon" : "full"}
+        minMenuWidth={220}
+        maxWidthClassName={compact ? "max-w-[210px]" : "max-w-[260px]"}
+      />
+      <RuntimeMenuSelect
+        ariaLabel={t("assistant.permission_mode")}
+        value={agent.mode}
+        options={permissionOptions}
+        onChange={(mode) => onChange({ ...agent, mode })}
+        triggerDisplay={compact ? "icon" : "full"}
+        minMenuWidth={180}
+        maxWidthClassName={compact ? "max-w-[150px]" : "max-w-[190px]"}
+      />
     </div>
   );
 }
