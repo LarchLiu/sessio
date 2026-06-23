@@ -758,6 +758,18 @@ affine-edgeless-root .widgets-container {
 }
 
 /*
+ * Live custom-card overlays use `zoom` because WebKit keeps text crisper than
+ * scaling the entire subtree. html2canvas does not reliably honor `zoom`,
+ * though, so snapshot capture temporarily switches overlay content back to an
+ * explicit transform while capture mode is active.
+ */
+.sessio-snapshot-capturing [data-sessio-overlay-content='true'] {
+  zoom: 1 !important;
+  transform: scale(var(--sessio-overlay-scale, 1)) !important;
+  transform-origin: top left !important;
+}
+
+/*
  * With gfx-viewport lifted above the card overlay, the invisible custom-block
  * placeholders (which carry `pointer-events: auto` while active) would sit over
  * the cards and swallow clicks meant for the card's own buttons. Selection and

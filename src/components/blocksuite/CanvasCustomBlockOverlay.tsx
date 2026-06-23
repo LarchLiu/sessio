@@ -90,11 +90,14 @@ export function CanvasCustomBlockOverlay({
           width: scaledWidth,
           height: scaledHeight,
         };
+        // Use CSS `zoom` rather than `transform: scale()` so the browser
+        // re-rasterizes text at the scaled size (crisp) instead of bitmap-
+        // scaling a texture laid out at base size (blurry at any non-1 zoom).
         const contentStyle: CSSProperties = {
           width: item.baseWidth,
           height: item.baseHeight,
-          transform: `scale(${item.scale})`,
-          transformOrigin: "top left",
+          zoom: item.scale,
+          ["--sessio-overlay-scale" as string]: String(item.scale),
         };
 
         if (item.kind === "file_card") {
