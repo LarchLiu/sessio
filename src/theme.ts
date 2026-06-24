@@ -45,8 +45,7 @@ async function resolveEffective(mode: ThemeMode): Promise<"light" | "dark"> {
 
 function applyTheme(effective: "light" | "dark") {
   const el = document.documentElement;
-  if (effective === "light") el.setAttribute("data-theme", "light");
-  else el.removeAttribute("data-theme");
+  el.setAttribute("data-theme", effective);
   syncWindowAppearance(effective);
 }
 
