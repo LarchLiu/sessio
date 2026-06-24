@@ -47,6 +47,7 @@ import {
 } from "../../lib/blocksuite/persistence";
 import type { MarkdownPreviewBlockModel } from "../../lib/blocksuite/blocks/markdown-preview";
 import {
+  DEFAULT_FILE_CARD_COLLAPSED_HEIGHT,
   DEFAULT_FILE_CARD_HEIGHT,
   DEFAULT_FILE_CARD_WIDTH,
   type FileCardBlockModel,
@@ -838,6 +839,7 @@ export default function BlockSuiteCanvasHost({
   const queuedSnapshotRef = useRef<string | null>(null);
   const currentSnapshotRef = useRef(initialSnapshot);
   const handledFileRequestRef = useRef<string | null>(null);
+  const expandedFileCardHeightsRef = useRef(new Map<string, number>());
   const addMenuButtonRef = useRef<HTMLButtonElement>(null);
   const editedFilesButtonRef = useRef<HTMLButtonElement>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -851,26 +853,35 @@ export default function BlockSuiteCanvasHost({
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [editedFilesPickerOpen, setEditedFilesPickerOpen] = useState(false);
   const [pendingEditedFiles, setPendingEditedFiles] = useState<string[]>([]);
-  const [reactToLit, portals] = useReactToLitBridge();
-
-  const changedFiles = useMemo(
-    () => Array.from(new Set(editedFiles.map((path) => path.trim()).filter(Boolean))),
-    [editedFiles],
-  );
-  const canvasFileKeys = useMemo(() => {
+  const [canvasBlockRecords, setCanvasBlockRecords] = useState(initialState.blockRecords);
+  const [localCanvasFileKeys, setLocalCanvasFileKeys] = useState<Set<string>>(() => {
     const keys = new Set<string>();
     for (const record of initialState.blockRecords) {
       const key = normalizeCanvasFileKey(record.sourcePath, workspacePath);
       if (key) keys.add(key);
     }
     return keys;
-  }, [initialState.blockRecords, workspacePath]);
+  });
+  const [reactToLit, portals] = useReactToLitBridge();
+
+  const changedFiles = useMemo(
+    () => Array.from(new Set(editedFiles.map((path) => path.trim()).filter(Boolean))),
+    [editedFiles],
+  );
+  const persistedCanvasFileKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const record of canvasBlockRecords) {
+      const key = normalizeCanvasFileKey(record.sourcePath, workspacePath);
+      if (key) keys.add(key);
+    }
+    return keys;
+  }, [canvasBlockRecords, workspacePath]);
   const availableEditedFiles = useMemo(
     () => changedFiles.filter((path) => {
       const key = normalizeCanvasFileKey(path, workspacePath);
-      return !key || !canvasFileKeys.has(key);
+      return !key || !localCanvasFileKeys.has(key);
     }),
-    [canvasFileKeys, changedFiles, workspacePath],
+    [changedFiles, localCanvasFileKeys, workspacePath],
   );
   const lastSavedRevision = initialState.savedRevision?.revision ?? null;
 
@@ -888,6 +899,25 @@ export default function BlockSuiteCanvasHost({
   useEffect(() => {
     latestStateRef.current = initialState;
   }, [initialState]);
+
+  useEffect(() => {
+    setCanvasBlockRecords(initialState.blockRecords);
+  }, [initialState.blockRecords]);
+
+  useEffect(() => {
+    setLocalCanvasFileKeys(persistedCanvasFileKeys);
+  }, [persistedCanvasFileKeys]);
+
+  useEffect(() => {
+    setPendingEditedFiles((current) => {
+      if (current.length === 0) return current;
+      const next = current.filter((path) => {
+        const key = normalizeCanvasFileKey(path, workspacePath);
+        return !key || !localCanvasFileKeys.has(key);
+      });
+      return next.length === current.length ? current : next;
+    });
+  }, [localCanvasFileKeys, workspacePath]);
 
   const getEditor = useCallback(() => editorRef.current, []);
   const getDoc = useCallback(() => docRef.current, []);
@@ -1064,6 +1094,7 @@ export default function BlockSuiteCanvasHost({
         sessionId,
         blocks: [...records, ...surfaceRecords],
       });
+      setCanvasBlockRecords(saved);
       latestStateRef.current = {
         ...latestStateRef.current,
         blockRecords: saved,
@@ -1106,6 +1137,30 @@ export default function BlockSuiteCanvasHost({
     }, AUTOSAVE_DEBOUNCE_MS);
   }, []);
 
+  const recomputeLocalCanvasFileKeys = useCallback((
+    doc: ReturnType<typeof createBlockSuiteDoc>["doc"],
+  ) => {
+    const keys = new Set<string>();
+    for (const block of doc.getBlocksByFlavour([
+      "sessio:file-card",
+      "sessio:markdown-preview",
+    ])) {
+      const model = block.model as { sourcePath?: string | null };
+      const key = normalizeCanvasFileKey(model.sourcePath ?? null, workspacePath);
+      if (key) keys.add(key);
+    }
+    setLocalCanvasFileKeys(keys);
+  }, [workspacePath]);
+
+  const scheduleRecomputeLocalCanvasFileKeys = useCallback((
+    doc: ReturnType<typeof createBlockSuiteDoc>["doc"],
+  ) => {
+    window.requestAnimationFrame(() => {
+      if (docRef.current !== doc) return;
+      recomputeLocalCanvasFileKeys(doc);
+    });
+  }, [recomputeLocalCanvasFileKeys]);
+
   const attachDoc = useCallback((host: HTMLDivElement, doc: ReturnType<typeof createBlockSuiteDoc>["doc"]) => {
     ensureEdgelessRoot(doc);
     removePlaceholderNotes(doc);
@@ -1118,7 +1173,12 @@ export default function BlockSuiteCanvasHost({
     selectionUpdatedDisposeRef.current?.dispose();
     clearBoxSelectingObserver();
     {
-      const subscription = doc.slots.blockUpdated.subscribe(() => {
+      const subscription = doc.slots.blockUpdated.subscribe((payload) => {
+        if (payload?.type === "delete") {
+          scheduleRecomputeLocalCanvasFileKeys(doc);
+        } else {
+          recomputeLocalCanvasFileKeys(doc);
+        }
         scheduleAutosave(doc);
       });
       blockUpdatedDisposeRef.current = {
@@ -1143,16 +1203,22 @@ export default function BlockSuiteCanvasHost({
         };
         updateSelectionState();
       });
+      recomputeLocalCanvasFileKeys(doc);
       scheduleSyncBlocks();
     });
-  }, [attachBoxSelectingObserver, clearBoxSelectingObserver, scheduleAutosave, scheduleSelectionStateUpdate, scheduleSyncBlocks, updateSelectionState, waitForRootService]);
+  }, [attachBoxSelectingObserver, clearBoxSelectingObserver, recomputeLocalCanvasFileKeys, scheduleAutosave, scheduleRecomputeLocalCanvasFileKeys, scheduleSelectionStateUpdate, scheduleSyncBlocks, updateSelectionState, waitForRootService]);
 
   const openEditedFilesPicker = () => {
+    const filteredAvailableFiles = changedFiles.filter((path) => {
+      const key = normalizeCanvasFileKey(path, workspacePath);
+      return !key || !localCanvasFileKeys.has(key);
+    });
+    if (filteredAvailableFiles.length === 0) return;
     if (availableEditedFiles.length === 0) return;
     setPendingEditedFiles((current) => (
       current.length > 0
-        ? current.filter((path) => availableEditedFiles.includes(path))
-        : availableEditedFiles
+        ? current.filter((path) => filteredAvailableFiles.includes(path))
+        : filteredAvailableFiles
     ));
     setEditedFilesPickerOpen(true);
   };
@@ -1256,6 +1322,7 @@ export default function BlockSuiteCanvasHost({
             summary: summarizeText(file?.content ?? "", 260),
             status: file ? "ready" : "unavailable",
             contentVersion: file ? `${fileToInsert.absolutePath}:${file.mtimeMs}` : fileToInsert.absolutePath,
+            previewCollapsed: false,
             xywh: bound.serialize(),
           },
         );
@@ -1430,45 +1497,6 @@ export default function BlockSuiteCanvasHost({
     scheduleSyncBlocks();
   }, [getEditor, getRootService, scheduleSyncBlocks]);
 
-  const promoteFileCardToMarkdown = useCallback((blockId: string) => {
-    const doc = getDoc();
-    const rootService = getRootService();
-    if (!doc || !rootService) return;
-    const model = doc.getModelById(blockId) as FileCardBlockModel | null;
-    if (!model) return;
-    const bound = Bound.deserialize(model.xywh);
-    const nextWidth = Math.max(bound.w, 420);
-    const nextHeight = Math.max(bound.h + 96, 260);
-    const [nextBound] = placeCanvasNodes(doc, rootService, [{
-      width: nextWidth,
-      height: nextHeight,
-      anchor: [bound.center[0] + 28, bound.center[1] + 28],
-    }]);
-    insertEdgelessBlock(
-      "sessio:markdown-preview",
-      {
-        title: model.title || "Markdown preview",
-        sourcePath: model.sourcePath || "",
-        sourceType: model.sourceType || "workspace_file",
-        excerpt: model.summary || "",
-        renderMode: "preview",
-        collapsed: false,
-        contentVersion: model.contentVersion || model.sourcePath || "",
-        cachedContent: "",
-        xywh: nextBound.serialize(),
-      },
-    );
-    rootService.removeElement(blockId);
-    scheduleSyncBlocks();
-    updateSelectionState();
-  }, [
-    getDoc,
-    getRootService,
-    insertEdgelessBlock,
-    scheduleSyncBlocks,
-    updateSelectionState,
-  ]);
-
   const runWorkflowBlock = useCallback(async (blockId: string) => {
     const doc = getDoc();
     if (!doc) return;
@@ -1526,10 +1554,28 @@ export default function BlockSuiteCanvasHost({
         const doc = getDoc();
         const model = doc?.getModelById(blockId) ?? null;
         if (!doc || !model) return;
+        if ("previewCollapsed" in props && typeof props.previewCollapsed === "boolean") {
+          const bound = boundFromModelXYWH(model as { xywh?: string } | null);
+          if (bound) {
+            const expandedHeights = expandedFileCardHeightsRef.current;
+            const rememberedHeight = expandedHeights.get(blockId);
+            const nextHeight = props.previewCollapsed
+              ? DEFAULT_FILE_CARD_COLLAPSED_HEIGHT
+              : rememberedHeight ?? Math.max(bound.h, DEFAULT_FILE_CARD_HEIGHT);
+            if (props.previewCollapsed) {
+              expandedHeights.set(blockId, Math.max(bound.h, DEFAULT_FILE_CARD_HEIGHT));
+            }
+            doc.updateBlock(model, {
+              ...props,
+              xywh: serializeXYWH(bound.x, bound.y, bound.w, nextHeight),
+            });
+            scheduleSyncBlocks();
+            return;
+          }
+        }
         doc.updateBlock(model, props);
         scheduleSyncBlocks();
       },
-      promoteFileCardToMarkdown,
       runWorkflowBlock: (blockId) => {
         void runWorkflowBlock(blockId);
       },
@@ -1543,7 +1589,6 @@ export default function BlockSuiteCanvasHost({
     getDoc,
     onOpenProjectFile,
     openWorkflowThread,
-    promoteFileCardToMarkdown,
     reactToLit,
     runWorkflowBlock,
     scheduleSyncBlocks,
@@ -1603,6 +1648,7 @@ export default function BlockSuiteCanvasHost({
           document: saved.document,
           draftSnapshot: snapshotJson,
         };
+        setCanvasBlockRecords(latestStateRef.current.blockRecords);
         onStateLoaded(latestStateRef.current);
       } catch (error) {
         const message = `Canvas draft save failed: ${String(error)}`;
@@ -1698,6 +1744,7 @@ export default function BlockSuiteCanvasHost({
         savedRevision: saved.revision,
         savedSnapshot: snapshotJson,
       };
+      setCanvasBlockRecords(latestStateRef.current.blockRecords);
       onStateLoaded(latestStateRef.current);
       await syncCanvasBlocks(doc);
     } catch (error) {

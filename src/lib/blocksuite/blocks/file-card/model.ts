@@ -10,10 +10,12 @@ export interface FileCardBlockProps extends GfxCompatibleProps {
   summary: string;
   status: string;
   contentVersion: string;
+  previewCollapsed: boolean;
 }
 
 export const DEFAULT_FILE_CARD_WIDTH = 340;
-export const DEFAULT_FILE_CARD_HEIGHT = 144;
+export const DEFAULT_FILE_CARD_HEIGHT = 320;
+export const DEFAULT_FILE_CARD_COLLAPSED_HEIGHT = 48;
 
 export const FileCardBlockSchema = defineBlockSchema({
   flavour: "sessio:file-card",
@@ -25,6 +27,7 @@ export const FileCardBlockSchema = defineBlockSchema({
     summary: "",
     status: "idle",
     contentVersion: "",
+    previewCollapsed: false,
     index: "a0",
     xywh: `[0,0,${DEFAULT_FILE_CARD_WIDTH},${DEFAULT_FILE_CARD_HEIGHT}]`,
     lockedBySelf: false,
@@ -101,6 +104,14 @@ export class FileCardBlockModel
 
   set contentVersion(value: string) {
     this.props.contentVersion = value;
+  }
+
+  get previewCollapsed() {
+    return this.props.previewCollapsed;
+  }
+
+  set previewCollapsed(value: boolean) {
+    this.props.previewCollapsed = value;
   }
 }
 

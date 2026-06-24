@@ -31,21 +31,25 @@ class FileCardPageComponent extends BlockComponent<FileCardBlockModel> {
       this.model.sourcePath || "",
       this.model.sourceType || "workspace_file",
       this.model.subtitle || "",
-      this.model.summary || "",
       this.model.status || "idle",
+      this.model.contentVersion || "",
+      this.model.previewCollapsed ? "1" : "0",
+      bridge?.workspacePath ?? "",
     ].join("\u001f");
     const content = bridge
       ? bridge.reactToLit(
           () =>
             createElement(FileCardHost, {
+              workspacePath: bridge.workspacePath,
+              blockId: this.model.id,
+              selected,
               title: this.model.title || "File card",
               sourcePath: this.model.sourcePath || "",
-              sourceType: this.model.sourceType || "workspace_file",
               subtitle: this.model.subtitle || "",
-              summary: this.model.summary || "",
-              status: this.model.status || "idle",
-              onPromoteToMarkdown: () => {
-                bridge.promoteFileCardToMarkdown?.(this.model.id);
+              contentVersion: this.model.contentVersion || this.model.sourcePath || "",
+              previewCollapsed: this.model.previewCollapsed,
+              onTogglePreviewCollapsed: (nextCollapsed) => {
+                bridge.updateBlock(this.model.id, { previewCollapsed: nextCollapsed });
               },
               onOpenFile: bridge.openProjectFile,
             }),

@@ -92,6 +92,7 @@ export function fileCardModelToCanvasBlock(
       summary: model.summary,
       status: model.status,
       contentVersion: model.contentVersion,
+      previewCollapsed: model.previewCollapsed,
     } satisfies BlockRecordMetadata),
   };
 }
