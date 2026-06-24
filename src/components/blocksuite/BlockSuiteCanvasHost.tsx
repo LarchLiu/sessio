@@ -71,6 +71,7 @@ const BOX_SELECTING_CLASS_NAME = "sessio-box-selecting";
 const SNAPSHOT_CAPTURING_CLASS_NAME = "sessio-snapshot-capturing";
 const CANVAS_NODE_PADDING = 32;
 const CANVAS_PLACEMENT_SEARCH_RADIUS = 64;
+const CANVAS_ROW_ALIGNMENT_TOLERANCE = 24;
 
 type BlockSuiteEditor = HTMLElement & {
   std?: {
@@ -736,6 +737,36 @@ function canPlaceCanvasBound(candidate: Bound, occupied: Bound[], padding: numbe
   return occupied.every((bound) => !boundsOverlapWithPadding(candidate, bound, padding));
 }
 
+function findRowAlignedCanvasBound(
+  occupied: Bound[],
+  spec: CanvasPlacementSpec,
+  fallbackAnchor: [number, number],
+  padding: number,
+): Bound | null {
+  const anchor = spec.anchor ?? fallbackAnchor;
+  const rowCandidates = occupied
+    .filter((bound) => Math.abs(bound.y - anchor[1]) <= Math.max(CANVAS_ROW_ALIGNMENT_TOLERANCE, padding))
+    .sort((a, b) => {
+      const horizontalDistance = Math.abs(a.center[0] - anchor[0]) - Math.abs(b.center[0] - anchor[0]);
+      if (horizontalDistance !== 0) return horizontalDistance;
+      return a.x - b.x;
+    });
+
+  for (const rowBound of rowCandidates) {
+    const candidate = new Bound(
+      rowBound.x + rowBound.w + padding,
+      rowBound.y,
+      spec.width,
+      spec.height,
+    );
+    if (canPlaceCanvasBound(candidate, occupied, padding)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 function* iteratePlacementGrid(radiusLimit: number): Generator<[number, number]> {
   yield [0, 0];
   for (let radius = 1; radius <= radiusLimit; radius += 1) {
@@ -761,6 +792,8 @@ function findAvailableCanvasBound(
   padding: number,
 ): Bound {
   const anchor = spec.anchor ?? fallbackAnchor;
+  const rowAligned = findRowAlignedCanvasBound(occupied, spec, fallbackAnchor, padding);
+  if (rowAligned) return rowAligned;
   const stepX = spec.width + padding;
   const stepY = spec.height + padding;
   for (const [gridX, gridY] of iteratePlacementGrid(CANVAS_PLACEMENT_SEARCH_RADIUS)) {
@@ -862,7 +895,6 @@ export default function BlockSuiteCanvasHost({
   const previousEditedFileKeysRef = useRef<Set<string>>(new Set());
   const previousAvailableEditedFilesRef = useRef<string[]>([]);
   const addMenuButtonRef = useRef<HTMLButtonElement>(null);
-  const editedFilesButtonRef = useRef<HTMLButtonElement>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [status, setStatus] = useState("Initializing BlockSuite canvas…");
   const [snapshotToast, setSnapshotToast] = useState<ToastStackMessage | null>(null);
@@ -919,11 +951,17 @@ export default function BlockSuiteCanvasHost({
   const lastSavedRevision = initialState.savedRevision?.revision ?? null;
 
   const addMenuOptions = useMemo<PopupMenuOption<string>[]>(() => [
+    {
+      key: "edited-files",
+      label: "Add edited files",
+      icon: <FilePlus2 className="h-4 w-4" />,
+      disabled: availableEditedFiles.length === 0,
+    },
     { key: "file", label: "Choose files", icon: <FolderOpen className="h-4 w-4" /> },
     { key: "image", label: "Add image", icon: <FileImage className="h-4 w-4" /> },
     { key: "workflow", label: "Add workflow", icon: <Workflow className="h-4 w-4" /> },
     { key: "note", label: "Add note", icon: <StickyNote className="h-4 w-4" /> },
-  ], []);
+  ], [availableEditedFiles.length]);
 
   const showSnapshotToast = useCallback((message: string, tone: ToastStackMessage["tone"] = "info") => {
     setSnapshotToast({ message, tone });
@@ -1806,6 +1844,10 @@ export default function BlockSuiteCanvasHost({
 
   const handleAddMenuSelect = async (key: string) => {
     setAddMenuOpen(false);
+    if (key === "edited-files") {
+      openEditedFilesPicker();
+      return;
+    }
     if (key === "note") {
       await addNoteNode();
       return;
@@ -2051,23 +2093,13 @@ export default function BlockSuiteCanvasHost({
           Add to canvas
         </button>
         <button
-          ref={editedFilesButtonRef}
-          type="button"
-          onClick={openEditedFilesPicker}
-          disabled={availableEditedFiles.length === 0}
-          className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-3 text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <FilePlus2 className="h-3.5 w-3.5" />
-          Add edited files
-        </button>
-        <button
           type="button"
           onClick={() => void handleSaveRevision()}
           disabled={!isReady || isSaving}
           className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-2.5 text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {isReady ? <Save className="h-3.5 w-3.5" /> : <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
-          Save
+          Save revision
         </button>
       </div>
       <div
@@ -2106,9 +2138,9 @@ export default function BlockSuiteCanvasHost({
           onClose={() => setAddMenuOpen(false)}
         />
       )}
-      {editedFilesPickerOpen && editedFilesButtonRef.current && (
+      {editedFilesPickerOpen && addMenuButtonRef.current && (
         <EditedFilesPopover
-          anchor={editedFilesButtonRef.current}
+          anchor={addMenuButtonRef.current}
           files={availableEditedFiles}
           selectedFiles={pendingEditedFiles}
           onToggleFile={togglePendingEditedFile}
@@ -2179,7 +2211,22 @@ function focusBlocksInViewport(
     editing: false,
     elements: blockIds,
   });
-  rootService.viewport.setViewportByBound(commonBound, [96, 96, 96, 96], true);
+  const viewport = rootService.viewport;
+  const currentZoom = viewport.zoom;
+  const visibleModelWidth = viewport.width / currentZoom;
+  const visibleModelHeight = viewport.height / currentZoom;
+  const fitPadding: [number, number, number, number] = [96, 96, 96, 96];
+  const fitsCurrentZoom = (
+    commonBound.w <= visibleModelWidth &&
+    commonBound.h <= visibleModelHeight
+  );
+
+  if (fitsCurrentZoom) {
+    viewport.setViewport(currentZoom, commonBound.center, false);
+    return;
+  }
+
+  viewport.setViewportByBound(commonBound, fitPadding, true);
 }
 
 function summarizeText(content: string, maxLength: number): string {
