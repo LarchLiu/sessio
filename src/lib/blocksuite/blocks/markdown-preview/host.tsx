@@ -105,7 +105,10 @@ export function MarkdownPreviewHost({
     <div className={"h-full w-full overflow-hidden rounded-[20px] border border-ink/10 bg-surface-panel/95 text-ink/80 shadow-[0_16px_40px_rgba(18,24,33,0.08)] " + overlayRootClassName}>
       <div
         onPointerDown={onHeaderPointerDown}
-        className={"flex items-start justify-between gap-3 border-b border-ink/8 px-4 py-3 " + overlayContentClassName}
+        className={
+          "relative flex items-start justify-between gap-3 px-4 py-3 after:pointer-events-none after:absolute after:bottom-0 after:left-0 after:right-0 after:h-px after:bg-ink/10 after:content-[''] " +
+          overlayContentClassName
+        }
       >
         <div className="min-w-0">
           <div className="truncate text-body-sm font-medium text-ink/88">{title || "Markdown preview"}</div>

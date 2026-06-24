@@ -1,10 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { GrammarState } from "shiki";
 import { ArrowUpRight, ChevronDown } from "lucide-react";
 import PlainMarkdownPreview from "../../../../components/PlainMarkdownPreview";
-import FileViewer from "../../../../components/FileViewer";
+import ScrollArea from "../../../../components/ScrollArea";
 import { readWorkspaceTextFile } from "../../../../api";
 import { isPlainEditorMarkdownDocumentPath } from "../../../../hooks/plainEditorFileTypes";
 import { languageFromPath } from "../../../../hooks/useFileContent";
+import {
+  getShikiHighlighter,
+  renderShikiLine,
+  shikiLanguage,
+  shikiTheme,
+  type ShikiHighlightedLine,
+  useEffectiveThemeType,
+} from "../../../../components/shikiHighlight";
 
 function stopOverlayInteraction(event: {
   preventDefault: () => void;
@@ -31,7 +40,6 @@ export interface FileCardHostProps {
 
 export function FileCardHost({
   workspacePath,
-  blockId,
   selected = false,
   title,
   sourcePath,
@@ -67,7 +75,6 @@ export function FileCardHost({
     () => languageFromPath(previewPath),
     [previewPath],
   );
-
   useEffect(() => {
     if (!shouldLoadPreview) return;
     if (!workspacePath || !resolvedSourcePath) return;
@@ -99,63 +106,67 @@ export function FileCardHost({
     : undefined;
 
   return (
-    <div className={"h-full w-full overflow-hidden rounded-[20px] border border-ink/10 bg-surface-panel/95 text-ink/80 shadow-[0_16px_40px_rgba(18,24,33,0.08)] " + overlayRootClassName}>
+    <div className={"flex h-full w-full min-h-0 flex-col overflow-hidden rounded-[20px] border border-ink/10 bg-surface-panel/95 text-ink/80 shadow-[0_16px_40px_rgba(18,24,33,0.08)] " + overlayRootClassName}>
       <div
         onPointerDown={onHeaderPointerDown}
         className={
-          "flex items-center justify-between gap-3 px-4 py-3 " +
-          (!previewCollapsed ? "border-b border-ink/8 " : "") +
+          "shrink-0 px-4 py-3 " +
+          (!previewCollapsed
+            ? "relative after:pointer-events-none after:absolute after:bottom-0 after:left-0 after:right-0 after:h-px after:bg-ink/10 after:content-[''] "
+            : "") +
           overlayContentClassName
         }
       >
-        <div className="flex min-w-0 flex-1 items-center gap-3">
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-body-sm font-medium text-ink/88">{title || "File card"}</div>
-            {!previewCollapsed && (
-              <div className="truncate font-mono text-[11px] text-ink/48">{subtitle || sourcePath}</div>
-            )}
+        <div className="flex w-full items-start justify-between gap-3">
+          <div className="min-w-0 flex-1 truncate text-body-sm font-medium text-ink/88">
+            {title || "File card"}
+          </div>
+          <div className={"flex shrink-0 items-center gap-1 " + overlayActionClassName}>
+            <button
+              type="button"
+              onPointerDown={stopOverlayInteraction}
+              onMouseDown={stopOverlayInteraction}
+              onClick={(event) => {
+                stopOverlayInteraction(event);
+                if (!resolvedSourcePath) return;
+                onOpenFile?.(resolvedSourcePath);
+              }}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-ink/45 transition hover:bg-ink/[0.05] hover:text-ink/80"
+              aria-label={`Open ${title || sourcePath}`}
+            >
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onPointerDown={stopOverlayInteraction}
+              onMouseDown={stopOverlayInteraction}
+              onClick={(event) => {
+                stopOverlayInteraction(event);
+                onTogglePreviewCollapsed(!previewCollapsed);
+              }}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-ink/45 transition hover:bg-ink/[0.05] hover:text-ink/80"
+              aria-label={previewCollapsed ? "Open preview" : "Collapse preview"}
+              aria-expanded={!previewCollapsed}
+            >
+              <ChevronDown
+                className={
+                  "h-3.5 w-3.5 transition-transform " +
+                  (previewCollapsed ? "-rotate-90" : "")
+                }
+              />
+            </button>
           </div>
         </div>
-        <div className={"flex shrink-0 items-center gap-1 self-start " + overlayActionClassName}>
-          <button
-            type="button"
-            onPointerDown={stopOverlayInteraction}
-            onMouseDown={stopOverlayInteraction}
-            onClick={(event) => {
-              stopOverlayInteraction(event);
-              if (!resolvedSourcePath) return;
-              onOpenFile?.(resolvedSourcePath);
-            }}
-            className="inline-flex h-6 w-6 items-center justify-center rounded-md text-ink/45 transition hover:bg-ink/[0.05] hover:text-ink/80"
-            aria-label={`Open ${title || sourcePath}`}
-          >
-            <ArrowUpRight className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            onPointerDown={stopOverlayInteraction}
-            onMouseDown={stopOverlayInteraction}
-            onClick={(event) => {
-              stopOverlayInteraction(event);
-              onTogglePreviewCollapsed(!previewCollapsed);
-            }}
-            className="inline-flex h-6 w-6 items-center justify-center rounded-md text-ink/45 transition hover:bg-ink/[0.05] hover:text-ink/80"
-            aria-label={previewCollapsed ? "Open preview" : "Collapse preview"}
-            aria-expanded={!previewCollapsed}
-          >
-            <ChevronDown
-              className={
-                "h-3.5 w-3.5 transition-transform " +
-                (previewCollapsed ? "-rotate-90" : "")
-              }
-            />
-          </button>
-        </div>
+        {!previewCollapsed && (
+          <div className="mt-1 w-full break-all font-mono text-[11px] leading-4 text-ink/48">
+            {subtitle || sourcePath}
+          </div>
+        )}
       </div>
       {!previewCollapsed && (
         <div
           className={
-            "flex h-[calc(100%-57px)] min-h-0 overflow-hidden overscroll-contain p-2 " +
+            "flex min-h-0 min-w-0 flex-1 overflow-hidden overscroll-contain p-2 " +
             overlayContentClassName
           }
           onWheelCapture={stopPreviewWheelPropagation}
@@ -176,20 +187,14 @@ export function FileCardHost({
                 scrollbarInset="flush"
               />
             ) : (
-              <FileViewer
-                fileKey={`${blockId}:${contentVersion}`}
-                text={content}
+              <FileCardVirtualizedCodePreview
+                code={content}
                 language={previewLanguage}
-                mode="code"
-                workspacePath={workspacePath}
-                path={resolvedSourcePath}
-                mtimeMs={null}
-                contentVersion={contentVersion}
-                savedScrollTop={0}
-                codePadding="12px 6px"
-                codeGutterMarginRight="0"
-                codeLineNumberPaddingRight="0"
-                codeShowLineNumbers={false}
+                interactionMode={
+                  capturePreviewWheel
+                    ? "capture-wheel"
+                    : "thumbs-only"
+                }
               />
             )
           )}
@@ -210,4 +215,247 @@ function resolveWorkspaceFilePath(
   const trimmedRoot = workspacePath.replace(/[\\/]+$/, "");
   const trimmedPath = path.replace(/^[\\/]+/, "");
   return `${trimmedRoot}${separator}${trimmedPath}`;
+}
+
+const FILE_CARD_CODE_LINE_HEIGHT = 20;
+const FILE_CARD_CODE_OVERSCAN = 40;
+const FILE_CARD_HIGHLIGHT_CHUNK_LINES = 120;
+const FILE_CARD_HIGHLIGHT_NEAR_VIEWPORT_BURST = 4;
+const FILE_CARD_HIGHLIGHT_BACKGROUND_BURST = 1;
+const FILE_CARD_HIGHLIGHT_NEAR_VIEWPORT_BUDGET_MS = 8;
+const FILE_CARD_HIGHLIGHT_BACKGROUND_BUDGET_MS = 4;
+
+function FileCardVirtualizedCodePreview({
+  code,
+  language,
+  interactionMode,
+}: {
+  code: string;
+  language: string;
+  interactionMode: "default" | "thumbs-only" | "capture-wheel";
+}) {
+  const themeType = useEffectiveThemeType();
+  const [viewportElement, setViewportElement] = useState<HTMLDivElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+
+  const handleViewportRef = useCallback((node: HTMLDivElement | null) => {
+    setViewportElement(node);
+  }, []);
+
+  useEffect(() => {
+    if (!viewportElement) return;
+    const updateMetrics = () => {
+      setScrollTop(viewportElement.scrollTop);
+      setViewportHeight(viewportElement.clientHeight);
+    };
+    updateMetrics();
+    const resizeObserver = new ResizeObserver(updateMetrics);
+    resizeObserver.observe(viewportElement);
+    return () => resizeObserver.disconnect();
+  }, [viewportElement]);
+
+  const handleScroll = useCallback((viewport: HTMLDivElement) => {
+    setScrollTop(viewport.scrollTop);
+    setViewportHeight(viewport.clientHeight);
+  }, []);
+
+  const plainLines = useMemo(() => code.split("\n"), [code]);
+  const lineCount = plainLines.length;
+  const visibleLineCount = Math.max(
+    1,
+    Math.ceil(viewportHeight / FILE_CARD_CODE_LINE_HEIGHT),
+  );
+  const startLine = Math.max(
+    0,
+    Math.floor(scrollTop / FILE_CARD_CODE_LINE_HEIGHT) - FILE_CARD_CODE_OVERSCAN,
+  );
+  const endLine = Math.min(
+    lineCount,
+    startLine + visibleLineCount + FILE_CARD_CODE_OVERSCAN * 2,
+  );
+  const {
+    highlightedChunks,
+  } = useProgressiveFileCardHighlightedCode(
+    plainLines,
+    language,
+    themeType,
+    endLine,
+  );
+  const visibleRows = useMemo(
+    () =>
+      Array.from({ length: Math.max(0, endLine - startLine) }, (_, offset) => {
+        const lineIndex = startLine + offset;
+        const chunkIndex = Math.floor(lineIndex / FILE_CARD_HIGHLIGHT_CHUNK_LINES);
+        const chunkLineIndex = lineIndex - chunkIndex * FILE_CARD_HIGHLIGHT_CHUNK_LINES;
+        return {
+          lineIndex,
+          plainText: plainLines[lineIndex] ?? "",
+          tokens: highlightedChunks.get(chunkIndex)?.[chunkLineIndex] ?? null,
+        };
+      }),
+    [endLine, highlightedChunks, plainLines, startLine],
+  );
+  const totalHeight = lineCount * FILE_CARD_CODE_LINE_HEIGHT;
+  const offsetTop = startLine * FILE_CARD_CODE_LINE_HEIGHT;
+
+  return (
+    <ScrollArea
+      ref={handleViewportRef}
+      className="min-h-0 flex-1 overflow-hidden rounded-md bg-ink/[0.055]"
+      viewportClassName="p-2"
+      orientation="both"
+      interactionMode={interactionMode}
+      scrollbarInset="flush"
+      onScroll={handleScroll}
+    >
+      <div
+        className="relative min-w-full"
+        style={{
+          height: `${Math.max(totalHeight, viewportHeight)}px`,
+        }}
+      >
+        <div
+          className="absolute left-0 top-0 min-w-full"
+          style={{ transform: `translateY(${offsetTop}px)` }}
+        >
+          {visibleRows.map(({ lineIndex, plainText, tokens }) => {
+            const content =
+              tokens && tokens.length > 0
+                ? renderShikiLine(tokens, lineIndex)
+                : (plainText || "\u00a0");
+            return (
+              <div
+                key={lineIndex}
+                className="w-max min-w-full bg-transparent font-mono text-caption text-ink/80"
+                style={{
+                  height: `${FILE_CARD_CODE_LINE_HEIGHT}px`,
+                  lineHeight: `${FILE_CARD_CODE_LINE_HEIGHT}px`,
+                  whiteSpace: "pre",
+                }}
+              >
+                {content}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </ScrollArea>
+  );
+}
+
+function useProgressiveFileCardHighlightedCode(
+  plainLines: string[],
+  language: string,
+  themeType: "light" | "dark",
+  priorityLine: number,
+) {
+  const lineCount = plainLines.length;
+  const chunkCount = Math.max(
+    1,
+    Math.ceil(lineCount / FILE_CARD_HIGHLIGHT_CHUNK_LINES),
+  );
+  const lang = useMemo(() => shikiLanguage(language), [language]);
+  const theme = useMemo(() => shikiTheme(themeType), [themeType]);
+  const [highlightedChunks, setHighlightedChunks] = useState<
+    Map<number, ShikiHighlightedLine[]>
+  >(new Map());
+  const priorityChunkRef = useRef(0);
+
+  priorityChunkRef.current = Math.min(
+    chunkCount - 1,
+    Math.max(0, Math.floor(priorityLine / FILE_CARD_HIGHLIGHT_CHUNK_LINES)),
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    let frameId: number | null = null;
+    let grammarState: GrammarState | undefined;
+    let nextChunkIndex = 0;
+    const queuedChunks = new Map<number, ShikiHighlightedLine[]>();
+
+    const flushQueuedChunks = () => {
+      if (!queuedChunks.size) return;
+      const entries = Array.from(queuedChunks.entries());
+      queuedChunks.clear();
+      startTransition(() => {
+        setHighlightedChunks((current) => {
+          const next = new Map(current);
+          for (const [chunkIndex, tokens] of entries) {
+            next.set(chunkIndex, tokens);
+          }
+          return next;
+        });
+      });
+    };
+
+    startTransition(() => {
+      setHighlightedChunks(new Map());
+    });
+
+    getShikiHighlighter()
+      .then((highlighter) => {
+        if (cancelled) return;
+
+        const step = () => {
+          if (cancelled) return;
+
+          const priorityChunk = priorityChunkRef.current;
+          const nearViewport = nextChunkIndex <= priorityChunk + 1;
+          const chunkBurst = nearViewport
+            ? FILE_CARD_HIGHLIGHT_NEAR_VIEWPORT_BURST
+            : FILE_CARD_HIGHLIGHT_BACKGROUND_BURST;
+          const frameBudget = nearViewport
+            ? FILE_CARD_HIGHLIGHT_NEAR_VIEWPORT_BUDGET_MS
+            : FILE_CARD_HIGHLIGHT_BACKGROUND_BUDGET_MS;
+          const frameStart = performance.now();
+          let processedChunks = 0;
+
+          while (
+            nextChunkIndex < chunkCount &&
+            processedChunks < chunkBurst &&
+            performance.now() - frameStart < frameBudget
+          ) {
+            const chunkStartLine = nextChunkIndex * FILE_CARD_HIGHLIGHT_CHUNK_LINES;
+            const chunkEndLine = Math.min(
+              lineCount,
+              chunkStartLine + FILE_CARD_HIGHLIGHT_CHUNK_LINES,
+            );
+            const chunkCode = plainLines
+              .slice(chunkStartLine, chunkEndLine)
+              .join("\n");
+            const tokens = highlighter.codeToTokensBase(chunkCode, {
+              lang,
+              theme,
+              grammarState,
+            });
+
+            grammarState = highlighter.getLastGrammarState(tokens);
+            queuedChunks.set(nextChunkIndex, tokens);
+            nextChunkIndex += 1;
+            processedChunks += 1;
+          }
+
+          flushQueuedChunks();
+
+          if (nextChunkIndex < chunkCount) {
+            frameId = window.requestAnimationFrame(step);
+          }
+        };
+
+        step();
+      })
+      .catch((err) => {
+        console.error("highlight file card chunk failed", err);
+      });
+
+    return () => {
+      cancelled = true;
+      if (frameId !== null) window.cancelAnimationFrame(frameId);
+    };
+  }, [chunkCount, lang, lineCount, plainLines, theme]);
+
+  return {
+    highlightedChunks,
+  };
 }

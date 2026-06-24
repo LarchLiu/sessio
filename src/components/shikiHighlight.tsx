@@ -21,6 +21,26 @@ import githubLightTheme from "shiki/themes/github-light.mjs";
 export type ShikiHighlightedLine = ThemedToken[];
 
 let shikiHighlighterPromise: Promise<HighlighterCore> | null = null;
+const MAX_SHIKI_CACHE_ENTRIES = 24;
+const shikiLineCache = new Map<string, ShikiHighlightedLine[]>();
+
+function getCachedShikiLines(cacheKey: string): ShikiHighlightedLine[] | null {
+  const cached = shikiLineCache.get(cacheKey);
+  if (!cached) return null;
+  shikiLineCache.delete(cacheKey);
+  shikiLineCache.set(cacheKey, cached);
+  return cached;
+}
+
+function setCachedShikiLines(cacheKey: string, lines: ShikiHighlightedLine[]) {
+  if (shikiLineCache.has(cacheKey)) shikiLineCache.delete(cacheKey);
+  shikiLineCache.set(cacheKey, lines);
+  while (shikiLineCache.size > MAX_SHIKI_CACHE_ENTRIES) {
+    const oldest = shikiLineCache.keys().next().value;
+    if (!oldest) break;
+    shikiLineCache.delete(oldest);
+  }
+}
 
 export function getShikiHighlighter(): Promise<HighlighterCore> {
   shikiHighlighterPromise ??= createHighlighterCore({
@@ -104,16 +124,32 @@ export function useShikiHighlightedLines(
   language: string,
   themeType: "light" | "dark",
 ): ShikiHighlightedLine[] | null {
-  const [lines, setLines] = useState<ShikiHighlightedLine[] | null>(null);
+  const lang = useMemo(() => shikiLanguage(language), [language]);
+  const theme = useMemo(() => shikiTheme(themeType), [themeType]);
+  const cacheKey = useMemo(
+    () => `${theme}\u001f${lang}\u001f${code}`,
+    [code, lang, theme],
+  );
+  const [lines, setLines] = useState<ShikiHighlightedLine[] | null>(() =>
+    getCachedShikiLines(cacheKey),
+  );
+
   useEffect(() => {
     let cancelled = false;
-    const lang = shikiLanguage(language);
-    const theme = shikiTheme(themeType);
+    const cached = getCachedShikiLines(cacheKey);
+    if (cached) {
+      setLines((current) => (current === cached ? current : cached));
+      return () => {
+        cancelled = true;
+      };
+    }
     setLines(null);
     getShikiHighlighter()
       .then((highlighter) => {
         const tokens = highlighter.codeToTokensBase(code, { lang, theme });
-        if (!cancelled) setLines(tokens);
+        if (cancelled) return;
+        setCachedShikiLines(cacheKey, tokens);
+        setLines(tokens);
       })
       .catch((err) => {
         console.error("highlight code block failed", err);
@@ -122,7 +158,7 @@ export function useShikiHighlightedLines(
     return () => {
       cancelled = true;
     };
-  }, [code, language, themeType]);
+  }, [cacheKey, code, lang, theme]);
   return lines;
 }
 
