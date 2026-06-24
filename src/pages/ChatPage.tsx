@@ -1660,6 +1660,9 @@ export function AcpTranscriptPanel({
             editedFiles={sessionFileEdits.edits
               .map((edit) => edit.path ?? edit.displayPath)
               .filter((path): path is string => Boolean(path))}
+            autoAddedEditedFiles={currentTurnFileEdits.edits
+              .map((edit) => edit.path ?? edit.displayPath)
+              .filter((path): path is string => Boolean(path))}
             selectedCanvasFileRequest={selectedCanvasFileRequest}
             composer={chatComposerController}
             onError={setComposerError}

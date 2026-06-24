@@ -573,6 +573,7 @@ export interface BlockSuiteCanvasHostProps {
   workspacePath: string | null;
   sessionThreadId?: string | null;
   editedFiles?: string[];
+  autoAddedEditedFiles?: string[];
   selectedFileRequest?: {
     paths: string[];
     requestId: number;
@@ -647,6 +648,23 @@ function normalizeCanvasFileKey(path: string | null | undefined, workspacePath: 
   const resolved = resolveCanvasFilePath(trimmed, workspacePath) ?? trimmed;
   const normalized = normalizePathSegment(resolved);
   return /^[a-zA-Z]:\//.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+function dedupeCanvasPaths(
+  paths: string[],
+  workspacePath: string | null,
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const rawPath of paths) {
+    const path = rawPath.trim();
+    if (!path) continue;
+    const key = normalizeCanvasFileKey(path, workspacePath) ?? normalizePathSegment(path);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(path);
+  }
+  return out;
 }
 
 function collectCanvasOccupiedBounds(doc: ReturnType<typeof createBlockSuiteDoc>["doc"]): Bound[] {
@@ -806,6 +824,7 @@ export default function BlockSuiteCanvasHost({
   workspacePath,
   sessionThreadId = null,
   editedFiles = [],
+  autoAddedEditedFiles = [],
   selectedFileRequest = null,
   initialState,
   initialSnapshot,
@@ -837,6 +856,9 @@ export default function BlockSuiteCanvasHost({
   const currentSnapshotRef = useRef(initialSnapshot);
   const handledFileRequestRef = useRef<string | null>(null);
   const expandedFileCardHeightsRef = useRef(new Map<string, number>());
+  const autoAddedEditedFilesHydratedRef = useRef(false);
+  const previousEditedFileKeysRef = useRef<Set<string>>(new Set());
+  const previousAvailableEditedFilesRef = useRef<string[]>([]);
   const addMenuButtonRef = useRef<HTMLButtonElement>(null);
   const editedFilesButtonRef = useRef<HTMLButtonElement>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -862,8 +884,12 @@ export default function BlockSuiteCanvasHost({
   const [reactToLit, portals] = useReactToLitBridge();
 
   const changedFiles = useMemo(
-    () => Array.from(new Set(editedFiles.map((path) => path.trim()).filter(Boolean))),
-    [editedFiles],
+    () => dedupeCanvasPaths(editedFiles, workspacePath),
+    [editedFiles, workspacePath],
+  );
+  const autoChangedFiles = useMemo(
+    () => dedupeCanvasPaths(autoAddedEditedFiles, workspacePath),
+    [autoAddedEditedFiles, workspacePath],
   );
   const persistedCanvasFileKeys = useMemo(() => {
     const keys = new Set<string>();
@@ -915,6 +941,31 @@ export default function BlockSuiteCanvasHost({
       return next.length === current.length ? current : next;
     });
   }, [localCanvasFileKeys, workspacePath]);
+
+  useEffect(() => {
+    if (!editedFilesPickerOpen) {
+      previousAvailableEditedFilesRef.current = availableEditedFiles;
+      return;
+    }
+    setPendingEditedFiles((current) => {
+      const previousAvailableFiles = previousAvailableEditedFilesRef.current;
+      const currentSet = new Set(current);
+      const nextAvailableSet = new Set(availableEditedFiles);
+      const hadAllPreviousFilesSelected =
+        previousAvailableFiles.length > 0 &&
+        previousAvailableFiles.every((path) => currentSet.has(path));
+      const next = current.filter((path) => nextAvailableSet.has(path));
+      if (hadAllPreviousFilesSelected) {
+        for (const path of availableEditedFiles) {
+          if (!next.includes(path)) next.push(path);
+        }
+      }
+      previousAvailableEditedFilesRef.current = availableEditedFiles;
+      return next.length === current.length && next.every((path, index) => path === current[index])
+        ? current
+        : next;
+    });
+  }, [availableEditedFiles, editedFilesPickerOpen]);
 
   const getEditor = useCallback(() => editorRef.current, []);
   const getDoc = useCallback(() => docRef.current, []);
@@ -1204,10 +1255,7 @@ export default function BlockSuiteCanvasHost({
   }, [attachBoxSelectingObserver, clearBoxSelectingObserver, recomputeLocalCanvasFileKeys, scheduleAutosave, scheduleRecomputeLocalCanvasFileKeys, scheduleSelectionStateUpdate, scheduleSyncBlocks, updateSelectionState, waitForRootService]);
 
   const openEditedFilesPicker = () => {
-    const filteredAvailableFiles = changedFiles.filter((path) => {
-      const key = normalizeCanvasFileKey(path, workspacePath);
-      return !key || !localCanvasFileKeys.has(key);
-    });
+    const filteredAvailableFiles = availableEditedFiles;
     if (filteredAvailableFiles.length === 0) return;
     if (availableEditedFiles.length === 0) return;
     setPendingEditedFiles((current) => (
@@ -1215,6 +1263,7 @@ export default function BlockSuiteCanvasHost({
         ? current.filter((path) => filteredAvailableFiles.includes(path))
         : filteredAvailableFiles
     ));
+    previousAvailableEditedFilesRef.current = filteredAvailableFiles;
     setEditedFilesPickerOpen(true);
   };
 
@@ -1245,7 +1294,12 @@ export default function BlockSuiteCanvasHost({
     return "inline_markdown";
   }, [changedFiles, workspacePath]);
 
-  const addFileCards = useCallback(async (paths: string[]) => {
+  const addFileCards = useCallback(async (
+    paths: string[],
+    options?: {
+      focus?: boolean;
+    },
+  ) => {
     const doc = getDoc();
     if (!doc) {
       onError("Canvas document is not ready yet.");
@@ -1330,8 +1384,9 @@ export default function BlockSuiteCanvasHost({
       }
     }
 
+    const shouldFocus = options?.focus ?? true;
     const finalFocusBlockIds = Array.from(focusBlockIds);
-    if (finalFocusBlockIds.length > 0) {
+    if (shouldFocus && finalFocusBlockIds.length > 0) {
       focusBlocksInViewport(rootService, doc, finalFocusBlockIds);
     }
     if (addedCount === 0) {
@@ -1909,6 +1964,35 @@ export default function BlockSuiteCanvasHost({
       }
     });
   }, [addFileCards, isReady, selectedFileRequest, sessionId]);
+
+  useEffect(() => {
+    autoAddedEditedFilesHydratedRef.current = false;
+    previousEditedFileKeysRef.current = new Set();
+  }, [initialState.document.id, sessionId]);
+
+  useEffect(() => {
+    if (!isReady || !workspacePath) return;
+    const entries = autoChangedFiles
+      .map((path) => {
+        const key = normalizeCanvasFileKey(path, workspacePath) ?? normalizePathSegment(path.trim());
+        return key ? { path, key } : null;
+      })
+      .filter((entry): entry is { path: string; key: string } => Boolean(entry));
+    const previousKeys = previousEditedFileKeysRef.current;
+    const nextKeys = new Set(entries.map((entry) => entry.key));
+    const isInitialHydration = !autoAddedEditedFilesHydratedRef.current;
+    const pathsToAdd = entries
+      .filter((entry) => isInitialHydration || !previousKeys.has(entry.key))
+      .map((entry) => entry.path);
+
+    previousEditedFileKeysRef.current = nextKeys;
+    autoAddedEditedFilesHydratedRef.current = true;
+
+    if (pathsToAdd.length === 0) return;
+    void addFileCards(pathsToAdd, {
+      focus: isInitialHydration,
+    });
+  }, [addFileCards, autoChangedFiles, isReady, workspacePath]);
 
   useEffect(() => {
     const handleCanvasAddFiles = (event: Event) => {

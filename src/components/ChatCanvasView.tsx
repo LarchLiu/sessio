@@ -15,6 +15,7 @@ export interface ChatCanvasViewProps {
   workspacePath: string | null;
   sessionThreadId?: string | null;
   editedFiles?: string[];
+  autoAddedEditedFiles?: string[];
   selectedCanvasFileRequest?: {
     paths: string[];
     requestId: number;
@@ -32,6 +33,7 @@ export default function ChatCanvasView({
   workspacePath,
   sessionThreadId = null,
   editedFiles = [],
+  autoAddedEditedFiles = [],
   selectedCanvasFileRequest = null,
   composer,
   onError,
@@ -122,6 +124,7 @@ export default function ChatCanvasView({
             workspacePath={workspacePath}
             sessionThreadId={sessionThreadId}
             editedFiles={editedFiles}
+            autoAddedEditedFiles={autoAddedEditedFiles}
             selectedFileRequest={selectedCanvasFileRequest}
             initialState={state}
             initialSnapshot={initialSnapshot}
