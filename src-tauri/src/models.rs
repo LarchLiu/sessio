@@ -1624,7 +1624,6 @@ pub struct RuntimeAgentOptionMetadata {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum CanvasBlockKind {
-    MarkdownPreview,
     FileCard,
     WorkflowCard,
     Note,
@@ -1635,7 +1634,6 @@ pub enum CanvasBlockKind {
 impl CanvasBlockKind {
     pub fn as_str(&self) -> &'static str {
         match self {
-            CanvasBlockKind::MarkdownPreview => "markdown_preview",
             CanvasBlockKind::FileCard => "file_card",
             CanvasBlockKind::WorkflowCard => "workflow_card",
             CanvasBlockKind::Note => "note",
@@ -1646,7 +1644,6 @@ impl CanvasBlockKind {
 
     pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
-            "markdown_preview" => Some(CanvasBlockKind::MarkdownPreview),
             "file_card" => Some(CanvasBlockKind::FileCard),
             "workflow_card" => Some(CanvasBlockKind::WorkflowCard),
             "note" => Some(CanvasBlockKind::Note),

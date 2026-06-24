@@ -45,7 +45,6 @@ import {
   surfaceElementToCanvasBlock,
   workflowSnapshotToMarkdown,
 } from "../../lib/blocksuite/persistence";
-import type { MarkdownPreviewBlockModel } from "../../lib/blocksuite/blocks/markdown-preview";
 import {
   DEFAULT_FILE_CARD_COLLAPSED_HEIGHT,
   DEFAULT_FILE_CARD_HEIGHT,
@@ -662,7 +661,6 @@ function collectCanvasOccupiedBounds(doc: ReturnType<typeof createBlockSuiteDoc>
   };
 
   const blockModels = doc.getBlocksByFlavour([
-    "sessio:markdown-preview",
     "sessio:file-card",
     "sessio:workflow-card",
     "affine:note",
@@ -691,7 +689,6 @@ function getExistingCanvasFileBlockIds(
   const existing = new Map<string, string[]>();
   const fileBlocks = doc.getBlocksByFlavour([
     "sessio:file-card",
-    "sessio:markdown-preview",
   ]);
   for (const block of fileBlocks) {
     const model = block.model as { id: string; sourcePath?: string | null };
@@ -1070,14 +1067,13 @@ export default function BlockSuiteCanvasHost({
   const syncCanvasBlocks = useCallback(async (doc: NonNullable<ReturnType<typeof getDoc>>) => {
     const records = doc
       .getBlocksByFlavour([
-        "sessio:markdown-preview",
         "sessio:file-card",
         "sessio:workflow-card",
         "affine:note",
         "affine:image",
       ])
       .map((item) => canvasInteropModelToCanvasBlock(
-        item.model as MarkdownPreviewBlockModel | FileCardBlockModel | WorkflowCardBlockModel,
+        item.model as FileCardBlockModel | WorkflowCardBlockModel,
       ))
       .filter((item): item is NonNullable<typeof item> => Boolean(item));
 
@@ -1143,7 +1139,6 @@ export default function BlockSuiteCanvasHost({
     const keys = new Set<string>();
     for (const block of doc.getBlocksByFlavour([
       "sessio:file-card",
-      "sessio:markdown-preview",
     ])) {
       const model = block.model as { sourcePath?: string | null };
       const key = normalizeCanvasFileKey(model.sourcePath ?? null, workspacePath);

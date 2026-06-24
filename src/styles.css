@@ -696,11 +696,9 @@ affine-edgeless-root gfx-viewport {
 
 .sessio-box-selecting affine-edgeless-root affine-edgeless-note,
 .sessio-box-selecting affine-edgeless-root sessio-edgeless-file-card,
-.sessio-box-selecting affine-edgeless-root sessio-edgeless-markdown-preview,
 .sessio-box-selecting affine-edgeless-root sessio-edgeless-workflow-card,
 .sessio-box-selecting affine-edgeless-root affine-edgeless-note *,
 .sessio-box-selecting affine-edgeless-root sessio-edgeless-file-card *,
-.sessio-box-selecting affine-edgeless-root sessio-edgeless-markdown-preview *,
 .sessio-box-selecting affine-edgeless-root sessio-edgeless-workflow-card * {
   pointer-events: none !important;
 }

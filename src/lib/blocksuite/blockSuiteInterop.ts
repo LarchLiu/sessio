@@ -1,6 +1,5 @@
 import type { CanvasBlockKind, CanvasBlockSourceType, CanvasContextRef, UpsertCanvasBlockRecordInput } from "../../canvasTypes";
 import type { ThreadWorkSnapshot } from "../../api";
-import type { MarkdownPreviewBlockModel } from "./blocks/markdown-preview";
 import type { FileCardBlockModel } from "./blocks/file-card";
 import type { WorkflowCardBlockModel } from "./blocks/workflow-card";
 
@@ -38,7 +37,6 @@ type GroupLikeModel = {
 type BlockRecordMetadata = Record<string, unknown>;
 
 type CanvasInteropBlock =
-  | MarkdownPreviewBlockModel
   | FileCardBlockModel
   | WorkflowCardBlockModel
   | NoteLikeModel
@@ -49,29 +47,6 @@ function hasFlavour(
   model: CanvasInteropBlock,
 ): model is (CanvasInteropBlock & { flavour: string }) {
   return typeof (model as { flavour?: unknown }).flavour === "string";
-}
-
-export function markdownPreviewModelToCanvasBlock(
-  model: MarkdownPreviewBlockModel,
-): UpsertCanvasBlockRecordInput {
-  return {
-    blockId: model.id,
-    blockKind: "markdown_preview",
-    sourceType: normalizeSourceType(model.sourceType),
-    sourcePath: model.sourcePath || null,
-    sourceKey: model.title || null,
-    metadataJson: JSON.stringify({
-      kind: "markdown_preview",
-      title: model.title,
-      sourcePath: model.sourcePath,
-      sourceType: model.sourceType,
-      excerpt: model.excerpt,
-      renderMode: model.renderMode,
-      collapsed: model.collapsed,
-      contentVersion: model.contentVersion,
-      cachedContent: model.cachedContent,
-    } satisfies BlockRecordMetadata),
-  };
 }
 
 export function fileCardModelToCanvasBlock(
@@ -184,8 +159,6 @@ export function canvasInteropModelToCanvasBlock(
 ): UpsertCanvasBlockRecordInput | null {
   if (!hasFlavour(model)) return null;
   switch (model.flavour) {
-    case "sessio:markdown-preview":
-      return markdownPreviewModelToCanvasBlock(model as MarkdownPreviewBlockModel);
     case "sessio:file-card":
       return fileCardModelToCanvasBlock(model as FileCardBlockModel);
     case "sessio:workflow-card":
@@ -319,7 +292,7 @@ export function buildCanvasRefSummary(
   if (kind === "image") {
     return `${title}${sourcePath ? ` from ${sourcePath}` : ""}`;
   }
-  if (kind === "file_card" || kind === "markdown_preview") {
+  if (kind === "file_card") {
     return `${title}${sourcePath ? ` at ${sourcePath}` : ""}`;
   }
   if (kind === "note") {
@@ -336,8 +309,6 @@ export function fallbackTitleForKind(kind: CanvasBlockKind): string {
       return "File";
     case "workflow_card":
       return "Workflow";
-    case "markdown_preview":
-      return "Markdown preview";
     case "image":
       return "Image";
     case "group":

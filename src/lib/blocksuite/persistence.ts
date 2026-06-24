@@ -4,7 +4,6 @@ export {
   fileCardModelToCanvasBlock,
   groupModelToCanvasBlock,
   imageModelToCanvasBlock,
-  markdownPreviewModelToCanvasBlock,
   noteModelToCanvasBlock,
   renderSelectionSummaryMarkdown,
   renderWorkflowSummaryMarkdown,

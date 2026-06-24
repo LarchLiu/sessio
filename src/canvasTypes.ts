@@ -1,5 +1,4 @@
 export type CanvasBlockKind =
-  | "markdown_preview"
   | "file_card"
   | "workflow_card"
   | "note"
