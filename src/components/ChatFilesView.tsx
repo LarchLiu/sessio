@@ -21,6 +21,7 @@ type ChatFilesDisplayMode = "code" | PlainEditorMode;
 
 export interface ChatFilesViewProps {
   edits: FileEditItem[];
+  latestEditedEdits?: FileEditItem[];
   workspacePath: string | null;
   /** "code" enables syntax highlighting; "plain" renders raw text. */
   subview: ChatFilesSubview;
@@ -35,6 +36,7 @@ export interface ChatFilesViewProps {
 
 export default function ChatFilesView({
   edits,
+  latestEditedEdits = [],
   workspacePath,
   subview,
   onSubviewChange,
@@ -224,6 +226,7 @@ export default function ChatFilesView({
         <FilePickerPopover
           anchor={pickerAnchorRef.current}
           edits={edits}
+          latestEditedEdits={latestEditedEdits}
           selectedKey={selectedKey}
           onSelect={(key) => {
             void selectFile(key).then((selectedNext) => {
@@ -284,12 +287,14 @@ function FileDisplayModeToggle({
 function FilePickerPopover({
   anchor,
   edits,
+  latestEditedEdits,
   selectedKey,
   onSelect,
   onClose,
 }: {
   anchor: HTMLElement;
   edits: FileEditItem[];
+  latestEditedEdits: FileEditItem[];
   selectedKey: string | null;
   onSelect: (key: string) => void;
   onClose: () => void;
@@ -310,6 +315,18 @@ function FilePickerPopover({
       }, 0),
     [edits],
   );
+  const latestEditedMeta = useMemo(() => {
+    const meta = new Map<string, { additions: number; deletions: number }>();
+    for (const edit of latestEditedEdits) {
+      const additions = edit.additions ?? 0;
+      const deletions = edit.deletions ?? 0;
+      const keys = [edit.path, edit.displayPath].filter((value): value is string => Boolean(value));
+      for (const key of keys) {
+        meta.set(key, { additions, deletions });
+      }
+    }
+    return meta;
+  }, [latestEditedEdits]);
 
   useLayoutEffect(() => {
     const update = () => {
@@ -379,6 +396,10 @@ function FilePickerPopover({
             const key = fileEditKey(edit);
             const label = edit.displayPath || edit.path || "(unknown file)";
             const active = key === selectedKey;
+            const latestMeta =
+              latestEditedMeta.get(key) ??
+              (edit.path ? latestEditedMeta.get(edit.path) : undefined) ??
+              (edit.displayPath ? latestEditedMeta.get(edit.displayPath) : undefined);
             return (
               <li key={key}>
                 <button
@@ -388,7 +409,7 @@ function FilePickerPopover({
                   onClick={() => onSelect(key)}
                   title={label}
                   className={
-                    "block w-full px-2.5 py-1.5 text-left text-body-sm transition-colors " +
+                    "grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-1.5 text-left text-body-sm transition-colors " +
                     (active
                       ? "bg-ink/[0.07] text-ink/90"
                       : "text-ink/72 hover:bg-ink/[0.04] hover:text-ink/90")
@@ -397,6 +418,12 @@ function FilePickerPopover({
                   <span className="min-w-0 whitespace-pre-wrap break-all font-mono leading-relaxed">
                     {label}
                   </span>
+                  {latestMeta ? (
+                    <span className="flex shrink-0 items-center gap-1.5 font-mono text-caption">
+                      <span className="text-[rgb(var(--color-emerald))]">+{latestMeta.additions}</span>
+                      <span className="text-status-error">-{latestMeta.deletions}</span>
+                    </span>
+                  ) : null}
                 </button>
               </li>
             );

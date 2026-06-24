@@ -1636,6 +1636,7 @@ export function AcpTranscriptPanel({
             )}
             <ChatFilesView
               edits={fileViewEdits}
+              latestEditedEdits={currentTurnFileEdits.edits}
               workspacePath={workspacePath}
               subview={filesSubview}
               onSubviewChange={onFilesSubviewChange}
