@@ -208,11 +208,13 @@ export default function PlainMarkdownPreview({
   filePath = null,
   interactionMode = "default",
   persistScrollbars = false,
+  scrollbarInset = "default",
 }: {
   text: string;
   filePath?: string | null;
   interactionMode?: "default" | "thumbs-only" | "capture-wheel";
   persistScrollbars?: boolean;
+  scrollbarInset?: "default" | "flush";
 }) {
   const themeType = useEffectiveThemeType();
   const components = useMemo(
@@ -226,6 +228,7 @@ export default function PlainMarkdownPreview({
       viewportClassName="sessio-plain-editor-preview-viewport"
       persistScrollbars={persistScrollbars}
       interactionMode={interactionMode}
+      scrollbarInset={scrollbarInset}
     >
       <article
         className="sessio-plain-editor-preview-content markdown-content"
@@ -540,12 +543,20 @@ function PlainPreviewImage({
   alt: string;
   filePath?: string | null;
 }) {
-  const resolvedSrc = useResolvedImageSrc(src, filePath);
+  const { src: resolvedSrc, loading } = useResolvedImageSrc(src, filePath);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     setFailed(false);
   }, [resolvedSrc]);
+
+  if (loading) {
+    return (
+      <span className="inline-flex rounded-md border border-ink/10 bg-ink/[0.03] px-2 py-1 text-caption text-ink/42">
+        Loading image...
+      </span>
+    );
+  }
 
   if (!resolvedSrc || failed) {
     return <code>{`![${alt}](${src})`}</code>;
@@ -1588,34 +1599,48 @@ function isRenderableMarkdownImageSrc(rawSrc: string, filePath?: string | null):
   }
 }
 
-function useResolvedImageSrc(rawSrc: string, filePath?: string | null): string {
+function useResolvedImageSrc(
+  rawSrc: string,
+  filePath?: string | null,
+): { src: string | null; loading: boolean } {
+  const localPath = useMemo(() => localImagePath(rawSrc, filePath), [filePath, rawSrc]);
   const fallback = useMemo(() => resolveImageSrc(rawSrc, filePath), [filePath, rawSrc]);
-  const [src, setSrc] = useState(fallback);
+  const [src, setSrc] = useState<string | null>(localPath ? null : fallback);
+  const [loading, setLoading] = useState(Boolean(localPath));
 
   useEffect(() => {
     let cancelled = false;
-    setSrc(fallback);
-    const localPath = localImagePath(rawSrc, filePath);
-    if (!localPath) return;
+    if (!localPath) {
+      setSrc(fallback);
+      setLoading(false);
+      return;
+    }
+    setSrc(null);
+    setLoading(true);
     readLocalImageDataUrl(localPath)
       .then((dataUrl) => {
-        if (!cancelled) setSrc(dataUrl);
+        if (!cancelled) {
+          setSrc(dataUrl);
+          setLoading(false);
+        }
       })
       .catch(() => {
-        if (!cancelled) setSrc(fallback);
+        if (!cancelled) {
+          setSrc(null);
+          setLoading(false);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [fallback, filePath, rawSrc]);
+  }, [fallback, localPath]);
 
-  return src;
+  return { src, loading };
 }
 
-function resolveImageSrc(rawSrc: string, filePath?: string | null): string {
+function resolveImageSrc(rawSrc: string, filePath?: string | null): string | null {
   const src = rawSrc.trim();
-  const localPath = resolveLocalMarkdownPath(src, filePath);
-  if (localPath) return convertFileSrc(localPath);
+  if (localImagePath(rawSrc, filePath)) return null;
   if (src.startsWith("data:") || src.startsWith("blob:") || src.startsWith("asset:")) return src;
   if (/^file:\/\//i.test(src)) return convertFileSrc(decodeFileUri(src));
   try {

@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import PlainMarkdownPreview from "../../../../components/PlainMarkdownPreview";
+import FileViewer from "../../../../components/FileViewer";
 import { readWorkspaceTextFile } from "../../../../api";
+import { isPlainEditorMarkdownDocumentPath } from "../../../../hooks/plainEditorFileTypes";
+import { languageFromPath } from "../../../../hooks/useFileContent";
 
 function stopOverlayInteraction(event: {
   preventDefault: () => void;
@@ -27,6 +30,7 @@ export interface MarkdownPreviewHostProps {
 
 export function MarkdownPreviewHost({
   workspacePath,
+  blockId,
   selected = false,
   title,
   sourcePath,
@@ -52,6 +56,15 @@ export function MarkdownPreviewHost({
   const resolvedSourcePath = useMemo(
     () => resolveWorkspaceFilePath(sourcePath, workspacePath),
     [sourcePath, workspacePath],
+  );
+  const previewPath = resolvedSourcePath ?? sourcePath;
+  const renderMarkdownPreview = useMemo(
+    () => isPlainEditorMarkdownDocumentPath(previewPath),
+    [previewPath],
+  );
+  const previewLanguage = useMemo(
+    () => languageFromPath(previewPath),
+    [previewPath],
   );
 
   useEffect(() => {
@@ -135,24 +148,43 @@ export function MarkdownPreviewHost({
       {shouldLoadPreview && (
         <div
           className={
-            "flex h-[calc(100%-57px)] min-h-0 overflow-hidden overscroll-contain px-4 py-3 " +
+            "flex h-[calc(100%-57px)] min-h-0 overflow-hidden overscroll-contain p-2 " +
             overlayContentClassName
           }
           onWheelCapture={stopPreviewWheelPropagation}
           onWheel={stopPreviewWheelPropagation}
         >
-          {loading && <div className="text-caption text-ink/52">Loading markdown preview…</div>}
+          {loading && <div className="text-caption text-ink/52">Loading preview…</div>}
           {!loading && error && <div className="text-caption text-status-error">{error}</div>}
           {!loading && !error && content !== null && (
-            <PlainMarkdownPreview
-              text={content}
-              filePath={resolvedSourcePath}
-              interactionMode={
-                capturePreviewWheel
-                  ? "capture-wheel"
-                  : "thumbs-only"
-              }
-            />
+            renderMarkdownPreview ? (
+              <PlainMarkdownPreview
+                text={content}
+                filePath={resolvedSourcePath}
+                interactionMode={
+                  capturePreviewWheel
+                    ? "capture-wheel"
+                    : "thumbs-only"
+                }
+                scrollbarInset="flush"
+              />
+            ) : (
+              <FileViewer
+                fileKey={`${blockId}:${contentVersion}`}
+                text={content}
+                language={previewLanguage}
+                mode="code"
+                workspacePath={workspacePath}
+                path={resolvedSourcePath}
+                mtimeMs={null}
+                contentVersion={contentVersion}
+                savedScrollTop={0}
+                codePadding="12px 6px"
+                codeGutterMarginRight="0"
+                codeLineNumberPaddingRight="0"
+                codeShowLineNumbers={false}
+              />
+            )
           )}
         </div>
       )}

@@ -29,6 +29,7 @@ type Props = {
   persistScrollbars?: boolean;
   orientation?: "vertical" | "horizontal" | "both";
   interactionMode?: "default" | "thumbs-only" | "capture-wheel";
+  scrollbarInset?: "default" | "flush";
   onScroll?: (viewport: HTMLDivElement) => void;
 };
 
@@ -41,6 +42,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
     persistScrollbars = false,
     orientation = "vertical",
     interactionMode = "default",
+    scrollbarInset = "default",
     onScroll,
   },
   ref,
@@ -221,6 +223,10 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
         : "overflow-y-scroll overflow-x-hidden";
   const viewportFlexClass =
     orientation === "horizontal" ? "flex-none" : "flex-1";
+  const verticalThumbEdgeClass =
+    scrollbarInset === "flush" ? "right-0" : "right-0.5";
+  const horizontalThumbEdgeClass =
+    scrollbarInset === "flush" ? "bottom-0" : "bottom-0.5";
   const stopWheelPropagation = captureWheelInteraction
     ? (event: React.WheelEvent<HTMLDivElement>) => {
         event.stopPropagation();
@@ -259,7 +265,9 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
         <div
           aria-hidden
           className={
-            "pointer-events-auto absolute top-0 right-0.5 z-30 w-2 rounded-full bg-ink/30 hover:bg-ink/50 cursor-pointer transition-opacity " +
+            "pointer-events-auto absolute top-0 z-30 w-2 rounded-full bg-ink/30 hover:bg-ink/50 cursor-pointer transition-opacity " +
+            verticalThumbEdgeClass +
+            " " +
             visibilityClass
           }
           ref={verticalThumbRef}
@@ -274,7 +282,9 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
         <div
           aria-hidden
           className={
-            "pointer-events-auto absolute bottom-0.5 left-0 z-30 h-2 rounded-full bg-ink/30 hover:bg-ink/50 cursor-pointer transition-opacity " +
+            "pointer-events-auto absolute left-0 z-30 h-2 rounded-full bg-ink/30 hover:bg-ink/50 cursor-pointer transition-opacity " +
+            horizontalThumbEdgeClass +
+            " " +
             visibilityClass
           }
           ref={horizontalThumbRef}

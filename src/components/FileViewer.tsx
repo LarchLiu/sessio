@@ -23,6 +23,9 @@ const PlainEditorView = lazy(() => import("./PlainEditorView"));
 const languageCompartment = new Compartment();
 const themeCompartment = new Compartment();
 const diffCompartment = new Compartment();
+const codePaddingCompartment = new Compartment();
+const codeChromeCompartment = new Compartment();
+const lineNumberCompartment = new Compartment();
 
 const baseTheme = EditorView.theme({
   "&": {
@@ -194,6 +197,28 @@ const lightTheme = EditorView.theme({
   },
 });
 
+function codePaddingTheme(padding: string): Extension {
+  return EditorView.theme({
+    ".cm-scroller": {
+      padding,
+    },
+  });
+}
+
+function codeChromeTheme(options: {
+  gutterMarginRight: string;
+  lineNumberPaddingRight: string;
+}): Extension {
+  return EditorView.theme({
+    ".cm-gutters": {
+      marginRight: options.gutterMarginRight,
+    },
+    ".cm-lineNumbers .cm-gutterElement": {
+      padding: `0 ${options.lineNumberPaddingRight} 0 0`,
+    },
+  });
+}
+
 export interface FileViewerProps {
   fileKey: string;
   text: string;
@@ -210,6 +235,10 @@ export interface FileViewerProps {
   gitDiff?: FileGitDiff | null;
   savedScrollTop?: number;
   onScrollTopChange?: (scrollTop: number) => void;
+  codePadding?: string;
+  codeGutterMarginRight?: string;
+  codeLineNumberPaddingRight?: string;
+  codeShowLineNumbers?: boolean;
 }
 
 export default function FileViewer({
@@ -228,6 +257,10 @@ export default function FileViewer({
   gitDiff = null,
   savedScrollTop = 0,
   onScrollTopChange,
+  codePadding = "16px 40px",
+  codeGutterMarginRight = "12px",
+  codeLineNumberPaddingRight = "12px",
+  codeShowLineNumbers = true,
 }: FileViewerProps) {
   if (mode === "plain") {
     return (
@@ -262,6 +295,10 @@ export default function FileViewer({
       gitDiff={gitDiff}
       savedScrollTop={savedScrollTop}
       onScrollTopChange={onScrollTopChange}
+      codePadding={codePadding}
+      codeGutterMarginRight={codeGutterMarginRight}
+      codeLineNumberPaddingRight={codeLineNumberPaddingRight}
+      codeShowLineNumbers={codeShowLineNumbers}
     />
   );
 }
@@ -273,6 +310,10 @@ function CodeMirrorFileViewer({
   gitDiff = null,
   savedScrollTop = 0,
   onScrollTopChange,
+  codePadding = "16px 40px",
+  codeGutterMarginRight = "12px",
+  codeLineNumberPaddingRight = "12px",
+  codeShowLineNumbers = true,
 }: Omit<FileViewerProps, "mode">) {
   const themeType = useEffectiveThemeType();
   const hostRef = useRef<HTMLDivElement>(null);
@@ -306,7 +347,12 @@ function CodeMirrorFileViewer({
         EditorState.readOnly.of(true),
         EditorView.lineWrapping,
         diffCompartment.of(diffExtension),
-        lineNumbers(),
+        codePaddingCompartment.of(codePaddingTheme(codePadding)),
+        codeChromeCompartment.of(codeChromeTheme({
+          gutterMarginRight: codeGutterMarginRight,
+          lineNumberPaddingRight: codeLineNumberPaddingRight,
+        })),
+        lineNumberCompartment.of(codeShowLineNumbers ? lineNumbers() : []),
         keymap.of([]),
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         languageCompartment.of(codeExtension),
@@ -373,6 +419,35 @@ function CodeMirrorFileViewer({
       effects: themeCompartment.reconfigure(activeTheme),
     });
   }, [activeTheme]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: codePaddingCompartment.reconfigure(codePaddingTheme(codePadding)),
+    });
+  }, [codePadding]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: codeChromeCompartment.reconfigure(codeChromeTheme({
+        gutterMarginRight: codeGutterMarginRight,
+        lineNumberPaddingRight: codeLineNumberPaddingRight,
+      })),
+    });
+  }, [codeGutterMarginRight, codeLineNumberPaddingRight]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: lineNumberCompartment.reconfigure(
+        codeShowLineNumbers ? lineNumbers() : [],
+      ),
+    });
+  }, [codeShowLineNumbers]);
 
   useEffect(() => {
     const view = viewRef.current;

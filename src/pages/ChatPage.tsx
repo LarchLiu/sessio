@@ -5471,16 +5471,23 @@ function MarkdownImageButton({
   cover?: boolean;
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
-  const resolvedSrc = useResolvedImageSrc(image.src);
+  const { src: resolvedSrc, loading } = useResolvedImageSrc(image.src);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     setFailed(false);
   }, [resolvedSrc]);
   const previewImage = useMemo(
-    () => ({ ...image, src: resolvedSrc }),
+    () => ({ ...image, src: resolvedSrc ?? image.src }),
     [image, resolvedSrc],
   );
-  if (failed) {
+  if (loading) {
+    return (
+      <div className="my-1 inline-flex h-28 w-36 items-center justify-center rounded-md border border-card-border/[0.16] bg-bg-panel-alt text-caption text-ink/42">
+        Loading image...
+      </div>
+    );
+  }
+  if (!resolvedSrc || failed) {
     return <MarkdownImageFallback image={image} />;
   }
   return (
@@ -5517,7 +5524,7 @@ function ImagePreviewOverlay({
   onClose: () => void;
 }) {
   const TOP_DRAG_SAFE_PX = 48;
-  const src = useResolvedImageSrc(image.src);
+  const { src, loading } = useResolvedImageSrc(image.src);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -5535,11 +5542,17 @@ function ImagePreviewOverlay({
       aria-modal="true"
     >
       <div className="max-h-full max-w-full" onClick={(e) => e.stopPropagation()}>
-        <img
-          src={src}
-          alt={image.alt}
-          className="max-h-[calc(100vh-48px)] max-w-[calc(100vw-48px)] rounded-md bg-bg-panel-alt object-contain shadow-2xl"
-        />
+        {src ? (
+          <img
+            src={src}
+            alt={image.alt}
+            className="max-h-[calc(100vh-48px)] max-w-[calc(100vw-48px)] rounded-md bg-bg-panel-alt object-contain shadow-2xl"
+          />
+        ) : (
+          <div className="flex min-h-[220px] min-w-[320px] items-center justify-center rounded-md bg-bg-panel-alt px-4 py-3 text-body-sm text-ink/48 shadow-2xl">
+            {loading ? "Loading image..." : "Unable to load image"}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -5631,34 +5644,45 @@ function markdownUrlTransform(url: string): string {
   return "";
 }
 
-function useResolvedImageSrc(rawSrc: string): string {
+function useResolvedImageSrc(rawSrc: string): { src: string | null; loading: boolean } {
+  const localPath = useMemo(() => localImagePath(rawSrc), [rawSrc]);
   const fallback = useMemo(() => resolveImageSrc(rawSrc), [rawSrc]);
-  const [src, setSrc] = useState(fallback);
+  const [src, setSrc] = useState<string | null>(localPath ? null : fallback);
+  const [loading, setLoading] = useState(Boolean(localPath));
 
   useEffect(() => {
     let cancelled = false;
-    setSrc(fallback);
-    const localPath = localImagePath(rawSrc);
-    if (!localPath) return;
+    if (!localPath) {
+      setSrc(fallback);
+      setLoading(false);
+      return;
+    }
+    setSrc(null);
+    setLoading(true);
     readLocalImageDataUrl(localPath)
       .then((dataUrl) => {
-        if (!cancelled) setSrc(dataUrl);
+        if (!cancelled) {
+          setSrc(dataUrl);
+          setLoading(false);
+        }
       })
       .catch(() => {
-        if (!cancelled) setSrc(fallback);
+        if (!cancelled) {
+          setSrc(null);
+          setLoading(false);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [fallback, rawSrc]);
+  }, [fallback, localPath]);
 
-  return src;
+  return { src, loading };
 }
 
-function resolveImageSrc(rawSrc: string): string {
+function resolveImageSrc(rawSrc: string): string | null {
   const src = rawSrc.trim().replace(/^<|>$/g, "");
-  const assetPath = localAssetImagePath(src);
-  if (assetPath) return convertFileSrc(assetPath);
+  if (localImagePath(rawSrc)) return null;
   if (/^(https?:|data:|asset:|blob:)/i.test(src)) return src;
   if (/^file:\/\//i.test(src)) return convertFileSrc(decodeFileUri(src));
   if (/^\/|^[A-Za-z]:[\\/]/.test(src)) return convertFileSrc(src);
