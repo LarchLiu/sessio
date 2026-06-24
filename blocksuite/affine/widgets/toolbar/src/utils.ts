@@ -123,8 +123,12 @@ export function autoUpdatePosition(
     const y =
       result.y -
       (currentPlacement.includes('top') ? 0 : offsetTop + offsetBottom);
+    const roundedX = Math.round(x);
+    const roundedY = Math.round(y);
 
-    toolbar.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+    toolbar.style.left = `${roundedX}px`;
+    toolbar.style.top = `${roundedY}px`;
+    toolbar.style.transform = 'none';
 
     if (middlewareData.hide) {
       if (toolbar.dataset.open) {
