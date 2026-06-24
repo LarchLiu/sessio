@@ -1,6 +1,6 @@
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GrammarState } from "shiki";
-import { ArrowUpRight, ChevronDown } from "lucide-react";
+import { ArrowUpRight, ChevronDown, ChevronUp, FileDiff } from "lucide-react";
 import PlainMarkdownPreview from "../../../../components/PlainMarkdownPreview";
 import ScrollArea from "../../../../components/ScrollArea";
 import { readWorkspaceTextFile } from "../../../../api";
@@ -32,6 +32,7 @@ export interface FileCardHostProps {
   subtitle: string;
   contentVersion: string;
   previewCollapsed: boolean;
+  isLatestEditedFile?: boolean;
   onTogglePreviewCollapsed: (nextCollapsed: boolean) => void;
   onOpenFile?: (path: string) => void;
   onHeaderPointerDown?: (event: React.PointerEvent<HTMLDivElement>) => void;
@@ -46,6 +47,7 @@ export function FileCardHost({
   subtitle,
   contentVersion,
   previewCollapsed,
+  isLatestEditedFile = false,
   onTogglePreviewCollapsed,
   onOpenFile,
   onHeaderPointerDown,
@@ -65,6 +67,10 @@ export function FileCardHost({
   const resolvedSourcePath = useMemo(
     () => resolveWorkspaceFilePath(sourcePath, workspacePath),
     [sourcePath, workspacePath],
+  );
+  const displayPath = useMemo(
+    () => resolveWorkspaceRelativePath(subtitle || sourcePath, workspacePath),
+    [sourcePath, subtitle, workspacePath],
   );
   const previewPath = resolvedSourcePath ?? sourcePath;
   const renderMarkdownPreview = useMemo(
@@ -117,11 +123,12 @@ export function FileCardHost({
           overlayContentClassName
         }
       >
-        <div className="flex w-full items-start justify-between gap-3">
-          <div className="min-w-0 flex-1 truncate text-body-sm font-medium text-ink/88">
-            {title || "File card"}
+        <div className="flex w-full items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 text-body-sm font-medium text-ink/88">
+            {isLatestEditedFile && <FileDiff className="h-3.5 w-3.5 shrink-0 text-ink/45" />}
+            <span className="min-w-0 flex-1 truncate">{title || "File card"}</span>
           </div>
-          <div className={"flex shrink-0 items-center gap-1 " + overlayActionClassName}>
+          <div className={"flex shrink-0 items-center gap-2 " + overlayActionClassName}>
             <button
               type="button"
               onPointerDown={stopOverlayInteraction}
@@ -131,7 +138,7 @@ export function FileCardHost({
                 if (!resolvedSourcePath) return;
                 onOpenFile?.(resolvedSourcePath);
               }}
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-ink/45 transition hover:bg-ink/[0.05] hover:text-ink/80"
+              className="flex h-5 w-5 items-center justify-center rounded text-ink/45 transition hover:bg-ink/[0.06] hover:text-ink/80"
               aria-label={`Open ${title || sourcePath}`}
             >
               <ArrowUpRight className="h-3.5 w-3.5" />
@@ -144,22 +151,21 @@ export function FileCardHost({
                 stopOverlayInteraction(event);
                 onTogglePreviewCollapsed(!previewCollapsed);
               }}
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-ink/45 transition hover:bg-ink/[0.05] hover:text-ink/80"
+              className="flex h-5 w-5 items-center justify-center rounded text-ink/45 transition hover:bg-ink/[0.06] hover:text-ink/80"
               aria-label={previewCollapsed ? "Open preview" : "Collapse preview"}
               aria-expanded={!previewCollapsed}
             >
-              <ChevronDown
-                className={
-                  "h-3.5 w-3.5 transition-transform " +
-                  (previewCollapsed ? "-rotate-90" : "")
-                }
-              />
+              {previewCollapsed ? (
+                <ChevronDown className="h-3.5 w-3.5 text-ink/55" />
+              ) : (
+                <ChevronUp className="h-3.5 w-3.5 text-ink/55" />
+              )}
             </button>
           </div>
         </div>
         {!previewCollapsed && (
           <div className="mt-1 w-full break-all font-mono text-[11px] leading-4 text-ink/48">
-            {subtitle || sourcePath}
+            {displayPath}
           </div>
         )}
       </div>
@@ -215,6 +221,19 @@ function resolveWorkspaceFilePath(
   const trimmedRoot = workspacePath.replace(/[\\/]+$/, "");
   const trimmedPath = path.replace(/^[\\/]+/, "");
   return `${trimmedRoot}${separator}${trimmedPath}`;
+}
+
+function resolveWorkspaceRelativePath(
+  path: string,
+  workspacePath: string | null,
+): string {
+  if (!path) return "";
+  if (!workspacePath) return path;
+  const normalizedPath = path.replace(/\\/g, "/");
+  const normalizedWorkspace = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (normalizedPath === normalizedWorkspace) return "";
+  if (!normalizedPath.startsWith(`${normalizedWorkspace}/`)) return path;
+  return normalizedPath.slice(normalizedWorkspace.length + 1);
 }
 
 const FILE_CARD_CODE_LINE_HEIGHT = 20;

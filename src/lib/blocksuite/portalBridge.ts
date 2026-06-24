@@ -3,6 +3,7 @@ import type { ReactToLit } from "./reactToLit";
 type BridgeState = {
   reactToLit: ReactToLit;
   workspacePath: string | null;
+  latestEditedFileKeys?: ReadonlySet<string>;
   updateBlock: (blockId: string, props: Record<string, unknown>) => void;
   runWorkflowBlock?: (blockId: string) => void;
   openWorkflowThread?: (blockId: string) => void;

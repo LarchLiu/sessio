@@ -574,6 +574,7 @@ export interface BlockSuiteCanvasHostProps {
   sessionThreadId?: string | null;
   editedFiles?: string[];
   autoAddedEditedFiles?: string[];
+  latestEditedFiles?: string[];
   selectedFileRequest?: {
     paths: string[];
     requestId: number;
@@ -825,6 +826,7 @@ export default function BlockSuiteCanvasHost({
   sessionThreadId = null,
   editedFiles = [],
   autoAddedEditedFiles = [],
+  latestEditedFiles = [],
   selectedFileRequest = null,
   initialState,
   initialSnapshot,
@@ -891,6 +893,14 @@ export default function BlockSuiteCanvasHost({
     () => dedupeCanvasPaths(autoAddedEditedFiles, workspacePath),
     [autoAddedEditedFiles, workspacePath],
   );
+  const latestEditedFileKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const path of dedupeCanvasPaths(latestEditedFiles, workspacePath)) {
+      const key = normalizeCanvasFileKey(path, workspacePath);
+      if (key) keys.add(key);
+    }
+    return keys;
+  }, [latestEditedFiles, workspacePath]);
   const persistedCanvasFileKeys = useMemo(() => {
     const keys = new Set<string>();
     for (const record of canvasBlockRecords) {
@@ -1331,16 +1341,12 @@ export default function BlockSuiteCanvasHost({
     }
 
     const existingByPath = getExistingCanvasFileBlockIds(doc, workspacePath);
-    const focusBlockIds = new Set<string>();
     const filesToInsert: Array<{ inputPath: string; absolutePath: string; key: string }> = [];
     let duplicateCount = 0;
     for (const [key, file] of requestedFiles.entries()) {
       const existingIds = existingByPath.get(key) ?? [];
       if (existingIds.length > 0) {
         duplicateCount += 1;
-        for (const id of existingIds) {
-          focusBlockIds.add(id);
-        }
         continue;
       }
       filesToInsert.push({ ...file, key });
@@ -1367,7 +1373,7 @@ export default function BlockSuiteCanvasHost({
             title,
             sourcePath: fileToInsert.absolutePath,
             sourceType: resolveFileSourceType(fileToInsert.inputPath),
-            subtitle: fileToInsert.absolutePath,
+            subtitle: fileToInsert.inputPath,
             summary: summarizeText(file?.content ?? "", 260),
             status: file ? "ready" : "unavailable",
             contentVersion: file ? `${fileToInsert.absolutePath}:${file.mtimeMs}` : fileToInsert.absolutePath,
@@ -1376,7 +1382,6 @@ export default function BlockSuiteCanvasHost({
           },
         );
         insertedBlockIds.push(blockId);
-        focusBlockIds.add(blockId);
         addedCount += 1;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1385,21 +1390,12 @@ export default function BlockSuiteCanvasHost({
     }
 
     const shouldFocus = options?.focus ?? true;
-    const finalFocusBlockIds = Array.from(focusBlockIds);
+    const finalFocusBlockIds = insertedBlockIds;
     if (shouldFocus && finalFocusBlockIds.length > 0) {
       focusBlocksInViewport(rootService, doc, finalFocusBlockIds);
     }
     if (addedCount === 0) {
-      if (duplicateCount > 0) {
-        setStatus(
-          duplicateCount === 1
-            ? "File is already on the canvas."
-            : `${duplicateCount} files are already on the canvas.`,
-        );
-        updateSelectionState();
-        return true;
-      }
-      return false;
+      return duplicateCount > 0;
     }
     const snapshotJson = snapshotToJson(doc);
     if (!snapshotJson) {
@@ -1600,6 +1596,7 @@ export default function BlockSuiteCanvasHost({
     setBlockSuitePortalBridge({
       reactToLit,
       workspacePath,
+      latestEditedFileKeys,
       updateBlock: (blockId, props) => {
         const doc = getDoc();
         const model = doc?.getModelById(blockId) ?? null;
@@ -1637,6 +1634,7 @@ export default function BlockSuiteCanvasHost({
     };
   }, [
     getDoc,
+    latestEditedFileKeys,
     onOpenProjectFile,
     openWorkflowThread,
     reactToLit,

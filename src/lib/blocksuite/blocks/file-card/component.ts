@@ -8,6 +8,22 @@ import { getBlockSuitePortalBridge } from "../../portalBridge";
 import { FileCardHost } from "./host";
 import type { FileCardBlockModel } from "./model";
 
+function normalizeBridgeFileKey(
+  path: string,
+  workspacePath: string | null,
+): string | null {
+  if (!path) return null;
+  const trimmed = path.trim();
+  if (!trimmed) return null;
+  const resolved = /^([a-zA-Z]:[\\/]|\/)/.test(trimmed)
+    ? trimmed
+    : workspacePath
+      ? `${workspacePath.replace(/[\\/]+$/, "")}${workspacePath.includes("\\") ? "\\" : "/"}${trimmed.replace(/^[\\/]+/, "")}`
+      : trimmed;
+  const normalized = resolved.replace(/\\/g, "/").replace(/\/+$/, "");
+  return /^[a-zA-Z]:\//.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
 class FileCardPageComponent extends BlockComponent<FileCardBlockModel> {
   blockDraggable = true;
 
@@ -25,6 +41,10 @@ class FileCardPageComponent extends BlockComponent<FileCardBlockModel> {
   override renderBlock() {
     const selected = this.selected$.value;
     const bridge = getBlockSuitePortalBridge();
+    const isLatestEditedFile = (() => {
+      const key = normalizeBridgeFileKey(this.model.sourcePath || "", bridge?.workspacePath ?? null);
+      return key ? bridge?.latestEditedFileKeys?.has(key) ?? false : false;
+    })();
     const rerenderToken = [
       selected ? "1" : "0",
       this.model.title || "File card",
@@ -35,6 +55,7 @@ class FileCardPageComponent extends BlockComponent<FileCardBlockModel> {
       this.model.contentVersion || "",
       this.model.previewCollapsed ? "1" : "0",
       bridge?.workspacePath ?? "",
+      isLatestEditedFile ? "1" : "0",
     ].join("\u001f");
     const content = bridge
       ? bridge.reactToLit(
@@ -48,6 +69,7 @@ class FileCardPageComponent extends BlockComponent<FileCardBlockModel> {
               subtitle: this.model.subtitle || "",
               contentVersion: this.model.contentVersion || this.model.sourcePath || "",
               previewCollapsed: this.model.previewCollapsed,
+              isLatestEditedFile,
               onTogglePreviewCollapsed: (nextCollapsed) => {
                 bridge.updateBlock(this.model.id, { previewCollapsed: nextCollapsed });
               },
