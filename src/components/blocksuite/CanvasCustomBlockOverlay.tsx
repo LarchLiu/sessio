@@ -10,6 +10,7 @@ type OverlayBase = {
   baseWidth: number;
   baseHeight: number;
   scale: number;
+  zIndex: number;
   selected: boolean;
 };
 
@@ -79,7 +80,7 @@ export function CanvasCustomBlockOverlay({
   }
 
   return (
-    <div className="pointer-events-none absolute inset-0 overflow-hidden">
+    <>
       {items.map((item) => {
         const shellClassName = "absolute";
         const scaledWidth = item.baseWidth * item.scale;
@@ -89,6 +90,7 @@ export function CanvasCustomBlockOverlay({
           top: item.top,
           width: scaledWidth,
           height: scaledHeight,
+          zIndex: item.zIndex,
         };
         // Use CSS `zoom` rather than `transform: scale()` so the browser
         // re-rasterizes text at the scaled size (crisp) instead of bitmap-
@@ -202,6 +204,6 @@ export function CanvasCustomBlockOverlay({
           </div>
         );
       })}
-    </div>
+    </>
   );
 }
