@@ -10,21 +10,16 @@ import { Bound, serializeXYWH } from "@blocksuite/global/gfx";
 import { BLOCKSUITE_STYLE_SCOPE_CLASS } from "@blocksuite/std";
 import { GfxControllerIdentifier } from "@blocksuite/std/gfx";
 import { createPortal } from "react-dom";
-import { Camera, Check, FileImage, FilePlus2, FolderOpen, Layers3, LoaderCircle, MessageCircleQuestionMark, RefreshCcw, Save, StickyNote, Workflow, X } from "lucide-react";
+import { Check, FileImage, FilePlus2, FolderOpen, Layers3, LoaderCircle, Save, StickyNote, Workflow, X } from "lucide-react";
 import type { ComposerAttachment } from "../ComposerAttachments";
 import PopupMenu, { type PopupMenuOption } from "../PopupMenu";
 import ScrollArea from "../ScrollArea";
 import type {
-  CanvasBlockKind,
-  CanvasBlockRecord,
-  CanvasContextOption,
   CanvasDocumentState,
 } from "../../canvasTypes";
 import {
   captureWindowAreaPng,
   createAstraRun,
-  createCanvasAnchor,
-  createCanvasContextFile,
   getThreadWorkSnapshot,
   readLocalImageDataUrl,
   readWorkspaceTextFile,
@@ -49,12 +44,8 @@ import {
 import ToastStack, { type ToastStackMessage } from "../ToastStack";
 import { setBlockSuitePortalBridge } from "../../lib/blocksuite/portalBridge";
 import {
-  canvasBlockRecordToContextRef,
   canvasInteropModelToCanvasBlock,
-  renderSelectionSummaryMarkdown,
-  renderWorkflowSummaryMarkdown,
   surfaceElementToCanvasBlock,
-  tryParseJson,
   workflowSnapshotToMarkdown,
 } from "../../lib/blocksuite/persistence";
 import type { MarkdownPreviewBlockModel } from "../../lib/blocksuite/blocks/markdown-preview";
@@ -66,24 +57,13 @@ import {
 } from "../../lib/blocksuite/toolbar";
 
 const CANVAS_ADD_FILES_EVENT = "sessio:canvas-add-files";
+const CANVAS_GROUP_SELECTION_EVENT = "sessio:canvas-group-selection";
+const CANVAS_UNGROUP_SELECTION_EVENT = "sessio:canvas-ungroup-selection";
 const AUTOSAVE_DEBOUNCE_MS = 900;
 const ROOT_SERVICE_RETRY_MS = 80;
 const ROOT_SERVICE_RETRY_LIMIT = 125;
 const BOX_SELECTING_CLASS_NAME = "sessio-box-selecting";
 const SNAPSHOT_CAPTURING_CLASS_NAME = "sessio-snapshot-capturing";
-
-type CanvasSelectionRef = {
-  blockId: string;
-  title: string;
-  sourcePath: string | null;
-  blockKind: CanvasBlockKind;
-  meta: Record<string, unknown> | null;
-};
-
-type CanvasSelectionContext = {
-  refs: CanvasSelectionRef[];
-  elementIds: string[];
-};
 
 type BlockSuiteEditor = HTMLElement & {
   std?: {
@@ -643,7 +623,6 @@ export default function BlockSuiteCanvasHost({
   const editorRef = useRef<BlockSuiteEditor | null>(null);
   const docRef = useRef<ReturnType<typeof createBlockSuiteDoc>["doc"] | null>(null);
   const latestStateRef = useRef(initialState);
-  const blockRecordsRef = useRef(initialState.blockRecords);
   const blockUpdatedDisposeRef = useRef<{ dispose: () => void } | null>(null);
   const selectionUpdatedDisposeRef = useRef<{ dispose: () => void } | null>(null);
   const selectionUiFrameRef = useRef<number | null>(null);
@@ -671,7 +650,6 @@ export default function BlockSuiteCanvasHost({
   const [isSaving, setIsSaving] = useState(false);
   const [selectionCount, setSelectionCount] = useState(0);
   const [canUngroupSelection, setCanUngroupSelection] = useState(false);
-  const [blockRecords, setBlockRecords] = useState(initialState.blockRecords);
   const [bridgeBusy, setBridgeBusy] = useState<null | "ask" | "snapshot" | "workflow">(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [editedFilesPickerOpen, setEditedFilesPickerOpen] = useState(false);
@@ -698,8 +676,6 @@ export default function BlockSuiteCanvasHost({
 
   useEffect(() => {
     latestStateRef.current = initialState;
-    blockRecordsRef.current = initialState.blockRecords;
-    setBlockRecords(initialState.blockRecords);
   }, [initialState]);
 
   const getEditor = useCallback(() => editorRef.current, []);
@@ -977,7 +953,6 @@ export default function BlockSuiteCanvasHost({
   }, [getRootService, updateSelectionState, waitForRootService]);
 
   const syncCanvasBlocks = useCallback(async (doc: NonNullable<ReturnType<typeof getDoc>>) => {
-    const nextBlocks: CanvasBlockRecord["metadataJson"][] = [];
     const records = doc
       .getBlocksByFlavour([
         "sessio:markdown-preview",
@@ -999,15 +974,11 @@ export default function BlockSuiteCanvasHost({
           .map((item) => surfaceElementToCanvasBlock(item as { id: string; type?: string; title?: string; childIds?: string[] }))
           .filter((item): item is NonNullable<typeof item> => Boolean(item))
       : [];
-
-    void nextBlocks;
     try {
       const saved = await updateCanvasBlocks({
         sessionId,
         blocks: [...records, ...surfaceRecords],
       });
-      blockRecordsRef.current = saved;
-      setBlockRecords(saved);
       latestStateRef.current = {
         ...latestStateRef.current,
         blockRecords: saved,
@@ -1690,36 +1661,6 @@ export default function BlockSuiteCanvasHost({
     }
   };
 
-  const handleRestoreSavedRevision = async () => {
-    const savedSnapshot = initialState.savedSnapshot;
-    if (!savedSnapshot || !hostRef.current) return;
-    try {
-      setIsReady(false);
-      setStatus("Restoring the last saved revision…");
-      const snapshot = JSON.parse(savedSnapshot);
-      const restored = await importDocSnapshot(snapshot);
-      if (!restored) {
-        throw new Error("snapshot import returned null");
-      }
-      ensureEdgelessRoot(restored);
-      attachDoc(hostRef.current, restored);
-      const ready = await finishCanvasInitialization("Restored the last saved revision.");
-      if (!ready) return;
-      currentSnapshotRef.current = savedSnapshot;
-      setSaveError(null);
-      latestStateRef.current = {
-        ...latestStateRef.current,
-        draftSnapshot: savedSnapshot,
-      };
-      onStateLoaded(latestStateRef.current);
-      await syncCanvasBlocks(restored);
-    } catch (error) {
-      const message = `Failed to restore the last saved revision: ${String(error)}`;
-      setSaveError(message);
-      onError(message);
-    }
-  };
-
   const handleAddMenuSelect = async (key: string) => {
     setAddMenuOpen(false);
     if (key === "note") {
@@ -1848,114 +1789,6 @@ export default function BlockSuiteCanvasHost({
     return { ok: true, snapshot };
   }, [getEditor, getRootService, overlayMountElement]);
 
-  const getSelectedCanvasContext = useCallback((): CanvasSelectionContext => {
-    const rootService = getRootService();
-    const editor = getEditor();
-    if (!rootService && !editor) {
-      return {
-        refs: [],
-        elementIds: [],
-      };
-    }
-    const selectedIds = getSelectedCanvasElements(editor, rootService).ids;
-    const selectedSet = new Set(selectedIds);
-    const refsById = new Map(blockRecords.map((ref) => [ref.blockId, ref]));
-    const refs = selectedIds.map((id: string) => {
-      const ref = refsById.get(id);
-      const meta = readCanvasMeta(id, getDoc(), blockRecords);
-      const title =
-        (typeof meta?.title === "string" && meta.title.trim() ? meta.title.trim() : null)
-        ?? ref?.sourceKey
-        ?? fallbackTitle(meta?.kind, id);
-      const kind = normalizeBlockKind(
-        typeof meta?.kind === "string" ? meta.kind : ref?.blockKind ?? "note",
-      );
-      const sourcePath =
-        typeof meta?.sourcePath === "string" && meta.sourcePath.trim()
-          ? meta.sourcePath
-          : ref?.sourcePath ?? null;
-      if (!selectedSet.has(id)) return null;
-      return {
-        blockId: id,
-        title,
-        sourcePath,
-        blockKind: kind,
-        meta,
-      };
-    }).filter((item: CanvasSelectionRef | null): item is CanvasSelectionRef => Boolean(item));
-    return {
-      refs,
-      elementIds: selectedIds,
-    };
-  }, [blockRecords, getDoc, getEditor, getRootService]);
-
-  const buildSelectionContext = useCallback(async () => {
-    const { refs, elementIds } = getSelectedCanvasContext();
-    if (refs.length === 0) return null;
-    const selectionSummary = renderSelectionSummaryMarkdown(refs);
-    const summaryPath = await createCanvasContextFile({
-      sessionId,
-      kind: "selection",
-      fileNamePrefix: "canvas-selection",
-      content: selectionSummary,
-    });
-    const attachments: ComposerAttachment[] = [
-      {
-        path: summaryPath,
-        kind: "file",
-        mimeType: "text/markdown",
-        previewDataUrl: null,
-        displayName: "Canvas selection summary",
-        name: "Canvas selection summary",
-      },
-    ];
-    const workflowRefs = refs.filter((ref) => ref.blockKind === "workflow_card");
-    for (const workflow of workflowRefs) {
-      const workflowMarkdown = renderWorkflowSummaryMarkdown(workflow.meta ?? {}, workflow.title);
-      const workflowPath = await createCanvasContextFile({
-        sessionId,
-        kind: "workflow",
-        fileNamePrefix: safeFilePrefix(workflow.title),
-        content: workflowMarkdown,
-      });
-      attachments.push({
-        path: workflowPath,
-        kind: "file",
-        mimeType: "text/markdown",
-        previewDataUrl: null,
-        displayName: `${workflow.title} workflow summary`,
-        name: `${workflow.title} workflow summary`,
-      });
-    }
-    const snapshotResult = await exportSelectionSnapshot();
-    if (snapshotResult.ok) attachments.push(snapshotResult.snapshot.attachment);
-    const canvasContext: CanvasContextOption = {
-      canvasId: initialState.document.id,
-      scope: "selection",
-      blockIds: refs.map((ref) => ref.blockId),
-      elementIds,
-      snapshotAttachmentPath: snapshotResult.ok ? snapshotResult.snapshot.path : null,
-      refs: refs.map((ref) => {
-        const record = blockRecords.find((item) => item.blockId === ref.blockId);
-        return record
-          ? canvasBlockRecordToContextRef(record)
-          : {
-              blockId: ref.blockId,
-              blockKind: ref.blockKind,
-              sourceType: "note",
-              sourcePath: ref.sourcePath,
-              sourceKey: ref.title,
-              summary: ref.title,
-            };
-      }),
-    };
-    return {
-      refs,
-      attachments,
-      canvasContext,
-    };
-  }, [blockRecords, exportSelectionSnapshot, getSelectedCanvasContext, initialState.document.id, sessionId]);
-
   const attachSelectionSnapshot = useCallback(async (elementIds?: string[] | null) => {
     setBridgeBusy("snapshot");
     try {
@@ -1977,50 +1810,6 @@ export default function BlockSuiteCanvasHost({
       setBridgeBusy(null);
     }
   }, [composer, exportSelectionSnapshot, showSnapshotToast]);
-
-  const askSelection = async () => {
-    setBridgeBusy("ask");
-    try {
-      const payload = await buildSelectionContext();
-      if (!payload) {
-        onError("Select one or more canvas items before asking about the canvas.");
-        return;
-      }
-      const prompt =
-        composer.text.trim() ||
-        `Help me reason about these ${payload.refs.length} selected canvas item${payload.refs.length === 1 ? "" : "s"}.`;
-      const sent = await composer.sendWithContext(prompt, {
-        clearComposer: true,
-        attachments: [...composer.attachments, ...payload.attachments],
-        runtimeOptions: {
-          canvasContext: payload.canvasContext,
-        },
-      });
-      if (!sent.ok) {
-        onError("Failed to send the canvas selection to the agent.");
-        return;
-      }
-      const turnId = sent.turnId ?? `canvas-selection:${Date.now()}`;
-      const anchor = await createCanvasAnchor({
-        sessionId,
-        anchorBlockId: payload.refs[0]?.blockId ?? null,
-        selectionBlockIdsJson: JSON.stringify(payload.refs.map((ref) => ref.blockId)),
-        selectionElementIdsJson: JSON.stringify(payload.canvasContext.elementIds),
-        turnId,
-        summary: payload.refs.map((ref) => ref.title).join(", ").slice(0, 180),
-      });
-      const nextState = {
-        ...latestStateRef.current,
-        anchors: [anchor, ...latestStateRef.current.anchors],
-      };
-      latestStateRef.current = nextState;
-      onStateLoaded(nextState);
-    } catch (error) {
-      onError(`Failed to ask about the current selection: ${String(error)}`);
-    } finally {
-      setBridgeBusy(null);
-    }
-  };
 
   useEffect(() => {
     const requestId = selectedFileRequest?.requestId ?? null;
@@ -2046,6 +1835,22 @@ export default function BlockSuiteCanvasHost({
 
   useEffect(() => {
     if (!isReady) return;
+    const handleGroupSelection = () => {
+      groupSelection();
+    };
+    const handleUngroupSelection = () => {
+      ungroupSelection();
+    };
+    window.addEventListener(CANVAS_GROUP_SELECTION_EVENT, handleGroupSelection);
+    window.addEventListener(CANVAS_UNGROUP_SELECTION_EVENT, handleUngroupSelection);
+    return () => {
+      window.removeEventListener(CANVAS_GROUP_SELECTION_EVENT, handleGroupSelection);
+      window.removeEventListener(CANVAS_UNGROUP_SELECTION_EVENT, handleUngroupSelection);
+    };
+  }, [groupSelection, isReady, ungroupSelection]);
+
+  useEffect(() => {
+    if (!isReady) return;
     let lastHandledAt = 0;
     const handleCanvasSnapshotSelection = (event: Event) => {
       const now = Date.now();
@@ -2066,86 +1871,44 @@ export default function BlockSuiteCanvasHost({
 
   return (
     <div className="absolute inset-0 flex min-h-0 flex-col">
-      <div className="flex h-9 shrink-0 items-center justify-between gap-3 border-b border-ink/8 bg-surface-panel/90 px-4">
-        <div className="flex items-center gap-3 text-caption text-ink/50">
-          <button
-            ref={addMenuButtonRef}
-            type="button"
-            onClick={() => setAddMenuOpen((value) => !value)}
-            className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/12 px-3 text-ink/72 transition hover:bg-ink/5"
-          >
-            <Layers3 className="h-3.5 w-3.5" />
-            Add to canvas
-          </button>
-          <button
-            ref={editedFilesButtonRef}
-            type="button"
-            onClick={openEditedFilesPicker}
-            disabled={changedFiles.length === 0}
-            className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-3 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <FilePlus2 className="h-3.5 w-3.5" />
-            Add edited files
-          </button>
-        </div>
-        <div className="flex items-center gap-2 text-caption">
-          <span className="inline-flex h-6 items-center rounded-md border border-ink/10 px-2.5 text-ink/55">
-            {selectionCount > 0 ? `${selectionCount} selected` : isReady ? status : "Canvas"}
-          </span>
-          <button
-            type="button"
-            onClick={() => void askSelection()}
-            disabled={selectionCount === 0 || bridgeBusy !== null}
-            className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-2.5 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <MessageCircleQuestionMark className="h-3.5 w-3.5" />
-            Ask selection
-          </button>
-          <button
-            type="button"
-            onClick={() => void attachSelectionSnapshot()}
-            disabled={selectionCount === 0 || bridgeBusy !== null}
-            className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-2.5 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Camera className="h-3.5 w-3.5" />
-            Attach snapshot
-          </button>
-          <button
-            type="button"
-            onClick={groupSelection}
-            disabled={selectionCount < 2}
-            className="inline-flex h-6 items-center rounded-md border border-ink/10 px-2.5 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Group
-          </button>
-          <button
-            type="button"
-            onClick={ungroupSelection}
-            disabled={!canUngroupSelection}
-            className="inline-flex h-6 items-center rounded-md border border-ink/10 px-2.5 text-ink/60 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Ungroup
-          </button>
-          {initialState.savedSnapshot && (
-            <button
-              type="button"
-              onClick={() => void handleRestoreSavedRevision()}
-              className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-2.5 text-ink/65 transition hover:bg-ink/5"
-            >
-              <RefreshCcw className="h-3.5 w-3.5" />
-              Restore
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => void handleSaveRevision()}
-            disabled={!isReady || isSaving}
-            className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-2.5 text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {isReady ? <Save className="h-3.5 w-3.5" /> : <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
-            Save
-          </button>
-        </div>
+      <div className="relative flex h-9 shrink-0 items-center gap-3 bg-surface-panel/90 px-4 text-caption text-ink/50 after:pointer-events-none after:absolute after:inset-x-4 after:bottom-0 after:h-px after:bg-gradient-to-r after:from-transparent after:via-ink/[0.1] after:to-transparent">
+        <button
+          ref={addMenuButtonRef}
+          type="button"
+          onClick={() => setAddMenuOpen((value) => !value)}
+          className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-3 text-ink/70 transition hover:bg-ink/5"
+        >
+          <Layers3 className="h-3.5 w-3.5" />
+          Add to canvas
+        </button>
+        <button
+          ref={editedFilesButtonRef}
+          type="button"
+          onClick={openEditedFilesPicker}
+          disabled={changedFiles.length === 0}
+          className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-3 text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <FilePlus2 className="h-3.5 w-3.5" />
+          Add edited files
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleSaveRevision()}
+          disabled={!isReady || isSaving}
+          className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-2.5 text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {isReady ? <Save className="h-3.5 w-3.5" /> : <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
+          Save
+        </button>
+      </div>
+      <div
+        className="sr-only"
+        aria-live="polite"
+        data-bridge-busy={bridgeBusy ?? "idle"}
+        data-can-ungroup={canUngroupSelection ? "true" : "false"}
+        data-selection-count={selectionCount}
+      >
+        {saveError ?? status}
       </div>
       {saveError && (
         <div className="mx-4 mt-3 rounded-xl border border-status-error/20 bg-status-error/8 px-3 py-2 text-caption text-status-error">
@@ -2288,92 +2051,6 @@ function resolveCanvasFilePath(path: string, workspacePath: string | null): stri
   const trimmedRoot = workspacePath.replace(/[\\/]+$/, "");
   const trimmedPath = path.replace(/^[\\/]+/, "");
   return `${trimmedRoot}${separator}${trimmedPath}`;
-}
-
-function normalizeBlockKind(value: string): CanvasBlockKind {
-  switch (value) {
-    case "markdown_preview":
-    case "file_card":
-    case "workflow_card":
-    case "note":
-    case "group":
-    case "image":
-      return value;
-    default:
-      return "note";
-  }
-}
-
-function fallbackTitle(kind: unknown, blockId: string): string {
-  if (kind === "workflow_card") return "Workflow";
-  if (kind === "file_card") return "File";
-  if (kind === "markdown_preview") return "Markdown preview";
-  if (kind === "image") return "Image";
-  if (kind === "group") return "Group";
-  return blockId ? `Block ${blockId.slice(0, 6)}` : "Canvas note";
-}
-
-function readCanvasMeta(
-  blockId: string,
-  doc: ReturnType<typeof createBlockSuiteDoc>["doc"] | null,
-  blockRecords: CanvasBlockRecord[],
-): Record<string, unknown> | null {
-  const model = doc?.getModelById(blockId) as (Record<string, unknown> & { flavour?: string; caption?: string }) | null;
-  if (model) {
-    if (model.flavour === "sessio:markdown-preview") {
-      return {
-        kind: "markdown_preview",
-        title: model.title,
-        sourcePath: model.sourcePath,
-        sourceType: model.sourceType,
-        excerpt: model.excerpt,
-        renderMode: model.renderMode,
-      };
-    }
-    if (model.flavour === "sessio:file-card") {
-      return {
-        kind: "file_card",
-        title: model.title,
-        sourcePath: model.sourcePath,
-        sourceType: model.sourceType,
-        subtitle: model.subtitle,
-        summary: model.summary,
-        status: model.status,
-      };
-    }
-    if (model.flavour === "sessio:workflow-card") {
-      return {
-        kind: "workflow_card",
-        title: model.title,
-        threadId: model.threadId,
-        threadStageId: model.threadStageId,
-        workflowSummaryMarkdown: model.workflowSummaryMarkdown,
-        executionState: model.executionState,
-        lastRunId: model.lastRunId,
-        threadGoal: model.threadGoal,
-        workflowSnapshotJson: model.workflowSnapshotJson,
-      };
-    }
-    if (model.flavour === "affine:note") {
-      return {
-        kind: "note",
-        title: blockRecords.find(item => item.blockId === blockId)?.sourceKey ?? "New note",
-      };
-    }
-    if (model.flavour === "affine:image") {
-      return {
-        kind: "image",
-        title: typeof model.caption === "string" && model.caption.trim() ? model.caption.trim() : "Image",
-      };
-    }
-  }
-  const record = blockRecords.find((item) => item.blockId === blockId);
-  return tryParseJson(record?.metadataJson);
-}
-
-function safeFilePrefix(value: string): string {
-  const cleaned = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  return cleaned || "canvas";
 }
 
 async function saveBlobAsAttachment(blob: Blob, fileName: string): Promise<string> {
