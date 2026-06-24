@@ -221,6 +221,11 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
         : "overflow-y-scroll overflow-x-hidden";
   const viewportFlexClass =
     orientation === "horizontal" ? "flex-none" : "flex-1";
+  const stopWheelPropagation = captureWheelInteraction
+    ? (event: React.WheelEvent<HTMLDivElement>) => {
+        event.stopPropagation();
+      }
+    : undefined;
 
   return (
     <div
@@ -245,13 +250,8 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
           " " +
           (viewportClassName ?? "")
         }
-        onWheel={
-          captureWheelInteraction
-            ? (event) => {
-                event.stopPropagation();
-              }
-            : undefined
-        }
+        onWheelCapture={stopWheelPropagation}
+        onWheel={stopWheelPropagation}
       >
         {children}
       </div>

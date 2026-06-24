@@ -1,6 +1,7 @@
 import {
   createElement,
   isValidElement,
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -230,7 +231,7 @@ export default function PlainMarkdownPreview({
         className="sessio-plain-editor-preview-content markdown-content"
         data-theme-type={themeType}
       >
-        <PlainMarkdownPreviewContent
+        <MemoizedPlainMarkdownPreviewContent
           text={text}
           components={components}
           filePath={filePath}
@@ -257,11 +258,21 @@ export function PlainMarkdownPreviewContent({
     () => components ?? createMarkdownComponents(themeType, filePath),
     [components, filePath, themeType],
   );
+  const allowRawHtml = useMemo(() => isMarkdownLikePreviewPath(filePath), [filePath]);
+  const rehypePlugins = useMemo(
+    () =>
+      (
+        allowRawHtml
+          ? [rehypeRaw, [rehypeSanitizeRenderedHtml, filePath], rehypeKatex]
+          : [[rehypeSanitizeRenderedHtml, filePath], rehypeKatex]
+      ) as Parameters<typeof ReactMarkdown>[0]["rehypePlugins"],
+    [allowRawHtml, filePath],
+  );
 
   return (
     <ReactMarkdown
       remarkPlugins={[[remarkGfm, { singleTilde: false }], remarkBreaks, remarkMath, remarkSuperSub]}
-      rehypePlugins={[rehypeRaw, [rehypeSanitizeRenderedHtml, filePath], rehypeKatex]}
+      rehypePlugins={rehypePlugins}
       components={resolvedComponents}
       urlTransform={(url) => markdownUrlTransform(url, filePath)}
     >
@@ -269,6 +280,15 @@ export function PlainMarkdownPreviewContent({
     </ReactMarkdown>
   );
 }
+
+const MemoizedPlainMarkdownPreviewContent = memo(
+  PlainMarkdownPreviewContent,
+  (prev, next) =>
+    prev.text === next.text &&
+    prev.components === next.components &&
+    prev.filePath === next.filePath &&
+    prev.themeType === next.themeType,
+);
 
 type MdastNode = {
   type: string;
@@ -336,6 +356,19 @@ function parseScriptSyntax(text: string): MdastNode[] {
 
 function normalizePreviewMarkdown(text: string): string {
   return coalesceBrokenMarkdownImageLinks(text);
+}
+
+function isMarkdownLikePreviewPath(path: string | null | undefined): boolean {
+  if (!path) return true;
+  const lower = (path ?? "").toLowerCase();
+  return (
+    lower.endsWith(".md") ||
+    lower.endsWith(".markdown") ||
+    lower.endsWith(".mdx") ||
+    lower.endsWith(".mkd") ||
+    lower.endsWith(".mdown") ||
+    lower.endsWith(".qmd")
+  );
 }
 
 function coalesceBrokenMarkdownImageLinks(text: string): string {
@@ -523,7 +556,7 @@ function PlainPreviewImage({
 
 function createThemedPreviewElement(themeType: PreviewThemeType) {
   return function themedElement(tagName: keyof HTMLElementTagNameMap) {
-    return function ThemedPreviewElement({
+    return function themedElementRenderer({
       node: _node,
       children,
       style,
@@ -533,14 +566,11 @@ function createThemedPreviewElement(themeType: PreviewThemeType) {
       node?: unknown;
       style?: CSSProperties;
     }) {
-      return createElement(
-        tagName,
-        {
-          ...props,
-          style: adaptPreviewInlineStyle(style, themeType),
-        },
+      return createElement(tagName, {
+        ...props,
+        style: adaptPreviewInlineStyle(style, themeType),
         children,
-      );
+      });
     };
   };
 }

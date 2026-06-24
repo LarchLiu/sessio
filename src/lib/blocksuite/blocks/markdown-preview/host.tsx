@@ -81,6 +81,12 @@ export function MarkdownPreviewHost({
     () => excerpt.trim() || "No markdown summary available.",
     [excerpt],
   );
+  const capturePreviewWheel = shouldLoadPreview && selected;
+  const stopPreviewWheelPropagation = capturePreviewWheel
+    ? (event: React.WheelEvent<HTMLDivElement>) => {
+        event.stopPropagation();
+      }
+    : undefined;
 
   return (
     <div className={"h-full w-full overflow-hidden rounded-[20px] border border-ink/10 bg-surface-panel/95 text-ink/80 shadow-[0_16px_40px_rgba(18,24,33,0.08)] " + overlayRootClassName}>
@@ -132,6 +138,8 @@ export function MarkdownPreviewHost({
             "flex h-[calc(100%-57px)] min-h-0 overflow-hidden overscroll-contain px-4 py-3 " +
             overlayContentClassName
           }
+          onWheelCapture={stopPreviewWheelPropagation}
+          onWheel={stopPreviewWheelPropagation}
         >
           {loading && <div className="text-caption text-ink/52">Loading markdown preview…</div>}
           {!loading && error && <div className="text-caption text-status-error">{error}</div>}
@@ -140,11 +148,9 @@ export function MarkdownPreviewHost({
               text={content}
               filePath={resolvedSourcePath}
               interactionMode={
-                interactionMode !== "overlay"
-                  ? "default"
-                  : selected
-                    ? "capture-wheel"
-                    : "thumbs-only"
+                capturePreviewWheel
+                  ? "capture-wheel"
+                  : "thumbs-only"
               }
             />
           )}
