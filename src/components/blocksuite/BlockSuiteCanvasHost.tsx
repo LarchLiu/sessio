@@ -46,8 +46,16 @@ import {
   workflowSnapshotToMarkdown,
 } from "../../lib/blocksuite/persistence";
 import type { MarkdownPreviewBlockModel } from "../../lib/blocksuite/blocks/markdown-preview";
-import type { FileCardBlockModel } from "../../lib/blocksuite/blocks/file-card";
-import type { WorkflowCardBlockModel } from "../../lib/blocksuite/blocks/workflow-card";
+import {
+  DEFAULT_FILE_CARD_HEIGHT,
+  DEFAULT_FILE_CARD_WIDTH,
+  type FileCardBlockModel,
+} from "../../lib/blocksuite/blocks/file-card";
+import {
+  DEFAULT_WORKFLOW_CARD_HEIGHT,
+  DEFAULT_WORKFLOW_CARD_WIDTH,
+  type WorkflowCardBlockModel,
+} from "../../lib/blocksuite/blocks/workflow-card";
 import {
   CANVAS_SNAPSHOT_SELECTION_EVENT,
   type CanvasSnapshotSelectionEventDetail,
@@ -61,6 +69,8 @@ const ROOT_SERVICE_RETRY_MS = 80;
 const ROOT_SERVICE_RETRY_LIMIT = 125;
 const BOX_SELECTING_CLASS_NAME = "sessio-box-selecting";
 const SNAPSHOT_CAPTURING_CLASS_NAME = "sessio-snapshot-capturing";
+const CANVAS_NODE_PADDING = 32;
+const CANVAS_PLACEMENT_SEARCH_RADIUS = 64;
 
 type BlockSuiteEditor = HTMLElement & {
   std?: {
@@ -150,6 +160,12 @@ type SnapshotExportFailureReason =
   | "save-failed";
 
 type SnapshotProgress = (message: string) => void;
+
+type CanvasPlacementSpec = {
+  width: number;
+  height: number;
+  anchor?: [number, number];
+};
 
 function withTimeout<T>(
   promise: Promise<T>,
@@ -578,6 +594,7 @@ function snapshotToJson(doc: ReturnType<typeof createBlockSuiteDoc>["doc"]) {
 function addEdgelessNote(
   rootService: EdgelessRootService,
   editor: BlockSuiteEditor,
+  bound?: Bound,
 ) {
   const std = editor.std;
   if (!std) {
@@ -593,20 +610,196 @@ function addEdgelessNote(
   const center = rootService.viewport.center;
   const [viewX, viewY] = gfx.viewport.toViewCoord(center.x, center.y);
   const [modelX, modelY] = gfx.viewport.toModelCoord(viewX, viewY);
+  const noteBound = bound ?? new Bound(
+    modelX - DEFAULT_NOTE_WIDTH / 2,
+    modelY - DEFAULT_NOTE_HEIGHT / 2,
+    DEFAULT_NOTE_WIDTH,
+    DEFAULT_NOTE_HEIGHT,
+  );
 
   return crud.addBlock(
     "affine:note",
     {
       xywh: serializeXYWH(
-        modelX - DEFAULT_NOTE_WIDTH / 2,
-        modelY - DEFAULT_NOTE_HEIGHT / 2,
-        DEFAULT_NOTE_WIDTH,
-        DEFAULT_NOTE_HEIGHT,
+        noteBound.x,
+        noteBound.y,
+        noteBound.w,
+        noteBound.h,
       ),
       displayMode: NoteDisplayMode.EdgelessOnly,
     },
     rootService.surface.id,
   );
+}
+
+function boundFromModelXYWH(model: { xywh?: string } | null | undefined): Bound | null {
+  if (!model?.xywh) return null;
+  try {
+    return Bound.deserialize(model.xywh);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeCanvasFileKey(path: string | null | undefined, workspacePath: string | null): string | null {
+  const trimmed = path?.trim();
+  if (!trimmed) return null;
+  const resolved = resolveCanvasFilePath(trimmed, workspacePath) ?? trimmed;
+  const normalized = normalizePathSegment(resolved);
+  return /^[a-zA-Z]:\//.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+function collectCanvasOccupiedBounds(doc: ReturnType<typeof createBlockSuiteDoc>["doc"]): Bound[] {
+  const occupied: Bound[] = [];
+  const seen = new Set<string>();
+  const pushBound = (bound: Bound | null) => {
+    if (!bound) return;
+    const key = `${bound.x}:${bound.y}:${bound.w}:${bound.h}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    occupied.push(bound);
+  };
+
+  const blockModels = doc.getBlocksByFlavour([
+    "sessio:markdown-preview",
+    "sessio:file-card",
+    "sessio:workflow-card",
+    "affine:note",
+    "affine:image",
+  ]);
+  for (const block of blockModels) {
+    pushBound(boundFromModelXYWH(block.model as { xywh?: string } | null));
+  }
+
+  const surface = doc.getBlocksByFlavour("affine:surface")[0]?.model as {
+    elementModels?: unknown[];
+  } | null;
+  if (Array.isArray(surface?.elementModels)) {
+    for (const element of surface.elementModels) {
+      pushBound(getSelectableBound(element as EdgelessSelectable));
+    }
+  }
+
+  return occupied;
+}
+
+function getExistingCanvasFileBlockIds(
+  doc: ReturnType<typeof createBlockSuiteDoc>["doc"],
+  workspacePath: string | null,
+): Map<string, string[]> {
+  const existing = new Map<string, string[]>();
+  const fileBlocks = doc.getBlocksByFlavour([
+    "sessio:file-card",
+    "sessio:markdown-preview",
+  ]);
+  for (const block of fileBlocks) {
+    const model = block.model as { id: string; sourcePath?: string | null };
+    const key = normalizeCanvasFileKey(model.sourcePath ?? null, workspacePath);
+    if (!key) continue;
+    const ids = existing.get(key);
+    if (ids) {
+      ids.push(model.id);
+    } else {
+      existing.set(key, [model.id]);
+    }
+  }
+  return existing;
+}
+
+function boundsOverlapWithPadding(a: Bound, b: Bound, padding: number): boolean {
+  return (
+    a.x < b.x + b.w + padding &&
+    a.x + a.w + padding > b.x &&
+    a.y < b.y + b.h + padding &&
+    a.y + a.h + padding > b.y
+  );
+}
+
+function canPlaceCanvasBound(candidate: Bound, occupied: Bound[], padding: number): boolean {
+  return occupied.every((bound) => !boundsOverlapWithPadding(candidate, bound, padding));
+}
+
+function* iteratePlacementGrid(radiusLimit: number): Generator<[number, number]> {
+  yield [0, 0];
+  for (let radius = 1; radius <= radiusLimit; radius += 1) {
+    for (let x = -radius; x <= radius; x += 1) {
+      yield [x, -radius];
+    }
+    for (let y = -radius + 1; y <= radius; y += 1) {
+      yield [radius, y];
+    }
+    for (let x = radius - 1; x >= -radius; x -= 1) {
+      yield [x, radius];
+    }
+    for (let y = radius - 1; y > -radius; y -= 1) {
+      yield [-radius, y];
+    }
+  }
+}
+
+function findAvailableCanvasBound(
+  occupied: Bound[],
+  spec: CanvasPlacementSpec,
+  fallbackAnchor: [number, number],
+  padding: number,
+): Bound {
+  const anchor = spec.anchor ?? fallbackAnchor;
+  const stepX = spec.width + padding;
+  const stepY = spec.height + padding;
+  for (const [gridX, gridY] of iteratePlacementGrid(CANVAS_PLACEMENT_SEARCH_RADIUS)) {
+    const candidate = Bound.fromCenter(
+      [anchor[0] + gridX * stepX, anchor[1] + gridY * stepY],
+      spec.width,
+      spec.height,
+    );
+    if (canPlaceCanvasBound(candidate, occupied, padding)) {
+      return candidate;
+    }
+  }
+  return Bound.fromCenter(
+    [anchor[0], anchor[1] + (occupied.length + 1) * stepY],
+    spec.width,
+    spec.height,
+  );
+}
+
+function placeCanvasNodes(
+  doc: ReturnType<typeof createBlockSuiteDoc>["doc"],
+  rootService: EdgelessRootService,
+  specs: CanvasPlacementSpec[],
+  padding = CANVAS_NODE_PADDING,
+): Bound[] {
+  const viewportCenter = rootService.viewport.center;
+  const fallbackAnchor: [number, number] = [viewportCenter.x, viewportCenter.y];
+  const occupied = collectCanvasOccupiedBounds(doc);
+  return specs.map((spec) => {
+    const bound = findAvailableCanvasBound(occupied, spec, fallbackAnchor, padding);
+    occupied.push(bound);
+    return bound;
+  });
+}
+
+function readBlobImageSize(blob: Blob): Promise<{ width: number; height: number }> {
+  return new Promise((resolve) => {
+    if (!blob.type.startsWith("image/")) {
+      resolve({ width: 0, height: 0 });
+      return;
+    }
+    const objectUrl = URL.createObjectURL(blob);
+    const image = new Image();
+    image.onload = () => {
+      resolve({
+        width: image.width,
+        height: image.height,
+      });
+      URL.revokeObjectURL(objectUrl);
+    };
+    image.onerror = () => {
+      resolve({ width: 0, height: 0 });
+      URL.revokeObjectURL(objectUrl);
+    };
+    image.src = objectUrl;
+  });
 }
 
 export default function BlockSuiteCanvasHost({
@@ -663,6 +856,21 @@ export default function BlockSuiteCanvasHost({
   const changedFiles = useMemo(
     () => Array.from(new Set(editedFiles.map((path) => path.trim()).filter(Boolean))),
     [editedFiles],
+  );
+  const canvasFileKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const record of initialState.blockRecords) {
+      const key = normalizeCanvasFileKey(record.sourcePath, workspacePath);
+      if (key) keys.add(key);
+    }
+    return keys;
+  }, [initialState.blockRecords, workspacePath]);
+  const availableEditedFiles = useMemo(
+    () => changedFiles.filter((path) => {
+      const key = normalizeCanvasFileKey(path, workspacePath);
+      return !key || !canvasFileKeys.has(key);
+    }),
+    [canvasFileKeys, changedFiles, workspacePath],
   );
   const lastSavedRevision = initialState.savedRevision?.revision ?? null;
 
@@ -940,11 +1148,11 @@ export default function BlockSuiteCanvasHost({
   }, [attachBoxSelectingObserver, clearBoxSelectingObserver, scheduleAutosave, scheduleSelectionStateUpdate, scheduleSyncBlocks, updateSelectionState, waitForRootService]);
 
   const openEditedFilesPicker = () => {
-    if (changedFiles.length === 0) return;
+    if (availableEditedFiles.length === 0) return;
     setPendingEditedFiles((current) => (
       current.length > 0
-        ? current.filter((path) => changedFiles.includes(path))
-        : changedFiles
+        ? current.filter((path) => availableEditedFiles.includes(path))
+        : availableEditedFiles
     ));
     setEditedFilesPickerOpen(true);
   };
@@ -991,45 +1199,91 @@ export default function BlockSuiteCanvasHost({
       onError("This session is not linked to a workspace, so files can not be added to the canvas.");
       return false;
     }
-    const uniquePaths = Array.from(new Set(paths.map((path) => path.trim()).filter(Boolean)));
-    const center = rootService.viewport.center;
+    const requestedFiles = new Map<string, { inputPath: string; absolutePath: string }>();
+    for (const path of paths.map((item) => item.trim()).filter(Boolean)) {
+      const absolutePath = resolveCanvasFilePath(path, workspacePath);
+      if (!absolutePath) {
+        onError(`Failed to add file card for ${path}: file path is unavailable`);
+        continue;
+      }
+      const key = normalizeCanvasFileKey(absolutePath, workspacePath) ?? normalizePathSegment(absolutePath);
+      if (!requestedFiles.has(key)) {
+        requestedFiles.set(key, {
+          inputPath: path,
+          absolutePath,
+        });
+      }
+    }
+
+    const existingByPath = getExistingCanvasFileBlockIds(doc, workspacePath);
+    const focusBlockIds = new Set<string>();
+    const filesToInsert: Array<{ inputPath: string; absolutePath: string; key: string }> = [];
+    let duplicateCount = 0;
+    for (const [key, file] of requestedFiles.entries()) {
+      const existingIds = existingByPath.get(key) ?? [];
+      if (existingIds.length > 0) {
+        duplicateCount += 1;
+        for (const id of existingIds) {
+          focusBlockIds.add(id);
+        }
+        continue;
+      }
+      filesToInsert.push({ ...file, key });
+    }
+
+    const plannedBounds = placeCanvasNodes(
+      doc,
+      rootService,
+      filesToInsert.map(() => ({
+        width: DEFAULT_FILE_CARD_WIDTH,
+        height: DEFAULT_FILE_CARD_HEIGHT,
+      })),
+    );
     let addedCount = 0;
     const insertedBlockIds: string[] = [];
-    for (const [index, path] of uniquePaths.entries()) {
+    for (const [index, fileToInsert] of filesToInsert.entries()) {
       try {
-        const absolutePath = resolveCanvasFilePath(path, workspacePath);
-        if (!absolutePath) throw new Error("file path is unavailable");
-        const file = await readWorkspaceTextFile(workspacePath, absolutePath).catch(() => null);
-        const title = absolutePath.split(/[/\\]/).pop() ?? absolutePath;
-        const bound = Bound.fromCenter(
-          [center.x + (index % 3) * 360, center.y + Math.floor(index / 3) * 156],
-          340,
-          144,
-        );
+        const file = await readWorkspaceTextFile(workspacePath, fileToInsert.absolutePath).catch(() => null);
+        const title = fileToInsert.absolutePath.split(/[/\\]/).pop() ?? fileToInsert.absolutePath;
+        const bound = plannedBounds[index];
         const blockId = insertEdgelessBlock(
           "sessio:file-card",
           {
             title,
-            sourcePath: absolutePath,
-            sourceType: resolveFileSourceType(path),
-            subtitle: absolutePath,
+            sourcePath: fileToInsert.absolutePath,
+            sourceType: resolveFileSourceType(fileToInsert.inputPath),
+            subtitle: fileToInsert.absolutePath,
             summary: summarizeText(file?.content ?? "", 260),
             status: file ? "ready" : "unavailable",
-            contentVersion: file ? `${absolutePath}:${file.mtimeMs}` : absolutePath,
+            contentVersion: file ? `${fileToInsert.absolutePath}:${file.mtimeMs}` : fileToInsert.absolutePath,
             xywh: bound.serialize(),
           },
         );
         insertedBlockIds.push(blockId);
+        focusBlockIds.add(blockId);
         addedCount += 1;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        onError(`Failed to add file card for ${path}: ${message}`);
+        onError(`Failed to add file card for ${fileToInsert.inputPath}: ${message}`);
       }
     }
+
+    const finalFocusBlockIds = Array.from(focusBlockIds);
+    if (finalFocusBlockIds.length > 0) {
+      focusBlocksInViewport(rootService, doc, finalFocusBlockIds);
+    }
     if (addedCount === 0) {
+      if (duplicateCount > 0) {
+        setStatus(
+          duplicateCount === 1
+            ? "File is already on the canvas."
+            : `${duplicateCount} files are already on the canvas.`,
+        );
+        updateSelectionState();
+        return true;
+      }
       return false;
     }
-    focusBlocksInViewport(rootService, doc, insertedBlockIds);
     const snapshotJson = snapshotToJson(doc);
     if (!snapshotJson) {
       onError("Canvas snapshot export failed after adding file cards.");
@@ -1037,7 +1291,11 @@ export default function BlockSuiteCanvasHost({
     }
     await flushSaveRef.current(snapshotJson);
     await syncCanvasBlocks(doc);
-    setStatus(`Added ${addedCount} file card${addedCount === 1 ? "" : "s"} to canvas.`);
+    setStatus(
+      duplicateCount > 0
+        ? `Added ${addedCount} file card${addedCount === 1 ? "" : "s"} to canvas. Skipped ${duplicateCount} duplicate file${duplicateCount === 1 ? "" : "s"}.`
+        : `Added ${addedCount} file card${addedCount === 1 ? "" : "s"} to canvas.`,
+    );
     updateSelectionState();
     return true;
   }, [getDoc, insertEdgelessBlock, onError, resolveFileSourceType, syncCanvasBlocks, updateSelectionState, waitForRootService, workspacePath]);
@@ -1053,7 +1311,11 @@ export default function BlockSuiteCanvasHost({
     const editor = getEditor();
     const doc = getDoc();
     if (!rootService || !editor || !doc) return;
-    const noteId = addEdgelessNote(rootService, editor);
+    const [noteBound] = placeCanvasNodes(doc, rootService, [{
+      width: DEFAULT_NOTE_WIDTH,
+      height: DEFAULT_NOTE_HEIGHT,
+    }]);
+    const noteId = addEdgelessNote(rootService, editor, noteBound);
     const note = doc.getModelById(noteId);
     if (note) {
       doc.updateBlock(note, {
@@ -1065,7 +1327,9 @@ export default function BlockSuiteCanvasHost({
 
   const addImageNode = useCallback(async () => {
     const editor = getEditor();
-    if (!editor) return;
+    const doc = getDoc();
+    const rootService = getRootService();
+    if (!editor || !doc || !rootService) return;
     try {
       const selection = await open({
         multiple: true,
@@ -1079,19 +1343,40 @@ export default function BlockSuiteCanvasHost({
       });
       if (!selection) return;
       const paths = Array.isArray(selection) ? selection : [selection];
-      const files = await Promise.all(paths.map(async (path) => {
+      const imageFiles = await Promise.all(paths.map(async (path) => {
         const response = await fetch(convertFileSrc(path));
         const blob = await response.blob();
-        return new File([blob], path.split(/[/\\]/).pop() ?? "image", {
-          type: blob.type || "image/png",
-        });
+        const size = await readBlobImageSize(blob);
+        return {
+          file: new File([blob], path.split(/[/\\]/).pop() ?? "image", {
+            type: blob.type || "image/png",
+          }),
+          width: Math.max(size.width || 320, 120),
+          height: Math.max(size.height || 180, 120),
+        };
       }));
-      await addImages(editor.std as never, files, {});
+      const plannedBounds = placeCanvasNodes(
+        doc,
+        rootService,
+        imageFiles.map(({ width, height }) => ({ width, height })),
+      );
+      const insertedBlockIds: string[] = [];
+      for (const [index, { file }] of imageFiles.entries()) {
+        const bound = plannedBounds[index];
+        const blockIds = await addImages(editor.std as never, [file], {
+          point: bound.center,
+          shouldTransformPoint: false,
+        });
+        insertedBlockIds.push(...blockIds);
+      }
+      if (insertedBlockIds.length > 0) {
+        focusBlocksInViewport(rootService, doc, insertedBlockIds);
+      }
       scheduleSyncBlocks();
     } catch (error) {
       onError(`Failed to add image node: ${String(error)}`);
     }
-  }, [getEditor, onError, scheduleSyncBlocks]);
+  }, [getDoc, getEditor, getRootService, onError, scheduleSyncBlocks]);
 
   const addWorkflowCard = useCallback(async () => {
     const doc = getDoc();
@@ -1101,8 +1386,10 @@ export default function BlockSuiteCanvasHost({
     const snapshot = snapshotResult?.snapshot ?? null;
     const title = snapshot?.goal?.trim() || "Workflow";
     const summaryMarkdown = workflowSnapshotToMarkdown(snapshot);
-    const center = rootService.viewport.center;
-    const bound = Bound.fromCenter([center.x, center.y], 360, 196);
+    const [bound] = placeCanvasNodes(doc, rootService, [{
+      width: DEFAULT_WORKFLOW_CARD_WIDTH,
+      height: DEFAULT_WORKFLOW_CARD_HEIGHT,
+    }]);
     insertEdgelessBlock(
       "sessio:workflow-card",
       {
@@ -1152,6 +1439,11 @@ export default function BlockSuiteCanvasHost({
     const bound = Bound.deserialize(model.xywh);
     const nextWidth = Math.max(bound.w, 420);
     const nextHeight = Math.max(bound.h + 96, 260);
+    const [nextBound] = placeCanvasNodes(doc, rootService, [{
+      width: nextWidth,
+      height: nextHeight,
+      anchor: [bound.center[0] + 28, bound.center[1] + 28],
+    }]);
     insertEdgelessBlock(
       "sessio:markdown-preview",
       {
@@ -1163,7 +1455,7 @@ export default function BlockSuiteCanvasHost({
         collapsed: false,
         contentVersion: model.contentVersion || model.sourcePath || "",
         cachedContent: "",
-        xywh: Bound.fromCenter([bound.center[0] + 28, bound.center[1] + 28], nextWidth, nextHeight).serialize(),
+        xywh: nextBound.serialize(),
       },
     );
     rootService.removeElement(blockId);
@@ -1638,7 +1930,7 @@ export default function BlockSuiteCanvasHost({
           ref={editedFilesButtonRef}
           type="button"
           onClick={openEditedFilesPicker}
-          disabled={changedFiles.length === 0}
+          disabled={availableEditedFiles.length === 0}
           className="inline-flex h-6 items-center gap-1.5 rounded-md border border-ink/10 px-3 text-ink/70 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
         >
           <FilePlus2 className="h-3.5 w-3.5" />
@@ -1693,7 +1985,7 @@ export default function BlockSuiteCanvasHost({
       {editedFilesPickerOpen && editedFilesButtonRef.current && (
         <EditedFilesPopover
           anchor={editedFilesButtonRef.current}
-          files={changedFiles}
+          files={availableEditedFiles}
           selectedFiles={pendingEditedFiles}
           onToggleFile={togglePendingEditedFile}
           onAdd={addPendingEditedFiles}
