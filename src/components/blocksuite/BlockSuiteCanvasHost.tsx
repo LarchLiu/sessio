@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { addImages } from "@blocksuite/affine/blocks/image";
@@ -37,11 +36,9 @@ import {
   exportDocSnapshot,
   importDocSnapshot,
 } from "./bootstrap";
-import {
-  CanvasCustomBlockOverlay,
-  type CanvasCustomBlockOverlayItem,
-} from "./CanvasCustomBlockOverlay";
+import { PortalHost } from "./portalHost";
 import ToastStack, { type ToastStackMessage } from "../ToastStack";
+import { useReactToLitBridge } from "../../lib/blocksuite/reactToLit";
 import { setBlockSuitePortalBridge } from "../../lib/blocksuite/portalBridge";
 import {
   canvasInteropModelToCanvasBlock,
@@ -126,6 +123,13 @@ type GfxControllerLike = {
       };
     };
   };
+  layer?: {
+    slots?: {
+      layerUpdated?: {
+        subscribe: (listener: () => void) => { unsubscribe: () => void };
+      };
+    };
+  } | null;
   getElementById?: (id: string) => EdgelessSelectable | null;
   getElementsByBound?: (
     bound: Bound,
@@ -178,7 +182,7 @@ async function reportSnapshotProgress(
 }
 
 function getGfxController(editor: BlockSuiteEditor | null): GfxControllerLike | null {
-  return editor?.std?.get?.<GfxControllerLike>(GfxControllerIdentifier) ?? null;
+  return editor?.std?.get?.(GfxControllerIdentifier) as GfxControllerLike | null ?? null;
 }
 
 function getSelectableXYWH(item: EdgelessSelectable): string | null {
@@ -419,6 +423,7 @@ async function withSnapshotCaptureMode<T>(
 ): Promise<T> {
   shell.classList.add(SNAPSHOT_CAPTURING_CLASS_NAME);
   document.documentElement.classList.add(SNAPSHOT_CAPTURING_CLASS_NAME);
+  document.body.classList.add(SNAPSHOT_CAPTURING_CLASS_NAME);
   try {
     await waitForNextFrame();
     await waitForNextFrame();
@@ -426,6 +431,7 @@ async function withSnapshotCaptureMode<T>(
   } finally {
     shell.classList.remove(SNAPSHOT_CAPTURING_CLASS_NAME);
     document.documentElement.classList.remove(SNAPSHOT_CAPTURING_CLASS_NAME);
+    document.body.classList.remove(SNAPSHOT_CAPTURING_CLASS_NAME);
   }
 }
 
@@ -578,7 +584,7 @@ function addEdgelessNote(
     throw new Error("Canvas editor context is not ready.");
   }
 
-  const gfx = std.get?.<GfxControllerLike>(GfxControllerIdentifier);
+  const gfx = std.get?.(GfxControllerIdentifier) as GfxControllerLike | null;
   const crud = rootService.crud;
   if (!gfx || !crud) {
     throw new Error("Canvas drawing services are not ready.");
@@ -631,8 +637,6 @@ export default function BlockSuiteCanvasHost({
     canUngroup: false,
   });
   const autosaveTimerRef = useRef<number | null>(null);
-  const overlaySyncFrameRef = useRef<number | null>(null);
-  const overlaySyncDeferredRef = useRef(false);
   const selectionUiDeferredRef = useRef(false);
   const boxSelectingObserverRef = useRef<MutationObserver | null>(null);
   const boxSelectingHostRef = useRef<HTMLElement | null>(null);
@@ -654,8 +658,7 @@ export default function BlockSuiteCanvasHost({
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [editedFilesPickerOpen, setEditedFilesPickerOpen] = useState(false);
   const [pendingEditedFiles, setPendingEditedFiles] = useState<string[]>([]);
-  const [customOverlayItems, setCustomOverlayItems] = useState<CanvasCustomBlockOverlayItem[]>([]);
-  const [overlayMountElement, setOverlayMountElement] = useState<HTMLDivElement | null>(null);
+  const [reactToLit, portals] = useReactToLitBridge();
 
   const changedFiles = useMemo(
     () => Array.from(new Set(editedFiles.map((path) => path.trim()).filter(Boolean))),
@@ -683,7 +686,7 @@ export default function BlockSuiteCanvasHost({
 
   const getRootService = useCallback((): EdgelessRootService | null => {
     try {
-      return getEditor()?.std?.get?.<EdgelessRootService>(EdgelessRootService) ?? null;
+      return getEditor()?.std?.get?.(EdgelessRootService) as EdgelessRootService | null ?? null;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setStatus(`Canvas startup failed: ${message}`);
@@ -761,137 +764,15 @@ export default function BlockSuiteCanvasHost({
     boxSelectingObserverRef.current = null;
     boxSelectingHostRef.current = null;
     isBoxSelectingRef.current = false;
-    overlaySyncDeferredRef.current = false;
     selectionUiDeferredRef.current = false;
   }, []);
-
-  const syncCustomBlockOverlay = useCallback(() => {
-    const host = hostRef.current;
-    const editor = getEditor();
-    const rootService = getRootService();
-    const doc = getDoc();
-    if (!host || !editor || !rootService || !doc) {
-      setCustomOverlayItems((current) => (current.length === 0 ? current : []));
-      return;
-    }
-
-    const hostRect = host.getBoundingClientRect();
-    const selectedIds = new Set(getSelectedCanvasElements(editor, rootService).ids);
-    const overlays: CanvasCustomBlockOverlayItem[] = [];
-    const entries = [
-      ...doc.getBlocksByFlavour("sessio:file-card"),
-      ...doc.getBlocksByFlavour("sessio:markdown-preview"),
-      ...doc.getBlocksByFlavour("sessio:workflow-card"),
-    ];
-
-    for (const entry of entries) {
-      const element = editor.std?.host?.view?.getBlock?.(entry.model.id) as HTMLElement | null;
-      if (!element?.isConnected) {
-        continue;
-      }
-      const rect = element.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) {
-        continue;
-      }
-
-      const transform = window.getComputedStyle(element).transform;
-      const matrix = transform && transform !== "none" ? new DOMMatrixReadOnly(transform) : null;
-      const scaleX = matrix ? Math.hypot(matrix.a, matrix.b) : 1;
-      const scaleY = matrix ? Math.hypot(matrix.c, matrix.d) : 1;
-      const scale = scaleX || scaleY ? (scaleX + scaleY) / (scaleX && scaleY ? 2 : 1) : 1;
-      const geometryModel = entry.model as { xywh?: string };
-      const bound = geometryModel.xywh ? Bound.deserialize(geometryModel.xywh) : null;
-      const baseWidth = bound ? bound.w : rect.width / scale;
-      const baseHeight = bound ? bound.h : rect.height / scale;
-      const base = {
-        blockId: entry.model.id,
-        left: rect.left - hostRect.left,
-        top: rect.top - hostRect.top,
-        baseWidth,
-        baseHeight,
-        scale,
-        selected: selectedIds.has(entry.model.id),
-      };
-
-      if (entry.model.flavour === "sessio:file-card") {
-        const fileCardModel = entry.model as FileCardBlockModel;
-        overlays.push({
-          ...base,
-          kind: "file_card",
-          title: fileCardModel.title || "File card",
-          sourcePath: fileCardModel.sourcePath || "",
-          sourceType: fileCardModel.sourceType || "workspace_file",
-          subtitle: fileCardModel.subtitle || "",
-          summary: fileCardModel.summary || "",
-          status: fileCardModel.status || "idle",
-        });
-        continue;
-      }
-
-      if (entry.model.flavour === "sessio:workflow-card") {
-        const workflowCardModel = entry.model as WorkflowCardBlockModel;
-        overlays.push({
-          ...base,
-          kind: "workflow_card",
-          title: workflowCardModel.title || "Workflow",
-          threadId: workflowCardModel.threadId || "",
-          threadStageId: workflowCardModel.threadStageId || "",
-          executionState: workflowCardModel.executionState || "idle",
-          lastRunId: workflowCardModel.lastRunId || "",
-          threadGoal: workflowCardModel.threadGoal || "",
-          workflowSummaryMarkdown: workflowCardModel.workflowSummaryMarkdown || "",
-        });
-        continue;
-      }
-
-      const markdownPreviewModel = entry.model as MarkdownPreviewBlockModel;
-      overlays.push({
-        ...base,
-        kind: "markdown_preview",
-        title: markdownPreviewModel.title || "Markdown preview",
-        sourcePath: markdownPreviewModel.sourcePath || "",
-        excerpt: markdownPreviewModel.excerpt || "",
-        contentVersion: markdownPreviewModel.contentVersion || "",
-        renderMode:
-          !markdownPreviewModel.collapsed &&
-          markdownPreviewModel.renderMode === "preview"
-            ? "preview"
-            : "summary",
-        workspacePath,
-      });
-    }
-
-    setCustomOverlayItems(overlays);
-  }, [getDoc, getEditor, getRootService, workspacePath]);
-
-  const scheduleCustomBlockOverlaySync = useCallback((force = false) => {
-    if (isBoxSelectingRef.current && !force) {
-      overlaySyncDeferredRef.current = true;
-      return;
-    }
-    if (overlaySyncFrameRef.current !== null) {
-      return;
-    }
-    overlaySyncFrameRef.current = window.requestAnimationFrame(() => {
-      overlaySyncFrameRef.current = null;
-      if (isBoxSelectingRef.current && !force) {
-        overlaySyncDeferredRef.current = true;
-        return;
-      }
-      syncCustomBlockOverlay();
-    });
-  }, [syncCustomBlockOverlay]);
 
   const flushDeferredCanvasUiSync = useCallback(() => {
     if (selectionUiDeferredRef.current) {
       selectionUiDeferredRef.current = false;
       scheduleSelectionStateUpdate();
     }
-    if (overlaySyncDeferredRef.current) {
-      overlaySyncDeferredRef.current = false;
-      scheduleCustomBlockOverlaySync(true);
-    }
-  }, [scheduleCustomBlockOverlaySync, scheduleSelectionStateUpdate]);
+  }, [scheduleSelectionStateUpdate]);
 
   const attachBoxSelectingObserver = useCallback(() => {
     const editor = getEditor();
@@ -915,10 +796,6 @@ export default function BlockSuiteCanvasHost({
       }
       isBoxSelectingRef.current = nextIsSelecting;
       if (nextIsSelecting) {
-        if (overlaySyncFrameRef.current !== null) {
-          window.cancelAnimationFrame(overlaySyncFrameRef.current);
-          overlaySyncFrameRef.current = null;
-        }
         if (selectionUiFrameRef.current !== null) {
           window.cancelAnimationFrame(selectionUiFrameRef.current);
           selectionUiFrameRef.current = null;
@@ -1049,22 +926,18 @@ export default function BlockSuiteCanvasHost({
         const subscription = rootService.selection.slots.updated.subscribe(() => {
           if (isBoxSelectingRef.current) {
             selectionUiDeferredRef.current = true;
-            overlaySyncDeferredRef.current = true;
             return;
           }
           scheduleSelectionStateUpdate();
-          scheduleCustomBlockOverlaySync();
         });
         selectionUpdatedDisposeRef.current = {
           dispose: () => subscription.unsubscribe(),
         };
         updateSelectionState();
-        scheduleCustomBlockOverlaySync();
       });
       scheduleSyncBlocks();
-      scheduleCustomBlockOverlaySync();
     });
-  }, [attachBoxSelectingObserver, clearBoxSelectingObserver, scheduleAutosave, scheduleCustomBlockOverlaySync, scheduleSelectionStateUpdate, scheduleSyncBlocks, updateSelectionState, waitForRootService]);
+  }, [attachBoxSelectingObserver, clearBoxSelectingObserver, scheduleAutosave, scheduleSelectionStateUpdate, scheduleSyncBlocks, updateSelectionState, waitForRootService]);
 
   const openEditedFilesPicker = () => {
     if (changedFiles.length === 0) return;
@@ -1295,86 +1168,13 @@ export default function BlockSuiteCanvasHost({
     );
     rootService.removeElement(blockId);
     scheduleSyncBlocks();
-    scheduleCustomBlockOverlaySync();
     updateSelectionState();
   }, [
     getDoc,
     getRootService,
     insertEdgelessBlock,
-    scheduleCustomBlockOverlaySync,
     scheduleSyncBlocks,
     updateSelectionState,
-  ]);
-
-  const dragMarkdownPreviewFromHeader = useCallback((
-    blockId: string,
-    event: ReactPointerEvent<HTMLDivElement>,
-  ) => {
-    if (event.button !== 0) return;
-
-    const doc = getDoc();
-    const rootService = getRootService();
-    if (!doc || !rootService) return;
-
-    const model = doc.getModelById(blockId) as MarkdownPreviewBlockModel | null;
-    if (!model?.xywh) return;
-
-    const startBound = Bound.deserialize(model.xywh);
-    const startClientX = event.clientX;
-    const startClientY = event.clientY;
-    const startZoom = rootService.viewport.zoom || 1;
-    let moved = false;
-
-    rootService.selection.set({
-      editing: false,
-      elements: [blockId],
-    });
-    scheduleSelectionStateUpdate();
-    event.preventDefault();
-    event.stopPropagation();
-
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      const dx = (moveEvent.clientX - startClientX) / startZoom;
-      const dy = (moveEvent.clientY - startClientY) / startZoom;
-      if (!moved && Math.abs(dx) < 1 && Math.abs(dy) < 1) {
-        return;
-      }
-      moved = true;
-      doc.updateBlock(model, {
-        xywh: serializeXYWH(
-          startBound.x + dx,
-          startBound.y + dy,
-          startBound.w,
-          startBound.h,
-        ),
-      });
-      scheduleCustomBlockOverlaySync();
-    };
-
-    const finishDrag = () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp, true);
-      window.removeEventListener("pointercancel", onPointerUp, true);
-      if (moved) {
-        scheduleSyncBlocks();
-      }
-      scheduleCustomBlockOverlaySync();
-      scheduleSelectionStateUpdate();
-    };
-
-    const onPointerUp = () => {
-      finishDrag();
-    };
-
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp, true);
-    window.addEventListener("pointercancel", onPointerUp, true);
-  }, [
-    getDoc,
-    getRootService,
-    scheduleCustomBlockOverlaySync,
-    scheduleSelectionStateUpdate,
-    scheduleSyncBlocks,
   ]);
 
   const runWorkflowBlock = useCallback(async (blockId: string) => {
@@ -1427,11 +1227,36 @@ export default function BlockSuiteCanvasHost({
   }, [getDoc, onError, onOpenThreadMultiSessionChat, sessionThreadId]);
 
   useEffect(() => {
-    setBlockSuitePortalBridge(null);
+    setBlockSuitePortalBridge({
+      reactToLit,
+      workspacePath,
+      updateBlock: (blockId, props) => {
+        const doc = getDoc();
+        const model = doc?.getModelById(blockId) ?? null;
+        if (!doc || !model) return;
+        doc.updateBlock(model, props);
+        scheduleSyncBlocks();
+      },
+      promoteFileCardToMarkdown,
+      runWorkflowBlock: (blockId) => {
+        void runWorkflowBlock(blockId);
+      },
+      openWorkflowThread,
+      openProjectFile: onOpenProjectFile,
+    });
     return () => {
       setBlockSuitePortalBridge(null);
     };
-  }, []);
+  }, [
+    getDoc,
+    onOpenProjectFile,
+    openWorkflowThread,
+    promoteFileCardToMarkdown,
+    reactToLit,
+    runWorkflowBlock,
+    scheduleSyncBlocks,
+    workspacePath,
+  ]);
 
   useEffect(() => {
     currentSnapshotRef.current = initialSnapshot;
@@ -1442,10 +1267,6 @@ export default function BlockSuiteCanvasHost({
       if (autosaveTimerRef.current !== null) {
         window.clearTimeout(autosaveTimerRef.current);
       }
-      if (overlaySyncFrameRef.current !== null) {
-        window.cancelAnimationFrame(overlaySyncFrameRef.current);
-        overlaySyncFrameRef.current = null;
-      }
       if (selectionUiFrameRef.current !== null) {
         window.cancelAnimationFrame(selectionUiFrameRef.current);
         selectionUiFrameRef.current = null;
@@ -1453,71 +1274,6 @@ export default function BlockSuiteCanvasHost({
       clearBoxSelectingObserver();
     };
   }, [clearBoxSelectingObserver]);
-
-  useEffect(() => {
-    if (!isReady) {
-      setCustomOverlayItems((current) => (current.length === 0 ? current : []));
-      return;
-    }
-
-    scheduleCustomBlockOverlaySync();
-
-    const editor = getEditor();
-    const rootService = getRootService();
-    if (!editor || !rootService) {
-      return;
-    }
-
-    const onWindowUpdate = () => {
-      scheduleCustomBlockOverlaySync();
-    };
-
-    window.addEventListener("resize", onWindowUpdate);
-    window.addEventListener("scroll", onWindowUpdate, true);
-
-    const viewportSubscription = rootService.viewport.viewportUpdated?.subscribe(() => {
-      scheduleCustomBlockOverlaySync();
-    });
-
-    const doc = getDoc();
-    const blockSubscription = doc?.slots.blockUpdated.subscribe(() => {
-      scheduleCustomBlockOverlaySync();
-    });
-
-    return () => {
-      window.removeEventListener("resize", onWindowUpdate);
-      window.removeEventListener("scroll", onWindowUpdate, true);
-      viewportSubscription?.unsubscribe();
-      blockSubscription?.unsubscribe();
-    };
-  }, [getDoc, getEditor, getRootService, isReady, scheduleCustomBlockOverlaySync]);
-
-  useLayoutEffect(() => {
-    const editor = editorRef.current;
-    if (!editor) {
-      setOverlayMountElement(null);
-      return;
-    }
-
-    const syncOverlayMount = () => {
-      const mountPoint = editor
-        .querySelector("affine-edgeless-root .edgeless-mount-point") as HTMLDivElement | null;
-      if (mountPoint) {
-        mountPoint.style.position = "absolute";
-        mountPoint.style.inset = "0";
-        mountPoint.style.pointerEvents = "auto";
-      }
-      setOverlayMountElement(mountPoint);
-    };
-
-    syncOverlayMount();
-    const frameId = window.requestAnimationFrame(syncOverlayMount);
-
-    return () => {
-      window.cancelAnimationFrame(frameId);
-      setOverlayMountElement((current) => (current?.isConnected ? current : null));
-    };
-  }, [isReady, initialState.document.id, initialSnapshot]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -1702,9 +1458,6 @@ export default function BlockSuiteCanvasHost({
     const shell = canvasShellRef.current;
     const overlayRoots: HTMLElement[] = [];
     if (shell?.isConnected) overlayRoots.push(shell);
-    if (overlayMountElement?.isConnected && overlayMountElement !== shell) {
-      overlayRoots.push(overlayMountElement);
-    }
     const selectionRect = getSelectionClientRect(editor, gfx, selected);
     console.info("BlockSuite snapshot selection resolved.", {
       requestedElementIds: elementIds ?? null,
@@ -1715,7 +1468,7 @@ export default function BlockSuiteCanvasHost({
         (count, root) => count + root.querySelectorAll("[data-sessio-overlay-block-id]").length,
         0,
       ),
-      hasOverlayMount: Boolean(overlayMountElement?.isConnected),
+      hasOverlayMount: false,
     });
     if (!shell || !selectionRect) {
       console.warn("BlockSuite DOM snapshot skipped because selection bounds were unavailable.", {
@@ -1787,7 +1540,7 @@ export default function BlockSuiteCanvasHost({
     if (!path) return { ok: false, reason: "save-failed" };
     const snapshot = await snapshotExportFromPath(path);
     return { ok: true, snapshot };
-  }, [getEditor, getRootService, overlayMountElement]);
+  }, [getEditor, getRootService]);
 
   const attachSelectionSnapshot = useCallback(async (elementIds?: string[] | null) => {
     setBridgeBusy("snapshot");
@@ -1926,27 +1679,6 @@ export default function BlockSuiteCanvasHost({
         durationMs={3600}
         onMessageConsumed={() => setSnapshotToast(null)}
       />
-      {overlayMountElement && createPortal(
-        <CanvasCustomBlockOverlay
-          items={customOverlayItems}
-          onPromoteFileCardToMarkdown={promoteFileCardToMarkdown}
-          onRunWorkflow={(blockId) => {
-            void runWorkflowBlock(blockId);
-          }}
-          onOpenWorkflowThread={openWorkflowThread}
-          onOpenFile={onOpenProjectFile}
-          onDragMarkdownPreviewFromHeader={dragMarkdownPreviewFromHeader}
-          onUpdateMarkdownRenderMode={(blockId, nextMode) => {
-            const doc = getDoc();
-            const model = doc?.getModelById(blockId) ?? null;
-            if (!doc || !model) return;
-            doc.updateBlock(model, { renderMode: nextMode });
-            scheduleSyncBlocks();
-            scheduleCustomBlockOverlaySync();
-          }}
-        />,
-        overlayMountElement,
-      )}
       {addMenuOpen && addMenuButtonRef.current && (
         <PopupMenu
           anchor={addMenuButtonRef.current}
@@ -1968,6 +1700,7 @@ export default function BlockSuiteCanvasHost({
           onClose={closeEditedFilesPicker}
         />
       )}
+      <PortalHost portals={portals} />
     </div>
   );
 }

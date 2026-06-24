@@ -17,6 +17,8 @@ type LitPortalEntry = {
   litElement: LitReactPortal;
 };
 
+type RerenderStrategy = "never" | "always" | "token";
+
 function randomId() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -28,22 +30,23 @@ const LIT_REACT_PORTAL = "sessio-lit-react-portal";
 
 function createLitPortalAnchor(
   elementOrFactory: ElementOrFactory,
-  shouldRerender: boolean,
+  rerenderStrategy: RerenderStrategy,
+  rerenderToken: number | string | null,
   notify: PortalListener,
 ) {
   return html`<sessio-lit-react-portal
-    .portalId=${randomId()}
     .elementOrFactory=${elementOrFactory}
-    .shouldRerender=${shouldRerender}
+    .rerenderStrategy=${rerenderStrategy}
+    .rerenderToken=${rerenderToken}
     .notify=${notify}
   ></sessio-lit-react-portal>`;
 }
 
 class LitReactPortal extends LitElement {
   static properties = {
-    portalId: { type: String },
     elementOrFactory: { attribute: false },
-    shouldRerender: { attribute: false },
+    rerenderStrategy: { attribute: false },
+    rerenderToken: { attribute: false },
     notify: { attribute: false },
   };
 
@@ -51,15 +54,18 @@ class LitReactPortal extends LitElement {
 
   declare elementOrFactory: ElementOrFactory | null;
 
-  declare shouldRerender: boolean;
+  declare rerenderStrategy: RerenderStrategy;
+
+  declare rerenderToken: number | string | null;
 
   declare notify: PortalListener | undefined;
 
   constructor() {
     super();
-    this.portalId = "";
+    this.portalId = randomId();
     this.elementOrFactory = null;
-    this.shouldRerender = false;
+    this.rerenderStrategy = "never";
+    this.rerenderToken = null;
     this.notify = undefined;
   }
 
@@ -71,21 +77,21 @@ class LitReactPortal extends LitElement {
     });
   }
 
-  override attributeChangedCallback(name: string, oldVal: string | null, newVal: string | null) {
-    super.attributeChangedCallback(name, oldVal, newVal);
-    if (name.toLowerCase() === "portalid") {
-      this.notify?.({
-        name: "willUpdate",
-        target: this,
-      });
-    }
-  }
-
   override createRenderRoot() {
     return this;
   }
 
-  override updated() {
+  override updated(changedProperties: Map<string, unknown>) {
+    const shouldNotify =
+      this.rerenderStrategy === "always" ||
+      (this.rerenderStrategy === "token" &&
+        (changedProperties.has("rerenderStrategy") ||
+          changedProperties.has("rerenderToken")));
+
+    if (!shouldNotify) {
+      return;
+    }
+
     this.notify?.({
       name: "willUpdate",
       target: this,
@@ -113,16 +119,30 @@ declare global {
 
 export type ReactToLit = (
   elementOrFactory: ElementOrFactory,
-  rerendering?: boolean,
+  rerendering?: boolean | number | string | null,
 ) => TemplateResult;
 
 export function useReactToLitBridge() {
   const [portals, setPortals] = useState<LitPortalEntry[]>([]);
 
   const reactToLit = useCallback<ReactToLit>((elementOrFactory, rerendering = false) => {
+    const isTokenRerender =
+      rerendering !== true &&
+      rerendering !== false &&
+      rerendering !== null &&
+      rerendering !== undefined;
+    const rerenderStrategy: RerenderStrategy =
+      rerendering === true
+        ? "always"
+        : rerendering === false || rerendering === null || rerendering === undefined
+          ? "never"
+          : "token";
+    const rerenderToken = isTokenRerender ? rerendering : null;
+
     return createLitPortalAnchor(
       elementOrFactory,
-      rerendering,
+      rerenderStrategy,
+      rerenderToken,
       (event) => {
         setPortals((currentPortals) => {
           const { name, target } = event;
@@ -159,7 +179,10 @@ export function useReactToLitBridge() {
               nextPortals = currentPortals.filter((entry) => entry.litElement.isConnected);
               break;
             case "willUpdate":
-              if (!target.isConnected || !rerendering) {
+              if (
+                !target.isConnected ||
+                target.rerenderStrategy === "never"
+              ) {
                 break;
               }
               updatePortals();

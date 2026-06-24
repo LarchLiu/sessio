@@ -7,6 +7,7 @@ type BridgeState = {
   promoteFileCardToMarkdown?: (blockId: string) => void;
   runWorkflowBlock?: (blockId: string) => void;
   openWorkflowThread?: (blockId: string) => void;
+  openProjectFile?: (path: string) => void;
 };
 
 let currentBridge: BridgeState | null = null;
