@@ -28,7 +28,7 @@ pub enum IndexTask {
     ReindexClaudeProject(PathBuf),
     ReindexClaudeSubagentFile(PathBuf),
     ReindexGeminiFile(PathBuf),
-    ReindexPiExternalFile(PathBuf),
+    ReindexPiFile(PathBuf),
     ReindexOpencodeAll,
     DeleteFile(PathBuf),
     DeleteSubagentFile(PathBuf),
@@ -413,9 +413,9 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
                     out.push(IndexTask::ReindexGeminiFile(p));
                 }
             }
-            IndexTask::ReindexPiExternalFile(p) => {
+            IndexTask::ReindexPiFile(p) => {
                 if seen_pi.insert(p.clone()) {
-                    out.push(IndexTask::ReindexPiExternalFile(p));
+                    out.push(IndexTask::ReindexPiFile(p));
                 }
             }
             IndexTask::ReindexOpencodeAll => {
@@ -483,8 +483,8 @@ fn execute(
         IndexTask::ReindexGeminiFile(path) if enabled_agents.contains(&Agent::Gemini) => {
             reindex_gemini_file(path, store)
         }
-        IndexTask::ReindexPiExternalFile(path) if enabled_agents.contains(&Agent::Pi) => {
-            reindex_pi_external_file(path, store)
+        IndexTask::ReindexPiFile(path) if enabled_agents.contains(&Agent::Pi) => {
+            reindex_pi_file(path, store)
         }
         IndexTask::ReindexOpencodeAll if enabled_agents.contains(&Agent::Opencode) => {
             reindex_opencode_all(store)
@@ -494,7 +494,7 @@ fn execute(
         | IndexTask::ReindexClaudeProject(_)
         | IndexTask::ReindexClaudeSubagentFile(_)
         | IndexTask::ReindexGeminiFile(_)
-        | IndexTask::ReindexPiExternalFile(_)
+        | IndexTask::ReindexPiFile(_)
         | IndexTask::ReindexOpencodeAll => Ok(TaskOutcome::default()),
         IndexTask::DeleteFile(path) => {
             let path_str = path.to_string_lossy();
@@ -784,7 +784,7 @@ fn reindex_gemini_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutc
     Ok(outcome)
 }
 
-fn reindex_pi_external_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutcome> {
+fn reindex_pi_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutcome> {
     if !path.exists() {
         store.mark_file_path_unavailable(&path.to_string_lossy())?;
         return Ok(TaskOutcome::default());
@@ -793,7 +793,7 @@ fn reindex_pi_external_file(path: &Path, store: &dyn SessionStore) -> Result<Tas
         return Ok(TaskOutcome::default());
     };
     let mut outcome = TaskOutcome::default();
-    match crate::agents::sources::pi_external::parser::parse_session_file(path)? {
+    match crate::agents::sources::pi::parser::parse_session_file(path)? {
         Some(info) => {
             push_session_project(&mut outcome, &info);
             push_session_source(&mut outcome, &info);
@@ -922,7 +922,7 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
                     _ => Some(IndexTask::ReindexClaudeFile(path)),
                 },
                 "gemini" => Some(IndexTask::ReindexGeminiFile(path)),
-                "pi" => Some(IndexTask::ReindexPiExternalFile(path)),
+                "pi" => Some(IndexTask::ReindexPiFile(path)),
                 "opencode" => Some(IndexTask::ReindexOpencodeAll),
                 _ => None,
             };
@@ -1142,15 +1142,12 @@ mod tests {
         )));
         assert!(matches!(gemini, Some(IndexTask::ReindexGeminiFile(_))));
 
-        let pi_external = source_task_to_index_task(SourceIndexTask::ReindexSource(src(
+        let pi = source_task_to_index_task(SourceIndexTask::ReindexSource(src(
             "pi",
-            "/tmp/pi-external/project/session.jsonl",
+            "/tmp/pi/project/session.jsonl",
             SourceKind::MainSession,
         )));
-        assert!(matches!(
-            pi_external,
-            Some(IndexTask::ReindexPiExternalFile(_))
-        ));
+        assert!(matches!(pi, Some(IndexTask::ReindexPiFile(_))));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::agents::runtime::types::AcpProtocolMessage;
-use crate::agents::sources::pi_external::text_message_event;
+use crate::agents::sources::pi::text_message_event;
 use crate::agents::sources::shared::convert::project_key_for_path_or_name;
 use crate::agents::sources::system_time_to_millis;
 use crate::agents::sources::types::{
@@ -103,7 +103,7 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
             match parse_session_file(&path) {
                 Ok(Some(info)) => out.push(info),
                 Ok(None) => {}
-                Err(error) => log::warn!("pi external parse {} failed: {error}", path.display()),
+                Err(error) => log::warn!("pi parse {} failed: {error}", path.display()),
             }
         }
     }
@@ -242,7 +242,7 @@ pub fn read_message_events(path: &Path, source: &SessionSource) -> Result<Vec<Me
 
     if out.is_empty() && !entries.is_empty() {
         log::debug!(
-            "[pi-external-parser] no message events parsed from {}",
+            "[pi-parser] no message events parsed from {}",
             path.display()
         );
     }

@@ -13,9 +13,9 @@ use crate::agents::sources::types::{
 };
 use crate::models::{text_content_blocks, Agent};
 
-pub struct PiExternalSource;
+pub struct PiSource;
 
-impl AgentSource for PiExternalSource {
+impl AgentSource for PiSource {
     fn agent(&self) -> crate::agents::sources::types::AgentKind {
         agent_kind(Agent::Pi)
     }

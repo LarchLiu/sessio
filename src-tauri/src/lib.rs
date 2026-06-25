@@ -2816,13 +2816,10 @@ fn read_session_history_result_from_source(
                 source_kind: crate::agents::sources::types::SourceKind::MainSession,
                 metadata: Default::default(),
             };
-            let events =
-                crate::agents::sources::pi_external::parser::read_message_events(&path, &source)?;
+            let events = crate::agents::sources::pi::parser::read_message_events(&path, &source)?;
             let count = events.len();
             let rows =
-                crate::agents::sources::pi_external::parser::message_events_to_history_acp_messages(
-                    events,
-                );
+                crate::agents::sources::pi::parser::message_events_to_history_acp_messages(events);
             (rows, count)
         }
         Agent::Codex => {
