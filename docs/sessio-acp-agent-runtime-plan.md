@@ -6,7 +6,7 @@ Sessio should keep its current role as the unified session index and memory laye
 
 The target shape is:
 
-- Sessio indexes Codex, Claude, and Gemini historical sessions as it does today.
+- Sessio indexes Codex, Claude, Pi, and OpenCode historical sessions as it does today.
 - Sessio can also start, prompt, stream, cancel, and resume live agent runs.
 - ACP is the preferred transport for live interaction.
 - Agent-specific CLI stream modes remain fallback transports where ACP is unavailable.
@@ -47,7 +47,7 @@ agent-runtime
   ├─ CliStreamJsonTransport      fallback for structured CLI output
   └─ PlainCliTransport           last-resort fallback
       ↓
-Codex / Claude / Gemini
+Codex / Claude / Pi / OpenCode
 
 agents/sources
   parse historical session files
@@ -151,12 +151,12 @@ The preferred order should be:
    - Supports structured session updates and permission flow.
 2. `CliStreamJsonTransport`
    - Used when an agent has stable structured CLI streaming.
-   - For example, Claude/Gemini-style `stream-json` modes can be parsed line by line.
+   - For example, agent-specific `stream-json` modes can be parsed line by line.
 3. `PlainCliTransport`
    - Used only as a compatibility escape hatch.
    - Emits coarse text/error events and should not be treated as a full feature runtime.
 
-The desktop-cc-gui project is a useful reference for fallback behavior: it uses structured CLI streaming for Claude and Gemini, while Codex is driven through an app-server runtime rather than plain terminal scraping.
+The desktop-cc-gui project is a useful reference for fallback behavior: it uses structured CLI streaming for some agents, while Codex is driven through an app-server runtime rather than plain terminal scraping.
 
 ## Tauri API
 
@@ -318,7 +318,7 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 ### Phase 0: Protocol and Capability Spike
 
 - [x] Pin the ACP SDK/schema version used by Sessio and record the source URL or vendored schema location. Sessio now depends on `agent-client-protocol = 0.12.1`, which uses `agent-client-protocol-schema = 0.13.2`; source: https://github.com/agentclientprotocol/rust-sdk.
-- [ ] Verify current ACP capabilities for Codex, Claude, and Gemini installations: native ACP, wrapper needed, structured CLI only, or plain CLI only.
+- [ ] Verify current ACP capabilities for supported agent installations: native ACP, wrapper needed, structured CLI only, or plain CLI only.
 - [ ] Map ACP update variants into `AgentRuntimeEvent`, including agent message chunks, thought/reasoning chunks, tool call lifecycle, plan updates, mode updates, and permission requests. Initial SDK-backed mapping covers `SessionNotification` message chunks, thought chunks, tool calls, tool output, and `RequestPermissionRequest`; fake runtime now emits SDK schema types instead of hand-written ACP JSON.
 - [ ] Decide how Sessio exposes runtime capabilities to the UI, for example `supportsCancel`, `supportsPermissions`, `supportsToolDeltas`, `supportsResume`, `supportsAttachments`, and `supportsModes`.
 - [ ] Define a stable id strategy: Sessio runtime session id, ACP session id, turn id, tool id, and permission request id must be separate fields.
@@ -419,7 +419,7 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 - [ ] Rely on the Rust SDK for ACP JSON-RPC request/response matching and add Sessio tests for worker startup timeout, unknown notification handling, malformed payload handling, and request timeout behavior.
 - [x] Unit-test ACP update-to-event conversion using SDK schema types for message chunks, tool calls, tool output, and permission requests.
 - [ ] Integration-test fake ACP server flows: start, prompt, deltas, tool calls, permission approve/reject, cancellation, process exit, and load existing session.
-- [ ] Integration-test fake structured CLI binaries for Claude/Gemini-style stream-json fallback.
+- [ ] Integration-test fake structured CLI binaries for stream-json fallback.
 - [ ] Add component tests or Playwright checks for composer layout at narrow and wide widths, streaming text append, auto-scroll, and manual scroll preservation.
 - [ ] Add regression coverage for chat auto-scroll timing: initial historical load with late content height changes, optimistic user message append, streamed fake/agent deltas, and manual scroll-up preservation.
 - [ ] Verify streaming Markdown does not break the chat window while code fences, tables, math, or lists are incomplete.

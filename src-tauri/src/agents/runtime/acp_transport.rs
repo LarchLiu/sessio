@@ -1626,7 +1626,6 @@ pub(crate) fn default_acp_command(agent: Agent) -> String {
         Agent::Pi => "pi".to_string(),
         Agent::Codex => "npx -y @agentclientprotocol/codex-acp@latest".to_string(),
         Agent::Claude => "npx -y @zed-industries/claude-code-acp@latest".to_string(),
-        Agent::Gemini => "npx -y -- @google/gemini-cli@latest --experimental-acp".to_string(),
         Agent::Opencode => "opencode acp".to_string(),
     }
 }

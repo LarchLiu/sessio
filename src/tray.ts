@@ -1,4 +1,4 @@
-import { Claude, OpenAI, Gemini } from "@lobehub/icons";
+import { Claude, OpenAI } from "@lobehub/icons";
 import { Hash } from "lucide-react";
 import { Menu } from "@tauri-apps/api/menu/menu";
 import { MenuItem } from "@tauri-apps/api/menu/menuItem";
@@ -18,7 +18,6 @@ const AGENT_ICONS: Record<Agent, MenuIconComponent> = {
   pi: OpenAI as MenuIconComponent,
   codex: OpenAI as MenuIconComponent,
   claude: Claude.Color as MenuIconComponent,
-  gemini: Gemini.Color as MenuIconComponent,
   opencode: OpenAI as MenuIconComponent,
 };
 
@@ -160,7 +159,6 @@ async function buildMenu(
     pi: await getAgentIcon("pi", theme),
     codex: await getAgentIcon("codex", theme),
     claude: await getAgentIcon("claude", theme),
-    gemini: await getAgentIcon("gemini", theme),
     opencode: await getAgentIcon("opencode", theme),
   };
   const threadIconBytes = await getThreadIcon(theme);

@@ -1587,7 +1587,6 @@ fn runtime_agent_name(agent: Agent) -> &'static str {
         Agent::Pi => "Pi",
         Agent::Codex => "Codex",
         Agent::Claude => "Claude",
-        Agent::Gemini => "Gemini",
         Agent::Opencode => "OpenCode",
     }
 }
@@ -1597,7 +1596,6 @@ fn runtime_agent_display_name(agent: Agent) -> &'static str {
         Agent::Pi => "Pi",
         Agent::Codex => "Codex CLI",
         Agent::Claude => "Claude Code",
-        Agent::Gemini => "Gemini CLI",
         Agent::Opencode => "OpenCode",
     }
 }
@@ -1606,9 +1604,8 @@ fn runtime_agent_order(agent: Agent) -> i64 {
     match agent {
         Agent::Codex => 0,
         Agent::Claude => 1,
-        Agent::Gemini => 2,
-        Agent::Opencode => 3,
-        Agent::Pi => 4,
+        Agent::Opencode => 2,
+        Agent::Pi => 3,
     }
 }
 
@@ -10876,7 +10873,7 @@ mod schema_tests {
             updated_at: 20,
         };
         let snapshot = SessionHistorySnapshotRecord {
-            child_agent: Agent::Gemini,
+            child_agent: Agent::Pi,
             child_session_id: "child".to_string(),
             ancestor_agent: Agent::Codex,
             ancestor_session_id: "parent".to_string(),
@@ -10887,14 +10884,14 @@ mod schema_tests {
         };
 
         store
-            .replace_session_history_snapshots(Agent::Gemini, "child", &[snapshot])
+            .replace_session_history_snapshots(Agent::Pi, "child", &[snapshot])
             .unwrap();
         let loaded = store
-            .get_session_history_snapshots(Agent::Gemini, "child")
+            .get_session_history_snapshots(Agent::Pi, "child")
             .unwrap();
 
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].child_agent, Agent::Gemini);
+        assert_eq!(loaded[0].child_agent, Agent::Pi);
         assert_eq!(loaded[0].child_session_id, "child");
         assert_eq!(loaded[0].ancestor_agent, Agent::Codex);
         assert_eq!(loaded[0].ancestor_session_id, "parent");
@@ -10913,7 +10910,7 @@ mod schema_tests {
 
         let pending = SessionInfo {
             id: "child".to_string(),
-            agent: Agent::Gemini,
+            agent: Agent::Pi,
             forked_from_agent: Some(Agent::Claude),
             forked_from_id: Some("parent".to_string()),
             project_path: Some("/tmp/project".to_string()),
@@ -10937,7 +10934,7 @@ mod schema_tests {
         store.upsert_session("", &pending).unwrap();
 
         let indexed = SessionInfo {
-            file_path: "/tmp/project/gemini-child.jsonl".to_string(),
+            file_path: "/tmp/project/pi-child.jsonl".to_string(),
             file_size: 256,
             partial: false,
             title: Some("indexed".to_string()),
@@ -10947,18 +10944,18 @@ mod schema_tests {
             ..pending
         };
         store
-            .replace_by_scope("/tmp/project/gemini-child.jsonl", Agent::Gemini, &[indexed])
+            .replace_by_scope("/tmp/project/pi-child.jsonl", Agent::Pi, &[indexed])
             .unwrap();
 
         let row = store
             .list_all_sessions()
             .unwrap()
             .into_iter()
-            .find(|session| session.agent == Agent::Gemini && session.id == "child")
+            .find(|session| session.agent == Agent::Pi && session.id == "child")
             .unwrap();
         assert_eq!(row.forked_from_agent, Some(Agent::Claude));
         assert_eq!(row.forked_from_id.as_deref(), Some("parent"));
-        assert_eq!(row.file_path, "/tmp/project/gemini-child.jsonl");
+        assert_eq!(row.file_path, "/tmp/project/pi-child.jsonl");
         assert_eq!(row.title.as_deref(), Some("indexed"));
         assert_eq!(row.first_user_message.as_deref(), Some("indexed"));
         assert!(!row.partial);
@@ -10968,7 +10965,7 @@ mod schema_tests {
             .unwrap()
             .query_row(
                 "SELECT count(*) FROM sessions WHERE agent = ? AND session_id = ?",
-                params![Agent::Gemini.as_str(), "child"],
+                params![Agent::Pi.as_str(), "child"],
                 |row| row.get(0),
             )
             .unwrap();
@@ -11329,7 +11326,7 @@ mod schema_tests {
             rename_title: Some("Manual pending title".to_string()),
             title: Some("Manual pending title".to_string()),
             first_user_message: Some("# Sessio stage task".to_string()),
-            forked_from_agent: Some(Agent::Gemini),
+            forked_from_agent: Some(Agent::Pi),
             forked_from_id: Some("parent".to_string()),
             ..indexed
         };
@@ -11347,7 +11344,7 @@ mod schema_tests {
         assert_eq!(row.message_count, 2);
         assert_eq!(row.rename_title.as_deref(), Some("Manual pending title"));
         assert_eq!(row.title.as_deref(), Some("# Sessio stage task"));
-        assert_eq!(row.forked_from_agent, Some(Agent::Gemini));
+        assert_eq!(row.forked_from_agent, Some(Agent::Pi));
         assert_eq!(row.forked_from_id.as_deref(), Some("parent"));
 
         let db_row_count: i64 = store
@@ -11666,7 +11663,7 @@ mod schema_tests {
         let existing = SessionInfo {
             id: "child".to_string(),
             agent: Agent::Codex,
-            forked_from_agent: Some(Agent::Gemini),
+            forked_from_agent: Some(Agent::Pi),
             forked_from_id: Some("db-parent".to_string()),
             project_path: Some("/tmp/project".to_string()),
             project_name: Some("project".to_string()),
@@ -11706,7 +11703,7 @@ mod schema_tests {
             .into_iter()
             .find(|session| session.agent == Agent::Codex && session.id == "child")
             .unwrap();
-        assert_eq!(row.forked_from_agent, Some(Agent::Gemini));
+        assert_eq!(row.forked_from_agent, Some(Agent::Pi));
         assert_eq!(row.forked_from_id.as_deref(), Some("db-parent"));
 
         let _ = std::fs::remove_file(&path);
@@ -13645,7 +13642,7 @@ mod schema_tests {
         store
             .link_plan_task_session(NewPlanTaskSession {
                 task_id: &round.tasks[0].id,
-                agent: Agent::Gemini,
+                agent: Agent::Pi,
                 session_id: "missing-runtime-session",
                 role: PlanTaskSessionRole::Runtime,
                 attempt_id: None,
@@ -13705,7 +13702,7 @@ mod schema_tests {
             HashSet::from([
                 format!("{}:direct-session", Agent::Codex.as_str()),
                 format!("{}:stage-runtime-session", Agent::Codex.as_str()),
-                format!("{}:missing-runtime-session", Agent::Gemini.as_str()),
+                format!("{}:missing-runtime-session", Agent::Pi.as_str()),
                 format!("{}:planner-session", Agent::Pi.as_str()),
                 format!("{}:missing-planner-session", Agent::Pi.as_str()),
             ])
@@ -14094,7 +14091,7 @@ mod schema_tests {
                     session_id: "shared-session",
                 },
                 SessionRef {
-                    agent: Agent::Gemini,
+                    agent: Agent::Pi,
                     session_id: "missing-session",
                 },
             ])
@@ -14153,7 +14150,6 @@ mod schema_tests {
             .efforts
             .iter()
             .any(|option| option.value == "max"));
-        assert!(agents.iter().all(|agent| agent.id != "gemini"));
         let parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-parent");
         std::fs::create_dir(&parent).unwrap();
 

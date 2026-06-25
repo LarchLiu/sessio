@@ -2,7 +2,7 @@
 
 ## Summary
 
-当前实现里，`src-tauri/src/lib.rs` 的 `list_sessions()` 会直接调用 `readers::list_all()`，每次启动或读取时全量扫描 `~/.codex`、`~/.claude`、`~/.gemini` 目录并解析文件。这个优化方案建议采用：
+当前实现里，`src-tauri/src/lib.rs` 的 `list_sessions()` 会直接调用 `readers::list_all()`，每次启动或读取时全量扫描各 agent 的会话目录并解析文件。这个优化方案建议采用：
 
 * 保留现有各 agent reader 作为文件真相源
 
@@ -174,8 +174,6 @@
 
 * `Claude`：扫描 `~/.claude/projects/*`
 
-* `Gemini`：扫描 `~/.gemini/tmp/*/logs.json` 与 `~/.gemini/projects.json`
-
 增量更新策略按 agent 区分：
 
 * `Codex`
@@ -192,12 +190,6 @@
 
   * `subagents/` 下变化时，重建对应父 session 的 subagent 列表
 
-* `Gemini`
-
-  * `logs.json` 变化时，重建该文件内所有 session 聚合结果
-
-  * `projects.json` 变化时，仅更新 project path/name 映射并回填受影响 session
-
 ### 4. Watcher 设计
 
 建议使用 Rust 文件监听库做递归监控，并加一层事件聚合：
@@ -210,17 +202,13 @@
 
   * `~/.claude/projects`
 
-  * `~/.gemini/tmp`
-
-  * `~/.gemini/projects.json`
-
 * 事件处理策略
 
   * 300-800ms 防抖
 
   * 同一路径短时间多次变更合并
 
-  * 对 Claude / Gemini 这类“一个文件影响多条 session”的格式，按目录或文件整体重算
+  * 对 Claude 这类“一个目录影响多条 session”的格式，按目录整体重算
 
 * 一致性策略
 
@@ -301,7 +289,6 @@ enum IndexTask {
     FullRebuild,
     ReindexPath(PathBuf),
     ReindexClaudeProject(PathBuf),
-    ReindexGeminiLogs(PathBuf),
     RefreshProjectMappings,
 }
 ```
@@ -328,8 +315,6 @@ enum IndexTask {
 
 * 同一 session 重复写入时去重与覆盖规则
 
-* `Gemini logs.json` 这种“一文件多 session”重建逻辑
-
 * `Claude sessions-index.json + jsonl + subagents` 合并结果正确
 
 ### 集成测试
@@ -339,8 +324,6 @@ enum IndexTask {
 * 修改一个 Codex `jsonl` 后，仅对应 session 更新
 
 * 删除 Claude 主文件但保留 index/subagents 时，`available` / `archived` / `subagents` 状态正确
-
-* 修改 Gemini `projects.json` 后，`project path/name` 能回填更新
 
 * watcher 在连续写文件时不会写入损坏状态，最终结果一致
 

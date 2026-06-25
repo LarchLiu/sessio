@@ -417,7 +417,7 @@ describe("buildThreadTimelineRows", () => {
       sessions: [
         debateReplaySession("codex", "session-1", "task-1", 10),
         debateReplaySession("claude", "session-2", "task-2", 11),
-        debateReplaySession("gemini", "session-3", "task-3", 12),
+        debateReplaySession("opencode", "session-3", "task-3", 12),
       ],
     };
     const lanes = buildThreadSessionLanes({

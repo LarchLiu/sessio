@@ -131,7 +131,7 @@ pub fn fingerprints_for_source(
 // SourceLocation that can sit on the record-level MemorySource. The resulting
 // location lets `memory resolve` map a record back to the contiguous raw-JSONL
 // range it summarizes. Falls back to a session-level pointer when none of
-// the events carry offset info (e.g. Gemini until v2 follow-up).
+// the events carry offset info.
 fn events_span_location(file_path: &str, events: &[MessageEvent]) -> SourceLocation {
     let mut line_start: Option<u64> = None;
     let mut line_end: Option<u64> = None;

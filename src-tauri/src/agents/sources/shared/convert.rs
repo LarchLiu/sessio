@@ -392,9 +392,6 @@ pub fn project_key_slug(input: &str) -> String {
 }
 
 fn scope_for_info(info: &SessionInfo) -> String {
-    if info.agent == Agent::Gemini {
-        return info.file_path.clone();
-    }
     Path::new(&info.file_path)
         .parent()
         .map(|p| p.to_string_lossy().to_string())

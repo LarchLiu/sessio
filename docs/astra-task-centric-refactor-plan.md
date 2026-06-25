@@ -168,7 +168,7 @@ tasks: []
 tasks:
   - title: string
     assistantId: assistant-id
-    targetAgent: codex|claude|gemini|opencode|pi
+    targetAgent: codex|claude|opencode|pi
     prompt: string
     expectedOutput: string
     risk: low|medium|high

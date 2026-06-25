@@ -58,7 +58,6 @@ export const RESUME_CMD: Record<Agent, (id: string) => string> = {
   pi: (id) => `pi --resume ${id}`,
   codex: (id) => `codex resume ${id}`,
   claude: (id) => `claude --resume ${id}`,
-  gemini: (id) => `gemini --resume ${id}`,
   opencode: (id) => `opencode session resume ${id}`,
 };
 
@@ -304,7 +303,7 @@ function crossPromptRole(kind: string): CrossPromptEntry["role"] | null {
 
 /// Render a single `[assistant]` entry per turn that snapshots the latest
 /// todo/plan tool call. Captures both Claude's `TodoWrite` and
-/// Codex/Gemini's `update_plan` / `TaskUpdate` so the receiving agent inherits
+/// Codex-style `update_plan` / `TaskUpdate` so the receiving agent inherits
 /// the active work plan rather than rediscovering it.
 function todoEntryFromTurnTools(
   tools: CrossPromptToolCall[] | undefined,

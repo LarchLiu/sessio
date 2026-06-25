@@ -128,13 +128,13 @@ mod tests {
         let context_path = dir.join("sessio-cross-context-parent.md");
         fs::write(
             &context_path,
-            r#"<!-- sessio-cross:start source_agent="gemini" source_session_id="gemini-parent" -->"#,
+            r#"<!-- sessio-cross:start source_agent="pi" source_session_id="pi-parent" -->"#,
         )
         .unwrap();
         let text = format!("[@ctx](file://{})", context_path.display());
         let lineage = cross_context_lineage_from_text(&text).expect("lineage");
-        assert_eq!(lineage.agent, Agent::Gemini);
-        assert_eq!(lineage.session_id, "gemini-parent");
+        assert_eq!(lineage.agent, Agent::Pi);
+        assert_eq!(lineage.session_id, "pi-parent");
         fs::remove_file(context_path).ok();
         fs::remove_dir(dir).ok();
     }

@@ -2297,16 +2297,16 @@ mod ancestor_tests {
     #[test]
     fn session_ancestors_from_db_follows_multihop_agent_lineage() {
         let root = session(
-            Agent::Gemini,
+            Agent::Pi,
             "root",
             None,
             None,
-            "/tmp/gemini/project/chats/session-root.jsonl",
+            "/tmp/pi/project/session-root.jsonl",
         );
         let middle = session(
             Agent::Claude,
             "middle",
-            Some(Agent::Gemini),
+            Some(Agent::Pi),
             Some("root"),
             "/tmp/claude/middle.jsonl",
         );
@@ -2325,7 +2325,7 @@ mod ancestor_tests {
         );
 
         assert_eq!(chain.len(), 2);
-        assert_eq!(chain[0].agent, Agent::Gemini);
+        assert_eq!(chain[0].agent, Agent::Pi);
         assert_eq!(chain[0].id, "root");
         assert_eq!(chain[0].file_path, root.file_path);
         assert_eq!(chain[1].agent, Agent::Claude);
@@ -2475,25 +2475,6 @@ fn remove_session_files_inner(session: SessionInfo) -> anyhow::Result<()> {
         if canvas_dir.exists() {
             let _ = std::fs::remove_dir_all(canvas_dir);
         }
-    }
-
-    if session.agent == Agent::Gemini {
-        if crate::agents::sources::gemini::parser::remove_session_from_logs(
-            Path::new(&session.file_path),
-            &session.id,
-            &home,
-            &removed_root,
-        )? {
-            for subagent in &session.subagents {
-                let _ = crate::agents::sources::gemini::parser::remove_session_from_logs(
-                    Path::new(&subagent.file_path),
-                    &subagent.id,
-                    &home,
-                    &removed_root,
-                )?;
-            }
-        }
-        return Ok(());
     }
 
     move_session_file(&session.file_path, &home, &removed_root)?;
@@ -2792,7 +2773,6 @@ fn read_session_history_result_from_source(
                 Agent::Pi => "Pi",
                 Agent::Codex => "Codex",
                 Agent::Claude => "Claude Code",
-                Agent::Gemini => "Gemini",
                 Agent::Opencode => "OpenCode",
             },
             if file_path.is_empty() {
@@ -2836,15 +2816,6 @@ fn read_session_history_result_from_source(
                     &path,
                 )?;
             let count = count_source_lines(&rows);
-            (rows, count)
-        }
-        Agent::Gemini => {
-            let sid = session_id.unwrap_or_default();
-            let rows =
-                crate::agents::sources::gemini::parser::read_history_acp_messages_with_locations(
-                    &path, sid,
-                )?;
-            let count = rows.len();
             (rows, count)
         }
         Agent::Opencode => {

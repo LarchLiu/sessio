@@ -11,13 +11,13 @@ import type {
   UpsertCanvasAnchorRequest,
 } from "./canvasTypes";
 
-export type Agent = "pi" | "codex" | "claude" | "gemini" | "opencode";
+export type Agent = "pi" | "codex" | "claude" | "opencode";
 
 /// Single source of truth for runtime agent ids. Keep in sync with the
 /// `Agent` enum on the Rust side. Adding a new agent here is the only TS
 /// place callers should touch — `isAgent`, `Record<Agent, …>` literals,
 /// and AGENTS-driven loops pick up the rest at compile time.
-export const AGENTS = ["pi", "codex", "claude", "gemini", "opencode"] as const;
+export const AGENTS = ["pi", "codex", "claude", "opencode"] as const;
 
 // Compile-time guard: AGENTS must cover every Agent variant and only contain
 // Agent variants. If either side drifts, TypeScript fails here.
@@ -2584,18 +2584,16 @@ export const AGENT_LABEL: Record<Agent, string> = {
   pi: "Pi",
   codex: "Codex",
   claude: "Claude Code",
-  gemini: "Gemini",
   opencode: "OpenCode",
 };
 
 /// Short single-word product names used in dense UI chips/dropdowns where the
-/// "Claude Code" / "Gemini CLI" suffixes don't fit. Defaults to AGENT_LABEL
+/// "Claude Code" suffix doesn't fit. Defaults to AGENT_LABEL
 /// when no override is set.
 export const AGENT_SHORT_LABEL: Record<Agent, string> = {
   pi: "Pi",
   codex: "Codex",
   claude: "Claude",
-  gemini: "Gemini",
   opencode: "OpenCode",
 };
 
@@ -2603,7 +2601,6 @@ const AGENT_COLOR_VAR: Record<Agent, string> = {
   pi: "--color-purple",
   codex: "--color-fg",
   claude: "--color-orange",
-  gemini: "--color-blue",
   opencode: "--color-fg",
 };
 
@@ -2611,7 +2608,6 @@ export const AGENT_ACCENT: Record<Agent, string> = {
   pi: `rgb(var(${AGENT_COLOR_VAR.pi}))`,
   codex: `rgb(var(${AGENT_COLOR_VAR.codex}))`,
   claude: `rgb(var(${AGENT_COLOR_VAR.claude}))`,
-  gemini: `rgb(var(${AGENT_COLOR_VAR.gemini}))`,
   opencode: `rgb(var(${AGENT_COLOR_VAR.opencode}))`,
 };
 

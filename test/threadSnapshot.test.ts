@@ -88,7 +88,7 @@ describe("renderThreadWorkContext", () => {
   });
 
   it("omits assistant prompts when no matching agent is selected", () => {
-    const rendered = renderThreadWorkContext(snapshot(), "gemini");
+    const rendered = renderThreadWorkContext(snapshot(), "opencode");
 
     expect(rendered).not.toContain("## Stage assistant instructions");
     expect(rendered).not.toContain("Use the builder instructions.");

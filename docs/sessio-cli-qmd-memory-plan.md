@@ -2,7 +2,7 @@
 
 ## Summary
 
-Sessio 下一阶段目标是把桌面应用背后的会话索引、消息提取、项目记忆和检索能力 CLI 化，让 Codex、Claude、Gemini 等 agent 可以通过 skill 调用 Sessio，检索当前 project 的历史 session 信息。
+Sessio 下一阶段目标是把桌面应用背后的会话索引、消息提取、项目记忆和检索能力 CLI 化，让 Codex、Claude、Pi、OpenCode 等 agent 可以通过 skill 调用 Sessio，检索当前 project 的历史 session 信息。
 
 核心设计：
 
@@ -20,7 +20,7 @@ Sessio 下一阶段目标是把桌面应用背后的会话索引、消息提取�
 整体数据流：
 
 ```text
-Codex / Claude / Gemini JSONL
+Codex / Claude / Pi / OpenCode sessions
   ↓
 agents/sources
   ↓
@@ -63,7 +63,7 @@ qmd 自己的 SQLite index 仍由 qmd 管理，可以使用 qmd 默认目录，�
 
 ## Layering And Extensibility
 
-为了后续添加新的 agent source，Sessio 应把 agents/sources、indexer、memory、qmd、CLI 做成清晰分层。除 source 层外，其他层不应该关心 Codex / Claude / Gemini 的原始文件格式。
+为了后续添加新的 agent source，Sessio 应把 agents/sources、indexer、memory、qmd、CLI 做成清晰分层。除 source 层外，其他层不应该关心 Codex / Claude / Pi / OpenCode 的原始文件格式。
 
 建议分层：
 
@@ -142,7 +142,7 @@ struct WatchRoot {
 }
 ```
 
-这样 watcher/polling 只负责收集文件事件并询问 source 如何分类，不把 Claude / Gemini 的路径规则写死在上层。
+这样 watcher/polling 只负责收集文件事件并询问 source 如何分类，不把具体 agent 的路径规则写死在上层。
 
 ### Unified Data Model
 
@@ -294,7 +294,8 @@ impl AgentSourceRegistry {
 ```text
 codex source
 claude source
-gemini source
+pi source
+opencode source
 ```
 
 未来新增 source 时：
@@ -330,7 +331,7 @@ type Metadata = BTreeMap<String, serde_json::Value>;
 
 ```mermaid
 flowchart TD
-    Raw["Agent raw sessions<br/>Codex / Claude / Gemini JSONL"] --> Readers["Sessio agent sources<br/>parse sessions and messages"]
+    Raw["Agent raw sessions<br/>Codex / Claude / Pi / OpenCode"] --> Readers["Sessio agent sources<br/>parse sessions and messages"]
     Readers --> Indexer["Sessio indexer<br/>full rebuild / file task"]
     Indexer --> SessionDB[("sessio-index.db<br/>sessions / subagents")]
     Indexer --> Changed["Changed session sources<br/>project + agent + session + file"]
@@ -377,7 +378,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Agent["Codex / Claude / Gemini skill"] --> CliSearch["sessio memory search<br/>--project $PWD --json"]
+    Agent["Codex / Claude / Pi / OpenCode skill"] --> CliSearch["sessio memory search<br/>--project $PWD --json"]
     CliSearch --> ProjectMap["Resolve project_path -> project_key<br/>collection = sessio-&lt;project_key&gt;"]
     ProjectMap --> QmdQuery["qmd query<br/>collection scoped search --json"]
     QmdQuery --> Hits["qmd hits<br/>path / snippet / score"]
@@ -524,7 +525,7 @@ struct RawTurn {
 }
 ```
 
-**v1 status**: 来源定位采用混合粒度。Codex 和 Claude 的 `read_messages_with_locations` 会为每条消息记录 `line_start/line_end/byte_start/byte_end`；record 级 `memory_sources` 取所有 events 的并集 (min line_start ..= max line_end，byte 同理)。Gemini 的 `logs.json` 是单个 JSON Array，`serde_json::from_str` 不暴露每个 element 的 byte offset，因此 Gemini 暂时仍是 session 级（全 None），等流式 JSON 扫描器到位再补 — 见 `docs/sessio-cli-qmd-memory-todos.md` 的 v2 roadmap。`memory resolve --include-source-excerpt` 会基于 location 把原始 JSONL 范围回读出来。
+**v1 status**: 来源定位采用混合粒度。Codex 和 Claude 的 `read_messages_with_locations` 会为每条消息记录 `line_start/line_end/byte_start/byte_end`；record 级 `memory_sources` 取所有 events 的并集 (min line_start ..= max line_end，byte 同理)。`memory resolve --include-source-excerpt` 会基于 location 把原始 JSONL 范围回读出来。
 
 对于 continuation-trim 过的 record，`memory_sources.location` 记录的是 **保留后正文** 对应的原始范围，而不是整个 session 的起点。这和 `record_continuations` 一起，能把“record 现在展示的正文来自哪里”和“前缀是被哪条 base record 覆盖掉的”区分开。
 
@@ -652,7 +653,7 @@ qmd can help avoid exact duplicate document content, but Sessio must own real de
 - current directionality is intentionally conservative:
   - only same-agent candidates are compared
   - Codex with `forked_from_id` requires the candidate to be exactly that parent session (siblings never qualify, regardless of timestamps)
-  - Codex without `forked_from_id`, Claude, and Gemini all fall back to earlier-session ordering via `started_at`, then `updated_at`, then `session_id`
+  - Sessions without `forked_from_id` fall back to earlier-session ordering via `started_at`, then `updated_at`, then `session_id`
 - trim boundaries are snapped to the next `user` block start so the remaining record does not begin with dangling `tool_use` / `tool_result`
 - when no user-block boundary exists after the matched prefix (i.e. the candidate has no fresh user turn of its own), the entire source is suppressed instead of generating a record — a continuation that only adds dangling tool work or assistant tail has no independent value
 - detailed continuation provenance is persisted in `record_continuations` and exposed through `memory resolve` / `memory search`
@@ -778,7 +779,7 @@ Sessio 侧要维护：
 
 `IndexTask::FullRebuild` 流程建议：
 
-1. 扫描 Codex / Claude / Gemini 原始 session 文件
+1. 扫描 Codex / Claude / Pi / OpenCode 原始 session 文件
 2. 更新 `sessions` 和 `subagents`
 3. 收集本次 rebuild 中所有受影响 project
 4. 对每个 project 运行 memory rebuild
@@ -810,7 +811,7 @@ Sessio 侧要维护：
    - 不是单 record 直写 qmd
 7. 根据策略延迟 embed
 
-Cold-start 注意：polling 进程内部用 in-memory HashMap 缓存 Claude `sessions-index.json` 和 Gemini `projects.json` 的 mtime。每次 app 重启缓存都是空的，如果只看缓存就会在冷启动那一次 tick 把每个 project 都视为"index 文件变了"并触发 reindex 风暴。两条路径都用同一种兜底：cache miss 时把当前 mtime 跟该 scope 下 sessions 行的 `last_indexed_at` 最大值比较，只有当 index 文件比上次 reindex 完成时间更新才算真的变化。
+Cold-start 注意：polling 进程内部用 in-memory HashMap 缓存 project index 文件的 mtime。每次 app 重启缓存都是空的，如果只看缓存就会在冷启动那一次 tick 把每个 project 都视为"index 文件变了"并触发 reindex 风暴。兜底策略是：cache miss 时把当前 mtime 跟该 scope 下 sessions 行的 `last_indexed_at` 最大值比较，只有当 index 文件比上次 reindex 完成时间更新才算真的变化。
 
 建议不要每次小变更都同步跑 expensive embedding：
 
@@ -937,7 +938,7 @@ trait MemoryIndexer {
 ### CLI
 
 - `sessio sessions list --json` 输出合法 JSON
-- `sessio sessions messages --json` 能读取 Codex / Claude / Gemini
+- `sessio sessions messages --json` 能读取 Codex / Claude / Pi / OpenCode
 - project path 不存在时返回结构化错误
 - qmd 不存在时 `sessio memory status --json` 返回可读错误
 - qmd query 超时时 `sessio memory search --json` 返回空 hits 和 `backendError`
@@ -962,7 +963,6 @@ trait MemoryIndexer {
 - 全量 rebuild 后同步生成 qmd memory records
 - 单个 Codex JSONL 更新后只重建对应 session record，并删除该 session 的 stale markdown
 - Claude project 重扫后对应 project qmd collection 更新
-- Gemini logs.json 变化后对应 project records 更新
 - qmd update 失败不影响 session index
 - qmd embed 防抖不会阻塞频繁 polling
 
@@ -971,7 +971,6 @@ trait MemoryIndexer {
 - 第一版是否先不做 LLM summary，只做规则压缩和 extractive records？
 - qmd embedding 是否默认关闭，等用户显式启用后再下载模型？
 - memory record 的 project key 当前已经改为 canonical project path 派生的可读 slug，而不是 hash 或 agent 自带 id。
-- Gemini 的 per-item line / byte offset 何时补齐？这需要把 `logs.json` 从整包 `serde_json::from_str` 改为可回报 element 位置的流式扫描。
 - qmd collection 是每个 project 一个，还是一个 collection + metadata filter？当前建议每 project 一个 collection，便于 skill 限定搜索范围。
 
 ## Recommended Defaults

@@ -12,7 +12,6 @@ import {
   Cloudflare,
   DeepSeek,
   Fireworks,
-  Gemini,
   GithubCopilot,
   Google,
   GoogleCloud,
@@ -3108,7 +3107,7 @@ function providerIconFor(provider: string): ProviderIconComponent | null {
   if (icon) return icon;
   if (key.includes("openai")) return OpenAI;
   if (key.includes("anthropic") || key.includes("claude")) return iconColor(Anthropic, Claude.Color);
-  if (key.includes("google") || key.includes("gemini")) return iconColor(Google, Gemini.Color);
+  if (key.includes("google")) return iconColor(Google, Google.Color);
   if (key.includes("azure")) return iconColor(Azure, Azure);
   if (key.includes("githubcopilot")) return iconColor(GithubCopilot, GithubCopilot);
   if (key.includes("cloudflare")) return iconColor(Cloudflare, Cloudflare);
@@ -3401,8 +3400,8 @@ const PROVIDER_LABEL_BY_ID: Record<string, string> = {
 const PROVIDER_ICON_BY_KEY: Record<string, ProviderIconComponent> = {
   openai: OpenAI,
   anthropic: iconColor(Anthropic, Claude.Color),
-  google: iconColor(Google, Gemini.Color),
-  googlevertex: iconColor(VertexAI, iconColor(GoogleCloud, iconColor(Google, Gemini.Color))),
+  google: iconColor(Google, Google.Color),
+  googlevertex: iconColor(VertexAI, iconColor(GoogleCloud, iconColor(Google, Google.Color))),
   amazonbedrock: iconColor(Bedrock, iconColor(Aws, Aws)),
   azureopenairesponses: iconColor(Azure, Azure),
   openaicodex: OpenAI,

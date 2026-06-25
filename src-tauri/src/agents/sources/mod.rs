@@ -1,6 +1,5 @@
 pub mod claude;
 pub mod codex;
-pub mod gemini;
 pub mod opencode;
 pub mod pi;
 pub mod registry;
@@ -18,7 +17,6 @@ pub fn list_all() -> Vec<SessionInfo> {
     for f in [
         codex::parser::list_sessions as fn() -> Result<Vec<SessionInfo>>,
         claude::parser::list_sessions,
-        gemini::parser::list_sessions,
         pi::parser::list_sessions,
         opencode::parser::list_sessions,
     ] {
@@ -54,9 +52,6 @@ where
     }
     if enabled.contains(&Agent::Claude) {
         registry.register(claude::ClaudeSource);
-    }
-    if enabled.contains(&Agent::Gemini) {
-        registry.register(gemini::GeminiSource);
     }
     if enabled.contains(&Agent::Opencode) {
         registry.register(opencode::OpencodeSource);

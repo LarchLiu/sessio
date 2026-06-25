@@ -2007,7 +2007,6 @@ fn parse_agent(s: &str) -> Result<Agent> {
     match s {
         "codex" => Ok(Agent::Codex),
         "claude" => Ok(Agent::Claude),
-        "gemini" => Ok(Agent::Gemini),
         "opencode" => Ok(Agent::Opencode),
         _ => bail!("unknown agent '{s}'"),
     }
@@ -2162,7 +2161,7 @@ fn print_help() {
 
 Usage:
   sessio sessions list [--project <path>] [--db-path <path>] [--json]
-  sessio sessions messages --agent <codex|claude|gemini> [--session-id <id>] [--file-path <path>] [--json]
+  sessio sessions messages --agent <codex|claude|opencode|pi> [--session-id <id>] [--file-path <path>] [--json]
   sessio thread list [--project <path>] [--db-path <path>] [--json]
   sessio thread show --id <threadId> [--db-path <path>] [--json]
   sessio stage list --thread-id <threadId> [--db-path <path>] [--json]
@@ -2187,8 +2186,7 @@ Notes:
   --json emits stable machine-readable output for skills and agents.
   sessions list reads from the Sessio index DB by default and falls back to a filesystem scan when the index is empty/unreadable; a stderr warning is printed when the fallback fires.
   memory search omits qmd's raw payload by default; pass --include-raw for debugging.
-  memory resolve omits raw JSONL excerpts by default; pass --include-source-excerpt to attach the byte/line range each source points at (Codex / Claude today; Gemini is session-level only).
-  Gemini message lookup reads session JSONL files.
+  memory resolve omits raw JSONL excerpts by default; pass --include-source-excerpt to attach the byte/line range each source points at.
   memory covered-by shows which base record covered a given record, if continuation provenance exists.
   memory base lists records covered by a given base record via record_continuations.
 "#

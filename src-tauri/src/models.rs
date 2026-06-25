@@ -13,27 +13,19 @@ pub enum Agent {
     Pi,
     Codex,
     Claude,
-    Gemini,
     Opencode,
 }
 
 impl Agent {
     /// All known runtime agents. Adding a new variant lights up exhaustiveness
     /// errors at compile time everywhere this list drives a match.
-    pub const ALL: &'static [Agent] = &[
-        Agent::Pi,
-        Agent::Codex,
-        Agent::Claude,
-        Agent::Gemini,
-        Agent::Opencode,
-    ];
+    pub const ALL: &'static [Agent] = &[Agent::Pi, Agent::Codex, Agent::Claude, Agent::Opencode];
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Agent::Pi => "pi",
             Agent::Codex => "codex",
             Agent::Claude => "claude",
-            Agent::Gemini => "gemini",
             Agent::Opencode => "opencode",
         }
     }
@@ -43,7 +35,6 @@ impl Agent {
             "pi" => Some(Agent::Pi),
             "codex" => Some(Agent::Codex),
             "claude" => Some(Agent::Claude),
-            "gemini" => Some(Agent::Gemini),
             "opencode" => Some(Agent::Opencode),
             _ => None,
         }
@@ -55,7 +46,7 @@ impl Agent {
     pub fn effort_config_id(self) -> &'static str {
         match self {
             Agent::Codex => "reasoning_effort",
-            Agent::Pi | Agent::Claude | Agent::Gemini | Agent::Opencode => "effort",
+            Agent::Pi | Agent::Claude | Agent::Opencode => "effort",
         }
     }
 }

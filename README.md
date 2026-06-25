@@ -14,7 +14,7 @@
 
 ### Session browser
 
-- Aggregates local sessions from `Codex`, `Claude Code`, `Gemini`, `OpenCode`, and external `Pi`
+- Aggregates local sessions from `Codex`, `Claude Code`, `OpenCode`, and external `Pi`
 - Builds a local `SQLite` index to avoid full disk scans on every launch
 - Watches file changes (plus periodic polling) and refreshes the list automatically
 - Groups sessions by project in the sidebar, with unread markers and live status indicators
@@ -72,9 +72,6 @@ By default it scans:
   - `~/.codex/archived_sessions`
 - Claude Code
   - `~/.claude/projects`
-- Gemini
-  - `~/.gemini/tmp`
-  - `~/.gemini/projects.json`
 - Pi
   - `~/.pi/agent/sessions`
 
@@ -288,7 +285,7 @@ Tags with a prerelease suffix such as `v0.5.0-beta.1` are published as GitHub pr
 - Only session metadata is indexed; message content is still read from the original files on demand
 - Raw log formats vary across agents, so compatibility depends on the current on-disk layout
 - If third-party tools change their directory structure or log format, the source parsers may need to be updated
-- Live agent runtimes for Codex / Claude Code / Gemini are fetched via `npx` and require the corresponding agent CLI accounts / API access
+- Live agent runtimes for Codex / Claude Code are fetched via `npx` and require the corresponding agent CLI accounts / API access
 
 ## License
 

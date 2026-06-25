@@ -509,10 +509,10 @@ mod tests {
 
     #[test]
     fn explicit_fork_lineage_allows_cross_agent_parent_only() {
-        let source = source_with_lineage("gemini", "claude", "parent");
+        let source = source_with_lineage("pi", "claude", "parent");
 
         assert!(is_allowed_candidate(&source, "claude", "parent", None));
-        assert!(!is_allowed_candidate(&source, "gemini", "parent", None));
+        assert!(!is_allowed_candidate(&source, "pi", "parent", None));
         assert!(!is_allowed_candidate(&source, "claude", "sibling", None));
     }
 }

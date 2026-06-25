@@ -189,7 +189,6 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
                     SourceKind::Subagent => Some(IndexTask::ReindexClaudeSubagentFile(path)),
                     _ => Some(IndexTask::ReindexClaudeFile(path)),
                 },
-                "gemini" => Some(IndexTask::ReindexGeminiFile(path)),
                 "pi" => Some(IndexTask::ReindexPiFile(path)),
                 "opencode" => Some(IndexTask::ReindexOpencodeAll),
                 _ => None,
@@ -275,31 +274,12 @@ mod tests {
     }
 
     #[test]
-    fn gemini_reindex_source_translates_to_reindex_gemini_file() {
-        let task = source_task_to_index_task(SourceIndexTask::ReindexSource(src(
-            "gemini",
-            "/tmp/gemini/abc/chats/session-1.jsonl",
-            SourceKind::MainSession,
-        )));
-        assert!(matches!(task, Some(IndexTask::ReindexGeminiFile(_))));
-    }
-
-    #[test]
     fn claude_scope_maps_to_reindex_claude_project() {
         let task = source_task_to_index_task(SourceIndexTask::ReindexScope {
             agent: AgentKind::new("claude"),
             scope: "/tmp/claude/proj".to_string(),
         });
         assert!(matches!(task, Some(IndexTask::ReindexClaudeProject(_))));
-    }
-
-    #[test]
-    fn gemini_scope_is_not_reindexed() {
-        let task = source_task_to_index_task(SourceIndexTask::ReindexScope {
-            agent: AgentKind::new("gemini"),
-            scope: "/tmp/gemini/abc".to_string(),
-        });
-        assert!(task.is_none());
     }
 
     #[test]

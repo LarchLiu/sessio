@@ -14,7 +14,7 @@
 
 ### 会话浏览
 
-- 聚合 `Codex`、`Claude Code`、`Gemini`、`OpenCode` 以及外部 `Pi` 的本地会话
+- 聚合 `Codex`、`Claude Code`、`OpenCode` 以及外部 `Pi` 的本地会话
 - 使用 `SQLite` 建立本地索引，避免每次启动都全量扫盘
 - 监听文件变化（辅以定时轮询）并自动刷新列表
 - 侧边栏按项目分组浏览，支持未读标记与实时运行状态指示
@@ -72,9 +72,6 @@ Sessio 直接读取本机已有的会话文件，不依赖云端服务。
   - `~/.codex/archived_sessions`
 - Claude Code
   - `~/.claude/projects`
-- Gemini
-  - `~/.gemini/tmp`
-  - `~/.gemini/projects.json`
 - Pi
   - `~/.pi/agent/sessions`
 
@@ -288,7 +285,7 @@ pnpm release -- 0.5.0-beta.1
 - 目前只索引会话元数据，详情内容仍按需读取原始文件
 - 不同 agent 的原始日志格式差异较大，兼容逻辑依赖当前本地文件结构
 - 如果第三方工具未来调整目录结构或日志格式，对应的解析器可能需要同步更新
-- Codex / Claude Code / Gemini 的实时运行时通过 `npx` 拉取，需要本机具备对应 agent 的账号 / API 访问能力
+- Codex / Claude Code 的实时运行时通过 `npx` 拉取，需要本机具备对应 agent 的账号 / API 访问能力
 
 ## License
 

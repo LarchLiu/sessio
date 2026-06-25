@@ -8,8 +8,7 @@ use crate::memory::MemorySource;
 
 // Resolve a MemorySource back to the raw text snippet it points at.
 //
-// Returns Ok(None) when the source carries no offset info (Gemini today, or
-// any future source where the parser does not yet emit line/byte ranges) so
+// Returns Ok(None) when the source carries no offset info so
 // the caller can decide whether to fall back to "session-level pointer
 // only". Errors only escape when the file is reachable but the requested
 // range cannot be read.
@@ -139,7 +138,7 @@ mod tests {
         fs::write(&file_path, "hello\n").unwrap();
         let source = MemorySource {
             record_id: "c".to_string(),
-            agent: "gemini".to_string(),
+            agent: "pi".to_string(),
             session_id: "s".to_string(),
             file_path: file_path.to_string_lossy().to_string(),
             location: SourceLocation::file(file_path.to_string_lossy().to_string()),

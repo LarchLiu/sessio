@@ -28,7 +28,6 @@
 - [x] Adapt Codex source to the unified interface.
 - [x] Make Codex forked rollout session ids use the first `session_meta.payload.id` instead of replayed metadata from the parent session.
 - [x] Adapt Claude source to the unified interface.
-- [x] Adapt Gemini source to the unified interface.
 - [x] Keep current UI APIs backward compatible while the new abstraction lands.
 - [x] Rename the abstraction from reader to source.
 - [x] Move source-owned parsers under `src-tauri/src/agents/sources/<agent>/parser.rs`.
@@ -87,7 +86,6 @@
 - [x] Debounce qmd embed jobs.
 - [x] Emit optional `memory_index_updated` events.
 - [x] Track memory/qmd job status and last error.
-- [x] Stop Gemini polling from re-submitting `RefreshGeminiProjectMappings` every 10s when `projects.json` mtime has not changed.
 - [x] Gate polling on `indexer.status().indexing` so a long-running `FullRebuild` (now driving the per-source memory/QMD pipeline) cannot race with polling and resubmit redundant per-file reindex tasks.
 - [x] Drain residual per-file reindex tasks from the indexer channel at the end of a `FullRebuild` batch (re-queueing `DeleteFile` / `DeleteSubagentFile`) so watcher events accumulated during the rebuild do not retrigger the heavy memory/QMD pipeline for already-covered files.
 - [x] Detect an empty session index in polling and submit a single `FullRebuild` instead of a per-file reindex storm, so cold-start / wiped-DB bootstrap goes through the project-level memory path.
@@ -161,14 +159,13 @@
 - [x] Aligned docs and skill examples with readable project slugs, `sessio-<agent>-<session id>` card ids, and session-level incremental rebuild behavior.
 - [x] `cargo test memory::build::tests::build_source_memory_marks_card_unavailable_and_removes_markdown_when_source_goes_empty` passed after making incremental source rebuild delete stale markdown and mark the card unavailable.
 - [x] `cargo check` and `cargo test` passed after filtering unavailable cards from `memory search` and deleting stale qmd-memory markdown on session-level rebuild.
-- [x] `cargo check` passed after caching Gemini `projects.json` mtime in polling so idle polling no longer flips the indexing indicator every 10s.
 - [x] `cargo check` passed after gating polling on `indexer.status().indexing` and draining post-`FullRebuild` per-file reindex tasks from the indexer channel.
 - [x] `cargo check` passed after short-circuiting empty-DB polling ticks to `FullRebuild`.
 - [x] `cargo test` (27 tests) passed after routing watcher events through `AgentSourceRegistry::classify_path_event` and replacing byte-slice `short_id`/`short_hash` in cards with `chars().take(12)`.
 - [x] `cargo test` (32 tests) passed after Codex/Claude parsers started returning per-message line/byte ranges, cards aggregated those into `memory_sources`, and `sessio memory resolve --include-source-excerpt` started returning raw JSONL excerpts.
 - [x] `cargo test` (38 tests) passed after adding continuation dedupe, user-block trim boundaries, `record_continuations`, and human-readable continuation summaries in CLI resolve/search output.
 - [x] `cargo test` (41 tests) passed after tightening codex dedupe direction (forked_from_id-then-time fallback), persisting `forked_from_id` in the sessions table, requiring real `text_len` fingerprints, invalidating dependent `record_continuations` on base reindex, and extracting the dedupe plan helper.
-- [x] `cargo test` (45 tests) passed after adding `memory covered-by` / `memory base` CLI commands backed by `continuations_for_base`, Gemini per-item line/byte offsets via `scan_json_array_entries`, and skill updates for the new commands.
+- [x] `cargo test` (45 tests) passed after adding `memory covered-by` / `memory base` CLI commands backed by `continuations_for_base` and skill updates for the new commands.
 
 - [x] `cargo run --bin sessio -- --help` printed CLI usage.
 - [x] `cargo run -- --help` printed CLI usage through the single desktop binary.
@@ -185,7 +182,6 @@
 These items are intentionally **not** in scope for v1. Schema columns are reserved so v2 work is additive.
 
 - [x] Fill `memory_sources.line_start/line_end/byte_start/byte_end` from Codex and Claude parsers. Card-level `memory_sources` rows now carry the aggregated line/byte span over all events in the card.
-- [x] Fill the same offsets for Gemini — implemented by scanning the JSON array and deserializing each object from its raw byte range.
 - [x] Implement source-range resolution (`crate::memory::resolve::read_source_excerpt`) that reads back a raw JSONL excerpt by byte range or, failing that, by inclusive line range; exposed through `sessio memory resolve --include-source-excerpt`.
 - [ ] Tool-result digest hash (command + exit code + key errors + output hash) feeding into a future tool-result dedupe layer.
 - [ ] SimHash / MinHash near-duplicate detection over card text; populate `memory_records.simhash` and merge near-dup cards by appending source refs.

@@ -108,7 +108,7 @@ Add Tauri commands and matching frontend API wrappers:
 
 ## CLI Surface
 
-Sessio already has a CLI entrypoint for `sessions`, `memory`, and `config`. Extend that same binary with `thread` and `stage` command groups so Codex, Claude, Gemini, and future agents can update workflow state without depending on the GUI.
+Sessio already has a CLI entrypoint for `sessions`, `memory`, and `config`. Extend that same binary with `thread` and `stage` command groups so supported agents can update workflow state without depending on the GUI.
 
 All commands should support `--json` and use the same SQLite store as the desktop app.
 
