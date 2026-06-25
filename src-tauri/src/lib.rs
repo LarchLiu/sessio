@@ -28,7 +28,6 @@ use std::time::Duration;
 use agents::runtime::metadata::{
     runtime_agents_from_db, startup_probe_runtime_agents, RuntimeAgentsCache,
 };
-use agents::runtime::pi_session_store::PiAcpSessionStore;
 use agents::runtime::types::{
     AgentInput, AgentSessionConfigChange, AgentSessionHandle, AgentTurnHandle,
     EnsureAgentRuntimeSession, RuntimeStatus, StartAgentSession,
@@ -672,9 +671,7 @@ fn update_agent_preferences(
             },
         )
         .map_err(|e| e.to_string())?;
-    if updated.id == Agent::AstraPi.as_str() {
-        astra.update_astra_preferences_cache(updated.clone());
-    }
+    astra.update_astra_preferences_cache(updated.clone());
     app.emit("runtime_agents_updated", ())
         .map_err(|e| e.to_string())?;
     Ok(updated)
@@ -2792,7 +2789,6 @@ fn read_session_history_result_from_source(
         anyhow::bail!(
             "Session file no longer exists (likely cleaned by {}): {}",
             match agent {
-                Agent::AstraPi => "Astra Pi",
                 Agent::Pi => "Pi",
                 Agent::Codex => "Codex",
                 Agent::Claude => "Claude Code",
@@ -2807,15 +2803,6 @@ fn read_session_history_result_from_source(
         );
     }
     let (messages, message_count) = match agent {
-        Agent::AstraPi => {
-            let sid = session_id.unwrap_or_default();
-            let rows =
-                crate::agents::sources::pi::parser::read_history_acp_messages_with_locations(
-                    &path, sid,
-                )?;
-            let count = rows.len();
-            (rows, count)
-        }
         Agent::Pi => {
             let source = crate::agents::sources::types::SessionSource {
                 agent: crate::agents::sources::types::AgentKind::new(Agent::Pi.as_str()),
@@ -5731,10 +5718,6 @@ pub fn run() {
             if let Err(error) = astra_service.watch_runtime_events() {
                 log::warn!("[astra:runtime-watch] {error}");
             }
-            let pi_session_store = PiAcpSessionStore::new(app.handle().clone(), store.clone());
-            if let Err(error) = pi_session_store.watch_runtime_events(runtime.clone()) {
-                log::warn!("[pi-acp-session-store] failed to watch runtime events: {error}");
-            }
             let im_bridge_config = match im_bridge::load_config_or_default() {
                 Ok(config) => config,
                 Err(error) => {
@@ -5762,7 +5745,6 @@ pub fn run() {
             }
             app.manage(scheduled_tasks_service);
             app.manage(im_bridge_service);
-            app.manage(pi_session_store);
             app.manage(astra_service);
             app.manage(runtime_agents_cache);
             let app_handle = app.handle().clone();

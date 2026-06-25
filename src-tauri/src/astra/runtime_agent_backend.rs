@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use serde_json::Value;
 
-use super::astra_pi_acp_adapter::parse_astra_pi_acp_orchestration_response;
 use super::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
+use super::orchestration_response::parse_astra_orchestration_response;
 use super::prompt::build_astra_orchestration_prompt;
 use super::{
     AstraOrchestration, AstraRun, AstraTaskCompletion, ASTRA_ORCHESTRATOR_TIMEOUT_MS,
@@ -28,7 +28,7 @@ pub struct RuntimeAgentBackendConfig {
 impl Default for RuntimeAgentBackendConfig {
     fn default() -> Self {
         Self {
-            agent: Agent::AstraPi,
+            agent: Agent::Pi,
             timeout_ms: ASTRA_ORCHESTRATOR_TIMEOUT_MS,
             model: None,
             effort: None,
@@ -71,7 +71,7 @@ impl OrchestratorBackend for RuntimeAgentOrchestrator {
             "orchestration",
         ) {
             Ok((text, session_id)) => {
-                match parse_astra_pi_acp_orchestration_response(
+                match parse_astra_orchestration_response(
                     &text,
                     run,
                     thread,
@@ -83,10 +83,10 @@ impl OrchestratorBackend for RuntimeAgentOrchestrator {
                         session_id,
                         backend_type: format!("runtime_agent_{}", self.config.agent.as_str()),
                     }),
-                    Err(pi_error) => Err(BackendFailure::new(
+                    Err(parse_error) => Err(BackendFailure::new(
                         format!("runtime_agent_{}", self.config.agent.as_str()),
-                        pi_error.code,
-                        pi_error.message,
+                        parse_error.code,
+                        parse_error.message,
                     )
                     .with_session_id(Some(session_id))
                     .with_raw_response(&text)),

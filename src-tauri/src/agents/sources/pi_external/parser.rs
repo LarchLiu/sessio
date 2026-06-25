@@ -13,7 +13,7 @@ use crate::agents::sources::types::{
     SourceLocation, ToolResultEvent, ToolUseEvent,
 };
 use crate::app_paths;
-use crate::models::{Agent, SessionInfo, normalize_preview};
+use crate::models::{normalize_preview, Agent, SessionInfo};
 use crate::turns::{
     history_assistant_message, history_prompt_message, history_thought_message,
     history_tool_call_message_with_kind, history_tool_result_message,

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use crate::agents::runtime::types::{
     AcpProtocolMessage, AgentAttachment, AgentAttachmentKind, AgentRuntimeEventPayload,
@@ -9,10 +9,10 @@ use crate::agents::runtime::types::{
 };
 use crate::agents::sources::types::HistoryAcpMessage;
 use crate::models::{
-    Agent, SessionContentBlock, SessionHistoryBlock, SessionHistoryPermissionOption,
-    SessionHistoryPermissionRequest, SessionHistoryToolCall, SessionHistoryTurn, is_system_noise,
-    sessio_attachment_marker_name, sessio_thread_prompt_block_metas, strip_injected_context,
-    strip_sessio_thread_prompt_blocks, text_content_blocks,
+    is_system_noise, sessio_attachment_marker_name, sessio_thread_prompt_block_metas,
+    strip_injected_context, strip_sessio_thread_prompt_blocks, text_content_blocks, Agent,
+    SessionContentBlock, SessionHistoryBlock, SessionHistoryPermissionOption,
+    SessionHistoryPermissionRequest, SessionHistoryToolCall, SessionHistoryTurn,
 };
 
 const MAX_PROTOCOL_MESSAGES: usize = 240;
@@ -3272,11 +3272,10 @@ mod tests {
                 .count(),
             1
         );
-        assert!(
-            turn.blocks.iter().any(|block| {
-                block.kind == "tool" && block.tool_id.as_deref() == Some("edit-1")
-            })
-        );
+        assert!(turn
+            .blocks
+            .iter()
+            .any(|block| { block.kind == "tool" && block.tool_id.as_deref() == Some("edit-1") }));
     }
 
     #[test]
@@ -3535,12 +3534,10 @@ mod tests {
             turns[0].tools[0].raw_output.as_str(),
             Some("Process running with session ID 42\ninitial output\n\npoll output")
         );
-        assert!(
-            turns[0]
-                .blocks
-                .iter()
-                .all(|block| block.tool_id.as_deref() != Some("poll-1"))
-        );
+        assert!(turns[0]
+            .blocks
+            .iter()
+            .all(|block| block.tool_id.as_deref() != Some("poll-1")));
     }
 
     #[test]
@@ -3987,12 +3984,10 @@ mod tests {
             30,
         );
 
-        assert!(
-            state.turns[0]
-                .blocks
-                .iter()
-                .all(|block| block.update_type.as_deref() != Some("file_edit"))
-        );
+        assert!(state.turns[0]
+            .blocks
+            .iter()
+            .all(|block| block.update_type.as_deref() != Some("file_edit")));
     }
 
     #[test]
@@ -4037,12 +4032,10 @@ mod tests {
             },
             20,
         );
-        assert!(
-            state.turns[0]
-                .blocks
-                .iter()
-                .any(|block| block.update_type.as_deref() == Some("file_edit"))
-        );
+        assert!(state.turns[0]
+            .blocks
+            .iter()
+            .any(|block| block.update_type.as_deref() == Some("file_edit")));
 
         apply_runtime_event_to_state(
             &mut state,
@@ -4063,12 +4056,10 @@ mod tests {
             21,
         );
 
-        assert!(
-            state.turns[0]
-                .blocks
-                .iter()
-                .all(|block| block.update_type.as_deref() != Some("file_edit"))
-        );
+        assert!(state.turns[0]
+            .blocks
+            .iter()
+            .all(|block| block.update_type.as_deref() != Some("file_edit")));
     }
 
     #[test]
@@ -4195,12 +4186,10 @@ mod tests {
         assert_eq!(state.turns.len(), 1);
         assert_eq!(state.turns[0].blocks.len(), 1);
         assert_eq!(state.turns[0].blocks[0].kind, "assistant");
-        assert!(
-            state.turns[0]
-                .blocks
-                .iter()
-                .all(|block| block.update_type.as_deref() != Some("usage_update"))
-        );
+        assert!(state.turns[0]
+            .blocks
+            .iter()
+            .all(|block| block.update_type.as_deref() != Some("usage_update")));
     }
 
     #[test]

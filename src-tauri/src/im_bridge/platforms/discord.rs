@@ -265,7 +265,7 @@ fn read_gateway_event(
     loop {
         match socket.read()? {
             Message::Text(text) => {
-                return serde_json::from_str(&text).context("parse Gateway JSON")
+                return serde_json::from_str(&text).context("parse Gateway JSON");
             }
             Message::Ping(payload) => socket.write(Message::Pong(payload))?,
             Message::Close(_) => bail!("Discord Gateway closed before hello"),

@@ -15,7 +15,6 @@ import { getMenuIconBytes, type MenuIconComponent } from "./menuIcon";
 import { sessionDisplayTitle } from "./appUtils";
 
 const AGENT_ICONS: Record<Agent, MenuIconComponent> = {
-  "astra-pi": OpenAI as MenuIconComponent,
   pi: OpenAI as MenuIconComponent,
   codex: OpenAI as MenuIconComponent,
   claude: Claude.Color as MenuIconComponent,
@@ -39,7 +38,7 @@ export type TrayRecentEntry =
   | { kind: "thread"; thread: ThreadIndexItemInfo; time: number };
 
 function themedAgentIconColor(agent: Agent, theme: TrayTheme): string | undefined {
-  if (agent !== "codex" && agent !== "astra-pi" && agent !== "pi") return undefined;
+  if (agent !== "codex" && agent !== "pi") return undefined;
   return theme === "dark" ? "#ffffff" : "#1c1c20";
 }
 
@@ -158,7 +157,6 @@ async function buildMenu(
   actions: TrayRecentActions,
 ): Promise<Menu> {
   const iconBytes: Record<Agent, Uint8Array> = {
-    "astra-pi": await getAgentIcon("astra-pi", theme),
     pi: await getAgentIcon("pi", theme),
     codex: await getAgentIcon("codex", theme),
     claude: await getAgentIcon("claude", theme),

@@ -4,7 +4,6 @@ import { type Agent } from "../api";
 import { OpencodeIcon, PiIcon } from "./IconifyIcon";
 
 const AGENT_ICON: Record<Agent, (props: { className?: string; style?: CSSProperties }) => ReactNode> = {
-  "astra-pi": PiIcon,
   pi: PiIcon,
   codex: OpenAI,
   claude: Claude.Color,

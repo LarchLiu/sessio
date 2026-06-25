@@ -16,14 +16,14 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::agents::runtime::RuntimeManager;
 use crate::agents::runtime::manager::RuntimeCleanupReport;
 use crate::agents::runtime::types::RuntimeSessionStatus;
 use crate::agents::runtime::types::{AgentSessionHandle, RuntimeTransportKind, StartAgentSession};
+use crate::agents::runtime::RuntimeManager;
 use crate::astra::{
     AstraHandle, AstraRunStatus, AstraService, CancelAstraRunRequest, CreateAstraRunRequest,
 };
@@ -32,8 +32,8 @@ use crate::models::{
     Agent, ProjectInfo, SessionInfo, StageStatus, ThreadAgentInfo, ThreadInfo, ThreadKind,
 };
 use crate::store::{
-    SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK, ScheduledTaskRecord, ScheduledTaskRunRecord,
-    SessionStore,
+    ScheduledTaskRecord, ScheduledTaskRunRecord, SessionStore,
+    SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK,
 };
 
 use self::config::{now_ms, task_chat_prompt};
@@ -1667,11 +1667,9 @@ fn spawn_completion_watcher(state: Arc<SchedulerState>) -> Result<()> {
         })?;
     thread::Builder::new()
         .name("scheduled-task-pushes".to_string())
-        .spawn(move || {
-            loop {
-                state.process_run_pushes();
-                thread::sleep(PUSH_CHECK_INTERVAL);
-            }
+        .spawn(move || loop {
+            state.process_run_pushes();
+            thread::sleep(PUSH_CHECK_INTERVAL);
         })?;
     Ok(())
 }

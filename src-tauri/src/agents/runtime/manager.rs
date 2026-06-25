@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc,
+    mpsc, Arc, Mutex,
 };
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use tauri::{AppHandle, Emitter, Manager};
 
 use agent_client_protocol::schema::RequestPermissionRequest;
@@ -28,8 +27,8 @@ use super::types::{
 use crate::models::Agent;
 use crate::store::{RuntimeAgentSessionConfigRecord, SessionStore};
 use crate::turns::{
-    AcpCanonicalSessionState, LiveRuntimeTurnSnapshotEvent, RuntimeTurnState,
-    apply_optimistic_user_message, apply_runtime_event_to_state,
+    apply_optimistic_user_message, apply_runtime_event_to_state, AcpCanonicalSessionState,
+    LiveRuntimeTurnSnapshotEvent, RuntimeTurnState,
 };
 
 #[derive(Clone)]
@@ -128,15 +127,6 @@ impl RuntimeManager {
                 filter: Arc::new(filter),
             });
         Ok(receiver)
-    }
-
-    pub(crate) fn event_session_agent(&self, payload: &AgentRuntimeEventPayload) -> Option<Agent> {
-        let session_id = event_session_id(payload)?;
-        self.inner
-            .sessions
-            .lock()
-            .ok()
-            .and_then(|sessions| sessions.get(session_id).map(|state| state.handle.agent))
     }
 
     pub(crate) fn event_session_metadata_has(

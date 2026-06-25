@@ -2043,22 +2043,22 @@ fn load_sessions_from_store_or_scan(
     db_path: Option<&str>,
 ) -> Result<Vec<crate::models::SessionInfo>> {
     match open_store(db_path) {
-        Ok(store) => {
-            match store.init().and_then(|()| store.list_sessions()) {
-                Ok(sessions) if !sessions.is_empty() => Ok(sessions),
-                Ok(_) => {
-                    eprintln!(
-                        "sessio: session index is empty, falling back to filesystem scan. \
+        Ok(store) => match store.init().and_then(|()| store.list_sessions()) {
+            Ok(sessions) if !sessions.is_empty() => Ok(sessions),
+            Ok(_) => {
+                eprintln!(
+                    "sessio: session index is empty, falling back to filesystem scan. \
                      Run the Sessio desktop app (or rebuild the index) for faster lookups."
-                    );
-                    Ok(crate::agents::sources::list_all())
-                }
-                Err(e) => {
-                    eprintln!("sessio: failed to read session index ({e}), falling back to filesystem scan.");
-                    Ok(crate::agents::sources::list_all())
-                }
+                );
+                Ok(crate::agents::sources::list_all())
             }
-        }
+            Err(e) => {
+                eprintln!(
+                    "sessio: failed to read session index ({e}), falling back to filesystem scan."
+                );
+                Ok(crate::agents::sources::list_all())
+            }
+        },
         Err(e) => {
             eprintln!(
                 "sessio: failed to open session index ({e}), falling back to filesystem scan."

@@ -140,7 +140,7 @@ describe("threadUnreadKeys", () => {
   it("covers linked sessions, runtime aliases, and live Astra planner sessions", () => {
     const planner: LiveRuntimeSession = {
       sessioRuntimeSessionId: "runtime-planner",
-      agent: "astra-pi",
+      agent: "pi",
       agentRuntimeSessionId: "planner-session",
       transport: "acp",
       workspacePath: "/tmp/project",
@@ -183,7 +183,7 @@ describe("threadUnreadKeys", () => {
       "child-session",
       "runtime-child",
       "runtime-planner",
-      "astra-pi:planner-session",
+      "pi:planner-session",
       "planner-session",
     ]));
   });

@@ -11,7 +11,7 @@ use crate::agents::sources::types::{
     MessageContent, MessageEvent, MessageRole, PathEvent, PathEventKind, SessionRecord,
     SessionSource, SourceIndexTask, SourceKind, SourceLocation, WatchPurpose, WatchRoot,
 };
-use crate::models::{Agent, text_content_blocks};
+use crate::models::{text_content_blocks, Agent};
 
 pub struct PiExternalSource;
 

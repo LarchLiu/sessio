@@ -2274,7 +2274,7 @@ function AstraAgentSettings({
     ? runtimePermissionModeOptions(permissionRows, permissionValue, selectedAgent.id)
     : permissionRows;
   const effectivePermissionValue = permissionValue || (permissionOptions[0]?.value ?? "");
-  const showPermissionMode = selectedAgent?.id !== "astra-pi" && permissionOptions.length > 0;
+  const showPermissionMode = permissionOptions.length > 0;
 
   return (
     <section className="grid gap-3">
@@ -2352,14 +2352,7 @@ function astraPreferenceSource(
 
 function astraAgentModelOptions(agent: AgentInfo | null): RuntimeAgentOptionMetadata[] {
   if (!agent) return [];
-  if (agent.id !== "astra-pi") {
-    return astraPreferenceSource(agent.models, agent.model);
-  }
-  const provider =
-    agent.aiProviders.find((item) => item.id === agent.aiProvider)
-    ?? agent.aiProviders.find((item) => item.enabled)
-    ?? agent.aiProviders[0];
-  return astraPreferenceSource(provider?.models ?? agent.models, provider?.model ?? agent.model);
+  return astraPreferenceSource(agent.models, agent.model);
 }
 
 function astraSelectableAgents(agents: AgentInfo[], selectedAgentId: string): AgentInfo[] {
@@ -2445,7 +2438,7 @@ function AgentEditor({
   const [newModelValue, setNewModelValue] = useState("");
   const [newModelDisplayName, setNewModelDisplayName] = useState("");
   const runtimeAgent = isRuntimeAgent(agent.id) ? agent.id : null;
-  const isAstra = agent.id === "astra-pi";
+  const isAstra = false;
   const [aiProvider, setAiProvider] = useState(agent.aiProvider ?? "");
   const [editingAiProvider, setEditingAiProvider] = useState(agent.aiProvider ?? "");
   const [aiProviders, setAiProviders] = useState<AgentAiProviderInfo[]>(agent.aiProviders);
@@ -2456,22 +2449,10 @@ function AgentEditor({
   const selectedAiProvider = aiProviders.find((provider) => provider.id === editingAiProvider) ?? activeAiProvider;
 
   useEffect(() => {
-    const selectedProvider =
-      agent.id === "astra-pi"
-        ? agent.aiProviders.find((provider) => provider.id === editingAiProvider)
-          ?? agent.aiProviders.find((provider) => provider.id === agent.aiProvider)
-          ?? agent.aiProviders.find((provider) => provider.enabled)
-          ?? agent.aiProviders[0]
-        : null;
-    setModel(
-      selectedProvider?.model
-      ?? agent.model
-      ?? defaultModelValue(selectedProvider?.models ?? agent.models)
-      ?? "",
-    );
+    setModel(agent.model ?? defaultModelValue(agent.models) ?? "");
     setEffort(agent.effort ?? agent.efforts[0]?.value ?? "");
     setPermissionMode(agent.permissionMode ?? agent.permissionModes[0]?.value ?? "");
-    setModels(selectedProvider?.models ?? agent.models);
+    setModels(agent.models);
     setNewModelValue("");
     setNewModelDisplayName("");
     setAiProvider(agent.aiProvider ?? "");

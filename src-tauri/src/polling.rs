@@ -70,9 +70,6 @@ fn poll_once(
     if enabled_agents.contains(&Agent::Gemini) {
         poll_gemini(&indexed, store.as_ref(), indexer)?;
     }
-    if enabled_agents.contains(&Agent::AstraPi) {
-        poll_pi(&indexed, store.as_ref(), indexer)?;
-    }
     if enabled_agents.contains(&Agent::Opencode) {
         poll_opencode(&indexed, store.as_ref(), indexer)?;
     }
@@ -377,62 +374,6 @@ fn gemini_chat_files(base_dir: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out
-}
-
-fn poll_pi(
-    indexed: &[IndexedSessionRecord],
-    store: &dyn SessionStore,
-    indexer: &IndexerHandle,
-) -> Result<()> {
-    let Some(root) = crate::agents::sources::pi::parser::root_dir()? else {
-        store.mark_missing_scopes_unavailable(Agent::AstraPi, &HashSet::new())?;
-        return Ok(());
-    };
-
-    let mut known: HashMap<String, &IndexedSessionRecord> = indexed
-        .iter()
-        .filter(|s| s.agent == Agent::AstraPi && !s.file_path.is_empty())
-        .map(|s| (s.file_path.clone(), s))
-        .collect();
-    let mut seen_scopes: HashSet<String> = HashSet::new();
-
-    for project_entry in std::fs::read_dir(&root)? {
-        let project_entry = project_entry?;
-        if !project_entry.file_type()?.is_dir() {
-            continue;
-        }
-        let project_dir = project_entry.path();
-        let scope = project_dir.to_string_lossy().into_owned();
-        seen_scopes.insert(scope);
-
-        for entry in std::fs::read_dir(project_dir)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let path_str = path.to_string_lossy().into_owned();
-            let needs_reindex = match known.remove(&path_str) {
-                Some(row) => !row.available || file_changed(&path, row.file_size, row.file_mtime),
-                None => true,
-            };
-            if needs_reindex {
-                indexer.submit(IndexTask::ReindexPiFile(path))?;
-            }
-        }
-    }
-
-    for stale in known.into_values() {
-        if stale.available {
-            indexer.submit(IndexTask::DeleteFile(PathBuf::from(&stale.file_path)))?;
-        }
-    }
-    store.mark_missing_scopes_unavailable(Agent::AstraPi, &seen_scopes)?;
-
-    Ok(())
 }
 
 /// OpenCode persists everything to `opencode.db` via SQLite's WAL. Polling

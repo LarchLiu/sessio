@@ -119,7 +119,7 @@ function astraRun(): AstraHandle {
     projectId: "project-1",
     status: "completed",
     mode: "auto",
-    plannerBackend: "astra-pi",
+    plannerBackend: "pi",
     roundIndex: 1,
     roundLimit: 3,
     terminalReason: "requested joke has been drafted and polished",

@@ -11,13 +11,13 @@ import type {
   UpsertCanvasAnchorRequest,
 } from "./canvasTypes";
 
-export type Agent = "astra-pi" | "pi" | "codex" | "claude" | "gemini" | "opencode";
+export type Agent = "pi" | "codex" | "claude" | "gemini" | "opencode";
 
 /// Single source of truth for runtime agent ids. Keep in sync with the
 /// `Agent` enum on the Rust side. Adding a new agent here is the only TS
 /// place callers should touch — `isAgent`, `Record<Agent, …>` literals,
 /// and AGENTS-driven loops pick up the rest at compile time.
-export const AGENTS = ["astra-pi", "pi", "codex", "claude", "gemini", "opencode"] as const;
+export const AGENTS = ["pi", "codex", "claude", "gemini", "opencode"] as const;
 
 // Compile-time guard: AGENTS must cover every Agent variant and only contain
 // Agent variants. If either side drifts, TypeScript fails here.
@@ -2581,7 +2581,6 @@ export async function respondAgentPermission(
 }
 
 export const AGENT_LABEL: Record<Agent, string> = {
-  "astra-pi": "Astra Pi",
   pi: "Pi",
   codex: "Codex",
   claude: "Claude Code",
@@ -2593,7 +2592,6 @@ export const AGENT_LABEL: Record<Agent, string> = {
 /// "Claude Code" / "Gemini CLI" suffixes don't fit. Defaults to AGENT_LABEL
 /// when no override is set.
 export const AGENT_SHORT_LABEL: Record<Agent, string> = {
-  "astra-pi": "Astra Pi",
   pi: "Pi",
   codex: "Codex",
   claude: "Claude",
@@ -2602,7 +2600,6 @@ export const AGENT_SHORT_LABEL: Record<Agent, string> = {
 };
 
 const AGENT_COLOR_VAR: Record<Agent, string> = {
-  "astra-pi": "--color-purple",
   pi: "--color-purple",
   codex: "--color-fg",
   claude: "--color-orange",
@@ -2611,7 +2608,6 @@ const AGENT_COLOR_VAR: Record<Agent, string> = {
 };
 
 export const AGENT_ACCENT: Record<Agent, string> = {
-  "astra-pi": `rgb(var(${AGENT_COLOR_VAR["astra-pi"]}))`,
   pi: `rgb(var(${AGENT_COLOR_VAR.pi}))`,
   codex: `rgb(var(${AGENT_COLOR_VAR.codex}))`,
   claude: `rgb(var(${AGENT_COLOR_VAR.claude}))`,

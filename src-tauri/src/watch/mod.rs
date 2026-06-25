@@ -190,7 +190,6 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
                     _ => Some(IndexTask::ReindexClaudeFile(path)),
                 },
                 "gemini" => Some(IndexTask::ReindexGeminiFile(path)),
-                "astra-pi" => Some(IndexTask::ReindexPiFile(path)),
                 "pi" => Some(IndexTask::ReindexPiExternalFile(path)),
                 "opencode" => Some(IndexTask::ReindexOpencodeAll),
                 _ => None,
@@ -283,16 +282,6 @@ mod tests {
             SourceKind::MainSession,
         )));
         assert!(matches!(task, Some(IndexTask::ReindexGeminiFile(_))));
-    }
-
-    #[test]
-    fn pi_reindex_source_translates_to_reindex_pi_file() {
-        let task = source_task_to_index_task(SourceIndexTask::ReindexSource(src(
-            "astra-pi",
-            "/tmp/pi/project/session.jsonl",
-            SourceKind::MainSession,
-        )));
-        assert!(matches!(task, Some(IndexTask::ReindexPiFile(_))));
     }
 
     #[test]

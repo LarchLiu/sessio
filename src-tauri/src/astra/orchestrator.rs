@@ -9,7 +9,6 @@ use super::{
     AstraRunIntent, AstraRunStatus, AstraService, AstraTaskCompletion,
     ASTRA_ORCHESTRATOR_TIMEOUT_MS,
 };
-use crate::astra::astra_pi_acp_adapter::AstraPiAcpOrchestrator;
 use crate::astra::backend::{BackendFailure, OrchestratorBackend};
 use crate::astra::brainstorm_backend::BrainstormBackend;
 use crate::astra::brainstorm_facilitator::{
@@ -227,7 +226,7 @@ impl AstraService {
         let backend_config = self.astra_backend_config();
         let orchestrator_backend: Box<dyn OrchestratorBackend> =
             self.create_orchestrator_backend(thread, &backend_config);
-        let config_value = json!(backend_config.provider_config);
+        let config_value = json!({});
 
         match orchestrator_backend.orchestrate(
             run,
@@ -358,11 +357,6 @@ impl AstraService {
                 self.inner.runtime.clone(),
                 runtime_config,
             ));
-        }
-
-        if let Some(astra_pi_acp_config) = self.inner.astra_pi_acp_config.clone() {
-            log::info!("[astra:orchestrator:backend] using astra_pi_acp backend");
-            return Box::new(AstraPiAcpOrchestrator::new(astra_pi_acp_config));
         }
 
         log::info!("[astra:orchestrator:backend] using deterministic backend");
@@ -923,14 +917,14 @@ mod tests {
 
     #[test]
     fn backend_failure_diagnostic_records_backend_session_and_raw_snippet() {
-        let failure = BackendFailure::new("astra_pi_acp", "invalid_yaml", "not valid YAML")
+        let failure = BackendFailure::new("runtime_agent_pi", "invalid_yaml", "not valid YAML")
             .with_session_id(Some("planner-session-1".to_string()))
             .with_raw_response("  summary: bad\n```yaml\nnope\n```  ");
 
         let diagnostic = orchestrator_backend_failure_diagnostic(&failure, 3, 2);
 
         assert_eq!(diagnostic["kind"], "orchestrator_backend_failure");
-        assert_eq!(diagnostic["backend"], "astra_pi_acp");
+        assert_eq!(diagnostic["backend"], "runtime_agent_pi");
         assert_eq!(diagnostic["code"], "invalid_yaml");
         assert_eq!(diagnostic["message"], "not valid YAML");
         assert_eq!(diagnostic["sessionId"], "planner-session-1");

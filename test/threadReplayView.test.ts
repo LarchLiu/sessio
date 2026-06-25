@@ -170,7 +170,7 @@ describe("buildThreadSessionLanes", () => {
       threadId: "thread-1",
       kind: "process",
       sessions: [
-        replaySession("astra-pi", "deterministic-orchestrator-astra-run-1-0", null, [
+        replaySession("pi", "deterministic-orchestrator-astra-run-1-0", null, [
           source({
             kind: "astra_internal",
             astraRunId: "run-1",
@@ -179,7 +179,7 @@ describe("buildThreadSessionLanes", () => {
             createdAt: 20,
           }),
         ]),
-        replaySession("astra-pi", "deterministic-orchestrator-astra-run-1-1", null, [
+        replaySession("pi", "deterministic-orchestrator-astra-run-1-1", null, [
           source({
             kind: "astra_internal",
             astraRunId: "run-1",
@@ -328,7 +328,7 @@ describe("groupReplaySessionsByThreadKind", () => {
       threadId: "thread-1",
       kind: "process",
       sessions: [
-        replaySession("astra-pi", "deterministic-orchestrator-astra-run-1-0", null, [
+        replaySession("pi", "deterministic-orchestrator-astra-run-1-0", null, [
           source({
             kind: "astra_internal",
             astraRunId: "run-1",
@@ -362,7 +362,7 @@ describe("buildThreadTimelineRows", () => {
       threadId: "thread-1",
       kind: "brainstorm",
       sessions: [
-        replaySession("astra-pi", "brainstorm-backend-run-1-0", null, [
+        replaySession("pi", "brainstorm-backend-run-1-0", null, [
           source({
             kind: "astra_internal",
             astraRunId: "run-1",

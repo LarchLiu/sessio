@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,7 +14,6 @@ use crate::agents::runtime::types::{
     StartAgentSession,
 };
 use crate::agents::runtime::{RuntimeCleanupReport, RuntimeManager};
-use crate::app_paths;
 use crate::models::{
     Agent, AgentInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageStatus, ThreadInfo, ThreadKind,
@@ -25,13 +23,13 @@ use crate::store::{
     PlanTaskStatusPatch, SessionStore, ThreadWorkSnapshotRecord,
 };
 
-mod astra_pi_acp_adapter;
 mod backend;
 mod brainstorm_backend;
 mod brainstorm_facilitator;
 mod debate_backend;
 mod debate_judge;
 mod deterministic_backend;
+mod orchestration_response;
 mod orchestrator;
 mod planner;
 mod prompt;
@@ -39,10 +37,6 @@ mod runtime_agent_backend;
 mod structured_response;
 mod types;
 
-use astra_pi_acp_adapter::{
-    prepare_astra_pi_agent_config, AstraPiAcpConfig, AstraPiAcpProviderConfig,
-    AstraPiAcpPurposeConfig,
-};
 use orchestrator::{
     dedicated_backend_required_error, push_internal_planner_session_id, RustNativeWorkerOutcome,
 };
@@ -59,8 +53,6 @@ pub(crate) use types::{AstraOrchestration, AstraRunIntent, AstraTaskCompletion};
 pub const ASTRA_EVENT_NAME: &str = "astra-run-event";
 const RUST_NATIVE_ROUND_LIMIT: u32 = 12;
 const ASTRA_ORCHESTRATOR_TIMEOUT_MS: u64 = 300_000;
-const ASTRA_SESSION_DIR_NAME: &str = "astra-sessions";
-const ENABLE_ASTRA_PI_SESSION_PERSISTENCE: bool = false;
 const MAX_ASTRA_RUN_DIAGNOSTICS: usize = 100;
 pub(crate) const ASTRA_ARTIFACT_ROOT_DIR: &str = ".sessio/astra";
 pub(crate) const TEAMWORK_ROUND_JOURNAL_KIND: &str = "teamwork_round_journal";
@@ -69,7 +61,6 @@ const TEAMWORK_JOURNAL_SUMMARY_CHAR_LIMIT: usize = 600;
 const TEAMWORK_JOURNAL_TASK_EXCERPT_CHAR_LIMIT: usize = 400;
 const TEAMWORK_JOURNAL_TASK_ERROR_CHAR_LIMIT: usize = 240;
 const TEAMWORK_JOURNAL_PROMPT_ROUNDS: usize = 8;
-const ASTRA_PI_DELEGATED_RUNTIME_LIMIT: usize = 2;
 const ASTRA_DELEGATED_QUEUE_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const ASTRA_RUNTIME_STARTUP_TIMEOUT_MS: u64 = 60_000;
 const ASTRA_DELEGATED_STARTUP_TIMEOUT_MS: u64 = ASTRA_RUNTIME_STARTUP_TIMEOUT_MS;
@@ -392,7 +383,6 @@ struct AstraServiceInner {
     app: AppHandle,
     store: Arc<dyn SessionStore>,
     runtime: RuntimeManager,
-    astra_pi_acp_config: Option<AstraPiAcpConfig>,
     astra_preferences: Mutex<AstraBackendConfig>,
     runtime_limiter: RuntimeResourceLimiter,
     delegated_sessions: Mutex<HashMap<String, DelegatedSessionState>>,
@@ -408,7 +398,6 @@ pub(super) struct AstraBackendConfig {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
-    pub provider_config: AstraPiAcpProviderConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -527,10 +516,8 @@ impl RuntimeResourceLimiter {
 }
 
 fn delegated_runtime_limit(agent: Agent) -> Option<usize> {
-    match agent {
-        Agent::AstraPi => Some(ASTRA_PI_DELEGATED_RUNTIME_LIMIT),
-        Agent::Pi | Agent::Codex | Agent::Claude | Agent::Gemini | Agent::Opencode => None,
-    }
+    let _ = agent;
+    None
 }
 
 fn delegated_attempt_id(plan_task_id: &str, attempt_count: u32) -> String {
@@ -546,152 +533,15 @@ struct DelegatedAttempt<'a> {
     retry_limit_reached: bool,
 }
 
-fn bundled_astra_pi_acp_config() -> Option<AstraPiAcpConfig> {
-    let command = bundled_astra_pi_acp_command()?;
-    log::info!("[astra:astra-pi-acp] using bundled Astra Pi ACP sidecar");
-    Some(AstraPiAcpConfig {
-        command,
-        session_dir: astra_session_dir().to_string_lossy().to_string(),
-        agent_dir: astra_agent_dir().to_string_lossy().to_string(),
-        orchestrator: AstraPiAcpPurposeConfig {
-            timeout_ms: ASTRA_ORCHESTRATOR_TIMEOUT_MS,
-        },
-    })
-}
-
-fn astra_session_dir() -> PathBuf {
-    app_paths::astra_runtime_session_dir()
-        .unwrap_or_else(|_| PathBuf::from(".").join(ASTRA_SESSION_DIR_NAME))
-}
-
-fn astra_agent_dir() -> PathBuf {
-    app_paths::astra_agent_dir().unwrap_or_else(|_| PathBuf::from(".").join("astra-pi-agent"))
-}
-
-pub fn bundled_astra_pi_acp_command() -> Option<String> {
-    let executable = bundled_astra_pi_binary_path()?;
-    if !executable.exists() {
-        return None;
-    }
-    let session_dir = astra_session_dir();
-    let agent_dir = astra_agent_dir();
-    if ENABLE_ASTRA_PI_SESSION_PERSISTENCE {
-        if let Err(error) = std::fs::create_dir_all(&session_dir) {
-            log::warn!(
-                "[astra:astra-pi-acp] failed to create session dir {}: {error}",
-                session_dir.display()
-            );
-            return None;
-        }
-    }
-    if let Err(error) = std::fs::create_dir_all(&agent_dir) {
-        log::warn!(
-            "[astra:astra-pi-acp] failed to create agent dir {}: {error}",
-            agent_dir.display()
-        );
-        return None;
-    }
-    Some(astra_pi_acp_stdio_command_json(
-        &executable,
-        &session_dir,
-        &agent_dir,
-        ENABLE_ASTRA_PI_SESSION_PERSISTENCE,
-    ))
-}
-
-fn astra_pi_acp_stdio_command_json(
-    executable: &std::path::Path,
-    session_dir: &std::path::Path,
-    agent_dir: &std::path::Path,
-    persist_sessions: bool,
-) -> String {
-    let args = if persist_sessions {
-        json!([
-            "--session-dir",
-            session_dir,
-            "--session-durability",
-            "strict",
-            "--acp",
-        ])
-    } else {
-        json!(["--no-session", "--acp"])
-    };
-    let env = if persist_sessions {
-        json!([
-            {
-                "name": "PI_CODING_AGENT_DIR",
-                "value": agent_dir,
-            },
-            {
-                "name": "PI_SESSIONS_DIR",
-                "value": session_dir,
-            },
-        ])
-    } else {
-        json!([
-            {
-                "name": "PI_CODING_AGENT_DIR",
-                "value": agent_dir,
-            },
-        ])
-    };
-    json!({
-        "type": "stdio",
-        "name": "astra-pi",
-        "command": executable,
-        "args": args,
-        "env": env,
-    })
-    .to_string()
-}
-
-fn bundled_astra_pi_binary_path() -> Option<PathBuf> {
-    let exe_path = std::env::current_exe().ok()?;
-    let exe_dir = exe_path.parent()?;
-    let base_dir = if exe_dir.ends_with("deps") {
-        exe_dir.parent().unwrap_or(exe_dir)
-    } else {
-        exe_dir
-    };
-    let binary_name = astra_pi_binary_name();
-    [
-        base_dir.join(binary_name),
-        base_dir.join("binaries").join(binary_name),
-        exe_dir.join(binary_name),
-    ]
-    .into_iter()
-    .find(|path| path.exists())
-}
-
-fn astra_pi_binary_name() -> &'static str {
-    if cfg!(windows) {
-        "astra-pi.exe"
-    } else {
-        "astra-pi"
-    }
-}
-
 fn load_astra_backend_config(store: &dyn SessionStore) -> AstraBackendConfig {
     match store.get_astra_config() {
         Ok(config) => {
             let agent = config.agent.as_deref().and_then(Agent::from_db_str);
-            let provider_config = match store.list_agents() {
-                Ok(agents) => agents
-                    .iter()
-                    .find(|agent| agent.id == Agent::AstraPi.as_str())
-                    .map(|agent| astra_provider_config_from_agent(agent.clone()))
-                    .unwrap_or_default(),
-                Err(_) => AstraPiAcpProviderConfig::default(),
-            };
-            let provider_config =
-                provider_config.with_runtime_overrides(config.model.clone(), config.effort.clone());
-
             AstraBackendConfig {
                 agent,
                 model: config.model,
                 effort: config.effort,
                 permission_mode: config.permission_mode,
-                provider_config,
             }
         }
         Err(error) => {
@@ -701,58 +551,19 @@ fn load_astra_backend_config(store: &dyn SessionStore) -> AstraBackendConfig {
                 model: None,
                 effort: None,
                 permission_mode: None,
-                provider_config: AstraPiAcpProviderConfig::default(),
             }
         }
     }
 }
 
-fn load_astra_agent_preferences(store: &dyn SessionStore) -> AstraBackendConfig {
-    load_astra_backend_config(store)
-}
-
-fn astra_provider_config_from_agent(agent: AgentInfo) -> AstraPiAcpProviderConfig {
-    let selected = agent
-        .ai_provider
-        .as_deref()
-        .and_then(|id| agent.ai_providers.iter().find(|provider| provider.id == id))
-        .or_else(|| agent.ai_providers.iter().find(|provider| provider.enabled))
-        .or_else(|| agent.ai_providers.first());
-    AstraPiAcpProviderConfig {
-        provider: selected.map(|provider| provider.provider.clone()),
-        api: selected.and_then(|provider| provider.api.clone()),
-        base_url: selected.and_then(|provider| provider.base_url.clone()),
-        api_key: selected.and_then(|provider| provider.api_key.clone()),
-        model: selected
-            .and_then(|provider| provider.model.clone())
-            .or(agent.model),
-        thinking_level: agent.effort,
-    }
-}
-
-fn sync_astra_pi_agent_config(config: &AstraPiAcpConfig, preferences: &AstraPiAcpProviderConfig) {
-    if let Err(error) = prepare_astra_pi_agent_config(config, preferences) {
-        log::warn!(
-            "[astra:astra-pi-acp:config] failed to write bundled Astra Pi config code={} message={}",
-            error.code,
-            error.message
-        );
-    }
-}
-
 impl AstraService {
     pub fn new(app: AppHandle, store: Arc<dyn SessionStore>, runtime: RuntimeManager) -> Self {
-        let astra_preferences = load_astra_agent_preferences(store.as_ref());
-        let astra_pi_acp_config = bundled_astra_pi_acp_config();
-        if let Some(config) = astra_pi_acp_config.as_ref() {
-            sync_astra_pi_agent_config(config, &astra_preferences.provider_config);
-        }
+        let astra_preferences = load_astra_backend_config(store.as_ref());
         Self {
             inner: Arc::new(AstraServiceInner {
                 app,
                 store,
                 runtime,
-                astra_pi_acp_config,
                 astra_preferences: Mutex::new(astra_preferences),
                 runtime_limiter: RuntimeResourceLimiter::new(),
                 delegated_sessions: Mutex::new(HashMap::new()),
@@ -763,17 +574,12 @@ impl AstraService {
         }
     }
 
-    pub fn update_astra_preferences_cache(&self, agent: AgentInfo) {
-        if agent.id == Agent::AstraPi.as_str() {
-            self.reload_config();
-        }
+    pub fn update_astra_preferences_cache(&self, _agent: AgentInfo) {
+        self.reload_config();
     }
 
     pub fn reload_config(&self) {
         let config = load_astra_backend_config(self.inner.store.as_ref());
-        if let Some(astra_pi_acp_config) = self.inner.astra_pi_acp_config.as_ref() {
-            sync_astra_pi_agent_config(astra_pi_acp_config, &config.provider_config);
-        }
         match self.inner.astra_preferences.lock() {
             Ok(mut preferences) => {
                 *preferences = config;
@@ -966,7 +772,7 @@ impl AstraService {
         source: &str,
     ) -> Result<SummarizeAutoTaskNotificationOutput> {
         let config = self.astra_backend_config();
-        let agent = config.agent.unwrap_or(Agent::AstraPi);
+        let agent = config.agent.unwrap_or(Agent::Pi);
         let runtime_config = runtime_agent_backend::RuntimeAgentBackendConfig {
             agent,
             timeout_ms: ASTRA_ORCHESTRATOR_TIMEOUT_MS,
@@ -1397,7 +1203,6 @@ impl AstraService {
                     model: None,
                     effort: None,
                     permission_mode: None,
-                    provider_config: AstraPiAcpProviderConfig::default(),
                 }
             }
         }
@@ -2928,7 +2733,7 @@ fn run_to_record(run: &AstraRun) -> AstraRunRecord {
         .planner_backend
         .as_deref()
         .and_then(record_agent_for_backend)
-        .unwrap_or(Agent::AstraPi);
+        .unwrap_or(Agent::Pi);
     AstraRunRecord {
         run_id: run.run_id.clone(),
         thread_id: run.thread_id.clone(),
@@ -2999,9 +2804,6 @@ fn record_agent_for_backend(backend: &str) -> Option<Agent> {
     let backend = backend.trim();
     if backend.is_empty() {
         return None;
-    }
-    if backend == "astra_pi_acp" || backend == Agent::AstraPi.as_str() {
-        return Some(Agent::AstraPi);
     }
     if let Some(agent) = backend.strip_prefix("runtime_agent_") {
         return Agent::from_db_str(agent);
@@ -3804,92 +3606,6 @@ mod tests {
         assert_eq!(updated.message_count, 4);
 
         let _ = std::fs::remove_file(&db_path);
-    }
-
-    #[test]
-    fn astra_provider_config_uses_selected_db_provider() {
-        let agent = AgentInfo {
-            id: Agent::AstraPi.as_str().to_string(),
-            name: "Astra Pi".to_string(),
-            display_name: "Astra Pi".to_string(),
-            icon: None,
-            ai_provider: Some("switch".to_string()),
-            ai_providers: vec![
-                crate::models::AgentAiProviderInfo {
-                    id: "fallback".to_string(),
-                    display_name: "Fallback".to_string(),
-                    provider: "openai".to_string(),
-                    api: Some("chat-completions".to_string()),
-                    base_url: Some("https://fallback.invalid/v1".to_string()),
-                    api_key: Some("fallback-key".to_string()),
-                    model: Some("fallback-model".to_string()),
-                    models: Vec::new(),
-                    enabled: true,
-                    order: 0,
-                },
-                crate::models::AgentAiProviderInfo {
-                    id: "switch".to_string(),
-                    display_name: "Switch".to_string(),
-                    provider: "custom-endpoint".to_string(),
-                    api: Some("openai-responses".to_string()),
-                    base_url: Some("http://127.0.0.1:15721/v1".to_string()),
-                    api_key: Some("ccw".to_string()),
-                    model: Some("gpt-5.5".to_string()),
-                    models: Vec::new(),
-                    enabled: true,
-                    order: 1,
-                },
-            ],
-            model: Some("agent-level-model".to_string()),
-            models: Vec::new(),
-            effort: Some("off".to_string()),
-            efforts: Vec::new(),
-            permission_mode: None,
-            permission_modes: Vec::new(),
-            agent_type: crate::models::AgentType::Builtin,
-            enabled: true,
-            transport: crate::agents::runtime::types::RuntimeTransportKind::Acp,
-            commands: crate::models::AgentCommandsInfo::default(),
-            order: 0,
-            created_at: 1,
-            updated_at: 1,
-        };
-
-        let config = astra_provider_config_from_agent(agent);
-
-        assert_eq!(config.provider.as_deref(), Some("custom-endpoint"));
-        assert_eq!(config.api.as_deref(), Some("openai-responses"));
-        assert_eq!(
-            config.base_url.as_deref(),
-            Some("http://127.0.0.1:15721/v1")
-        );
-        assert_eq!(config.api_key.as_deref(), Some("ccw"));
-        assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
-        assert_eq!(config.thinking_level.as_deref(), Some("off"));
-    }
-
-    #[test]
-    fn astra_pi_acp_stdio_command_disables_session_persistence() {
-        let command = astra_pi_acp_stdio_command_json(
-            std::path::Path::new("/tmp/astra-pi"),
-            std::path::Path::new("/tmp/sessions"),
-            std::path::Path::new("/tmp/agent"),
-            ENABLE_ASTRA_PI_SESSION_PERSISTENCE,
-        );
-        let value: Value = serde_json::from_str(&command).unwrap();
-
-        assert_eq!(value["command"], "/tmp/astra-pi");
-        assert_eq!(value["name"], "astra-pi");
-        assert_eq!(value["args"], json!(["--no-session", "--acp"]));
-        assert_eq!(
-            value["env"],
-            json!([
-                {
-                    "name": "PI_CODING_AGENT_DIR",
-                    "value": "/tmp/agent",
-                }
-            ])
-        );
     }
 
     #[test]
@@ -5302,106 +5018,6 @@ mod tests {
             diagnostics[0]["idx"],
             Value::Number(serde_json::Number::from(3))
         );
-    }
-
-    #[test]
-    fn runtime_limiter_blocks_astrapi_without_limiting_other_agents() {
-        let limiter = Arc::new(RuntimeResourceLimiter::new());
-        assert_eq!(
-            limiter
-                .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
-                .unwrap(),
-            Some(Agent::AstraPi)
-        );
-        assert_eq!(
-            limiter
-                .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
-                .unwrap(),
-            Some(Agent::AstraPi)
-        );
-        assert_eq!(
-            limiter
-                .acquire(Agent::Codex, Duration::from_secs(1), || Ok(true))
-                .unwrap(),
-            None
-        );
-
-        let waiting = limiter.clone();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let acquired = waiting
-                .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
-                .unwrap();
-            sender.send(acquired).unwrap();
-        });
-
-        assert!(matches!(
-            receiver.recv_timeout(Duration::from_millis(50)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        ));
-        limiter.release(Agent::AstraPi);
-        assert_eq!(
-            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Some(Agent::AstraPi)
-        );
-
-        limiter.release(Agent::AstraPi);
-        limiter.release(Agent::AstraPi);
-    }
-
-    #[test]
-    fn runtime_limiter_stops_waiting_when_run_is_inactive() {
-        let limiter = Arc::new(RuntimeResourceLimiter::new());
-        limiter
-            .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
-            .unwrap();
-        limiter
-            .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
-            .unwrap();
-
-        let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let waiting = limiter.clone();
-        let waiting_active = active.clone();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = waiting.acquire(Agent::AstraPi, Duration::from_secs(1), || {
-                Ok(waiting_active.load(std::sync::atomic::Ordering::SeqCst))
-            });
-            sender.send(result.map(|value| value.is_some())).unwrap();
-        });
-
-        assert!(matches!(
-            receiver.recv_timeout(Duration::from_millis(50)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        ));
-        active.store(false, std::sync::atomic::Ordering::SeqCst);
-        let result = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(result.is_err());
-
-        limiter.release(Agent::AstraPi);
-        limiter.release(Agent::AstraPi);
-    }
-
-    #[test]
-    fn runtime_limiter_times_out_when_capacity_never_frees() {
-        let limiter = RuntimeResourceLimiter::new();
-        limiter
-            .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
-            .unwrap();
-        limiter
-            .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
-            .unwrap();
-
-        let result = limiter.acquire(Agent::AstraPi, Duration::from_millis(10), || Ok(true));
-
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("runtime queue timed out"));
-
-        limiter.release(Agent::AstraPi);
-        limiter.release(Agent::AstraPi);
     }
 
     pub(super) fn test_thread(stages: Vec<crate::models::StageInfo>) -> ThreadInfo {

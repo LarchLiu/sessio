@@ -861,7 +861,9 @@ fn normalize_gemini_file_diff(path: &str, diff: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let normalized = path.trim_start_matches('/');
-    format!("diff --git a/{normalized} b/{normalized}\n--- a/{normalized}\n+++ b/{normalized}\n{body}\n")
+    format!(
+        "diff --git a/{normalized} b/{normalized}\n--- a/{normalized}\n+++ b/{normalized}\n{body}\n"
+    )
 }
 
 fn diff_line_count(diff: &str, marker: char) -> usize {

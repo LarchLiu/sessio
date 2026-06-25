@@ -1070,9 +1070,10 @@ mod tests {
             .tasks
             .iter()
             .all(|task| task.prompt.contains(&format!("1. {disagreement}"))));
-        assert!(next.tasks.iter().all(|task| task
-            .prompt
-            .contains("Arbitration note: 建议由人工复核延迟基准。")));
+        assert!(next.tasks.iter().all(|task| {
+            task.prompt
+                .contains("Arbitration note: 建议由人工复核延迟基准。")
+        }));
         assert!(next.diagnostics.iter().any(|diagnostic| {
             diagnostic["kind"] == "debate_convergence"
                 && diagnostic["status"] == "diverged"

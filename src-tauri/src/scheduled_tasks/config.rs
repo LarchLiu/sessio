@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use croner::Cron;
 use serde::{Deserialize, Serialize};
 

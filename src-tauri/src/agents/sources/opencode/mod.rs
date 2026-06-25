@@ -27,7 +27,7 @@ impl AgentSource for OpencodeSource {
         // OpenCode persists everything to a SQLite database whose writes go
         // through WAL. Filesystem notifications on the .db / .db-wal pair
         // are unreliable across platforms, so the indexer relies on the
-        // polling loop instead — same approach we use for AstraPi.
+        // polling loop instead, matching sources that do not expose reliable file watches.
         Ok(Vec::new())
     }
 

@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use super::SchedulerState;
 use super::config::now_ms;
+use super::SchedulerState;
 
 /// How often to check for due tasks. The finest schedule resolution is one
 /// minute (cron/daily/weekly), and intervals are second-granular, so a 30s tick

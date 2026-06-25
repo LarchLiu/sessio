@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rusqlite::{
-    Connection, OptionalExtension, ToSql, params, params_from_iter, types::Value as SqlValue,
+    params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension, ToSql,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -29,9 +29,9 @@ use crate::store::{
     ChannelSessionRecord, IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound,
     NewPlanTask, NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch,
     RuntimeAgentCapabilityRecord, RuntimeAgentSelection, RuntimeAgentSessionConfigRecord,
-    SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK, ScheduledTaskRecord, ScheduledTaskRunRecord,
-    SessionHistorySnapshotRecord, SessionRef, SessionStore, ThreadWorkSnapshotRecord,
-    UpsertCanvasBlockRecord,
+    ScheduledTaskRecord, ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef,
+    SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
+    SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK,
 };
 
 pub struct SqliteStore {
@@ -933,7 +933,6 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_MEMORY)?;
     conn.execute_batch(SCHEMA_APP)?;
     seed_builtins(conn)?;
-    sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
     seed_opencode_builtin_agent(conn, now_ms())?;
     Ok(())
 }
@@ -1302,7 +1301,11 @@ trait EmptyStringFallback {
 
 impl EmptyStringFallback for String {
     fn if_empty_then(self, fallback: impl FnOnce() -> String) -> String {
-        if self.is_empty() { fallback() } else { self }
+        if self.is_empty() {
+            fallback()
+        } else {
+            self
+        }
     }
 }
 
@@ -1399,7 +1402,7 @@ fn seed_astra_config(conn: &Connection, now: i64) -> Result<()> {
         ) VALUES (?, ?, ?, ?, ?, ?, ?)",
         params![
             1,
-            Some(Agent::AstraPi.as_str()),
+            Some(Agent::Pi.as_str()),
             Option::<&str>::None, // model
             Option::<&str>::None, // effort
             Option::<&str>::None, // permission_mode
@@ -1411,52 +1414,6 @@ fn seed_astra_config(conn: &Connection, now: i64) -> Result<()> {
 }
 
 fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
-    // Astra Pi agent - for Astra orchestration or direct chat
-    seed_builtin_agent(
-        conn,
-        Agent::AstraPi,
-        BuiltinAgentSeed {
-            model: Some("gpt-5.5"),
-            models: runtime_options(vec![
-                runtime_option("gpt-5.5", "GPT 5.5"),
-                runtime_option("gpt-5.4", "GPT 5.4"),
-            ]),
-            effort: Some("off"),
-            efforts: vec![
-                runtime_option("off", "Off"),
-                runtime_option("minimal", "Minimal"),
-                runtime_option("low", "Low"),
-                runtime_option("medium", "Medium"),
-                runtime_option("high", "High"),
-                runtime_option("xhigh", "Extra High"),
-            ],
-            permission_mode: None,
-            permission_modes: [].to_vec(),
-            enabled: true,
-            transport: RuntimeTransportKind::Acp,
-            commands: AgentCommandsInfo {
-                session: Vec::new(),
-                version: Vec::new(),
-            },
-            ai_providers: vec![AgentAiProviderInfo {
-                id: "cc-switch".to_string(),
-                display_name: "CC Switch".to_string(),
-                provider: "openai".to_string(),
-                api: Some("openai-responses".to_string()),
-                base_url: Some("http://127.0.0.1:15721/v1".to_string()),
-                api_key: Some("ccs".to_string()),
-                model: Some("gpt-5.5".to_string()),
-                models: vec![
-                    runtime_option("gpt-5.5", "GPT-5.5"),
-                    runtime_option("gpt-5.4", "GPT 5.4"),
-                ],
-                enabled: true,
-                order: 0,
-            }],
-        },
-        now,
-    )?;
-    sync_astra_pi_builtin_agent_defaults(conn, now)?;
     seed_builtin_agent(
         conn,
         Agent::Codex,
@@ -1587,33 +1544,6 @@ fn seed_opencode_builtin_agent(conn: &Connection, now: i64) -> Result<()> {
     )
 }
 
-fn sync_astra_pi_builtin_agent_defaults(conn: &Connection, now: i64) -> Result<()> {
-    let commands_json = serde_json::to_string(&AgentCommandsInfo {
-        session: Vec::new(),
-        version: Vec::new(),
-    })?;
-    conn.execute(
-        "UPDATE agents SET display_name = ?, updated_at = ? WHERE id = ? AND display_name = ?",
-        params!["Astra Pi", now, Agent::AstraPi.as_str(), "Pi"],
-    )?;
-    conn.execute(
-        "UPDATE agents SET name = ?, updated_at = ? WHERE id = ? AND name = ?",
-        params!["Astra Pi", now, Agent::AstraPi.as_str(), "Pi"],
-    )?;
-    conn.execute(
-        "UPDATE agents SET ai_provider = ?, updated_at = ?
-         WHERE id = ? AND (ai_provider IS NULL OR trim(ai_provider) = '')",
-        params!["cc-switch", now, Agent::AstraPi.as_str()],
-    )?;
-    conn.execute(
-        "UPDATE agents
-         SET commands_json = ?, updated_at = ?
-         WHERE id = ? AND commands_json <> ?",
-        params![commands_json, now, Agent::AstraPi.as_str(), commands_json],
-    )?;
-    Ok(())
-}
-
 fn sync_pi_builtin_agent_defaults(conn: &Connection, now: i64) -> Result<()> {
     let commands_json = serde_json::to_string(&AgentCommandsInfo {
         session: vec!["pi --mode rpc".to_string()],
@@ -1654,7 +1584,6 @@ fn transport_kind_from_db(value: &str) -> RuntimeTransportKind {
 
 fn runtime_agent_name(agent: Agent) -> &'static str {
     match agent {
-        Agent::AstraPi => "Astra Pi",
         Agent::Pi => "Pi",
         Agent::Codex => "Codex",
         Agent::Claude => "Claude",
@@ -1665,7 +1594,6 @@ fn runtime_agent_name(agent: Agent) -> &'static str {
 
 fn runtime_agent_display_name(agent: Agent) -> &'static str {
     match agent {
-        Agent::AstraPi => "Astra Pi",
         Agent::Pi => "Pi",
         Agent::Codex => "Codex CLI",
         Agent::Claude => "Claude Code",
@@ -1676,12 +1604,11 @@ fn runtime_agent_display_name(agent: Agent) -> &'static str {
 
 fn runtime_agent_order(agent: Agent) -> i64 {
     match agent {
-        Agent::AstraPi => 0,
-        Agent::Pi => 1,
-        Agent::Codex => 2,
-        Agent::Claude => 3,
-        Agent::Gemini => 4,
-        Agent::Opencode => 5,
+        Agent::Pi => 0,
+        Agent::Codex => 1,
+        Agent::Claude => 2,
+        Agent::Gemini => 3,
+        Agent::Opencode => 4,
     }
 }
 
@@ -3289,7 +3216,7 @@ fn astra_run_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Astra
     let role_raw: String = row.get(3)?;
     Ok(AstraRunSessionRecord {
         run_id: row.get(0)?,
-        agent: Agent::from_db_str(&agent_raw).unwrap_or(Agent::AstraPi),
+        agent: Agent::from_db_str(&agent_raw).unwrap_or(Agent::Pi),
         session_id: row.get(2)?,
         role: PlanTaskSessionRole::from_db_str(&role_raw).unwrap_or(PlanTaskSessionRole::Planner),
         sort_order: row.get(4)?,
@@ -10612,7 +10539,7 @@ mod schema_tests {
             last_error_message: None,
             internal_planner_sessions: vec![AstraRunSessionRecord {
                 run_id: "astra-run-1".to_string(),
-                agent: Agent::AstraPi,
+                agent: Agent::Pi,
                 session_id: "planner-session-1".to_string(),
                 role: PlanTaskSessionRole::Planner,
                 sort_order: 0,
@@ -10728,7 +10655,7 @@ mod schema_tests {
             last_error_message: None,
             internal_planner_sessions: vec![AstraRunSessionRecord {
                 run_id: "astra-run-thinking".to_string(),
-                agent: Agent::AstraPi,
+                agent: Agent::Pi,
                 session_id: "planner-placeholder".to_string(),
                 role: PlanTaskSessionRole::Planner,
                 sort_order: 0,
@@ -10811,7 +10738,7 @@ mod schema_tests {
         };
         let planner_placeholder = SessionInfo {
             id: "planner-placeholder".to_string(),
-            agent: Agent::AstraPi,
+            agent: Agent::Pi,
             rename_title: Some("Astra planner placeholder".to_string()),
             ..placeholder.clone()
         };
@@ -11461,7 +11388,7 @@ mod schema_tests {
 
         let placeholder = SessionInfo {
             id: "pi-live-session".to_string(),
-            agent: Agent::AstraPi,
+            agent: Agent::Pi,
             forked_from_agent: None,
             forked_from_id: None,
             project_path: Some(project_path.clone()),
@@ -11487,7 +11414,7 @@ mod schema_tests {
         assert!(store.list_all_sessions().unwrap().is_empty());
         let placeholder_ref = store
             .list_sessions_by_refs(&[SessionRef {
-                agent: Agent::AstraPi,
+                agent: Agent::Pi,
                 session_id: "pi-live-session",
             }])
             .unwrap()
@@ -11513,7 +11440,7 @@ mod schema_tests {
         assert!(store.list_all_sessions().unwrap().is_empty());
         let visible_by_ref = store
             .list_sessions_by_refs(&[SessionRef {
-                agent: Agent::AstraPi,
+                agent: Agent::Pi,
                 session_id: "pi-live-session",
             }])
             .unwrap()
@@ -11529,7 +11456,7 @@ mod schema_tests {
             .unwrap()
             .query_row(
                 "SELECT is_auxiliary FROM sessions WHERE agent = ? AND session_id = ?",
-                params![Agent::AstraPi.as_str(), "pi-live-session"],
+                params![Agent::Pi.as_str(), "pi-live-session"],
                 |row| row.get(0),
             )
             .unwrap();
@@ -11541,7 +11468,7 @@ mod schema_tests {
             .query_row(
                 "SELECT file_path, partial, message_count FROM sessions
                  WHERE agent = ? AND session_id = ?",
-                params![Agent::AstraPi.as_str(), "pi-live-session"],
+                params![Agent::Pi.as_str(), "pi-live-session"],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -12010,17 +11937,13 @@ mod schema_tests {
         );
         let code_assistants = store.list_assistants(Some(&code.id)).unwrap();
         assert_eq!(code_assistants.len(), 4);
-        assert!(
-            code_assistants
-                .iter()
-                .all(|item| item.project_id.as_deref() == Some(code.id.as_str()))
-        );
-        assert!(
-            code_assistants
-                .iter()
-                .all(|item| item.process_template_id.as_deref()
-                    == Some(code.process_template_id.as_str()))
-        );
+        assert!(code_assistants
+            .iter()
+            .all(|item| item.project_id.as_deref() == Some(code.id.as_str())));
+        assert!(code_assistants
+            .iter()
+            .all(|item| item.process_template_id.as_deref()
+                == Some(code.process_template_id.as_str())));
 
         let writing_kinds = stage_kinds(store.list_project_stages(&writing.id).unwrap());
         assert_eq!(
@@ -12181,21 +12104,15 @@ mod schema_tests {
             stage_kinds(stages.clone()),
             vec![StageType::Research, StageType::Done]
         );
-        assert!(
-            stages
-                .iter()
-                .all(|stage| stage.project_id.as_deref() == Some(project.id.as_str()))
-        );
-        assert!(
-            stages
-                .iter()
-                .all(|stage| stage.stage_type == ProjectStageType::Builtin)
-        );
-        assert!(
-            stages
-                .iter()
-                .all(|stage| !selected_template_ids.contains(&stage.id))
-        );
+        assert!(stages
+            .iter()
+            .all(|stage| stage.project_id.as_deref() == Some(project.id.as_str())));
+        assert!(stages
+            .iter()
+            .all(|stage| stage.stage_type == ProjectStageType::Builtin));
+        assert!(stages
+            .iter()
+            .all(|stage| !selected_template_ids.contains(&stage.id)));
         let project_research = stages
             .iter()
             .find(|stage| stage.kind == Some(StageType::Research))
@@ -12231,20 +12148,16 @@ mod schema_tests {
                 project_id: Some(&project.id),
             })
             .unwrap();
-        assert!(
-            store
-                .add_thread_stage(
-                    &thread.id,
-                    &research_template.id,
-                    std::slice::from_ref(&assistant.id),
-                )
-                .is_err()
-        );
-        assert!(
-            store
-                .add_thread_stage(&thread.id, &project_research.id, &[assistant.id])
-                .is_ok()
-        );
+        assert!(store
+            .add_thread_stage(
+                &thread.id,
+                &research_template.id,
+                std::slice::from_ref(&assistant.id),
+            )
+            .is_err());
+        assert!(store
+            .add_thread_stage(&thread.id, &project_research.id, &[assistant.id])
+            .is_ok());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
@@ -12278,11 +12191,9 @@ mod schema_tests {
         // Lazy default: with no active stage and no stored state, all stages
         // read as not_started.
         let stages = load_thread_stages(&store.conn.lock().unwrap(), &thread.id).unwrap();
-        assert!(
-            stages
-                .iter()
-                .all(|stage| stage.status == StageStatus::NotStarted)
-        );
+        assert!(stages
+            .iter()
+            .all(|stage| stage.status == StageStatus::NotStarted));
 
         // Setting the active stage derives completed/in_progress for rows that
         // still have no explicit state.
@@ -12374,12 +12285,10 @@ mod schema_tests {
 
         // deleting the parent thread stage cascades to its issues.
         store.delete_thread_stage(&stage.id).unwrap();
-        assert!(
-            store
-                .list_thread_stage_issues(&stage.id)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(store
+            .list_thread_stage_issues(&stage.id)
+            .unwrap()
+            .is_empty());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
@@ -12761,11 +12670,9 @@ mod schema_tests {
         store
             .upsert_session(&other_session.file_path, &other_session)
             .unwrap();
-        assert!(
-            store
-                .link_kanban_item_session(&item.id, Agent::Codex, &other_session.id)
-                .is_err()
-        );
+        assert!(store
+            .link_kanban_item_session(&item.id, Agent::Codex, &other_session.id)
+            .is_err());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
@@ -12994,12 +12901,10 @@ mod schema_tests {
         assert_eq!(parallel.round_index, 0);
         assert_eq!(parallel.status, PlanRoundStatus::Running);
         assert_eq!(parallel.tasks.len(), 2);
-        assert!(
-            parallel
-                .tasks
-                .iter()
-                .all(|task| task.status == PlanTaskStatus::Running)
-        );
+        assert!(parallel
+            .tasks
+            .iter()
+            .all(|task| task.status == PlanTaskStatus::Running));
         assert_eq!(
             parallel.tasks[0].stage_snapshot_json.as_deref(),
             Some(r#"{"stage":"research-v1"}"#)
@@ -13036,13 +12941,11 @@ mod schema_tests {
             .find(|session| session.session_id == "runtime-session-1")
             .unwrap();
         assert!(first_runtime.superseded_at.is_some());
-        assert!(
-            parallel.tasks[0]
-                .sessions
-                .iter()
-                .any(|session| session.session_id == "runtime-session-stale"
-                    && session.superseded_at.is_none())
-        );
+        assert!(parallel.tasks[0]
+            .sessions
+            .iter()
+            .any(|session| session.session_id == "runtime-session-stale"
+                && session.superseded_at.is_none()));
         let relinked = store
             .relink_plan_task_session(
                 NewPlanTaskSession {
@@ -13243,12 +13146,10 @@ mod schema_tests {
             )
             .unwrap();
         assert_eq!(sequential.status, PlanRoundStatus::Completed);
-        assert!(
-            sequential
-                .tasks
-                .iter()
-                .all(|task| task.status == PlanTaskStatus::Completed)
-        );
+        assert!(sequential
+            .tasks
+            .iter()
+            .all(|task| task.status == PlanTaskStatus::Completed));
 
         let listed = store.list_plan_rounds(&thread.id).unwrap();
         assert_eq!(
@@ -13386,7 +13287,7 @@ mod schema_tests {
         };
         let internal_session = SessionInfo {
             id: "planner-session".to_string(),
-            agent: Agent::AstraPi,
+            agent: Agent::Pi,
             started_at: Some(50),
             updated_at: Some(60),
             message_count: 1,
@@ -13453,7 +13354,7 @@ mod schema_tests {
                 project_path: project.path.clone(),
                 status: "completed".to_string(),
                 mode: "auto".to_string(),
-                planner_backend: Some("astra_pi_acp".to_string()),
+                planner_backend: Some("runtime_agent_pi".to_string()),
                 round_index: Some(0),
                 round_limit: 3,
                 terminal_reason: None,
@@ -13461,7 +13362,7 @@ mod schema_tests {
                 last_error_message: None,
                 internal_planner_sessions: vec![AstraRunSessionRecord {
                     run_id: "replay-run".to_string(),
-                    agent: Agent::AstraPi,
+                    agent: Agent::Pi,
                     session_id: "planner-session".to_string(),
                     role: PlanTaskSessionRole::Planner,
                     sort_order: 0,
@@ -13503,13 +13404,11 @@ mod schema_tests {
             .unwrap();
         assert_eq!(stage_task.agent, Agent::Codex);
         assert_eq!(stage_task.sources.len(), 2);
-        assert!(
-            stage_task
-                .sources
-                .iter()
-                .any(|source| source.kind == ThreadReplaySessionSourceKind::Stage
-                    && source.stage_id.as_deref() == Some(thread_stage.id.as_str()))
-        );
+        assert!(stage_task
+            .sources
+            .iter()
+            .any(|source| source.kind == ThreadReplaySessionSourceKind::Stage
+                && source.stage_id.as_deref() == Some(thread_stage.id.as_str())));
         assert!(stage_task.sources.iter().any(|source| source.kind
             == ThreadReplaySessionSourceKind::PlanTask
             && source.plan_task_id.as_deref() == Some(round.tasks[0].id.as_str())
@@ -13523,7 +13422,7 @@ mod schema_tests {
             .iter()
             .find(|session| session.session_id == internal_session.id)
             .unwrap();
-        assert_eq!(internal.agent, Agent::AstraPi);
+        assert_eq!(internal.agent, Agent::Pi);
         assert_eq!(internal.sources.len(), 1);
         assert_eq!(
             internal.sources[0].kind,
@@ -13569,13 +13468,11 @@ mod schema_tests {
         assert_eq!(item.kind, thread.kind);
         assert!(item.session_keys.is_empty());
         assert!(item.time >= thread.updated_at.max(thread.created_at));
-        assert!(
-            store
-                .list_thread_index(None)
-                .unwrap()
-                .iter()
-                .any(|item| item.thread_id == thread.id)
-        );
+        assert!(store
+            .list_thread_index(None)
+            .unwrap()
+            .iter()
+            .any(|item| item.thread_id == thread.id));
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
@@ -13676,7 +13573,7 @@ mod schema_tests {
         };
         let planner_session = SessionInfo {
             id: "planner-session".to_string(),
-            agent: Agent::AstraPi,
+            agent: Agent::Pi,
             started_at: Some(50),
             updated_at: Some(60),
             message_count: 1,
@@ -13764,7 +13661,7 @@ mod schema_tests {
                 project_path: project.path.clone(),
                 status: "completed".to_string(),
                 mode: "auto".to_string(),
-                planner_backend: Some("astra_pi_acp".to_string()),
+                planner_backend: Some("runtime_agent_pi".to_string()),
                 round_index: Some(0),
                 round_limit: 3,
                 terminal_reason: None,
@@ -13773,7 +13670,7 @@ mod schema_tests {
                 internal_planner_sessions: vec![
                     AstraRunSessionRecord {
                         run_id: "index-run".to_string(),
-                        agent: Agent::AstraPi,
+                        agent: Agent::Pi,
                         session_id: planner_session.id.clone(),
                         role: PlanTaskSessionRole::Planner,
                         sort_order: 0,
@@ -13782,7 +13679,7 @@ mod schema_tests {
                     },
                     AstraRunSessionRecord {
                         run_id: "index-run".to_string(),
-                        agent: Agent::AstraPi,
+                        agent: Agent::Pi,
                         session_id: "missing-planner-session".to_string(),
                         role: PlanTaskSessionRole::Planner,
                         sort_order: 1,
@@ -13809,8 +13706,8 @@ mod schema_tests {
                 format!("{}:direct-session", Agent::Codex.as_str()),
                 format!("{}:stage-runtime-session", Agent::Codex.as_str()),
                 format!("{}:missing-runtime-session", Agent::Gemini.as_str()),
-                format!("{}:planner-session", Agent::AstraPi.as_str()),
-                format!("{}:missing-planner-session", Agent::AstraPi.as_str()),
+                format!("{}:planner-session", Agent::Pi.as_str()),
+                format!("{}:missing-planner-session", Agent::Pi.as_str()),
             ])
         );
         assert_eq!(item.time, session_activity_time);
@@ -13818,19 +13715,15 @@ mod schema_tests {
         // Archiving the project drops its threads from the index without
         // erroring, for both the scoped and the global listing.
         store.archive_project(&project.id).unwrap();
-        assert!(
-            store
-                .list_thread_index(Some(&project.id))
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            store
-                .list_thread_index(None)
-                .unwrap()
-                .iter()
-                .all(|item| item.thread_id != thread.id)
-        );
+        assert!(store
+            .list_thread_index(Some(&project.id))
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .list_thread_index(None)
+            .unwrap()
+            .iter()
+            .all(|item| item.thread_id != thread.id));
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
@@ -14090,13 +13983,11 @@ mod schema_tests {
             .to_string();
         assert!(disable_error.contains("thread assistant binding(s)"));
         assert!(disable_error.contains("thread \"Teamwork lane updated\""));
-        assert!(
-            store
-                .delete_assistant(&builder.id)
-                .unwrap_err()
-                .to_string()
-                .contains("stages or threads")
-        );
+        assert!(store
+            .delete_assistant(&builder.id)
+            .unwrap_err()
+            .to_string()
+            .contains("stages or threads"));
 
         store.delete_thread(&updated.id).unwrap();
         let binding_count: i64 = store
@@ -14233,7 +14124,7 @@ mod schema_tests {
                 .iter()
                 .map(|agent| agent.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["astra-pi", "pi", "codex", "claude", "opencode"]
+            vec!["pi", "codex", "claude", "opencode"]
         );
         let pi_agent = agents.iter().find(|agent| agent.id == "pi").unwrap();
         assert_eq!(pi_agent.transport, RuntimeTransportKind::PiRpc);
@@ -14247,51 +14138,20 @@ mod schema_tests {
             Some("npm view @agentclientprotocol/codex-acp version")
         );
         assert_eq!(codex_agent.effort.as_deref(), Some("high"));
-        assert!(
-            codex_agent
-                .efforts
-                .iter()
-                .any(|option| option.value == "xhigh")
-        );
-        let astra_agent = agents.iter().find(|agent| agent.id == "astra-pi").unwrap();
-        assert_eq!(astra_agent.display_name, "Astra Pi");
-        assert_eq!(astra_agent.transport, RuntimeTransportKind::Acp);
-        assert!(astra_agent.commands.session.is_empty());
-        assert!(astra_agent.commands.version.is_empty());
-        assert_eq!(astra_agent.ai_provider.as_deref(), Some("cc-switch"));
-        assert_eq!(astra_agent.model.as_deref(), Some("gpt-5.5"));
-        let astra_provider = astra_agent
-            .ai_providers
+        assert!(codex_agent
+            .efforts
             .iter()
-            .find(|provider| provider.id == "cc-switch")
-            .unwrap();
-        assert_eq!(astra_provider.display_name, "CC Switch");
-        assert_eq!(
-            astra_provider.base_url.as_deref(),
-            Some("http://127.0.0.1:15721/v1")
-        );
-        assert_eq!(astra_provider.api_key.as_deref(), Some("ccs"));
-        assert_eq!(astra_provider.model.as_deref(), Some("gpt-5.5"));
-        assert_eq!(
-            astra_provider
-                .models
-                .iter()
-                .map(|option| (option.value.as_str(), option.display_name.as_str()))
-                .collect::<Vec<_>>(),
-            vec![("gpt-5.5", "GPT-5.5"), ("gpt-5.4", "GPT 5.4"),]
-        );
+            .any(|option| option.value == "xhigh"));
         let claude_agent = agents.iter().find(|agent| agent.id == "claude").unwrap();
         assert_eq!(
             claude_agent.commands.version.first().map(String::as_str),
             Some("npm view @agentclientprotocol/claude-agent-acp version")
         );
         assert_eq!(claude_agent.effort.as_deref(), Some("high"));
-        assert!(
-            claude_agent
-                .efforts
-                .iter()
-                .any(|option| option.value == "max")
-        );
+        assert!(claude_agent
+            .efforts
+            .iter()
+            .any(|option| option.value == "max"));
         assert!(agents.iter().all(|agent| agent.id != "gemini"));
         let parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-parent");
         std::fs::create_dir(&parent).unwrap();
@@ -14329,11 +14189,9 @@ mod schema_tests {
         assert_eq!(assistant.agent.effort, "medium");
         let project_assistants = store.list_assistants(Some(&project.id)).unwrap();
         assert_eq!(project_assistants.len(), 5);
-        assert!(
-            project_assistants
-                .iter()
-                .all(|item| item.project_id.as_deref() == Some(project.id.as_str()))
-        );
+        assert!(project_assistants
+            .iter()
+            .all(|item| item.project_id.as_deref() == Some(project.id.as_str())));
         assert_eq!(
             project_assistants
                 .iter()
@@ -14341,11 +14199,9 @@ mod schema_tests {
                 .count(),
             4
         );
-        assert!(
-            project_assistants
-                .iter()
-                .any(|item| item.id == assistant.id)
-        );
+        assert!(project_assistants
+            .iter()
+            .any(|item| item.id == assistant.id));
         let reviewer = store
             .create_assistant(NewAssistant {
                 name: "Reviewer",
@@ -14377,23 +14233,17 @@ mod schema_tests {
             .find(|stage| stage.kind == Some(StageType::Research))
             .unwrap()
             .clone();
-        assert!(
-            research_option
-                .description
-                .as_deref()
-                .unwrap()
-                .contains("technical context")
-        );
-        assert!(
-            builtin_stages
-                .iter()
-                .any(|stage| stage.kind == Some(StageType::Develop))
-        );
-        assert!(
-            builtin_stages
-                .iter()
-                .all(|stage| stage.kind != Some(StageType::Build))
-        );
+        assert!(research_option
+            .description
+            .as_deref()
+            .unwrap()
+            .contains("technical context"));
+        assert!(builtin_stages
+            .iter()
+            .any(|stage| stage.kind == Some(StageType::Develop)));
+        assert!(builtin_stages
+            .iter()
+            .all(|stage| stage.kind != Some(StageType::Build)));
         assert_eq!(research_option.assistants.len(), 1);
         let builtin_research_assistant_id = research_option.assistants[0].assistant_id.clone();
         assert_eq!(
@@ -14426,16 +14276,14 @@ mod schema_tests {
             .unwrap();
         assert_eq!(default_research.assistant_ids, vec![assistant.id.clone()]);
         assert_eq!(default_research.assistants[0].agent.id, "codex");
-        assert!(
-            store
-                .list_threads(&project.id)
-                .unwrap()
-                .into_iter()
-                .find(|item| item.id == default_thread.id)
-                .unwrap()
-                .stage_id
-                .is_none()
-        );
+        assert!(store
+            .list_threads(&project.id)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == default_thread.id)
+            .unwrap()
+            .stage_id
+            .is_none());
         let assistant_disable_error = store
             .update_assistant(&assistant.id, None, None, None, None, Some(false))
             .unwrap_err()
@@ -14519,24 +14367,20 @@ mod schema_tests {
             .unwrap();
         assert!(human.assistant_ids.is_empty());
         assert!(human.allow_empty_assistants);
-        assert!(
-            store
-                .list_threads(&project.id)
-                .unwrap()
-                .into_iter()
-                .find(|item| item.id == thread.id)
-                .unwrap()
-                .stage_id
-                .is_none()
-        );
+        assert!(store
+            .list_threads(&project.id)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == thread.id)
+            .unwrap()
+            .stage_id
+            .is_none());
         assert!(!build_option.allow_empty_assistants);
-        assert!(
-            store
-                .add_thread_stage(&thread.id, &build_option.id, &[])
-                .unwrap_err()
-                .to_string()
-                .contains("stage does not allow empty assistants")
-        );
+        assert!(store
+            .add_thread_stage(&thread.id, &build_option.id, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("stage does not allow empty assistants"));
         let manual_build = store
             .update_project_stage(
                 &build_option.id,
@@ -14727,25 +14571,19 @@ mod schema_tests {
             )
             .unwrap();
         assert!(!disabled_research.enabled);
-        assert!(
-            store
-                .list_project_stages(&project.id)
-                .unwrap()
-                .into_iter()
-                .any(|stage| stage.id == research.stage_id && !stage.enabled)
-        );
-        assert!(
-            store
-                .list_process_template_stages(&project.process_template_id)
-                .unwrap()
-                .into_iter()
-                .any(|stage| stage.kind == Some(StageType::Research) && stage.project_id.is_none())
-        );
-        assert!(
-            store
-                .add_thread_stage(&thread.id, &research.stage_id, &assistant_ids)
-                .is_err()
-        );
+        assert!(store
+            .list_project_stages(&project.id)
+            .unwrap()
+            .into_iter()
+            .any(|stage| stage.id == research.stage_id && !stage.enabled));
+        assert!(store
+            .list_process_template_stages(&project.process_template_id)
+            .unwrap()
+            .into_iter()
+            .any(|stage| stage.kind == Some(StageType::Research) && stage.project_id.is_none()));
+        assert!(store
+            .add_thread_stage(&thread.id, &research.stage_id, &assistant_ids)
+            .is_err());
         let enabled_research = store
             .update_project_stage(
                 &research.stage_id,
@@ -14798,11 +14636,9 @@ mod schema_tests {
             .unwrap();
         assert_eq!(linked.sessions.len(), 1);
         assert_eq!(linked.sessions[0].id, session.id);
-        assert!(
-            store
-                .link_thread_session(&thread.id, Agent::Codex, &session.id)
-                .is_err()
-        );
+        assert!(store
+            .link_thread_session(&thread.id, Agent::Codex, &session.id)
+            .is_err());
         assert_eq!(
             store
                 .list_threads(&project.id)
@@ -14843,17 +14679,13 @@ mod schema_tests {
             .unwrap();
         assert_eq!(thread_linked.sessions.len(), 1);
         assert_eq!(thread_linked.sessions[0].id, session.id);
-        assert!(
-            thread_linked
-                .stages
-                .iter()
-                .all(|stage| stage.sessions.is_empty())
-        );
-        assert!(
-            store
-                .link_stage_session(&build.id, Agent::Codex, &session.id)
-                .is_err()
-        );
+        assert!(thread_linked
+            .stages
+            .iter()
+            .all(|stage| stage.sessions.is_empty()));
+        assert!(store
+            .link_stage_session(&build.id, Agent::Codex, &session.id)
+            .is_err());
         let listed_thread = store
             .list_threads(&project.id)
             .unwrap()
@@ -14924,11 +14756,9 @@ mod schema_tests {
         store
             .upsert_session(&other_session.file_path, &other_session)
             .unwrap();
-        assert!(
-            store
-                .link_stage_session(&build.id, Agent::Codex, &other_session.id)
-                .is_err()
-        );
+        assert!(store
+            .link_stage_session(&build.id, Agent::Codex, &other_session.id)
+            .is_err());
 
         let other_assistant = store
             .create_assistant(NewAssistant {
@@ -14985,50 +14815,44 @@ mod schema_tests {
         store.delete_assistant(&reviewer.id).unwrap();
         let remaining_assistants = store.list_assistants(Some(&project.id)).unwrap();
         assert_eq!(remaining_assistants.len(), 4);
-        assert!(
-            remaining_assistants
-                .iter()
-                .any(|item| item.id == builtin_research_assistant_id)
-        );
+        assert!(remaining_assistants
+            .iter()
+            .any(|item| item.id == builtin_research_assistant_id));
 
-        assert!(
-            store
-                .create_assistant(NewAssistant {
-                    name: "Invalid",
-                    agent: AssistantAgentInfo {
-                        id: "missing".to_string(),
-                        name: "Missing".to_string(),
-                        model: "gpt-5.3-codex".to_string(),
-                        mode: "read-only".to_string(),
-                        effort: "medium".to_string(),
-                    },
-                    system_prompt: None,
-                    color: None,
-                    assistant_type: AssistantType::Custom,
-                    process_template_id: None,
-                    project_id: Some(&project.id),
-                })
-                .is_err()
-        );
-        assert!(
-            store
-                .create_assistant(NewAssistant {
-                    name: "Invalid builtin",
-                    agent: AssistantAgentInfo {
-                        id: "codex".to_string(),
-                        name: "Codex".to_string(),
-                        model: "gpt-5.3-codex".to_string(),
-                        mode: "read-only".to_string(),
-                        effort: "medium".to_string(),
-                    },
-                    system_prompt: None,
-                    color: None,
-                    assistant_type: AssistantType::Builtin,
-                    process_template_id: None,
-                    project_id: Some(&project.id),
-                })
-                .is_err()
-        );
+        assert!(store
+            .create_assistant(NewAssistant {
+                name: "Invalid",
+                agent: AssistantAgentInfo {
+                    id: "missing".to_string(),
+                    name: "Missing".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: None,
+                color: None,
+                assistant_type: AssistantType::Custom,
+                process_template_id: None,
+                project_id: Some(&project.id),
+            })
+            .is_err());
+        assert!(store
+            .create_assistant(NewAssistant {
+                name: "Invalid builtin",
+                agent: AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: None,
+                color: None,
+                assistant_type: AssistantType::Builtin,
+                process_template_id: None,
+                project_id: Some(&project.id),
+            })
+            .is_err());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
@@ -15072,12 +14896,10 @@ mod schema_tests {
         store
             .mark_runtime_agent_session_config_needs_refresh(Agent::Codex, "codex-acp@1.2.3")
             .unwrap();
-        assert!(
-            store
-                .get_runtime_agent_session_config(Agent::Codex, "codex-acp@1.2.3")
-                .unwrap()
-                .is_none()
-        );
+        assert!(store
+            .get_runtime_agent_session_config(Agent::Codex, "codex-acp@1.2.3")
+            .unwrap()
+            .is_none());
 
         store
             .upsert_runtime_agent_session_config(&RuntimeAgentSessionConfigRecord {
@@ -15134,75 +14956,21 @@ mod schema_tests {
     }
 
     #[test]
-    fn astra_pi_agent_display_name_is_explicit() {
-        let path = unique_db("sessio-astra-pi-display-name");
-        let store = SqliteStore::open(&path).unwrap();
-        store.init().unwrap();
-
-        let astra_pi = store
-            .list_agents()
-            .unwrap()
-            .into_iter()
-            .find(|agent| agent.id == Agent::AstraPi.as_str())
-            .unwrap();
-        assert_eq!(astra_pi.name, "Astra Pi");
-        assert_eq!(astra_pi.display_name, "Astra Pi");
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn astra_pi_builtin_commands_are_not_persisted() {
-        let path = unique_db("sessio-astra-pi-command-cleanup");
-        let store = SqliteStore::open(&path).unwrap();
-        store.init().unwrap();
-
-        let legacy_commands = AgentCommandsInfo {
-            session: vec!["astra-pi --acp".to_string()],
-            version: vec!["astra-pi --version".to_string()],
-        };
-        {
-            let conn = store.conn.lock().unwrap();
-            conn.execute(
-                "UPDATE agents SET commands_json = ? WHERE id = ?",
-                params![
-                    serde_json::to_string(&legacy_commands).unwrap(),
-                    Agent::AstraPi.as_str()
-                ],
-            )
-            .unwrap();
-        }
-
-        store.init().unwrap();
-
-        let astra_pi = store
-            .list_agents()
-            .unwrap()
-            .into_iter()
-            .find(|agent| agent.id == Agent::AstraPi.as_str())
-            .unwrap();
-        assert!(astra_pi.commands.session.is_empty());
-        assert!(astra_pi.commands.version.is_empty());
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
     fn runtime_agent_empty_model_patch_keeps_current_model() {
         let path = unique_db("runtime-empty-model");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
 
-        let astra_pi = store
+        let pi = store
             .update_agent_preferences_by_id(
-                Agent::AstraPi.as_str(),
+                Agent::Pi.as_str(),
                 AgentPreferencesPatch {
                     model: Some(""),
                     ..Default::default()
                 },
             )
             .unwrap();
-        assert_eq!(astra_pi.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(pi.model.as_deref(), None);
 
         let codex = store
             .update_builtin_agent_preferences(
@@ -15228,7 +14996,7 @@ mod schema_tests {
             .list_agents()
             .unwrap()
             .into_iter()
-            .find(|agent| agent.id == Agent::AstraPi.as_str())
+            .find(|agent| agent.id == Agent::Pi.as_str())
             .unwrap()
             .ai_providers;
         providers.push(AgentAiProviderInfo {
@@ -15246,7 +15014,7 @@ mod schema_tests {
 
         let astra = store
             .update_agent_preferences_by_id(
-                Agent::AstraPi.as_str(),
+                Agent::Pi.as_str(),
                 AgentPreferencesPatch {
                     ai_provider: Some(""),
                     ai_providers: Some(&providers),
@@ -15262,13 +15030,11 @@ mod schema_tests {
             .unwrap();
         assert!(generated.id.starts_with("custom-provider-"));
         assert!(!generated.id.trim().is_empty());
-        assert_eq!(astra.ai_provider.as_deref(), Some("cc-switch"));
-        assert!(
-            astra
-                .ai_providers
-                .iter()
-                .any(|provider| Some(provider.id.as_str()) == astra.ai_provider.as_deref())
-        );
+        assert_eq!(astra.ai_provider.as_deref(), Some(generated.id.as_str()));
+        assert!(astra
+            .ai_providers
+            .iter()
+            .any(|provider| Some(provider.id.as_str()) == astra.ai_provider.as_deref()));
 
         let _ = std::fs::remove_file(&path);
     }

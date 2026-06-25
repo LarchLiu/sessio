@@ -834,7 +834,9 @@ fn claude_meta_patch(path: &str, hunks: &[serde_json::Value]) -> String {
         .filter_map(|h| h.get("detail").and_then(|x| x.as_str()))
         .collect::<Vec<_>>()
         .join("\n");
-    format!("diff --git a/{normalized} b/{normalized}\n--- a/{normalized}\n+++ b/{normalized}\n{body}\n")
+    format!(
+        "diff --git a/{normalized} b/{normalized}\n--- a/{normalized}\n+++ b/{normalized}\n{body}\n"
+    )
 }
 
 fn claude_write_edits(input: &serde_json::Value) -> Vec<serde_json::Value> {

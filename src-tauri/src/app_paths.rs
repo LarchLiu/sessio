@@ -88,18 +88,6 @@ pub fn agent_probe_workspace_dir(agent: &str) -> Result<PathBuf> {
         .join("tmp-agent-capabilities"))
 }
 
-pub fn astra_agent_dir() -> Result<PathBuf> {
-    Ok(app_home()?.join("astra-pi-agent"))
-}
-
-pub fn astra_sessions_dir() -> Result<PathBuf> {
-    Ok(astra_agent_dir()?.join("sessions"))
-}
-
-pub fn astra_runtime_session_dir() -> Result<PathBuf> {
-    Ok(app_home()?.join("astra-sessions"))
-}
-
 pub fn pi_agent_home_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("no home dir")?;
     Ok(home.join(".pi").join("agent"))

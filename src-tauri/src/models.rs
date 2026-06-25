@@ -10,8 +10,6 @@ const SESSIO_THREAD_PROMPT_END: &str = "<!-- sessio-thread-prompt:end";
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
-    #[serde(rename = "astra-pi")]
-    AstraPi,
     Pi,
     Codex,
     Claude,
@@ -23,7 +21,6 @@ impl Agent {
     /// All known runtime agents. Adding a new variant lights up exhaustiveness
     /// errors at compile time everywhere this list drives a match.
     pub const ALL: &'static [Agent] = &[
-        Agent::AstraPi,
         Agent::Pi,
         Agent::Codex,
         Agent::Claude,
@@ -33,7 +30,6 @@ impl Agent {
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Agent::AstraPi => "astra-pi",
             Agent::Pi => "pi",
             Agent::Codex => "codex",
             Agent::Claude => "claude",
@@ -44,7 +40,6 @@ impl Agent {
 
     pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
-            "astra-pi" => Some(Agent::AstraPi),
             "pi" => Some(Agent::Pi),
             "codex" => Some(Agent::Codex),
             "claude" => Some(Agent::Claude),
@@ -60,9 +55,7 @@ impl Agent {
     pub fn effort_config_id(self) -> &'static str {
         match self {
             Agent::Codex => "reasoning_effort",
-            Agent::AstraPi | Agent::Pi | Agent::Claude | Agent::Gemini | Agent::Opencode => {
-                "effort"
-            }
+            Agent::Pi | Agent::Claude | Agent::Gemini | Agent::Opencode => "effort",
         }
     }
 }

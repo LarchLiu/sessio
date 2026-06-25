@@ -171,7 +171,6 @@ pub fn startup_probe_runtime_agents(
 
 fn startup_probe_command(runtime_agent: Agent, agent: &AgentInfo) -> String {
     match runtime_agent {
-        Agent::AstraPi => acp_transport::default_acp_command(runtime_agent),
         _ => agent
             .commands
             .session
