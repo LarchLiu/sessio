@@ -46,6 +46,7 @@ src-tauri/gen
 # Misc
 .cache
 coverage
+*.tsbuildinfo
 **/__screenshots__/
 **/.vitest-attachments/
 

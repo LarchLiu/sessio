@@ -13,7 +13,7 @@ fn main() {
     }
 
     println!("\nLatest 5 per agent:");
-    for agent in ["codex", "claude", "gemini"] {
+    for agent in ["codex", "claude", "opencode", "pi"] {
         let mut rows: Vec<_> = sessions
             .iter()
             .filter(|s| s.agent.as_str() == agent)

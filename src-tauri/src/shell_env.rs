@@ -275,7 +275,6 @@ fn shell_env_allowlist() -> HashSet<&'static str> {
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "GOOGLE_API_KEY",
-        "GEMINI_API_KEY",
         "CODEX_HOME",
         "HTTP_PROXY",
         "HTTPS_PROXY",
