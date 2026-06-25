@@ -1,4 +1,4 @@
-use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -14,9 +14,9 @@ use crate::agents::sources::types::{
     PathEvent, PathEventKind, ProjectRef, SessionSource, SourceIndexTask, SourceKind,
 };
 use crate::config::MemoryConfig;
+use crate::memory::MemoryStore;
 use crate::memory::build::MemoryBuildOptions;
 use crate::memory::service::{MemoryBackendSyncJob, MemoryService};
-use crate::memory::MemoryStore;
 use crate::models::Agent;
 use crate::store::SessionStore;
 
@@ -29,6 +29,7 @@ pub enum IndexTask {
     ReindexClaudeSubagentFile(PathBuf),
     ReindexGeminiFile(PathBuf),
     ReindexPiFile(PathBuf),
+    ReindexPiExternalFile(PathBuf),
     ReindexOpencodeAll,
     DeleteFile(PathBuf),
     DeleteSubagentFile(PathBuf),
@@ -168,9 +169,9 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
         while let Ok(t) = rx.try_recv() {
             batch.push(t);
         }
-        if ctx.runtime.has_active_acp_turn() {
+        if ctx.runtime.has_active_runtime_turn() {
             log::info!(
-                "indexer: dropping {} task(s) while an ACP turn is active",
+                "indexer: dropping {} task(s) while a runtime turn is active",
                 batch.len()
             );
             continue;
@@ -418,6 +419,11 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
                     out.push(IndexTask::ReindexPiFile(p));
                 }
             }
+            IndexTask::ReindexPiExternalFile(p) => {
+                if seen_pi.insert(p.clone()) {
+                    out.push(IndexTask::ReindexPiExternalFile(p));
+                }
+            }
             IndexTask::ReindexOpencodeAll => {
                 if !seen_opencode {
                     seen_opencode = true;
@@ -486,6 +492,9 @@ fn execute(
         IndexTask::ReindexPiFile(path) if enabled_agents.contains(&Agent::AstraPi) => {
             reindex_pi_file(path, store)
         }
+        IndexTask::ReindexPiExternalFile(path) if enabled_agents.contains(&Agent::Pi) => {
+            reindex_pi_external_file(path, store)
+        }
         IndexTask::ReindexOpencodeAll if enabled_agents.contains(&Agent::Opencode) => {
             reindex_opencode_all(store)
         }
@@ -495,6 +504,7 @@ fn execute(
         | IndexTask::ReindexClaudeSubagentFile(_)
         | IndexTask::ReindexGeminiFile(_)
         | IndexTask::ReindexPiFile(_)
+        | IndexTask::ReindexPiExternalFile(_)
         | IndexTask::ReindexOpencodeAll => Ok(TaskOutcome::default()),
         IndexTask::DeleteFile(path) => {
             let path_str = path.to_string_lossy();
@@ -829,6 +839,29 @@ fn reindex_pi_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutcome>
     Ok(outcome)
 }
 
+fn reindex_pi_external_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutcome> {
+    if !path.exists() {
+        store.mark_file_path_unavailable(&path.to_string_lossy())?;
+        return Ok(TaskOutcome::default());
+    }
+    let Some(parent) = path.parent() else {
+        return Ok(TaskOutcome::default());
+    };
+    let mut outcome = TaskOutcome::default();
+    match crate::agents::sources::pi_external::parser::parse_session_file(path)? {
+        Some(info) => {
+            push_session_project(&mut outcome, &info);
+            push_session_source(&mut outcome, &info);
+            let scope = parent.to_string_lossy().into_owned();
+            store.upsert_session(&scope, &info)?;
+        }
+        None => {
+            store.mark_file_path_unindexable(Agent::Pi, &path.to_string_lossy())?;
+        }
+    }
+    Ok(outcome)
+}
+
 fn build_project_memory_for_indexer(
     project: &ProjectRef,
     store: &dyn MemoryStore,
@@ -945,6 +978,7 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
                 },
                 "gemini" => Some(IndexTask::ReindexGeminiFile(path)),
                 "astra-pi" => Some(IndexTask::ReindexPiFile(path)),
+                "pi" => Some(IndexTask::ReindexPiExternalFile(path)),
                 "opencode" => Some(IndexTask::ReindexOpencodeAll),
                 _ => None,
             };
@@ -1170,6 +1204,16 @@ mod tests {
             SourceKind::MainSession,
         )));
         assert!(matches!(pi, Some(IndexTask::ReindexPiFile(_))));
+
+        let pi_external = source_task_to_index_task(SourceIndexTask::ReindexSource(src(
+            "pi",
+            "/tmp/pi-external/project/session.jsonl",
+            SourceKind::MainSession,
+        )));
+        assert!(matches!(
+            pi_external,
+            Some(IndexTask::ReindexPiExternalFile(_))
+        ));
     }
 
     #[test]

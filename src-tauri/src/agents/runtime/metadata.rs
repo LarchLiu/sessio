@@ -3,8 +3,8 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 
-use super::acp_transport;
 use super::types::{RuntimeCapabilitySet, RuntimeTransportKind};
+use super::{acp_transport, pi_rpc_transport};
 use crate::app_paths;
 use crate::models::{Agent, AgentInfo, AgentType, RuntimeAgentMetadata};
 use crate::store::{RuntimeAgentCapabilityRecord, SessionStore};
@@ -187,14 +187,29 @@ fn detect_capabilities_with_initialize_only(
     transport: RuntimeTransportKind,
     command: String,
 ) -> Result<acp_transport::AcpInitializeProbe> {
-    if transport != RuntimeTransportKind::Acp {
-        return Err(anyhow::anyhow!(
-            "initialize-only probe currently only supports ACP transport for {} at {}",
-            agent.as_str(),
-            workspace_path
-        ));
+    if transport == RuntimeTransportKind::PiRpc {
+        let capabilities = pi_rpc_transport::runtime_capabilities();
+        return Ok(acp_transport::AcpInitializeProbe {
+            protocol_version: "pi-rpc".to_string(),
+            raw_initialize_response_json: serde_json::json!({
+                "protocolVersion": "pi-rpc",
+                "command": command,
+                "workspacePath": workspace_path,
+                "agent": agent.as_str(),
+            })
+            .to_string(),
+            raw_capabilities_json: serde_json::to_string(&capabilities)?,
+        });
     }
-    acp_transport::probe_initialize_response(command, workspace_path.to_string())
+    if transport == RuntimeTransportKind::Acp {
+        return acp_transport::probe_initialize_response(command, workspace_path.to_string());
+    }
+    Err(anyhow::anyhow!(
+        "initialize-only probe does not support {:?} transport for {} at {}",
+        transport,
+        agent.as_str(),
+        workspace_path
+    ))
 }
 
 #[allow(dead_code)]
@@ -229,6 +244,9 @@ fn ensure_probe_workspace(agent: Agent) -> Result<String> {
 }
 
 fn derive_runtime_capabilities(raw_capabilities_json: &str) -> Result<RuntimeCapabilitySet> {
+    if let Ok(capabilities) = serde_json::from_str::<RuntimeCapabilitySet>(raw_capabilities_json) {
+        return Ok(capabilities);
+    }
     let capabilities: agent_client_protocol::schema::AgentCapabilities =
         serde_json::from_str(raw_capabilities_json).context("parse ACP capabilities json")?;
     Ok(acp_transport::runtime_capabilities_from_acp(&capabilities))
@@ -294,7 +312,7 @@ mod tests {
         let result = detect_capabilities_with_initialize_only(
             Agent::Codex,
             "/tmp/sessio-probe-workspace",
-            RuntimeTransportKind::PlainCli,
+            RuntimeTransportKind::Fake,
             "npx -y @agentclientprotocol/codex-acp@latest".to_string(),
         );
 
@@ -302,6 +320,23 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("initialize-only probe currently only supports ACP transport"));
+            .contains("initialize-only probe does not support Fake transport"));
+    }
+
+    #[test]
+    fn initialize_only_probe_supports_pi_rpc_transport_locally() {
+        let probe = detect_capabilities_with_initialize_only(
+            Agent::Pi,
+            "/tmp/sessio-probe-workspace",
+            RuntimeTransportKind::PiRpc,
+            "pi --mode rpc".to_string(),
+        )
+        .expect("pi rpc probe");
+
+        assert_eq!(probe.protocol_version, "pi-rpc");
+        let capabilities: RuntimeCapabilitySet =
+            serde_json::from_str(&probe.raw_capabilities_json).expect("capabilities json");
+        assert!(capabilities.supports_cancel);
+        assert!(capabilities.supports_image_attachments);
     }
 }

@@ -221,7 +221,6 @@ function initialRuntimePermission(agent: RuntimeAgentMetadata | null): string {
 
 function runtimeSessionOptions(model: string, permissionMode: string, effort = ""): Record<string, unknown> {
   return {
-    transport: "acp",
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
     ...(permissionMode ? { permissionMode } : {}),

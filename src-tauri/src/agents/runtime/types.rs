@@ -11,9 +11,7 @@ pub type RuntimeMetadata = BTreeMap<String, Value>;
 #[serde(rename_all = "camelCase")]
 pub enum RuntimeTransportKind {
     Acp,
-    CliStreamJson,
-    PlainCli,
-    Sidecar,
+    PiRpc,
     Fake,
 }
 

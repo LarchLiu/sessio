@@ -11,13 +11,13 @@ import type {
   UpsertCanvasAnchorRequest,
 } from "./canvasTypes";
 
-export type Agent = "astra-pi" | "codex" | "claude" | "gemini" | "opencode";
+export type Agent = "astra-pi" | "pi" | "codex" | "claude" | "gemini" | "opencode";
 
 /// Single source of truth for runtime agent ids. Keep in sync with the
 /// `Agent` enum on the Rust side. Adding a new agent here is the only TS
 /// place callers should touch — `isAgent`, `Record<Agent, …>` literals,
 /// and AGENTS-driven loops pick up the rest at compile time.
-export const AGENTS = ["astra-pi", "codex", "claude", "gemini", "opencode"] as const;
+export const AGENTS = ["astra-pi", "pi", "codex", "claude", "gemini", "opencode"] as const;
 
 // Compile-time guard: AGENTS must cover every Agent variant and only contain
 // Agent variants. If either side drifts, TypeScript fails here.
@@ -964,7 +964,7 @@ export interface ProjectMemorySearchResult {
   raw: unknown;
 }
 
-export type RuntimeTransportKind = "acp" | "cliStreamJson" | "plainCli" | "sidecar" | "fake";
+export type RuntimeTransportKind = "acp" | "piRpc" | "fake";
 
 export type RuntimeSessionStatus =
   | "starting"
@@ -2582,6 +2582,7 @@ export async function respondAgentPermission(
 
 export const AGENT_LABEL: Record<Agent, string> = {
   "astra-pi": "Astra Pi",
+  pi: "Pi",
   codex: "Codex",
   claude: "Claude Code",
   gemini: "Gemini",
@@ -2593,6 +2594,7 @@ export const AGENT_LABEL: Record<Agent, string> = {
 /// when no override is set.
 export const AGENT_SHORT_LABEL: Record<Agent, string> = {
   "astra-pi": "Astra Pi",
+  pi: "Pi",
   codex: "Codex",
   claude: "Claude",
   gemini: "Gemini",
@@ -2601,6 +2603,7 @@ export const AGENT_SHORT_LABEL: Record<Agent, string> = {
 
 const AGENT_COLOR_VAR: Record<Agent, string> = {
   "astra-pi": "--color-purple",
+  pi: "--color-purple",
   codex: "--color-fg",
   claude: "--color-orange",
   gemini: "--color-blue",
@@ -2609,6 +2612,7 @@ const AGENT_COLOR_VAR: Record<Agent, string> = {
 
 export const AGENT_ACCENT: Record<Agent, string> = {
   "astra-pi": `rgb(var(${AGENT_COLOR_VAR["astra-pi"]}))`,
+  pi: `rgb(var(${AGENT_COLOR_VAR.pi}))`,
   codex: `rgb(var(${AGENT_COLOR_VAR.codex}))`,
   claude: `rgb(var(${AGENT_COLOR_VAR.claude}))`,
   gemini: `rgb(var(${AGENT_COLOR_VAR.gemini}))`,

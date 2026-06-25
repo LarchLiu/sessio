@@ -515,8 +515,9 @@ pub(super) fn switch_agent(
     agent_arg: &str,
 ) -> Result<String> {
     let arg = agent_arg.trim();
-    let agent = Agent::from_db_str(arg.trim())
-        .with_context(|| format!("unknown agent: {arg} (expected claude/codex/gemini/astra-pi)"))?;
+    let agent = Agent::from_db_str(arg.trim()).with_context(|| {
+        format!("unknown agent: {arg} (expected pi/claude/codex/gemini/astra-pi/opencode)")
+    })?;
 
     let config = state.config_snapshot();
     let current_session = state.chat_session(key);
@@ -941,9 +942,7 @@ fn transport_option(transport: crate::agents::runtime::types::RuntimeTransportKi
     use crate::agents::runtime::types::RuntimeTransportKind as T;
     match transport {
         T::Acp => "acp",
-        T::CliStreamJson => "cliStreamJson",
-        T::PlainCli => "plainCli",
-        T::Sidecar => "sidecar",
+        T::PiRpc => "piRpc",
         T::Fake => "fake",
     }
     .to_string()
@@ -976,7 +975,7 @@ pub(super) fn session_status_text(state: &Arc<ImBridgeState>, key: &ChatKey) -> 
 fn help_text() -> String {
     "Sessio 命令:\n\
      /new [workspace] — 开启新会话\n\
-     /agent [agent] — 选择或切换 agent (claude/codex/gemini/astra-pi)\n\
+     /agent [agent] — 选择或切换 agent (pi/claude/codex/gemini/astra-pi/opencode)\n\
      /model — 切换当前会话的 model\n\
      /effort — 切换当前会话的 effort\n\
      /workspace — 切换当前会话的 workspace\n\

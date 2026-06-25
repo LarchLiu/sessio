@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rusqlite::{
-    params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension, ToSql,
+    Connection, OptionalExtension, ToSql, params, params_from_iter, types::Value as SqlValue,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -16,9 +16,8 @@ use crate::models::{
     Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AgentType, AssistantAgentInfo,
     AssistantInfo, AssistantType, AstraConfig, CanvasBlockKind, CanvasBlockRecord,
     CanvasBlockSourceType, CanvasContextAnchor, CanvasDocumentInfo, CanvasDocumentState,
-    CanvasRevisionInfo,
-    ChannelSessionInfo, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
-    PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
+    CanvasRevisionInfo, ChannelSessionInfo, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus,
+    PlanRoundInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo,
     ProcessTemplateType, ProjectInfo, ProjectStageInfo, ProjectStageType,
     RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, SessionOrigin, StageAssistantInfo,
@@ -30,9 +29,9 @@ use crate::store::{
     ChannelSessionRecord, IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound,
     NewPlanTask, NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch,
     RuntimeAgentCapabilityRecord, RuntimeAgentSelection, RuntimeAgentSessionConfigRecord,
-    ScheduledTaskRecord, ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef,
-    SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
-    SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK,
+    SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK, ScheduledTaskRecord, ScheduledTaskRunRecord,
+    SessionHistorySnapshotRecord, SessionRef, SessionStore, ThreadWorkSnapshotRecord,
+    UpsertCanvasBlockRecord,
 };
 
 pub struct SqliteStore {
@@ -1303,11 +1302,7 @@ trait EmptyStringFallback {
 
 impl EmptyStringFallback for String {
     fn if_empty_then(self, fallback: impl FnOnce() -> String) -> String {
-        if self.is_empty() {
-            fallback()
-        } else {
-            self
-        }
+        if self.is_empty() { fallback() } else { self }
     }
 }
 
@@ -1497,6 +1492,34 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
     )?;
     seed_builtin_agent(
         conn,
+        Agent::Pi,
+        BuiltinAgentSeed {
+            model: None,
+            models: Vec::new(),
+            effort: Some("medium"),
+            efforts: vec![
+                runtime_option("off", "Off"),
+                runtime_option("minimal", "Minimal"),
+                runtime_option("low", "Low"),
+                runtime_option("medium", "Medium"),
+                runtime_option("high", "High"),
+                runtime_option("xhigh", "Extra High"),
+            ],
+            permission_mode: None,
+            permission_modes: Vec::new(),
+            enabled: true,
+            transport: RuntimeTransportKind::PiRpc,
+            commands: AgentCommandsInfo {
+                session: vec!["pi --mode rpc".to_string()],
+                version: vec!["pi --version".to_string()],
+            },
+            ai_providers: vec![],
+        },
+        now,
+    )?;
+    sync_pi_builtin_agent_defaults(conn, now)?;
+    seed_builtin_agent(
+        conn,
         Agent::Claude,
         BuiltinAgentSeed {
             model: Some("claude-opus-4-8"),
@@ -1591,21 +1614,39 @@ fn sync_astra_pi_builtin_agent_defaults(conn: &Connection, now: i64) -> Result<(
     Ok(())
 }
 
+fn sync_pi_builtin_agent_defaults(conn: &Connection, now: i64) -> Result<()> {
+    let commands_json = serde_json::to_string(&AgentCommandsInfo {
+        session: vec!["pi --mode rpc".to_string()],
+        version: vec!["pi --version".to_string()],
+    })?;
+    conn.execute(
+        "UPDATE agents
+         SET transport = ?, commands_json = ?, enabled = 1, updated_at = ?
+         WHERE id = ? AND (transport <> ? OR commands_json <> ? OR enabled = 0)",
+        params![
+            transport_kind_to_db(RuntimeTransportKind::PiRpc),
+            commands_json,
+            now,
+            Agent::Pi.as_str(),
+            transport_kind_to_db(RuntimeTransportKind::PiRpc),
+            commands_json,
+        ],
+    )?;
+    Ok(())
+}
+
 fn transport_kind_to_db(transport: RuntimeTransportKind) -> &'static str {
     match transport {
         RuntimeTransportKind::Acp => "acp",
-        RuntimeTransportKind::CliStreamJson => "cliStreamJson",
-        RuntimeTransportKind::PlainCli => "plainCli",
-        RuntimeTransportKind::Sidecar => "sidecar",
+        RuntimeTransportKind::PiRpc => "piRpc",
         RuntimeTransportKind::Fake => "fake",
     }
 }
 
 fn transport_kind_from_db(value: &str) -> RuntimeTransportKind {
     match value {
-        "cliStreamJson" => RuntimeTransportKind::CliStreamJson,
-        "plainCli" => RuntimeTransportKind::PlainCli,
-        "sidecar" => RuntimeTransportKind::Sidecar,
+        "piRpc" | "pi_rpc" => RuntimeTransportKind::PiRpc,
+        "cliStreamJson" | "plainCli" | "sidecar" => RuntimeTransportKind::Fake,
         "fake" => RuntimeTransportKind::Fake,
         _ => RuntimeTransportKind::Acp,
     }
@@ -1614,6 +1655,7 @@ fn transport_kind_from_db(value: &str) -> RuntimeTransportKind {
 fn runtime_agent_name(agent: Agent) -> &'static str {
     match agent {
         Agent::AstraPi => "Astra Pi",
+        Agent::Pi => "Pi",
         Agent::Codex => "Codex",
         Agent::Claude => "Claude",
         Agent::Gemini => "Gemini",
@@ -1624,6 +1666,7 @@ fn runtime_agent_name(agent: Agent) -> &'static str {
 fn runtime_agent_display_name(agent: Agent) -> &'static str {
     match agent {
         Agent::AstraPi => "Astra Pi",
+        Agent::Pi => "Pi",
         Agent::Codex => "Codex CLI",
         Agent::Claude => "Claude Code",
         Agent::Gemini => "Gemini CLI",
@@ -1634,10 +1677,11 @@ fn runtime_agent_display_name(agent: Agent) -> &'static str {
 fn runtime_agent_order(agent: Agent) -> i64 {
     match agent {
         Agent::AstraPi => 0,
-        Agent::Codex => 1,
-        Agent::Claude => 2,
-        Agent::Gemini => 3,
-        Agent::Opencode => 4,
+        Agent::Pi => 1,
+        Agent::Codex => 2,
+        Agent::Claude => 3,
+        Agent::Gemini => 4,
+        Agent::Opencode => 5,
     }
 }
 
@@ -2945,7 +2989,10 @@ fn upsert_canvas_document_title(
         .ok_or_else(|| anyhow::anyhow!("canvas document missing after upsert for {session_id}"))
 }
 
-fn latest_canvas_revision(conn: &Connection, canvas_id: &str) -> Result<Option<CanvasRevisionInfo>> {
+fn latest_canvas_revision(
+    conn: &Connection,
+    canvas_id: &str,
+) -> Result<Option<CanvasRevisionInfo>> {
     conn.query_row(
         "SELECT id, canvas_id, revision, snapshot_path, snapshot_hash, snapshot_size_bytes, source, created_at
          FROM canvas_revisions
@@ -2972,7 +3019,9 @@ fn stale_canvas_revision_paths(
          ORDER BY revision DESC, created_at DESC
          LIMIT -1 OFFSET ?",
     )?;
-    let rows = stmt.query_map(params![canvas_id, keep_latest], |row| row.get::<_, String>(0))?;
+    let rows = stmt.query_map(params![canvas_id, keep_latest], |row| {
+        row.get::<_, String>(0)
+    })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
@@ -9186,8 +9235,9 @@ impl SessionStore for SqliteStore {
                 document.id,
             ],
         )?;
-        get_canvas_document_by_session(&conn, session_id)?
-            .ok_or_else(|| anyhow::anyhow!("canvas document missing after draft save for {session_id}"))
+        get_canvas_document_by_session(&conn, session_id)?.ok_or_else(|| {
+            anyhow::anyhow!("canvas document missing after draft save for {session_id}")
+        })
     }
 
     fn save_canvas_revision(
@@ -9238,8 +9288,10 @@ impl SessionStore for SqliteStore {
                 document.id.as_str(),
             ],
         )?;
-        let updated_document = get_canvas_document_by_session(&tx, session_id)?
-            .ok_or_else(|| anyhow::anyhow!("canvas document missing after revision save for {session_id}"))?;
+        let updated_document =
+            get_canvas_document_by_session(&tx, session_id)?.ok_or_else(|| {
+                anyhow::anyhow!("canvas document missing after revision save for {session_id}")
+            })?;
         let revision = tx.query_row(
             "SELECT id, canvas_id, revision, snapshot_path, snapshot_hash, snapshot_size_bytes, source, created_at
              FROM canvas_revisions
@@ -9251,11 +9303,7 @@ impl SessionStore for SqliteStore {
         Ok((updated_document, revision))
     }
 
-    fn prune_canvas_revisions(
-        &self,
-        session_id: &str,
-        keep_latest: usize,
-    ) -> Result<Vec<String>> {
+    fn prune_canvas_revisions(&self, session_id: &str, keep_latest: usize) -> Result<Vec<String>> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let document = upsert_canvas_document_title(&tx, session_id, None)?;
@@ -9330,15 +9378,14 @@ impl SessionStore for SqliteStore {
         let nonce = unique_nonce();
         let conn = self.conn.lock().unwrap();
         let document = upsert_canvas_document_title(&conn, session_id, None)?;
-        let id =
-            stable_canvas_anchor_id(
-                &document.id,
-                selection_block_ids_json,
-                selection_element_ids_json,
-                turn_id,
-                now,
-                &nonce,
-            );
+        let id = stable_canvas_anchor_id(
+            &document.id,
+            selection_block_ids_json,
+            selection_element_ids_json,
+            turn_id,
+            now,
+            &nonce,
+        );
         conn.execute(
             "INSERT INTO canvas_context_anchors (
                 id, canvas_id, anchor_block_id, selection_block_ids_json, selection_element_ids_json, turn_id, summary, created_at
@@ -11963,13 +12010,17 @@ mod schema_tests {
         );
         let code_assistants = store.list_assistants(Some(&code.id)).unwrap();
         assert_eq!(code_assistants.len(), 4);
-        assert!(code_assistants
-            .iter()
-            .all(|item| item.project_id.as_deref() == Some(code.id.as_str())));
-        assert!(code_assistants
-            .iter()
-            .all(|item| item.process_template_id.as_deref()
-                == Some(code.process_template_id.as_str())));
+        assert!(
+            code_assistants
+                .iter()
+                .all(|item| item.project_id.as_deref() == Some(code.id.as_str()))
+        );
+        assert!(
+            code_assistants
+                .iter()
+                .all(|item| item.process_template_id.as_deref()
+                    == Some(code.process_template_id.as_str()))
+        );
 
         let writing_kinds = stage_kinds(store.list_project_stages(&writing.id).unwrap());
         assert_eq!(
@@ -12130,15 +12181,21 @@ mod schema_tests {
             stage_kinds(stages.clone()),
             vec![StageType::Research, StageType::Done]
         );
-        assert!(stages
-            .iter()
-            .all(|stage| stage.project_id.as_deref() == Some(project.id.as_str())));
-        assert!(stages
-            .iter()
-            .all(|stage| stage.stage_type == ProjectStageType::Builtin));
-        assert!(stages
-            .iter()
-            .all(|stage| !selected_template_ids.contains(&stage.id)));
+        assert!(
+            stages
+                .iter()
+                .all(|stage| stage.project_id.as_deref() == Some(project.id.as_str()))
+        );
+        assert!(
+            stages
+                .iter()
+                .all(|stage| stage.stage_type == ProjectStageType::Builtin)
+        );
+        assert!(
+            stages
+                .iter()
+                .all(|stage| !selected_template_ids.contains(&stage.id))
+        );
         let project_research = stages
             .iter()
             .find(|stage| stage.kind == Some(StageType::Research))
@@ -12174,16 +12231,20 @@ mod schema_tests {
                 project_id: Some(&project.id),
             })
             .unwrap();
-        assert!(store
-            .add_thread_stage(
-                &thread.id,
-                &research_template.id,
-                std::slice::from_ref(&assistant.id),
-            )
-            .is_err());
-        assert!(store
-            .add_thread_stage(&thread.id, &project_research.id, &[assistant.id])
-            .is_ok());
+        assert!(
+            store
+                .add_thread_stage(
+                    &thread.id,
+                    &research_template.id,
+                    std::slice::from_ref(&assistant.id),
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .add_thread_stage(&thread.id, &project_research.id, &[assistant.id])
+                .is_ok()
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
@@ -12217,9 +12278,11 @@ mod schema_tests {
         // Lazy default: with no active stage and no stored state, all stages
         // read as not_started.
         let stages = load_thread_stages(&store.conn.lock().unwrap(), &thread.id).unwrap();
-        assert!(stages
-            .iter()
-            .all(|stage| stage.status == StageStatus::NotStarted));
+        assert!(
+            stages
+                .iter()
+                .all(|stage| stage.status == StageStatus::NotStarted)
+        );
 
         // Setting the active stage derives completed/in_progress for rows that
         // still have no explicit state.
@@ -12311,10 +12374,12 @@ mod schema_tests {
 
         // deleting the parent thread stage cascades to its issues.
         store.delete_thread_stage(&stage.id).unwrap();
-        assert!(store
-            .list_thread_stage_issues(&stage.id)
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .list_thread_stage_issues(&stage.id)
+                .unwrap()
+                .is_empty()
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
@@ -12696,9 +12761,11 @@ mod schema_tests {
         store
             .upsert_session(&other_session.file_path, &other_session)
             .unwrap();
-        assert!(store
-            .link_kanban_item_session(&item.id, Agent::Codex, &other_session.id)
-            .is_err());
+        assert!(
+            store
+                .link_kanban_item_session(&item.id, Agent::Codex, &other_session.id)
+                .is_err()
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
@@ -12927,10 +12994,12 @@ mod schema_tests {
         assert_eq!(parallel.round_index, 0);
         assert_eq!(parallel.status, PlanRoundStatus::Running);
         assert_eq!(parallel.tasks.len(), 2);
-        assert!(parallel
-            .tasks
-            .iter()
-            .all(|task| task.status == PlanTaskStatus::Running));
+        assert!(
+            parallel
+                .tasks
+                .iter()
+                .all(|task| task.status == PlanTaskStatus::Running)
+        );
         assert_eq!(
             parallel.tasks[0].stage_snapshot_json.as_deref(),
             Some(r#"{"stage":"research-v1"}"#)
@@ -12967,11 +13036,13 @@ mod schema_tests {
             .find(|session| session.session_id == "runtime-session-1")
             .unwrap();
         assert!(first_runtime.superseded_at.is_some());
-        assert!(parallel.tasks[0]
-            .sessions
-            .iter()
-            .any(|session| session.session_id == "runtime-session-stale"
-                && session.superseded_at.is_none()));
+        assert!(
+            parallel.tasks[0]
+                .sessions
+                .iter()
+                .any(|session| session.session_id == "runtime-session-stale"
+                    && session.superseded_at.is_none())
+        );
         let relinked = store
             .relink_plan_task_session(
                 NewPlanTaskSession {
@@ -13172,10 +13243,12 @@ mod schema_tests {
             )
             .unwrap();
         assert_eq!(sequential.status, PlanRoundStatus::Completed);
-        assert!(sequential
-            .tasks
-            .iter()
-            .all(|task| task.status == PlanTaskStatus::Completed));
+        assert!(
+            sequential
+                .tasks
+                .iter()
+                .all(|task| task.status == PlanTaskStatus::Completed)
+        );
 
         let listed = store.list_plan_rounds(&thread.id).unwrap();
         assert_eq!(
@@ -13430,11 +13503,13 @@ mod schema_tests {
             .unwrap();
         assert_eq!(stage_task.agent, Agent::Codex);
         assert_eq!(stage_task.sources.len(), 2);
-        assert!(stage_task
-            .sources
-            .iter()
-            .any(|source| source.kind == ThreadReplaySessionSourceKind::Stage
-                && source.stage_id.as_deref() == Some(thread_stage.id.as_str())));
+        assert!(
+            stage_task
+                .sources
+                .iter()
+                .any(|source| source.kind == ThreadReplaySessionSourceKind::Stage
+                    && source.stage_id.as_deref() == Some(thread_stage.id.as_str()))
+        );
         assert!(stage_task.sources.iter().any(|source| source.kind
             == ThreadReplaySessionSourceKind::PlanTask
             && source.plan_task_id.as_deref() == Some(round.tasks[0].id.as_str())
@@ -13494,11 +13569,13 @@ mod schema_tests {
         assert_eq!(item.kind, thread.kind);
         assert!(item.session_keys.is_empty());
         assert!(item.time >= thread.updated_at.max(thread.created_at));
-        assert!(store
-            .list_thread_index(None)
-            .unwrap()
-            .iter()
-            .any(|item| item.thread_id == thread.id));
+        assert!(
+            store
+                .list_thread_index(None)
+                .unwrap()
+                .iter()
+                .any(|item| item.thread_id == thread.id)
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
@@ -13741,15 +13818,19 @@ mod schema_tests {
         // Archiving the project drops its threads from the index without
         // erroring, for both the scoped and the global listing.
         store.archive_project(&project.id).unwrap();
-        assert!(store
-            .list_thread_index(Some(&project.id))
-            .unwrap()
-            .is_empty());
-        assert!(store
-            .list_thread_index(None)
-            .unwrap()
-            .iter()
-            .all(|item| item.thread_id != thread.id));
+        assert!(
+            store
+                .list_thread_index(Some(&project.id))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_thread_index(None)
+                .unwrap()
+                .iter()
+                .all(|item| item.thread_id != thread.id)
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
@@ -13977,8 +14058,8 @@ mod schema_tests {
 
         let updated_participants = vec![ThreadAgentInfo {
             participant_id: "updated-participant".to_string(),
-            agent: Agent::Gemini,
-            model: "gemini-2.5-pro".to_string(),
+            agent: Agent::Claude,
+            model: "claude-opus-4-8".to_string(),
             effort: "high".to_string(),
             permission_mode: "default".to_string(),
             order: 0,
@@ -14009,11 +14090,13 @@ mod schema_tests {
             .to_string();
         assert!(disable_error.contains("thread assistant binding(s)"));
         assert!(disable_error.contains("thread \"Teamwork lane updated\""));
-        assert!(store
-            .delete_assistant(&builder.id)
-            .unwrap_err()
-            .to_string()
-            .contains("stages or threads"));
+        assert!(
+            store
+                .delete_assistant(&builder.id)
+                .unwrap_err()
+                .to_string()
+                .contains("stages or threads")
+        );
 
         store.delete_thread(&updated.id).unwrap();
         let binding_count: i64 = store
@@ -14150,21 +14233,26 @@ mod schema_tests {
                 .iter()
                 .map(|agent| agent.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["astra-pi", "codex", "claude", "opencode"]
+            vec!["astra-pi", "pi", "codex", "claude", "opencode"]
         );
+        let pi_agent = agents.iter().find(|agent| agent.id == "pi").unwrap();
+        assert_eq!(pi_agent.transport, RuntimeTransportKind::PiRpc);
+        assert_eq!(pi_agent.commands.session, vec!["pi --mode rpc".to_string()]);
         let codex_agent = agents.iter().find(|agent| agent.id == "codex").unwrap();
         assert_eq!(codex_agent.icon.as_deref(), Some("codex"));
         assert_eq!(codex_agent.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(codex_agent.commands.session.len(), 1);
         assert_eq!(
             codex_agent.commands.version.first().map(String::as_str),
-            Some("codex --version")
+            Some("npm view @agentclientprotocol/codex-acp version")
         );
         assert_eq!(codex_agent.effort.as_deref(), Some("high"));
-        assert!(codex_agent
-            .efforts
-            .iter()
-            .any(|option| option.value == "xhigh"));
+        assert!(
+            codex_agent
+                .efforts
+                .iter()
+                .any(|option| option.value == "xhigh")
+        );
         let astra_agent = agents.iter().find(|agent| agent.id == "astra-pi").unwrap();
         assert_eq!(astra_agent.display_name, "Astra Pi");
         assert_eq!(astra_agent.transport, RuntimeTransportKind::Acp);
@@ -14195,13 +14283,15 @@ mod schema_tests {
         let claude_agent = agents.iter().find(|agent| agent.id == "claude").unwrap();
         assert_eq!(
             claude_agent.commands.version.first().map(String::as_str),
-            Some("claude --version")
+            Some("npm view @agentclientprotocol/claude-agent-acp version")
         );
         assert_eq!(claude_agent.effort.as_deref(), Some("high"));
-        assert!(claude_agent
-            .efforts
-            .iter()
-            .any(|option| option.value == "max"));
+        assert!(
+            claude_agent
+                .efforts
+                .iter()
+                .any(|option| option.value == "max")
+        );
         assert!(agents.iter().all(|agent| agent.id != "gemini"));
         let parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-parent");
         std::fs::create_dir(&parent).unwrap();
@@ -14239,9 +14329,11 @@ mod schema_tests {
         assert_eq!(assistant.agent.effort, "medium");
         let project_assistants = store.list_assistants(Some(&project.id)).unwrap();
         assert_eq!(project_assistants.len(), 5);
-        assert!(project_assistants
-            .iter()
-            .all(|item| item.project_id.as_deref() == Some(project.id.as_str())));
+        assert!(
+            project_assistants
+                .iter()
+                .all(|item| item.project_id.as_deref() == Some(project.id.as_str()))
+        );
         assert_eq!(
             project_assistants
                 .iter()
@@ -14249,9 +14341,11 @@ mod schema_tests {
                 .count(),
             4
         );
-        assert!(project_assistants
-            .iter()
-            .any(|item| item.id == assistant.id));
+        assert!(
+            project_assistants
+                .iter()
+                .any(|item| item.id == assistant.id)
+        );
         let reviewer = store
             .create_assistant(NewAssistant {
                 name: "Reviewer",
@@ -14283,17 +14377,23 @@ mod schema_tests {
             .find(|stage| stage.kind == Some(StageType::Research))
             .unwrap()
             .clone();
-        assert!(research_option
-            .description
-            .as_deref()
-            .unwrap()
-            .contains("technical context"));
-        assert!(builtin_stages
-            .iter()
-            .any(|stage| stage.kind == Some(StageType::Develop)));
-        assert!(builtin_stages
-            .iter()
-            .all(|stage| stage.kind != Some(StageType::Build)));
+        assert!(
+            research_option
+                .description
+                .as_deref()
+                .unwrap()
+                .contains("technical context")
+        );
+        assert!(
+            builtin_stages
+                .iter()
+                .any(|stage| stage.kind == Some(StageType::Develop))
+        );
+        assert!(
+            builtin_stages
+                .iter()
+                .all(|stage| stage.kind != Some(StageType::Build))
+        );
         assert_eq!(research_option.assistants.len(), 1);
         let builtin_research_assistant_id = research_option.assistants[0].assistant_id.clone();
         assert_eq!(
@@ -14326,14 +14426,16 @@ mod schema_tests {
             .unwrap();
         assert_eq!(default_research.assistant_ids, vec![assistant.id.clone()]);
         assert_eq!(default_research.assistants[0].agent.id, "codex");
-        assert!(store
-            .list_threads(&project.id)
-            .unwrap()
-            .into_iter()
-            .find(|item| item.id == default_thread.id)
-            .unwrap()
-            .stage_id
-            .is_none());
+        assert!(
+            store
+                .list_threads(&project.id)
+                .unwrap()
+                .into_iter()
+                .find(|item| item.id == default_thread.id)
+                .unwrap()
+                .stage_id
+                .is_none()
+        );
         let assistant_disable_error = store
             .update_assistant(&assistant.id, None, None, None, None, Some(false))
             .unwrap_err()
@@ -14417,20 +14519,24 @@ mod schema_tests {
             .unwrap();
         assert!(human.assistant_ids.is_empty());
         assert!(human.allow_empty_assistants);
-        assert!(store
-            .list_threads(&project.id)
-            .unwrap()
-            .into_iter()
-            .find(|item| item.id == thread.id)
-            .unwrap()
-            .stage_id
-            .is_none());
+        assert!(
+            store
+                .list_threads(&project.id)
+                .unwrap()
+                .into_iter()
+                .find(|item| item.id == thread.id)
+                .unwrap()
+                .stage_id
+                .is_none()
+        );
         assert!(!build_option.allow_empty_assistants);
-        assert!(store
-            .add_thread_stage(&thread.id, &build_option.id, &[])
-            .unwrap_err()
-            .to_string()
-            .contains("stage does not allow empty assistants"));
+        assert!(
+            store
+                .add_thread_stage(&thread.id, &build_option.id, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("stage does not allow empty assistants")
+        );
         let manual_build = store
             .update_project_stage(
                 &build_option.id,
@@ -14530,17 +14636,17 @@ mod schema_tests {
                 &review_stage.id,
                 &assistant.id,
                 AssistantAgentInfo {
-                    id: "gemini".to_string(),
-                    name: "Gemini".to_string(),
-                    model: "gemini-3-pro".to_string(),
+                    id: "pi".to_string(),
+                    name: "Pi".to_string(),
+                    model: "default".to_string(),
                     mode: "workspace-write".to_string(),
                     effort: "medium".to_string(),
                 },
             )
             .unwrap();
         assert_eq!(review_stage.assistants[0].assistant_id, assistant.id);
-        assert_eq!(review_stage.assistants[0].agent.id, "gemini");
-        assert_eq!(review_stage.assistants[0].agent.name, "Gemini");
+        assert_eq!(review_stage.assistants[0].agent.id, "pi");
+        assert_eq!(review_stage.assistants[0].agent.name, "Pi");
         assert_eq!(review_stage.assistants[1].assistant_id, reviewer.id);
         assert_eq!(review_stage.assistants[1].agent.id, "codex");
         let thread_lanes = store.list_threads(&project.id).unwrap();
@@ -14566,7 +14672,7 @@ mod schema_tests {
                 .id,
             "claude"
         );
-        assert_eq!(review_lane.stages[0].assistants[0].agent.id, "gemini");
+        assert_eq!(review_lane.stages[0].assistants[0].agent.id, "pi");
         assert_eq!(
             store
                 .list_assistants(Some(&project.id))
@@ -14621,19 +14727,25 @@ mod schema_tests {
             )
             .unwrap();
         assert!(!disabled_research.enabled);
-        assert!(store
-            .list_project_stages(&project.id)
-            .unwrap()
-            .into_iter()
-            .any(|stage| stage.id == research.stage_id && !stage.enabled));
-        assert!(store
-            .list_process_template_stages(&project.process_template_id)
-            .unwrap()
-            .into_iter()
-            .any(|stage| stage.kind == Some(StageType::Research) && stage.project_id.is_none()));
-        assert!(store
-            .add_thread_stage(&thread.id, &research.stage_id, &assistant_ids)
-            .is_err());
+        assert!(
+            store
+                .list_project_stages(&project.id)
+                .unwrap()
+                .into_iter()
+                .any(|stage| stage.id == research.stage_id && !stage.enabled)
+        );
+        assert!(
+            store
+                .list_process_template_stages(&project.process_template_id)
+                .unwrap()
+                .into_iter()
+                .any(|stage| stage.kind == Some(StageType::Research) && stage.project_id.is_none())
+        );
+        assert!(
+            store
+                .add_thread_stage(&thread.id, &research.stage_id, &assistant_ids)
+                .is_err()
+        );
         let enabled_research = store
             .update_project_stage(
                 &research.stage_id,
@@ -14686,9 +14798,11 @@ mod schema_tests {
             .unwrap();
         assert_eq!(linked.sessions.len(), 1);
         assert_eq!(linked.sessions[0].id, session.id);
-        assert!(store
-            .link_thread_session(&thread.id, Agent::Codex, &session.id)
-            .is_err());
+        assert!(
+            store
+                .link_thread_session(&thread.id, Agent::Codex, &session.id)
+                .is_err()
+        );
         assert_eq!(
             store
                 .list_threads(&project.id)
@@ -14729,13 +14843,17 @@ mod schema_tests {
             .unwrap();
         assert_eq!(thread_linked.sessions.len(), 1);
         assert_eq!(thread_linked.sessions[0].id, session.id);
-        assert!(thread_linked
-            .stages
-            .iter()
-            .all(|stage| stage.sessions.is_empty()));
-        assert!(store
-            .link_stage_session(&build.id, Agent::Codex, &session.id)
-            .is_err());
+        assert!(
+            thread_linked
+                .stages
+                .iter()
+                .all(|stage| stage.sessions.is_empty())
+        );
+        assert!(
+            store
+                .link_stage_session(&build.id, Agent::Codex, &session.id)
+                .is_err()
+        );
         let listed_thread = store
             .list_threads(&project.id)
             .unwrap()
@@ -14806,9 +14924,11 @@ mod schema_tests {
         store
             .upsert_session(&other_session.file_path, &other_session)
             .unwrap();
-        assert!(store
-            .link_stage_session(&build.id, Agent::Codex, &other_session.id)
-            .is_err());
+        assert!(
+            store
+                .link_stage_session(&build.id, Agent::Codex, &other_session.id)
+                .is_err()
+        );
 
         let other_assistant = store
             .create_assistant(NewAssistant {
@@ -14865,44 +14985,50 @@ mod schema_tests {
         store.delete_assistant(&reviewer.id).unwrap();
         let remaining_assistants = store.list_assistants(Some(&project.id)).unwrap();
         assert_eq!(remaining_assistants.len(), 4);
-        assert!(remaining_assistants
-            .iter()
-            .any(|item| item.id == builtin_research_assistant_id));
+        assert!(
+            remaining_assistants
+                .iter()
+                .any(|item| item.id == builtin_research_assistant_id)
+        );
 
-        assert!(store
-            .create_assistant(NewAssistant {
-                name: "Invalid",
-                agent: AssistantAgentInfo {
-                    id: "missing".to_string(),
-                    name: "Missing".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
-                },
-                system_prompt: None,
-                color: None,
-                assistant_type: AssistantType::Custom,
-                process_template_id: None,
-                project_id: Some(&project.id),
-            })
-            .is_err());
-        assert!(store
-            .create_assistant(NewAssistant {
-                name: "Invalid builtin",
-                agent: AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
-                },
-                system_prompt: None,
-                color: None,
-                assistant_type: AssistantType::Builtin,
-                process_template_id: None,
-                project_id: Some(&project.id),
-            })
-            .is_err());
+        assert!(
+            store
+                .create_assistant(NewAssistant {
+                    name: "Invalid",
+                    agent: AssistantAgentInfo {
+                        id: "missing".to_string(),
+                        name: "Missing".to_string(),
+                        model: "gpt-5.3-codex".to_string(),
+                        mode: "read-only".to_string(),
+                        effort: "medium".to_string(),
+                    },
+                    system_prompt: None,
+                    color: None,
+                    assistant_type: AssistantType::Custom,
+                    process_template_id: None,
+                    project_id: Some(&project.id),
+                })
+                .is_err()
+        );
+        assert!(
+            store
+                .create_assistant(NewAssistant {
+                    name: "Invalid builtin",
+                    agent: AssistantAgentInfo {
+                        id: "codex".to_string(),
+                        name: "Codex".to_string(),
+                        model: "gpt-5.3-codex".to_string(),
+                        mode: "read-only".to_string(),
+                        effort: "medium".to_string(),
+                    },
+                    system_prompt: None,
+                    color: None,
+                    assistant_type: AssistantType::Builtin,
+                    process_template_id: None,
+                    project_id: Some(&project.id),
+                })
+                .is_err()
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
@@ -14946,10 +15072,12 @@ mod schema_tests {
         store
             .mark_runtime_agent_session_config_needs_refresh(Agent::Codex, "codex-acp@1.2.3")
             .unwrap();
-        assert!(store
-            .get_runtime_agent_session_config(Agent::Codex, "codex-acp@1.2.3")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .get_runtime_agent_session_config(Agent::Codex, "codex-acp@1.2.3")
+                .unwrap()
+                .is_none()
+        );
 
         store
             .upsert_runtime_agent_session_config(&RuntimeAgentSessionConfigRecord {
@@ -15135,10 +15263,12 @@ mod schema_tests {
         assert!(generated.id.starts_with("custom-provider-"));
         assert!(!generated.id.trim().is_empty());
         assert_eq!(astra.ai_provider.as_deref(), Some("cc-switch"));
-        assert!(astra
-            .ai_providers
-            .iter()
-            .any(|provider| Some(provider.id.as_str()) == astra.ai_provider.as_deref()));
+        assert!(
+            astra
+                .ai_providers
+                .iter()
+                .any(|provider| Some(provider.id.as_str()) == astra.ai_provider.as_deref())
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -15200,8 +15330,14 @@ mod schema_tests {
                 },
             )
             .unwrap();
-        assert_eq!(updated.commands.session, vec!["custom-codex --acp".to_string()]);
-        assert_eq!(updated.commands.version, vec!["custom-codex --version".to_string()]);
+        assert_eq!(
+            updated.commands.session,
+            vec!["custom-codex --acp".to_string()]
+        );
+        assert_eq!(
+            updated.commands.version,
+            vec!["custom-codex --version".to_string()]
+        );
 
         let loaded = store
             .list_agents()
@@ -15209,8 +15345,14 @@ mod schema_tests {
             .into_iter()
             .find(|agent| agent.id == Agent::Codex.as_str())
             .unwrap();
-        assert_eq!(loaded.commands.session, vec!["custom-codex --acp".to_string()]);
-        assert_eq!(loaded.commands.version, vec!["custom-codex --version".to_string()]);
+        assert_eq!(
+            loaded.commands.session,
+            vec!["custom-codex --acp".to_string()]
+        );
+        assert_eq!(
+            loaded.commands.version,
+            vec!["custom-codex --version".to_string()]
+        );
 
         let _ = std::fs::remove_file(&path);
     }

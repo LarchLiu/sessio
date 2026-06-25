@@ -3,6 +3,7 @@ pub mod codex;
 pub mod gemini;
 pub mod opencode;
 pub mod pi;
+pub mod pi_external;
 pub mod registry;
 pub mod shared;
 pub mod types;
@@ -20,6 +21,7 @@ pub fn list_all() -> Vec<SessionInfo> {
         claude::parser::list_sessions,
         gemini::parser::list_sessions,
         pi::parser::list_sessions,
+        pi_external::parser::list_sessions,
         opencode::parser::list_sessions,
     ] {
         match f() {
@@ -48,6 +50,9 @@ where
     let mut registry = registry::AgentSourceRegistry::new();
     if enabled.contains(&Agent::AstraPi) {
         registry.register(pi::PiSource);
+    }
+    if enabled.contains(&Agent::Pi) {
+        registry.register(pi_external::PiExternalSource);
     }
     if enabled.contains(&Agent::Codex) {
         registry.register(codex::CodexSource);

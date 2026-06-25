@@ -1628,6 +1628,7 @@ pub(crate) fn default_acp_command(agent: Agent) -> String {
             crate::astra::bundled_astra_pi_acp_command()
                 .unwrap_or_else(|| "astra-pi --acp".to_string())
         }
+        Agent::Pi => "pi".to_string(),
         Agent::Codex => "npx -y @agentclientprotocol/codex-acp@latest".to_string(),
         Agent::Claude => "npx -y @zed-industries/claude-code-acp@latest".to_string(),
         Agent::Gemini => "npx -y -- @google/gemini-cli@latest --experimental-acp".to_string(),
@@ -1650,9 +1651,7 @@ pub fn transport_requested(options: &RuntimeMetadata) -> RuntimeTransportKind {
 fn transport_from_str(transport: &str) -> RuntimeTransportKind {
     match transport {
         "acp" => RuntimeTransportKind::Acp,
-        "cliStreamJson" => RuntimeTransportKind::CliStreamJson,
-        "plainCli" => RuntimeTransportKind::PlainCli,
-        "sidecar" => RuntimeTransportKind::Sidecar,
+        "piRpc" | "pi_rpc" => RuntimeTransportKind::PiRpc,
         "fake" => RuntimeTransportKind::Fake,
         _ => RuntimeTransportKind::Fake,
     }
@@ -1765,8 +1764,8 @@ mod tests {
 
     #[test]
     fn spawn_acp_transport_parses_npx_command_without_shell_wrapper() {
-        let args =
-            shell_words::split("npx -y @agentclientprotocol/codex-acp@latest").expect("split command");
+        let args = shell_words::split("npx -y @agentclientprotocol/codex-acp@latest")
+            .expect("split command");
         let (program, rest) = args.split_first().expect("program");
 
         assert_eq!(*program, "npx");

@@ -16,14 +16,14 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::agents::runtime::RuntimeManager;
 use crate::agents::runtime::manager::RuntimeCleanupReport;
 use crate::agents::runtime::types::RuntimeSessionStatus;
 use crate::agents::runtime::types::{AgentSessionHandle, RuntimeTransportKind, StartAgentSession};
-use crate::agents::runtime::RuntimeManager;
 use crate::astra::{
     AstraHandle, AstraRunStatus, AstraService, CancelAstraRunRequest, CreateAstraRunRequest,
 };
@@ -32,8 +32,8 @@ use crate::models::{
     Agent, ProjectInfo, SessionInfo, StageStatus, ThreadAgentInfo, ThreadInfo, ThreadKind,
 };
 use crate::store::{
-    ScheduledTaskRecord, ScheduledTaskRunRecord, SessionStore,
-    SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK,
+    SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK, ScheduledTaskRecord, ScheduledTaskRunRecord,
+    SessionStore,
 };
 
 use self::config::{now_ms, task_chat_prompt};
@@ -54,13 +54,13 @@ const RUN_STALL_TIMEOUT_MS: i64 = 60 * 60 * 1000;
 /// Bounded wait when freeing a finished chat run's runtime session. Short so it
 /// never meaningfully delays the watcher/push threads that call it.
 const CHAT_SESSION_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
-/// Wait for the runtime to surface a real ACP session id before we stamp it
+/// Wait for the runtime to surface a real agent session id before we stamp it
 /// with the scheduled task lineage on the request path. If startup is slower
 /// than this, a background waiter keeps watching so Run Now does not look
 /// stuck in the UI.
 const SCHEDULED_CHAT_STARTUP_INLINE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Upper bound for the background waiter that stamps scheduled task lineage
-/// after a chat session eventually publishes its real ACP session id.
+/// after a chat session eventually publishes its real agent session id.
 const SCHEDULED_CHAT_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn log_scheduled_chat_cleanup_issue(session_id: &str, report: &RuntimeCleanupReport) {
@@ -94,7 +94,7 @@ fn stamp_started_chat_session(
     run_id: &str,
     timeout: Duration,
 ) -> Result<()> {
-    let real_agent_session_id = if handle.transport == RuntimeTransportKind::Acp {
+    let real_agent_session_id = if transport_publishes_real_agent_session_id(handle.transport) {
         wait_for_real_agent_session_id(runtime, &handle.sessio_runtime_session_id, timeout)?
     } else {
         handle.agent_runtime_session_id.trim().to_string()
@@ -125,6 +125,13 @@ fn stamp_started_chat_session(
         );
     }
     Ok(())
+}
+
+fn transport_publishes_real_agent_session_id(transport: RuntimeTransportKind) -> bool {
+    matches!(
+        transport,
+        RuntimeTransportKind::Acp | RuntimeTransportKind::PiRpc
+    )
 }
 
 fn wait_for_real_agent_session_id(
@@ -431,7 +438,7 @@ impl SchedulerState {
                 Value::String(permission_mode.clone()),
             );
         }
-        // Stamping (waiting for a real ACP session id, then writing the
+        // Stamping (waiting for a real agent session id, then writing the
         // sessions placeholder + run.agent_session_id backfill) happens after
         // record_run lands; callers invoke `kick_off_chat_stamp` with the
         // freshly-recorded run id.
@@ -1660,9 +1667,11 @@ fn spawn_completion_watcher(state: Arc<SchedulerState>) -> Result<()> {
         })?;
     thread::Builder::new()
         .name("scheduled-task-pushes".to_string())
-        .spawn(move || loop {
-            state.process_run_pushes();
-            thread::sleep(PUSH_CHECK_INTERVAL);
+        .spawn(move || {
+            loop {
+                state.process_run_pushes();
+                thread::sleep(PUSH_CHECK_INTERVAL);
+            }
         })?;
     Ok(())
 }

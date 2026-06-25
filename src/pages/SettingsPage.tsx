@@ -76,8 +76,6 @@ import { AiGenerate2Icon, ChannelShare24RegularIcon, DiscordLogoIcon, LarkLogoIc
 import { type Lang, useI18n } from "../i18n";
 import type { ThemeMode } from "../theme";
 import { formatVersionLabel, type UpdateState } from "../updater";
-import acpMarkBlackUrl from "../../assets/acp_mark-black.svg?url";
-import acpMarkWhiteUrl from "../../assets/acp_mark-white.svg?url";
 
 type SettingsSection = "general" | "agents" | "assistants" | "processTemplates" | "channels";
 type ChannelPlatform = "telegram" | "discord" | "feishu" | "wechat";
@@ -2421,7 +2419,6 @@ function AgentListRow({
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="truncate font-medium text-card-fg/78">{agent.displayName}</span>
-            {agent.transport === "acp" && <AcpLogo className="h-2 w-auto shrink-0 opacity-70" />}
           </span>
           <span className="mt-0.5 block truncate text-meta text-card-muted/45">{agent.model || t("agent.no_model")}</span>
         </span>
@@ -2429,36 +2426,6 @@ function AgentListRow({
       </button>
     </div>
   );
-}
-
-function AcpLogo({ className }: { className?: string }) {
-  const theme = useEffectiveThemeType();
-  return (
-    <Tooltip content="ACP" placement="top">
-      <span className="inline-flex shrink-0 items-center">
-        <img src={theme === "light" ? acpMarkBlackUrl : acpMarkWhiteUrl} alt="ACP" className={className} draggable={false} />
-      </span>
-    </Tooltip>
-  );
-}
-
-function useEffectiveThemeType(): "light" | "dark" {
-  const [themeType, setThemeType] = useState<"light" | "dark">(() =>
-    document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark",
-  );
-
-  useEffect(() => {
-    const root = document.documentElement;
-    const update = () => {
-      setThemeType(root.getAttribute("data-theme") === "light" ? "light" : "dark");
-    };
-    update();
-    const observer = new MutationObserver(update);
-    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
-    return () => observer.disconnect();
-  }, []);
-
-  return themeType;
 }
 
 function AgentEditor({
@@ -2818,7 +2785,6 @@ function AgentEditor({
                   <span className={"rounded px-1.5 py-0.5 text-meta " + (agent.enabled ? "bg-ink/[0.09] text-ink/70" : "bg-card-chip/8 text-card-muted/50")}>
                     {agent.enabled ? t("agent.active") : t("agent.disabled")}
                   </span>
-                  {agent.transport === "acp" && <AcpLogo className="h-2.5 w-auto shrink-0 opacity-75" />}
                 </div>
                 <SwitchControl
                   checked={agent.enabled}

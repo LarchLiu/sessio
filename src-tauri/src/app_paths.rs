@@ -99,3 +99,12 @@ pub fn astra_sessions_dir() -> Result<PathBuf> {
 pub fn astra_runtime_session_dir() -> Result<PathBuf> {
     Ok(app_home()?.join("astra-sessions"))
 }
+
+pub fn pi_agent_home_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("no home dir")?;
+    Ok(home.join(".pi").join("agent"))
+}
+
+pub fn pi_agent_sessions_dir() -> Result<PathBuf> {
+    Ok(pi_agent_home_dir()?.join("sessions"))
+}

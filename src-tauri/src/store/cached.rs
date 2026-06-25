@@ -1118,12 +1118,8 @@ impl SessionStore for CachedStore {
         draft_snapshot_path: &str,
         draft_snapshot_hash: &str,
     ) -> Result<CanvasDocumentInfo> {
-        self.inner.save_canvas_draft(
-            session_id,
-            title,
-            draft_snapshot_path,
-            draft_snapshot_hash,
-        )
+        self.inner
+            .save_canvas_draft(session_id, title, draft_snapshot_path, draft_snapshot_hash)
     }
 
     fn save_canvas_revision(
@@ -1145,11 +1141,7 @@ impl SessionStore for CachedStore {
         )
     }
 
-    fn prune_canvas_revisions(
-        &self,
-        session_id: &str,
-        keep_latest: usize,
-    ) -> Result<Vec<String>> {
+    fn prune_canvas_revisions(&self, session_id: &str, keep_latest: usize) -> Result<Vec<String>> {
         self.inner.prune_canvas_revisions(session_id, keep_latest)
     }
 

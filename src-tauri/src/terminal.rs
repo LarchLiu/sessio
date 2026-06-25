@@ -72,19 +72,10 @@ pub struct TerminalEventEnvelope {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TerminalEvent {
-    Created {
-        session: TerminalSessionSummary,
-    },
-    Output {
-        data: String,
-    },
-    Resized {
-        cols: u16,
-        rows: u16,
-    },
-    Closed {
-        exit_code: Option<i32>,
-    },
+    Created { session: TerminalSessionSummary },
+    Output { data: String },
+    Resized { cols: u16, rows: u16 },
+    Closed { exit_code: Option<i32> },
     Removed,
 }
 
@@ -314,11 +305,7 @@ impl TerminalService {
         });
     }
 
-    fn spawn_exit_watcher(
-        &self,
-        terminal_id: String,
-        mut child: Box<dyn Child + Send + Sync>,
-    ) {
+    fn spawn_exit_watcher(&self, terminal_id: String, mut child: Box<dyn Child + Send + Sync>) {
         let app = self.app.clone();
         let sessions = Arc::clone(&self.sessions);
         thread::spawn(move || {

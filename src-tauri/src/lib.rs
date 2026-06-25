@@ -44,10 +44,10 @@ use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
-    Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
-    AstraConfig, CanvasBlockKind, CanvasBlockRecord, CanvasBlockSourceType, CanvasContextAnchor,
-    CanvasDocumentState, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
-    PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
+    Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AssistantAgentInfo, AssistantInfo,
+    AssistantType, AstraConfig, CanvasBlockKind, CanvasBlockRecord, CanvasBlockSourceType,
+    CanvasContextAnchor, CanvasDocumentState, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus,
+    PlanRoundInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
     ProjectStageInfo, RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
     StageIssueInfo, StageStatus, ThreadAgentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind,
@@ -748,9 +748,7 @@ fn insert_option_if_missing(
 fn runtime_transport_option(transport: agents::runtime::types::RuntimeTransportKind) -> String {
     match transport {
         agents::runtime::types::RuntimeTransportKind::Acp => "acp",
-        agents::runtime::types::RuntimeTransportKind::CliStreamJson => "cliStreamJson",
-        agents::runtime::types::RuntimeTransportKind::PlainCli => "plainCli",
-        agents::runtime::types::RuntimeTransportKind::Sidecar => "sidecar",
+        agents::runtime::types::RuntimeTransportKind::PiRpc => "piRpc",
         agents::runtime::types::RuntimeTransportKind::Fake => "fake",
     }
     .to_string()
@@ -2795,6 +2793,7 @@ fn read_session_history_result_from_source(
             "Session file no longer exists (likely cleaned by {}): {}",
             match agent {
                 Agent::AstraPi => "Astra Pi",
+                Agent::Pi => "Pi",
                 Agent::Codex => "Codex",
                 Agent::Claude => "Claude Code",
                 Agent::Gemini => "Gemini",
@@ -2815,6 +2814,28 @@ fn read_session_history_result_from_source(
                     &path, sid,
                 )?;
             let count = rows.len();
+            (rows, count)
+        }
+        Agent::Pi => {
+            let source = crate::agents::sources::types::SessionSource {
+                agent: crate::agents::sources::types::AgentKind::new(Agent::Pi.as_str()),
+                session_id: session_id.unwrap_or_default().to_string(),
+                scope: path
+                    .parent()
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                file_path: file_path.to_string(),
+                project: None,
+                source_kind: crate::agents::sources::types::SourceKind::MainSession,
+                metadata: Default::default(),
+            };
+            let events =
+                crate::agents::sources::pi_external::parser::read_message_events(&path, &source)?;
+            let count = events.len();
+            let rows =
+                crate::agents::sources::pi_external::parser::message_events_to_history_acp_messages(
+                    events,
+                );
             (rows, count)
         }
         Agent::Codex => {
@@ -3025,10 +3046,7 @@ async fn capture_window_area_png(
 
     let dir = paste_cache_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let file_name = safe_pasted_attachment_file_name(
-        req.file_name.as_deref(),
-        Some("image/png"),
-    );
+    let file_name = safe_pasted_attachment_file_name(req.file_name.as_deref(), Some("image/png"));
     let path = dir.join(format!(
         "native-window-area-{}-{file_name}",
         chrono::Utc::now().timestamp_millis()
@@ -3055,7 +3073,9 @@ async fn capture_window_area_png(
         .status()
         .map_err(|e| format!("Failed to start native screenshot capture: {e}"))?;
     if !status.success() {
-        return Err(format!("Native screenshot capture failed with status {status}"));
+        return Err(format!(
+            "Native screenshot capture failed with status {status}"
+        ));
     }
     let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
     if meta.len() == 0 {
@@ -3106,12 +3126,17 @@ async fn capture_webview_area_png(
                 let max_width = bounds.size.width - origin_x;
                 let max_height = bounds.size.height - origin_y;
                 if max_width <= 0.0 || max_height <= 0.0 {
-                    send(Err("WKWebView snapshot area is outside the webview bounds".to_string()));
+                    send(Err(
+                        "WKWebView snapshot area is outside the webview bounds".to_string()
+                    ));
                     return;
                 }
                 let crop = CGRect::new(
                     CGPoint::new(origin_x, origin_y),
-                    CGSize::new(width.min(max_width).max(1.0), height.min(max_height).max(1.0)),
+                    CGSize::new(
+                        width.min(max_width).max(1.0),
+                        height.min(max_height).max(1.0),
+                    ),
                 );
                 let config = WKSnapshotConfiguration::new(objc2::MainThreadMarker::new_unchecked());
                 config.setRect(crop);
@@ -3119,7 +3144,10 @@ async fn capture_webview_area_png(
                 let block = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
                     if !error.is_null() {
                         let error = &*error;
-                        send(Err(format!("WKWebView snapshot failed: {}", error.localizedDescription())));
+                        send(Err(format!(
+                            "WKWebView snapshot failed: {}",
+                            error.localizedDescription()
+                        )));
                         return;
                     }
                     if image.is_null() {
@@ -3131,11 +3159,15 @@ async fn capture_webview_area_png(
                         .TIFFRepresentation()
                         .ok_or_else(|| "WKWebView snapshot did not return image data".to_string())
                         .and_then(|tiff| {
-                            NSBitmapImageRep::imageRepWithData(&tiff)
-                                .ok_or_else(|| "WKWebView snapshot image data was not decodable".to_string())
+                            NSBitmapImageRep::imageRepWithData(&tiff).ok_or_else(|| {
+                                "WKWebView snapshot image data was not decodable".to_string()
+                            })
                         })
                         .and_then(|bitmap| {
-                            let properties = NSDictionary::<objc2_app_kit::NSBitmapImageRepPropertyKey, AnyObject>::dictionary();
+                            let properties = NSDictionary::<
+                                objc2_app_kit::NSBitmapImageRepPropertyKey,
+                                AnyObject,
+                            >::dictionary();
                             bitmap
                                 .representationUsingType_properties(
                                     NSBitmapImageFileType::PNG,
@@ -3218,8 +3250,7 @@ async fn capture_webview2_area_png(
         Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
     };
     use windows::Win32::{
-        Foundation::HGLOBAL,
-        System::Com::StructuredStorage::CreateStreamOnHGlobal,
+        Foundation::HGLOBAL, System::Com::StructuredStorage::CreateStreamOnHGlobal,
     };
 
     let device_scale = window.scale_factor().map_err(|e| e.to_string())?;
@@ -3273,7 +3304,9 @@ async fn capture_webview2_area_png(
                                 &callback_sender,
                                 Err("WebView2 snapshot returned an empty stream".to_string()),
                             ),
-                            Err(error) => send_webview2_snapshot_result(&callback_sender, Err(error)),
+                            Err(error) => {
+                                send_webview2_snapshot_result(&callback_sender, Err(error))
+                            }
                         }
                         Ok(())
                     }));
@@ -3442,8 +3475,7 @@ async fn capture_webkitgtk_area_png(
     use image::GenericImageView;
     use webkit2gtk::{SnapshotOptions, SnapshotRegion, WebViewExt};
 
-    let (tx, rx) =
-        tokio::sync::oneshot::channel::<Result<(Vec<u8>, i32, i32), String>>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<(Vec<u8>, i32, i32), String>>();
     let sender = Arc::new(Mutex::new(Some(tx)));
 
     window
@@ -4811,7 +4843,8 @@ fn get_session_canvas(
         .map_err(|e| e.to_string())?;
     state.draft_snapshot = read_optional_text_file(state.document.draft_snapshot_path.as_deref());
     state.saved_snapshot = read_optional_text_file(
-        state.saved_revision
+        state
+            .saved_revision
             .as_ref()
             .map(|revision| revision.snapshot_path.as_str()),
     );

@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc, Arc, Mutex,
+    mpsc,
 };
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tauri::{AppHandle, Emitter, Manager};
 
 use agent_client_protocol::schema::RequestPermissionRequest;
@@ -17,6 +18,7 @@ use super::acp::{
 };
 use super::acp_transport::{self, AcpSessionController};
 use super::fake;
+use super::pi_rpc_transport::{self, PiRpcSessionController};
 use super::types::{
     AgentInput, AgentRuntimeEvent, AgentRuntimeEventPayload, AgentRuntimeSessionConfig,
     AgentSessionConfigChange, AgentSessionHandle, AgentTurnHandle, EnsureAgentRuntimeSession,
@@ -26,8 +28,8 @@ use super::types::{
 use crate::models::Agent;
 use crate::store::{RuntimeAgentSessionConfigRecord, SessionStore};
 use crate::turns::{
-    apply_optimistic_user_message, apply_runtime_event_to_state, AcpCanonicalSessionState,
-    LiveRuntimeTurnSnapshotEvent, RuntimeTurnState,
+    AcpCanonicalSessionState, LiveRuntimeTurnSnapshotEvent, RuntimeTurnState,
+    apply_optimistic_user_message, apply_runtime_event_to_state,
 };
 
 #[derive(Clone)]
@@ -54,6 +56,7 @@ struct RuntimeSessionState {
     turn_cancellations: HashMap<String, Arc<AtomicBool>>,
     permission_waiters: HashMap<String, mpsc::Sender<RuntimePermissionDecision>>,
     acp_controller: Option<AcpSessionController>,
+    pi_rpc_controller: Option<PiRpcSessionController>,
 }
 
 type RuntimeEventFilter = Arc<dyn Fn(&AgentRuntimeEventPayload) -> bool + Send + Sync>;
@@ -158,24 +161,43 @@ impl RuntimeManager {
     }
 
     pub fn status(&self, agent: Agent) -> RuntimeStatus {
+        let transport = self.configured_transport(agent);
         RuntimeStatus {
             agent,
-            transport: RuntimeTransportKind::Acp,
+            transport,
             available: true,
             status: RuntimeSessionStatus::Idle,
-            capabilities: RuntimeCapabilitySet::fake(),
+            capabilities: runtime_capabilities_for_transport(transport),
             error: None,
             metadata: Default::default(),
         }
     }
 
     pub fn configured_transport(&self, agent: Agent) -> RuntimeTransportKind {
-        let _ = agent;
-        RuntimeTransportKind::Acp
+        if agent == Agent::Pi {
+            RuntimeTransportKind::PiRpc
+        } else {
+            RuntimeTransportKind::Acp
+        }
     }
 
     pub fn configured_session_command(&self, agent: Agent) -> String {
-        acp_transport::command_from_options(agent, &Default::default())
+        if self.configured_transport(agent) == RuntimeTransportKind::PiRpc {
+            pi_rpc_transport::command_from_options(&Default::default())
+        } else {
+            acp_transport::command_from_options(agent, &Default::default())
+        }
+    }
+
+    fn requested_transport(&self, agent: Agent, options: &RuntimeMetadata) -> RuntimeTransportKind {
+        if agent == Agent::Pi {
+            return RuntimeTransportKind::PiRpc;
+        }
+        if options.contains_key("transport") {
+            acp_transport::transport_requested(options)
+        } else {
+            self.configured_transport(agent)
+        }
     }
 
     pub fn status_for_session(
@@ -239,13 +261,13 @@ impl RuntimeManager {
         })
     }
 
-    pub fn has_active_acp_turn(&self) -> bool {
+    pub fn has_active_runtime_turn(&self) -> bool {
         self.inner
             .sessions
             .lock()
             .map(|sessions| {
                 sessions.values().any(|session| {
-                    session.handle.transport == RuntimeTransportKind::Acp
+                    transport_requires_startup(session.handle.transport)
                         && session.active_turn_id.is_some()
                 })
             })
@@ -392,35 +414,59 @@ impl RuntimeManager {
             bail!("workspace_path does not exist: {}", req.workspace_path);
         }
 
-        let transport = if req.options.contains_key("transport") {
-            acp_transport::transport_requested(&req.options)
-        } else {
-            RuntimeTransportKind::Acp
-        };
+        let transport = self.requested_transport(req.agent, &req.options);
         let runtime_config = session_config_from_options(req.agent, &req.options);
         let id = self.next_id("runtime");
         let agent_session_id = self.next_id("fake-agent-session");
-        let capabilities = RuntimeCapabilitySet::fake();
+        let capabilities = runtime_capabilities_for_transport(transport);
         let mut acp_controller = None;
-        if transport == RuntimeTransportKind::Acp {
-            let command = acp_transport::command_from_options(req.agent, &req.options);
-            let start = match (&req.source_session_id, req.source_agent) {
-                (Some(source_session_id), Some(source_agent)) if source_agent == req.agent => {
-                    acp_transport::AcpSessionStart::Fork {
-                        source_session_id: source_session_id.clone(),
+        let mut pi_rpc_controller = None;
+        let mut pi_rpc_worker = None;
+        match transport {
+            RuntimeTransportKind::Acp => {
+                let command = acp_transport::command_from_options(req.agent, &req.options);
+                let start = match (&req.source_session_id, req.source_agent) {
+                    (Some(source_session_id), Some(source_agent)) if source_agent == req.agent => {
+                        acp_transport::AcpSessionStart::Fork {
+                            source_session_id: source_session_id.clone(),
+                        }
                     }
-                }
-                _ => acp_transport::AcpSessionStart::New,
-            };
-            acp_controller = Some(acp_transport::spawn_session(
-                self.clone(),
-                id.clone(),
-                req.agent,
-                req.workspace_path.clone(),
-                command,
-                Some(runtime_config),
-                start,
-            ));
+                    _ => acp_transport::AcpSessionStart::New,
+                };
+                acp_controller = Some(acp_transport::spawn_session(
+                    self.clone(),
+                    id.clone(),
+                    req.agent,
+                    req.workspace_path.clone(),
+                    command,
+                    Some(runtime_config),
+                    start,
+                ));
+            }
+            RuntimeTransportKind::PiRpc => {
+                let start = match (&req.source_session_id, req.source_agent) {
+                    (Some(source_session_id), Some(source_agent)) if source_agent == req.agent => {
+                        pi_rpc_transport::PiRpcSessionStart::Fork {
+                            source_session_id: source_session_id.clone(),
+                        }
+                    }
+                    _ => pi_rpc_transport::PiRpcSessionStart::New,
+                };
+                let (controller, worker) = pi_rpc_transport::prepare_session(
+                    self.clone(),
+                    id.clone(),
+                    pi_rpc_transport::PiRpcSessionSpec {
+                        agent: req.agent,
+                        workspace_path: req.workspace_path.clone(),
+                        command: pi_rpc_transport::command_from_options(&req.options),
+                        runtime_config: Some(runtime_config),
+                        start,
+                    },
+                );
+                pi_rpc_controller = Some(controller);
+                pi_rpc_worker = Some(worker);
+            }
+            RuntimeTransportKind::Fake => {}
         }
         let handle = AgentSessionHandle {
             sessio_runtime_session_id: id.clone(),
@@ -428,7 +474,7 @@ impl RuntimeManager {
             transport,
             agent_runtime_session_id: agent_session_id.clone(),
             workspace_path: req.workspace_path.clone(),
-            status: if transport == RuntimeTransportKind::Acp {
+            status: if transport_requires_startup(transport) {
                 RuntimeSessionStatus::Starting
             } else {
                 RuntimeSessionStatus::Active
@@ -460,6 +506,7 @@ impl RuntimeManager {
                     turn_cancellations: HashMap::new(),
                     permission_waiters: HashMap::new(),
                     acp_controller,
+                    pi_rpc_controller,
                 },
             );
         };
@@ -473,6 +520,10 @@ impl RuntimeManager {
             capabilities: handle.capabilities.clone(),
             metadata: req.options.clone(),
         })?;
+
+        if let Some(worker) = pi_rpc_worker {
+            worker.start();
+        }
 
         if let Some(text) = req.initial_prompt {
             if !text.trim().is_empty() {
@@ -516,44 +567,76 @@ impl RuntimeManager {
             }
         }
 
-        let transport = if req.options.contains_key("transport") {
-            acp_transport::transport_requested(&req.options)
-        } else {
-            RuntimeTransportKind::Acp
-        };
+        let transport = self.requested_transport(req.agent, &req.options);
         let runtime_config = session_config_from_options(req.agent, &req.options);
         let agent_session_id = req
             .agent_runtime_session_id
             .clone()
             .unwrap_or_else(|| req.sessio_runtime_session_id.clone());
-        let capabilities = RuntimeCapabilitySet::fake();
+        let capabilities = runtime_capabilities_for_transport(transport);
         let mut acp_controller = None;
-        if transport == RuntimeTransportKind::Acp {
-            let start = req
-                .agent_runtime_session_id
-                .as_ref()
-                .filter(|id| !id.trim().is_empty())
-                .map(|agent_session_id| {
-                    if req.source_agent == Some(req.agent) {
-                        acp_transport::AcpSessionStart::Resume {
-                            agent_session_id: agent_session_id.clone(),
+        let mut pi_rpc_controller = None;
+        let mut pi_rpc_worker = None;
+        match transport {
+            RuntimeTransportKind::Acp => {
+                let start = req
+                    .agent_runtime_session_id
+                    .as_ref()
+                    .filter(|id| !id.trim().is_empty())
+                    .map(|agent_session_id| {
+                        if req.source_agent == Some(req.agent) {
+                            acp_transport::AcpSessionStart::Resume {
+                                agent_session_id: agent_session_id.clone(),
+                            }
+                        } else {
+                            acp_transport::AcpSessionStart::Load {
+                                agent_session_id: agent_session_id.clone(),
+                            }
                         }
-                    } else {
-                        acp_transport::AcpSessionStart::Load {
-                            agent_session_id: agent_session_id.clone(),
+                    })
+                    .unwrap_or(acp_transport::AcpSessionStart::New);
+                acp_controller = Some(acp_transport::spawn_session(
+                    self.clone(),
+                    req.sessio_runtime_session_id.clone(),
+                    req.agent,
+                    req.workspace_path.clone(),
+                    acp_transport::command_from_options(req.agent, &req.options),
+                    Some(runtime_config),
+                    start,
+                ));
+            }
+            RuntimeTransportKind::PiRpc => {
+                let start = req
+                    .agent_runtime_session_id
+                    .as_ref()
+                    .filter(|id| !id.trim().is_empty())
+                    .map(|agent_session_id| {
+                        if req.source_agent == Some(req.agent) {
+                            pi_rpc_transport::PiRpcSessionStart::Resume {
+                                agent_session_id: agent_session_id.clone(),
+                            }
+                        } else {
+                            pi_rpc_transport::PiRpcSessionStart::Load {
+                                agent_session_id: agent_session_id.clone(),
+                            }
                         }
-                    }
-                })
-                .unwrap_or(acp_transport::AcpSessionStart::New);
-            acp_controller = Some(acp_transport::spawn_session(
-                self.clone(),
-                req.sessio_runtime_session_id.clone(),
-                req.agent,
-                req.workspace_path.clone(),
-                acp_transport::command_from_options(req.agent, &req.options),
-                Some(runtime_config),
-                start,
-            ));
+                    })
+                    .unwrap_or(pi_rpc_transport::PiRpcSessionStart::New);
+                let (controller, worker) = pi_rpc_transport::prepare_session(
+                    self.clone(),
+                    req.sessio_runtime_session_id.clone(),
+                    pi_rpc_transport::PiRpcSessionSpec {
+                        agent: req.agent,
+                        workspace_path: req.workspace_path.clone(),
+                        command: pi_rpc_transport::command_from_options(&req.options),
+                        runtime_config: Some(runtime_config),
+                        start,
+                    },
+                );
+                pi_rpc_controller = Some(controller);
+                pi_rpc_worker = Some(worker);
+            }
+            RuntimeTransportKind::Fake => {}
         }
 
         let handle = AgentSessionHandle {
@@ -562,7 +645,7 @@ impl RuntimeManager {
             transport,
             agent_runtime_session_id: agent_session_id,
             workspace_path: req.workspace_path,
-            status: if transport == RuntimeTransportKind::Acp {
+            status: if transport_requires_startup(transport) {
                 RuntimeSessionStatus::Starting
             } else {
                 RuntimeSessionStatus::Idle
@@ -597,6 +680,7 @@ impl RuntimeManager {
                     turn_cancellations: HashMap::new(),
                     permission_waiters: HashMap::new(),
                     acp_controller,
+                    pi_rpc_controller,
                 },
             );
         }
@@ -610,6 +694,10 @@ impl RuntimeManager {
             capabilities: handle.capabilities.clone(),
             metadata: req.options.clone(),
         })?;
+
+        if let Some(worker) = pi_rpc_worker {
+            worker.start();
+        }
 
         Ok(handle)
     }
@@ -625,7 +713,7 @@ impl RuntimeManager {
 
         let turn_id = self.next_id("turn");
         let cancel_token = Arc::new(AtomicBool::new(false));
-        let acp_controller = {
+        let (acp_controller, pi_rpc_controller) = {
             let mut sessions = self
                 .inner
                 .sessions
@@ -672,7 +760,10 @@ impl RuntimeManager {
                 .turn_cancellations
                 .insert(turn_id.clone(), cancel_token.clone());
             state.handle.status = RuntimeSessionStatus::Active;
-            state.acp_controller.clone()
+            (
+                state.acp_controller.clone(),
+                state.pi_rpc_controller.clone(),
+            )
         };
 
         self.emit(AgentRuntimeEventPayload::TurnStarted {
@@ -686,6 +777,19 @@ impl RuntimeManager {
                     .session_startup_error(sessio_runtime_session_id)
                     .map(|message| ("acp_runtime_error", message))
                     .unwrap_or_else(|| ("acp_send_error", error.to_string()));
+                self.fail_turn(
+                    sessio_runtime_session_id,
+                    &turn_id,
+                    RuntimeError::new(code, message.clone()),
+                )?;
+                return Err(anyhow::anyhow!(message));
+            }
+        } else if let Some(controller) = pi_rpc_controller {
+            if let Err(error) = controller.send_prompt(turn_id.clone(), input) {
+                let (code, message) = self
+                    .session_startup_error(sessio_runtime_session_id)
+                    .map(|message| ("pi_rpc_runtime_error", message))
+                    .unwrap_or_else(|| ("pi_rpc_send_error", error.to_string()));
                 self.fail_turn(
                     sessio_runtime_session_id,
                     &turn_id,
@@ -711,7 +815,7 @@ impl RuntimeManager {
     }
 
     pub fn cancel_turn(&self, sessio_runtime_session_id: &str, turn_id: &str) -> Result<()> {
-        let acp_controller = {
+        let (acp_controller, pi_rpc_controller) = {
             let mut sessions = self
                 .inner
                 .sessions
@@ -723,6 +827,7 @@ impl RuntimeManager {
             match state.active_turn_id.as_deref() {
                 Some(active) if active == turn_id => {
                     let acp_controller = state.acp_controller.clone();
+                    let pi_rpc_controller = state.pi_rpc_controller.clone();
                     state.active_turn_id = None;
                     if let Some(token) = state.turn_cancellations.get(turn_id) {
                         token.store(true, Ordering::Relaxed);
@@ -731,7 +836,7 @@ impl RuntimeManager {
                         let _ = sender.send(RuntimePermissionDecision::Cancelled);
                     }
                     state.handle.status = RuntimeSessionStatus::Idle;
-                    acp_controller
+                    (acp_controller, pi_rpc_controller)
                 }
                 Some(active) => bail!("active turn is {active}, not {turn_id}"),
                 None => bail!("runtime session has no active turn"),
@@ -739,6 +844,9 @@ impl RuntimeManager {
         };
 
         if let Some(controller) = acp_controller {
+            controller.cancel_turn(turn_id.to_string())?;
+        }
+        if let Some(controller) = pi_rpc_controller {
             controller.cancel_turn(turn_id.to_string())?;
         }
 
@@ -756,7 +864,7 @@ impl RuntimeManager {
         if change.config_id.trim().is_empty() {
             bail!("config_id is required");
         }
-        let acp_controller = {
+        let (acp_controller, pi_rpc_controller) = {
             let sessions = self
                 .inner
                 .sessions
@@ -765,12 +873,18 @@ impl RuntimeManager {
             let state = sessions
                 .get(sessio_runtime_session_id)
                 .with_context(|| format!("unknown runtime session: {sessio_runtime_session_id}"))?;
-            state
-                .acp_controller
-                .clone()
-                .context("session config updates require an ACP runtime session")?
+            (
+                state.acp_controller.clone(),
+                state.pi_rpc_controller.clone(),
+            )
         };
-        acp_controller.set_config_option(change.config_id, change.value)
+        if let Some(controller) = acp_controller {
+            controller.set_config_option(change.config_id, change.value)
+        } else if let Some(controller) = pi_rpc_controller {
+            controller.set_config_option(change.config_id, change.value)
+        } else {
+            bail!("session config updates require a runtime session controller")
+        }
     }
 
     pub fn respond_permission(
@@ -1085,6 +1199,7 @@ impl RuntimeManager {
             state.handle.status = RuntimeSessionStatus::Errored;
             state.startup_error = Some(message.clone());
             state.acp_controller = None;
+            state.pi_rpc_controller = None;
             for (_, sender) in state.permission_waiters.drain() {
                 let _ = sender.send(RuntimePermissionDecision::Cancelled);
             }
@@ -1327,6 +1442,21 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn runtime_capabilities_for_transport(transport: RuntimeTransportKind) -> RuntimeCapabilitySet {
+    match transport {
+        RuntimeTransportKind::Acp => RuntimeCapabilitySet::fake(),
+        RuntimeTransportKind::PiRpc => pi_rpc_transport::runtime_capabilities(),
+        RuntimeTransportKind::Fake => RuntimeCapabilitySet::fake(),
+    }
+}
+
+fn transport_requires_startup(transport: RuntimeTransportKind) -> bool {
+    matches!(
+        transport,
+        RuntimeTransportKind::Acp | RuntimeTransportKind::PiRpc
+    )
 }
 
 fn log_runtime_event(payload: &AgentRuntimeEventPayload) {

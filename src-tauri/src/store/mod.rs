@@ -6,15 +6,15 @@ use std::collections::{HashMap, HashSet};
 
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
-    Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
-    AstraConfig, CanvasBlockKind, CanvasBlockRecord, CanvasBlockSourceType, CanvasContextAnchor,
-    CanvasDocumentInfo, CanvasDocumentState, CanvasRevisionInfo, ChannelSessionInfo, IssueSeverity,
-    IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo, PlanRoundMode, PlanRoundSource,
-    PlanRoundStatus, PlanTaskInfo, PlanTaskRisk, PlanTaskSessionInfo, PlanTaskSessionRole,
-    PlanTaskStatus, ProcessTemplateInfo, ProjectInfo, ProjectStageInfo,
-    RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo,
-    StageStatus, SubagentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
-    ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo,
+    Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AssistantAgentInfo, AssistantInfo,
+    AssistantType, AstraConfig, CanvasBlockKind, CanvasBlockRecord, CanvasBlockSourceType,
+    CanvasContextAnchor, CanvasDocumentInfo, CanvasDocumentState, CanvasRevisionInfo,
+    ChannelSessionInfo, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
+    PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
+    PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
+    ProjectStageInfo, RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
+    StageIssueInfo, StageStatus, SubagentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind,
+    ThreadOrigin, ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo,
     ThreadReplaySessionSourceKind,
 };
 
@@ -955,11 +955,7 @@ pub trait SessionStore: Send + Sync {
         snapshot_size_bytes: i64,
         source: &str,
     ) -> Result<(CanvasDocumentInfo, CanvasRevisionInfo)>;
-    fn prune_canvas_revisions(
-        &self,
-        session_id: &str,
-        keep_latest: usize,
-    ) -> Result<Vec<String>>;
+    fn prune_canvas_revisions(&self, session_id: &str, keep_latest: usize) -> Result<Vec<String>>;
     fn replace_canvas_blocks(
         &self,
         session_id: &str,

@@ -46,7 +46,7 @@ tauri-plugin-process = "2"
 tauri-plugin-shell = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "multipart"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
-tokio = { version = "1", features = ["io-util", "process", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "process", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 libc = "0.2"
 tauri-plugin-notification = "2"

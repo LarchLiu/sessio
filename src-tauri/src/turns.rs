@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::agents::runtime::types::{
     AcpProtocolMessage, AgentAttachment, AgentAttachmentKind, AgentRuntimeEventPayload,
@@ -9,10 +9,10 @@ use crate::agents::runtime::types::{
 };
 use crate::agents::sources::types::HistoryAcpMessage;
 use crate::models::{
-    is_system_noise, sessio_attachment_marker_name, sessio_thread_prompt_block_metas,
-    strip_injected_context, strip_sessio_thread_prompt_blocks, text_content_blocks, Agent,
-    SessionContentBlock, SessionHistoryBlock, SessionHistoryPermissionOption,
-    SessionHistoryPermissionRequest, SessionHistoryToolCall, SessionHistoryTurn,
+    Agent, SessionContentBlock, SessionHistoryBlock, SessionHistoryPermissionOption,
+    SessionHistoryPermissionRequest, SessionHistoryToolCall, SessionHistoryTurn, is_system_noise,
+    sessio_attachment_marker_name, sessio_thread_prompt_block_metas, strip_injected_context,
+    strip_sessio_thread_prompt_blocks, text_content_blocks,
 };
 
 const MAX_PROTOCOL_MESSAGES: usize = 240;
@@ -620,11 +620,240 @@ pub fn apply_runtime_event_to_state(
                 apply_acp_message_to_turn(turn, message, timestamp);
             }
         }
+        AgentRuntimeEventPayload::TextDelta { turn_id, text, .. } => {
+            append_content_block(
+                state.upsert_turn(turn_id, timestamp),
+                "assistant",
+                vec![SessionContentBlock::text(text.clone())],
+                json!({ "text": text }),
+                timestamp,
+            );
+        }
+        AgentRuntimeEventPayload::ReasoningDelta { turn_id, text, .. } => {
+            append_content_block(
+                state.upsert_turn(turn_id, timestamp),
+                "thought",
+                vec![SessionContentBlock::text(text.clone())],
+                json!({ "text": text }),
+                timestamp,
+            );
+        }
+        AgentRuntimeEventPayload::ToolStarted {
+            turn_id,
+            tool_id,
+            name,
+            input,
+            data,
+            ..
+        } => {
+            let turn = state.upsert_turn(turn_id, timestamp);
+            let tool = runtime_tool_value(
+                tool_id,
+                name,
+                "running",
+                input.clone().unwrap_or(Value::Null),
+                Value::Null,
+                data.clone(),
+            );
+            upsert_tool(turn, tool_from_value(&tool, timestamp));
+            ensure_tool_block(turn, tool_id.clone(), timestamp);
+            postprocess_turn(turn);
+        }
+        AgentRuntimeEventPayload::ToolInputDelta {
+            turn_id,
+            tool_id,
+            delta,
+            data,
+            ..
+        } => {
+            let turn = state.upsert_turn(turn_id, timestamp);
+            let existing_input = turn
+                .tools
+                .iter()
+                .find(|tool| tool.tool_id == *tool_id)
+                .map(|tool| tool.raw_input.clone())
+                .unwrap_or(Value::Null);
+            let raw_input = append_runtime_tool_text(existing_input, delta);
+            let tool = runtime_tool_value(
+                tool_id,
+                "tool",
+                "running",
+                raw_input,
+                Value::Null,
+                data.clone().unwrap_or(Value::Null),
+            );
+            upsert_tool(turn, tool_from_value(&tool, timestamp));
+            ensure_tool_block(turn, tool_id.clone(), timestamp);
+            postprocess_turn(turn);
+        }
+        AgentRuntimeEventPayload::ToolOutputDelta {
+            turn_id,
+            tool_id,
+            delta,
+            data,
+            ..
+        } => {
+            let turn = state.upsert_turn(turn_id, timestamp);
+            let tool = runtime_tool_value(
+                tool_id,
+                "tool",
+                "running",
+                Value::Null,
+                Value::String(delta.clone()),
+                data.clone().unwrap_or(Value::Null),
+            );
+            upsert_tool(turn, tool_from_value(&tool, timestamp));
+            ensure_tool_block(turn, tool_id.clone(), timestamp);
+            postprocess_turn(turn);
+        }
+        AgentRuntimeEventPayload::ToolStatusChanged {
+            turn_id,
+            tool_id,
+            status,
+            data,
+            ..
+        } => {
+            let turn = state.upsert_turn(turn_id, timestamp);
+            let tool = runtime_tool_value(
+                tool_id,
+                "tool",
+                status,
+                Value::Null,
+                Value::Null,
+                data.clone().unwrap_or(Value::Null),
+            );
+            upsert_tool(turn, tool_from_value(&tool, timestamp));
+            ensure_tool_block(turn, tool_id.clone(), timestamp);
+            postprocess_turn(turn);
+        }
+        AgentRuntimeEventPayload::SessionUpdate {
+            update_type, data, ..
+        } => {
+            state.session_state =
+                apply_runtime_session_update(&state.session_state, update_type, data);
+        }
         AgentRuntimeEventPayload::SessionEnded { .. } => {
             state.ended = true;
         }
+    }
+}
+
+fn runtime_tool_value(
+    tool_id: &str,
+    name: &str,
+    status: &str,
+    raw_input: Value,
+    raw_output: Value,
+    raw: Value,
+) -> Value {
+    let kind = runtime_tool_kind(name, &raw_input, &raw);
+    json!({
+        "toolCallId": tool_id,
+        "title": name,
+        "kind": kind,
+        "status": status,
+        "rawInput": raw_input,
+        "rawOutput": raw_output,
+        "meta": { "source": "runtime" },
+        "raw": raw,
+    })
+}
+
+fn runtime_tool_kind(name: &str, raw_input: &Value, raw: &Value) -> &'static str {
+    if let Some(kind) = string_field(raw, "kind")
+        .or_else(|| string_field(raw, "toolKind"))
+        .or_else(|| string_field(raw, "tool_kind"))
+        .or_else(|| {
+            raw.get("toolCall")
+                .and_then(|tool| string_field(tool, "kind"))
+        })
+    {
+        return canonical_runtime_tool_kind(&kind);
+    }
+    let normalized = name.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "bash" | "shell" | "terminal" | "run_shell_command" | "shell_command" | "exec_command" => {
+            "execute"
+        }
+        "read" | "read_file" | "readfile" | "readfiletool" | "read_file_tool" => "read",
+        "write" | "write_file" | "writefile" | "edit" | "replace" | "patch" | "apply_patch"
+        | "multi_edit" | "multiedit" | "notebook_edit" => "edit",
+        "delete" | "remove" | "remove_file" | "delete_file" => "delete",
+        "move" | "rename" | "move_file" => "move",
+        "grep" | "grep_search" | "search" | "searchtext" | "tool_search" | "toolsearch"
+        | "glob" | "find_files" | "web_search" | "websearch" => "search",
+        "web_fetch" | "webfetch" | "fetch" => "fetch",
+        "todo_write" | "todowrite" => "task_list",
+        _ => {
+            if raw_input.get("command").is_some() || raw_input.get("cmd").is_some() {
+                "execute"
+            } else {
+                "tool"
+            }
+        }
+    }
+}
+
+fn canonical_runtime_tool_kind(kind: &str) -> &'static str {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "execute" | "exec" | "shell" | "bash" => "execute",
+        "read" => "read",
+        "write" | "edit" | "patch" => "edit",
+        "delete" | "remove" => "delete",
+        "move" | "rename" => "move",
+        "search" | "grep" | "glob" => "search",
+        "fetch" | "web_fetch" => "fetch",
+        "todo" | "task_list" => "task_list",
+        _ => "tool",
+    }
+}
+
+fn append_runtime_tool_text(existing: Value, delta: &str) -> Value {
+    if delta.is_empty() {
+        return existing;
+    }
+    match existing {
+        Value::String(mut text) => {
+            text.push_str(delta);
+            Value::String(text)
+        }
+        Value::Null => Value::String(delta.to_string()),
+        other => other,
+    }
+}
+
+fn apply_runtime_session_update(
+    state: &AcpCanonicalSessionState,
+    update_type: &str,
+    data: &Value,
+) -> AcpCanonicalSessionState {
+    let mut next = state.clone();
+    match update_type {
+        "available_commands" => {
+            next.available_commands = array_field(data, "availableCommands")
+                .iter()
+                .map(normalize_available_command)
+                .collect();
+        }
+        "config_options" => {
+            let options = array_field(data, "configOptions")
+                .iter()
+                .map(normalize_session_config_option)
+                .collect();
+            next.config_options = dedupe_session_config_options(options);
+        }
+        "session_info" => {
+            next.session_info = Some(normalize_session_info(data));
+        }
+        "current_mode" => {
+            next.current_mode_id = string_field(data, "currentModeId");
+        }
+        "plan" => {
+            next.plan = Some(normalize_plan(data));
+        }
         _ => {}
     }
+    next
 }
 
 pub fn apply_optimistic_user_message(
@@ -1129,8 +1358,124 @@ fn ensure_permission_block(turn: &mut SessionHistoryTurn, request_id: String, ti
 
 fn postprocess_turn(turn: &mut SessionHistoryTurn) {
     merge_terminal_polling_tools(turn);
+    merge_runtime_toolcall_delta_tools(turn);
     sync_tool_diff_file_edit_block(turn);
     merge_file_edit_blocks(turn);
+}
+
+fn merge_runtime_toolcall_delta_tools(turn: &mut SessionHistoryTurn) {
+    let mut merges: Vec<(String, String, Value, i64)> = Vec::new();
+
+    for source_index in 0..turn.tools.len() {
+        let source = &turn.tools[source_index];
+        if !is_runtime_toolcall_delta_placeholder(source) {
+            continue;
+        }
+        let Some(source_input) = comparable_tool_input(&source.raw_input) else {
+            continue;
+        };
+        let Some(target) = turn.tools[source_index + 1..].iter().find(|candidate| {
+            !is_runtime_toolcall_delta_placeholder(candidate)
+                && comparable_tool_input(&candidate.raw_input)
+                    .map(|target_input| tool_inputs_match(&source_input, &target_input))
+                    .unwrap_or(false)
+        }) else {
+            continue;
+        };
+        merges.push((
+            source.tool_id.clone(),
+            target.tool_id.clone(),
+            source.raw_input.clone(),
+            source.updated_at,
+        ));
+    }
+
+    if merges.is_empty() {
+        return;
+    }
+
+    let remove_tool_ids: HashSet<String> = merges
+        .iter()
+        .map(|(source_tool_id, _, _, _)| source_tool_id.clone())
+        .collect();
+
+    for (_, target_tool_id, source_input, source_updated_at) in merges {
+        if let Some(target) = turn
+            .tools
+            .iter_mut()
+            .find(|candidate| candidate.tool_id == target_tool_id)
+        {
+            if target.raw_input.is_null() {
+                target.raw_input = source_input;
+            }
+            target.updated_at = target.updated_at.max(source_updated_at);
+        }
+    }
+
+    turn.tools
+        .retain(|tool| !remove_tool_ids.contains(&tool.tool_id));
+    turn.blocks.retain(|block| {
+        block.kind != "tool"
+            || block
+                .tool_id
+                .as_ref()
+                .map(|tool_id| !remove_tool_ids.contains(tool_id))
+                .unwrap_or(true)
+    });
+}
+
+fn is_runtime_toolcall_delta_placeholder(tool: &SessionHistoryToolCall) -> bool {
+    tool.title == "tool"
+        && tool.kind == "tool"
+        && tool.content.is_empty()
+        && tool.locations.is_empty()
+        && tool_output_text(tool).trim().is_empty()
+        && runtime_tool_raw_event_type(tool).as_deref() == Some("toolcall_delta")
+}
+
+fn runtime_tool_raw_event_type(tool: &SessionHistoryToolCall) -> Option<String> {
+    let raw = tool.raw.get("raw").unwrap_or(&tool.raw);
+    string_field(raw, "type")
+        .or_else(|| {
+            raw.get("assistantMessageEvent")
+                .and_then(|event| string_field(event, "type"))
+        })
+        .or_else(|| {
+            raw.get("messageEvent")
+                .and_then(|event| string_field(event, "type"))
+        })
+        .or_else(|| raw.get("data").and_then(|data| string_field(data, "type")))
+        .or_else(|| {
+            raw.get("data")
+                .and_then(|data| data.get("assistantMessageEvent"))
+                .and_then(|event| string_field(event, "type"))
+        })
+}
+
+fn comparable_tool_input(value: &Value) -> Option<Value> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            serde_json::from_str(trimmed).ok().or_else(|| {
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(Value::String(trimmed.to_string()))
+                }
+            })
+        }
+        Value::Array(items) if items.is_empty() => None,
+        Value::Object(object) if object.is_empty() => None,
+        other => Some(other.clone()),
+    }
+}
+
+fn tool_inputs_match(left: &Value, right: &Value) -> bool {
+    left == right
 }
 
 fn merge_terminal_polling_tools(turn: &mut SessionHistoryTurn) {
@@ -2838,6 +3183,103 @@ mod tests {
     }
 
     #[test]
+    fn runtime_tool_value_infers_special_display_kind() {
+        let shell = runtime_tool_value(
+            "tool-1",
+            "bash",
+            "running",
+            json!({ "command": "rg -n TODO src" }),
+            Value::Null,
+            json!({ "source": "pi-rpc" }),
+        );
+        assert_eq!(shell["kind"], "execute");
+
+        let read = runtime_tool_value(
+            "tool-2",
+            "read_file",
+            "running",
+            json!({ "path": "README.md" }),
+            Value::Null,
+            Value::Null,
+        );
+        assert_eq!(read["kind"], "read");
+
+        let todo = runtime_tool_value(
+            "tool-3",
+            "todo_write",
+            "running",
+            json!({ "todos": [] }),
+            Value::Null,
+            Value::Null,
+        );
+        assert_eq!(todo["kind"], "task_list");
+    }
+
+    #[test]
+    fn postprocess_merges_runtime_toolcall_delta_placeholder_into_real_tool() {
+        let mut turn = new_turn("turn-1".to_string(), 10, RuntimeTurnStatus::Streaming);
+        let placeholder = tool_from_value(
+            &runtime_tool_value(
+                "tool",
+                "tool",
+                "running",
+                Value::String(
+                    json!({
+                        "path": "world-cup-today-2026-06-26.md",
+                        "edits": [{
+                            "oldText": "old",
+                            "newText": "new"
+                        }]
+                    })
+                    .to_string(),
+                ),
+                Value::Null,
+                json!({ "type": "toolcall_delta" }),
+            ),
+            20,
+        );
+        let edit = tool_from_value(
+            &runtime_tool_value(
+                "edit-1",
+                "edit",
+                "running",
+                json!({
+                    "path": "world-cup-today-2026-06-26.md",
+                    "edits": [{
+                        "oldText": "old",
+                        "newText": "new"
+                    }]
+                }),
+                Value::Null,
+                json!({ "type": "tool_execution_start" }),
+            ),
+            21,
+        );
+        turn.tools.push(placeholder);
+        turn.tools.push(edit);
+        ensure_tool_block(&mut turn, "tool".to_string(), 20);
+        ensure_tool_block(&mut turn, "edit-1".to_string(), 21);
+
+        postprocess_turn(&mut turn);
+
+        assert_eq!(turn.tools.len(), 1);
+        assert_eq!(turn.tools[0].tool_id, "edit-1");
+        assert_eq!(turn.tools[0].title, "edit");
+        assert_eq!(
+            turn.blocks
+                .iter()
+                .filter(|block| block.kind == "tool")
+                .count(),
+            1
+        );
+        assert!(
+            turn.blocks.iter().any(|block| {
+                block.kind == "tool" && block.tool_id.as_deref() == Some("edit-1")
+            })
+        );
+    }
+
+    #[test]
     fn history_turns_emit_acp_like_blocks_and_tools() {
         let messages = vec![
             row(
@@ -3093,10 +3535,12 @@ mod tests {
             turns[0].tools[0].raw_output.as_str(),
             Some("Process running with session ID 42\ninitial output\n\npoll output")
         );
-        assert!(turns[0]
-            .blocks
-            .iter()
-            .all(|block| block.tool_id.as_deref() != Some("poll-1")));
+        assert!(
+            turns[0]
+                .blocks
+                .iter()
+                .all(|block| block.tool_id.as_deref() != Some("poll-1"))
+        );
     }
 
     #[test]
@@ -3543,10 +3987,12 @@ mod tests {
             30,
         );
 
-        assert!(state.turns[0]
-            .blocks
-            .iter()
-            .all(|block| block.update_type.as_deref() != Some("file_edit")));
+        assert!(
+            state.turns[0]
+                .blocks
+                .iter()
+                .all(|block| block.update_type.as_deref() != Some("file_edit"))
+        );
     }
 
     #[test]
@@ -3591,10 +4037,12 @@ mod tests {
             },
             20,
         );
-        assert!(state.turns[0]
-            .blocks
-            .iter()
-            .any(|block| block.update_type.as_deref() == Some("file_edit")));
+        assert!(
+            state.turns[0]
+                .blocks
+                .iter()
+                .any(|block| block.update_type.as_deref() == Some("file_edit"))
+        );
 
         apply_runtime_event_to_state(
             &mut state,
@@ -3615,10 +4063,12 @@ mod tests {
             21,
         );
 
-        assert!(state.turns[0]
-            .blocks
-            .iter()
-            .all(|block| block.update_type.as_deref() != Some("file_edit")));
+        assert!(
+            state.turns[0]
+                .blocks
+                .iter()
+                .all(|block| block.update_type.as_deref() != Some("file_edit"))
+        );
     }
 
     #[test]
@@ -3745,10 +4195,12 @@ mod tests {
         assert_eq!(state.turns.len(), 1);
         assert_eq!(state.turns[0].blocks.len(), 1);
         assert_eq!(state.turns[0].blocks[0].kind, "assistant");
-        assert!(state.turns[0]
-            .blocks
-            .iter()
-            .all(|block| block.update_type.as_deref() != Some("usage_update")));
+        assert!(
+            state.turns[0]
+                .blocks
+                .iter()
+                .all(|block| block.update_type.as_deref() != Some("usage_update"))
+        );
     }
 
     #[test]

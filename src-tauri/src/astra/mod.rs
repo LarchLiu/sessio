@@ -529,7 +529,7 @@ impl RuntimeResourceLimiter {
 fn delegated_runtime_limit(agent: Agent) -> Option<usize> {
     match agent {
         Agent::AstraPi => Some(ASTRA_PI_DELEGATED_RUNTIME_LIMIT),
-        Agent::Codex | Agent::Claude | Agent::Gemini | Agent::Opencode => None,
+        Agent::Pi | Agent::Codex | Agent::Claude | Agent::Gemini | Agent::Opencode => None,
     }
 }
 
@@ -2917,9 +2917,7 @@ fn runtime_transport_option(
 ) -> String {
     match transport {
         crate::agents::runtime::types::RuntimeTransportKind::Acp => "acp",
-        crate::agents::runtime::types::RuntimeTransportKind::CliStreamJson => "cliStreamJson",
-        crate::agents::runtime::types::RuntimeTransportKind::PlainCli => "plainCli",
-        crate::agents::runtime::types::RuntimeTransportKind::Sidecar => "sidecar",
+        crate::agents::runtime::types::RuntimeTransportKind::PiRpc => "piRpc",
         crate::agents::runtime::types::RuntimeTransportKind::Fake => "fake",
     }
     .to_string()

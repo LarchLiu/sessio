@@ -191,6 +191,7 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
                 },
                 "gemini" => Some(IndexTask::ReindexGeminiFile(path)),
                 "astra-pi" => Some(IndexTask::ReindexPiFile(path)),
+                "pi" => Some(IndexTask::ReindexPiExternalFile(path)),
                 "opencode" => Some(IndexTask::ReindexOpencodeAll),
                 _ => None,
             }

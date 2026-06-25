@@ -56,6 +56,7 @@ export const IS_WIN =
 
 export const RESUME_CMD: Record<Agent, (id: string) => string> = {
   "astra-pi": (id) => `astra-pi --resume ${id}`,
+  pi: (id) => `pi --resume ${id}`,
   codex: (id) => `codex resume ${id}`,
   claude: (id) => `claude --resume ${id}`,
   gemini: (id) => `gemini --resume ${id}`,
