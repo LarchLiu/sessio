@@ -96,7 +96,7 @@ Examples:
 Live chats spawn agents as ACP subprocesses. Default commands:
 
 - Astra Pi: bundled `astra-pi` sidecar
-- Codex: `npx -y @zed-industries/codex-acp@latest`
+- Codex: `npx -y @agentclientprotocol/codex-acp@latest`
 - Claude Code: `npx -y @zed-industries/claude-code-acp@latest`
 - Gemini: `npx -y @google/gemini-cli@latest --experimental-acp`
 

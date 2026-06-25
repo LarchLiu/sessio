@@ -1628,7 +1628,7 @@ pub(crate) fn default_acp_command(agent: Agent) -> String {
             crate::astra::bundled_astra_pi_acp_command()
                 .unwrap_or_else(|| "astra-pi --acp".to_string())
         }
-        Agent::Codex => "npx -y @zed-industries/codex-acp@latest".to_string(),
+        Agent::Codex => "npx -y @agentclientprotocol/codex-acp@latest".to_string(),
         Agent::Claude => "npx -y @zed-industries/claude-code-acp@latest".to_string(),
         Agent::Gemini => "npx -y -- @google/gemini-cli@latest --experimental-acp".to_string(),
         Agent::Opencode => "opencode acp".to_string(),
@@ -1756,17 +1756,17 @@ mod tests {
         let mut options = RuntimeMetadata::default();
         options.insert(
             "command".to_string(),
-            serde_json::Value::String("npx -y @zed-industries/codex-acp@latest".to_string()),
+            serde_json::Value::String("npx -y @agentclientprotocol/codex-acp@latest".to_string()),
         );
         let command = command_from_options(Agent::Codex, &options);
 
-        assert_eq!(command, "npx -y @zed-industries/codex-acp@latest");
+        assert_eq!(command, "npx -y @agentclientprotocol/codex-acp@latest");
     }
 
     #[test]
     fn spawn_acp_transport_parses_npx_command_without_shell_wrapper() {
         let args =
-            shell_words::split("npx -y @zed-industries/codex-acp@latest").expect("split command");
+            shell_words::split("npx -y @agentclientprotocol/codex-acp@latest").expect("split command");
         let (program, rest) = args.split_first().expect("program");
 
         assert_eq!(*program, "npx");
@@ -1774,7 +1774,7 @@ mod tests {
             rest,
             &[
                 "-y".to_string(),
-                "@zed-industries/codex-acp@latest".to_string()
+                "@agentclientprotocol/codex-acp@latest".to_string()
             ]
         );
     }

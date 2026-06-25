@@ -1488,8 +1488,8 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
             enabled: true,
             transport: RuntimeTransportKind::Acp,
             commands: AgentCommandsInfo {
-                session: vec!["npx -y @zed-industries/codex-acp@latest".to_string()],
-                version: vec!["codex --version".to_string()],
+                session: vec!["npx -y @agentclientprotocol/codex-acp@latest".to_string()],
+                version: vec!["npm view @agentclientprotocol/codex-acp version".to_string()],
             },
             ai_providers: vec![],
         },
@@ -1499,7 +1499,7 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
         conn,
         Agent::Claude,
         BuiltinAgentSeed {
-            model: Some("claude-opus-4-7"),
+            model: Some("claude-opus-4-8"),
             models: runtime_options(vec![
                 runtime_option("claude-opus-4-8", "Opus 4.8"),
                 runtime_option("claude-opus-4-7", "Opus 4.7"),
@@ -1524,35 +1524,7 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
             transport: RuntimeTransportKind::Acp,
             commands: AgentCommandsInfo {
                 session: vec!["npx -y @agentclientprotocol/claude-agent-acp@latest".to_string()],
-                version: vec!["claude --version".to_string()],
-            },
-            ai_providers: vec![],
-        },
-        now,
-    )?;
-    seed_builtin_agent(
-        conn,
-        Agent::Gemini,
-        BuiltinAgentSeed {
-            model: None,
-            models: Vec::new(),
-            effort: Some("high"),
-            efforts: vec![
-                runtime_option("low", "Low"),
-                runtime_option("medium", "Medium"),
-                runtime_option("high", "High"),
-            ],
-            permission_mode: Some("default"),
-            permission_modes: vec![
-                runtime_option("default", "Default"),
-                runtime_option("autoEdit", "Auto Edit"),
-                runtime_option("yolo", "YOLO"),
-            ],
-            enabled: false,
-            transport: RuntimeTransportKind::Acp,
-            commands: AgentCommandsInfo {
-                session: vec!["npx -y -- @google/gemini-cli@latest --experimental-acp".to_string()],
-                version: vec!["gemini --version".to_string()],
+                version: vec!["npm view @agentclientprotocol/claude-agent-acp version".to_string()],
             },
             ai_providers: vec![],
         },
@@ -6484,6 +6456,7 @@ impl SessionStore for SqliteStore {
             order,
             ai_provider,
             ai_providers,
+            commands,
             model,
             effort,
             permission_mode,
@@ -6517,6 +6490,10 @@ impl SessionStore for SqliteStore {
             Some(values) => serde_json::to_string(values)?,
             None => serde_json::to_string(&current.ai_providers)?,
         };
+        let next_commands = match commands {
+            Some(values) => serde_json::to_string(values)?,
+            None => serde_json::to_string(&current.commands)?,
+        };
         let trimmed_model = model.map(str::trim);
         let next_model = trimmed_model.filter(|value| !value.is_empty());
         let next_effort = effort.map(str::trim).filter(|value| !value.is_empty());
@@ -6541,6 +6518,7 @@ impl SessionStore for SqliteStore {
              SET display_name = COALESCE(?, display_name),
                  ai_provider = COALESCE(?, ai_provider),
                  ai_providers_json = ?,
+                 commands_json = ?,
                  model = COALESCE(?, model),
                  models_json = ?,
                  effort = COALESCE(?, effort),
@@ -6555,6 +6533,7 @@ impl SessionStore for SqliteStore {
                 next_display_name,
                 next_ai_provider.as_deref(),
                 next_ai_providers,
+                next_commands,
                 next_model,
                 next_models,
                 next_effort,
@@ -14171,7 +14150,7 @@ mod schema_tests {
                 .iter()
                 .map(|agent| agent.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["astra-pi", "codex", "claude", "gemini", "opencode"]
+            vec!["astra-pi", "codex", "claude", "opencode"]
         );
         let codex_agent = agents.iter().find(|agent| agent.id == "codex").unwrap();
         assert_eq!(codex_agent.icon.as_deref(), Some("codex"));
@@ -14223,13 +14202,7 @@ mod schema_tests {
             .efforts
             .iter()
             .any(|option| option.value == "max"));
-        let gemini_agent = agents.iter().find(|agent| agent.id == "gemini").unwrap();
-        assert_eq!(
-            gemini_agent.commands.version.first().map(String::as_str),
-            Some("gemini --version")
-        );
-        assert_eq!(gemini_agent.model, None);
-        assert_eq!(gemini_agent.effort.as_deref(), Some("high"));
+        assert!(agents.iter().all(|agent| agent.id != "gemini"));
         let parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-parent");
         std::fs::create_dir(&parent).unwrap();
 
@@ -15205,6 +15178,39 @@ mod schema_tests {
         assert_eq!(codex.permission_mode.as_deref(), Some("auto"));
         assert!(!codex.enabled);
         assert_eq!(codex.order, 99);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn builtin_agent_commands_can_be_updated() {
+        let path = unique_db("sessio-agent-commands-update");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let updated = store
+            .update_builtin_agent_preferences(
+                Agent::Codex,
+                AgentPreferencesPatch {
+                    commands: Some(&AgentCommandsInfo {
+                        session: vec!["custom-codex --acp".to_string()],
+                        version: vec!["custom-codex --version".to_string()],
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.commands.session, vec!["custom-codex --acp".to_string()]);
+        assert_eq!(updated.commands.version, vec!["custom-codex --version".to_string()]);
+
+        let loaded = store
+            .list_agents()
+            .unwrap()
+            .into_iter()
+            .find(|agent| agent.id == Agent::Codex.as_str())
+            .unwrap();
+        assert_eq!(loaded.commands.session, vec!["custom-codex --acp".to_string()]);
+        assert_eq!(loaded.commands.version, vec!["custom-codex --version".to_string()]);
 
         let _ = std::fs::remove_file(&path);
     }

@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
-    Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
+    Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
     AstraConfig, CanvasBlockKind, CanvasBlockRecord, CanvasBlockSourceType, CanvasContextAnchor,
     CanvasDocumentInfo, CanvasDocumentState, CanvasRevisionInfo, ChannelSessionInfo, IssueSeverity,
     IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo, PlanRoundMode, PlanRoundSource,
@@ -27,6 +27,7 @@ pub struct AgentPreferencesPatch<'a> {
     pub order: Option<i64>,
     pub ai_provider: Option<&'a str>,
     pub ai_providers: Option<&'a [AgentAiProviderInfo]>,
+    pub commands: Option<&'a AgentCommandsInfo>,
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
     pub permission_mode: Option<&'a str>,

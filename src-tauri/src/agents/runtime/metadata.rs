@@ -295,7 +295,7 @@ mod tests {
             Agent::Codex,
             "/tmp/sessio-probe-workspace",
             RuntimeTransportKind::PlainCli,
-            "npx -y @zed-industries/codex-acp@latest".to_string(),
+            "npx -y @agentclientprotocol/codex-acp@latest".to_string(),
         );
 
         assert!(result.is_err());

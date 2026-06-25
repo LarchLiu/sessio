@@ -44,7 +44,7 @@ use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
-    Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
+    Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
     AstraConfig, CanvasBlockKind, CanvasBlockRecord, CanvasBlockSourceType, CanvasContextAnchor,
     CanvasDocumentState, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
@@ -138,6 +138,7 @@ struct UpdateRuntimeAgentPreferencesRequest {
     order: Option<i64>,
     ai_provider: Option<String>,
     ai_providers: Option<Vec<AgentAiProviderInfo>>,
+    commands: Option<AgentCommandsInfo>,
     model: Option<String>,
     effort: Option<String>,
     permission_mode: Option<String>,
@@ -247,6 +248,7 @@ struct UpdateAgentPreferencesRequest {
     order: Option<i64>,
     ai_provider: Option<String>,
     ai_providers: Option<Vec<AgentAiProviderInfo>>,
+    commands: Option<AgentCommandsInfo>,
     model: Option<String>,
     effort: Option<String>,
     permission_mode: Option<String>,
@@ -660,6 +662,7 @@ fn update_agent_preferences(
                 order: req.order,
                 ai_provider: req.ai_provider.as_deref(),
                 ai_providers: req.ai_providers.as_deref(),
+                commands: req.commands.as_ref(),
                 model: req.model.as_deref(),
                 effort: req.effort.as_deref(),
                 permission_mode: req.permission_mode.as_deref(),
@@ -5172,6 +5175,7 @@ fn update_runtime_agent_preferences(
                 order: req.order,
                 ai_provider: req.ai_provider.as_deref(),
                 ai_providers: req.ai_providers.as_deref(),
+                commands: req.commands.as_ref(),
                 model: req.model.as_deref(),
                 effort: req.effort.as_deref(),
                 permission_mode: req.permission_mode.as_deref(),

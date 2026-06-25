@@ -96,7 +96,7 @@ Sessio 直接读取本机已有的会话文件，不依赖云端服务。
 实时对话会以 ACP 子进程方式启动 agent，默认命令：
 
 - Astra Pi：内置 `astra-pi` sidecar
-- Codex：`npx -y @zed-industries/codex-acp@latest`
+- Codex：`npx -y @agentclientprotocol/codex-acp@latest`
 - Claude Code：`npx -y @zed-industries/claude-code-acp@latest`
 - Gemini：`npx -y @google/gemini-cli@latest --experimental-acp`
 

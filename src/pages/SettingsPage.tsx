@@ -34,7 +34,7 @@ import {
   ZAI,
 } from "@lobehub/icons";
 import { ArrowLeft, AtSign, Bot, Check, Circle, Download, Eye, EyeOff, Globe2, GripVertical, Hash, Info, Languages, Link2, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Server, Settings2, Shield, Sparkles, SquareKanban, Sun, Trash2, Workflow, X } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
+import type { Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AstraConfig, AssistantInfo, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
 import {
   createProcessTemplate,
   detectTelegramUserIds,
@@ -88,6 +88,7 @@ type AgentPreferencePatch = {
   order?: number;
   aiProvider?: string | null;
   aiProviders?: AgentAiProviderInfo[];
+  commands?: AgentCommandsInfo;
   model?: string | null;
   effort?: string | null;
   permissionMode?: string | null;
@@ -2482,6 +2483,8 @@ function AgentEditor({
   const [editingAiProvider, setEditingAiProvider] = useState(agent.aiProvider ?? "");
   const [aiProviders, setAiProviders] = useState<AgentAiProviderInfo[]>(agent.aiProviders);
   const [providerDialog, setProviderDialog] = useState<{ mode: "add" | "edit"; provider: AgentAiProviderInfo } | null>(null);
+  const [sessionCommandInput, setSessionCommandInput] = useState(agent.commands.session[0] ?? "");
+  const [versionCommandInput, setVersionCommandInput] = useState(agent.commands.version[0] ?? "");
   const activeAiProvider = aiProviders.find((provider) => provider.id === aiProvider) ?? aiProviders.find((provider) => provider.enabled) ?? aiProviders[0] ?? null;
   const selectedAiProvider = aiProviders.find((provider) => provider.id === editingAiProvider) ?? activeAiProvider;
 
@@ -2510,6 +2513,8 @@ function AgentEditor({
       return isAstra && agent.aiProviders.some((provider) => provider.id === current) ? current : defaultProviderId;
     });
     setAiProviders(agent.aiProviders);
+    setSessionCommandInput(agent.commands.session[0] ?? "");
+    setVersionCommandInput(agent.commands.version[0] ?? "");
     setProviderDialog(null);
   }, [agent]);
 
@@ -2669,8 +2674,20 @@ function AgentEditor({
   const permissionOptions = runtimeAgent
     ? runtimePermissionModeOptions(optionRows(agent.permissionModes, permissionMode), permissionMode, runtimeAgent)
     : optionRows(agent.permissionModes, permissionMode);
-  const sessionCommand = agent.commands.session[0] ?? "";
-  const versionCommand = agent.commands.version[0] ?? "";
+  const showCommandSettings = runtimeAgent !== null && !isAstra;
+  const saveCommands = async (nextSessionCommand: string, nextVersionCommand: string) => {
+    const normalizedSession = nextSessionCommand.trim();
+    const normalizedVersion = nextVersionCommand.trim();
+    const currentSession = agent.commands.session[0]?.trim() ?? "";
+    const currentVersion = agent.commands.version[0]?.trim() ?? "";
+    if (normalizedSession === currentSession && normalizedVersion === currentVersion) return;
+    await persist({
+      commands: {
+        session: normalizedSession ? [normalizedSession] : [],
+        version: normalizedVersion ? [normalizedVersion] : [],
+      },
+    });
+  };
   const saveAstraProviders = async (
     nextProviders: AgentAiProviderInfo[],
     nextProviderId = aiProvider,
@@ -2793,29 +2810,45 @@ function AgentEditor({
     <>
       <SettingsGroup title={agent.displayName}>
         <div className="grid gap-5">
-          <div className="flex items-start gap-3 rounded-md border border-card-border/[0.10] bg-card-chip/[0.025] p-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-card-chip/[0.08]">
-              <SettingsAgentGlyph agentId={agent.id} className="h-5 w-5" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{agent.type}</span>
-                <span className={"rounded px-1.5 py-0.5 text-meta " + (agent.enabled ? "bg-ink/[0.09] text-ink/70" : "bg-card-chip/8 text-card-muted/50")}>
-                  {agent.enabled ? t("agent.active") : t("agent.disabled")}
-                </span>
-                {agent.transport === "acp" && <AcpLogo className="h-2.5 w-auto shrink-0 opacity-75" />}
+          <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-3 rounded-md border border-card-border/[0.10] bg-card-chip/[0.025] p-3">
+            <SettingsAgentGlyph agentId={agent.id} className="mt-1 h-5 w-5 shrink-0" />
+            <div className="min-w-0">
+              <div className="flex min-w-0 items-start justify-between gap-3">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className={"rounded px-1.5 py-0.5 text-meta " + (agent.enabled ? "bg-ink/[0.09] text-ink/70" : "bg-card-chip/8 text-card-muted/50")}>
+                    {agent.enabled ? t("agent.active") : t("agent.disabled")}
+                  </span>
+                  {agent.transport === "acp" && <AcpLogo className="h-2.5 w-auto shrink-0 opacity-75" />}
+                </div>
+                <SwitchControl
+                  checked={agent.enabled}
+                  tooltip={agent.enabled ? t("agent.disable") : t("agent.enable")}
+                  onToggle={() => void persist({ enabled: !agent.enabled })}
+                />
               </div>
-              <div className="mt-2 flex flex-wrap gap-1.5 text-caption text-card-muted/55">
-                <span className="rounded bg-card-chip/[0.06] px-1.5 py-0.5">{agent.transport}</span>
-                {sessionCommand && <span className="max-w-full truncate rounded bg-card-chip/[0.06] px-1.5 py-0.5">{sessionCommand}</span>}
-                {versionCommand && <span className="max-w-full truncate rounded bg-card-chip/[0.06] px-1.5 py-0.5">{versionCommand}</span>}
+              {showCommandSettings && (
+                <div className="mt-2 grid gap-2 rounded-md border border-card-border/[0.10] bg-card-chip/[0.03] p-2.5">
+                <AgentPreferenceRow label={t("agent.session_command")}>
+                  <input
+                    value={sessionCommandInput}
+                    onChange={(event) => setSessionCommandInput(event.target.value)}
+                    onBlur={() => void saveCommands(sessionCommandInput, versionCommandInput)}
+                    placeholder={t("agent.session_command_placeholder")}
+                    className={inputClassName + " w-full"}
+                  />
+                </AgentPreferenceRow>
+                <AgentPreferenceRow label={t("agent.version_command")}>
+                  <input
+                    value={versionCommandInput}
+                    onChange={(event) => setVersionCommandInput(event.target.value)}
+                    onBlur={() => void saveCommands(sessionCommandInput, versionCommandInput)}
+                    placeholder={t("agent.version_command_placeholder")}
+                    className={inputClassName + " w-full"}
+                  />
+                </AgentPreferenceRow>
               </div>
+              )}
             </div>
-            <SwitchControl
-              checked={agent.enabled}
-              tooltip={agent.enabled ? t("agent.disable") : t("agent.enable")}
-              onToggle={() => void persist({ enabled: !agent.enabled })}
-            />
           </div>
           {isAstra && (
             <div className="grid gap-2">
@@ -3266,7 +3299,7 @@ function AgentPreferenceRow({ label, children }: { label: string; children: Reac
   return (
     <div className="grid min-h-10 grid-cols-[120px_minmax(0,1fr)] items-center gap-3 rounded-md bg-card-chip/[0.04] px-3">
       <span className="text-caption font-medium text-card-muted/60">{label}</span>
-      <div className="min-w-0 justify-self-start">{children}</div>
+      <div className="min-w-0 justify-self-stretch">{children}</div>
     </div>
   );
 }

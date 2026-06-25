@@ -1056,6 +1056,7 @@ export interface UpdateRuntimeAgentPreferencesRequest {
   order?: number | null;
   aiProvider?: string | null;
   aiProviders?: AgentAiProviderInfo[];
+  commands?: AgentCommandsInfo;
   model?: string | null;
   effort?: string | null;
   permissionMode?: string | null;
@@ -1071,6 +1072,7 @@ export interface UpdateAgentPreferencesRequest {
   order?: number | null;
   aiProvider?: string | null;
   aiProviders?: AgentAiProviderInfo[];
+  commands?: AgentCommandsInfo;
   model?: string | null;
   effort?: string | null;
   permissionMode?: string | null;
