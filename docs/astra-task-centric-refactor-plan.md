@@ -168,7 +168,7 @@ tasks: []
 tasks:
   - title: string
     assistantId: assistant-id
-    targetAgent: codex|claude|gemini|astra-pi
+    targetAgent: codex|claude|gemini|opencode|pi
     prompt: string
     expectedOutput: string
     risk: low|medium|high
@@ -328,7 +328,7 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 * `AstraOrchestration` 改为 `{ summary, runIntent, reason, mode, tasks }`。
 
-* 抽出公共 contract builder，runtime agent backend 和 Astra Pi ACP backend 共用。
+* 抽出公共 contract builder，供 runtime agent backend 的不同 agent 共用。
 
 * prompt 明确 teamwork 使用 `assistantId`，不返回 `targetStageId`。
 
@@ -364,7 +364,7 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 * brainstorm / debate 不能通过旧 stage-decision 或 generic teamwork planner 创建 run；它们必须由 `docs/thread-types-plan-rounds.md` Phase 5/6 的专用 backend 接管。
 
-* runtime agent 和 Astra Pi ACP 使用同一份 contract 文案。
+* runtime agent 使用同一份 contract 文案。
 
 * timeout 统一为 300s。
 

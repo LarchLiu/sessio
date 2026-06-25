@@ -238,7 +238,7 @@
 
   * 保持现有 assistant-based routing。
 
-  * `RuntimeAgentBackend`、Astra Pi adapter、planner prompt 中 teamwork contract 不变。
+  * `RuntimeAgentBackend` 和 planner prompt 中 teamwork contract 不变。
 
 * `brainstorm`
 

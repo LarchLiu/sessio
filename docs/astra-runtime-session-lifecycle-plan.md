@@ -94,13 +94,13 @@ internal planner/orchestrator session 也必须遵守同样的 cleanup 原则。
 
 ## Runtime Resource Gate
 
-AstraPi 的限制目标是保护 CPU/内存，而不是保证同一个 thread 串行。因此不应把 v1 策略表述成 `per-thread single-flight gate`。per-thread single-flight 会和 `brainstorm` / `debate` 的并发 lane 需求冲突，也会让同一 batch 中的其他 runtime 被 AstraPi 串行化拖慢。
+Pi RPC 等高成本 runtime 的限制目标是保护 CPU/内存，而不是保证同一个 thread 串行。因此不应把 v1 策略表述成 `per-thread single-flight gate`。per-thread single-flight 会和 `brainstorm` / `debate` 的并发 lane 需求冲突，也会让同一 batch 中的其他 runtime 被 Pi 串行化拖慢。
 
 更清晰的策略是 resource limiter：
 
 * planner limiter 和 runtime limiter 分开计数。
 
-* runtime limiter 按 agent 或 runtime class 配额，例如 `astra-pi` 最多 N 个 live runtime；其他 agent 不应被 AstraPi 的限制串行化。
+* runtime limiter 按 agent 或 runtime class 配额，例如 `pi` 最多 N 个 live runtime；其他 agent 不应被 Pi 的限制串行化。
 
 * limiter 是全局资源预算，可选叠加 per-thread fair queue，避免单个 thread 抢占全部 slot。
 
@@ -196,11 +196,11 @@ v1 不新增 turn-level schema。只有未来引入 process pool、长期 ACP se
 
 * Brainstorm/Debate 在 resource limiter 下仍能按预期并发显示 lane，不被 per-thread single-flight 串行化。
 
-* AstraPi 连续多轮后不会残留多个高 CPU live runtime，且全局 runtime 资源预算生效。
+* Pi 连续多轮后不会残留多个高 CPU live runtime，且全局 runtime 资源预算生效。
 
 * placeholder link 失败、record result 失败、UI event emit 失败时仍释放 live runtime session 并唤醒 task waiter。
 
-* AstraPi runtime task 等待 limiter 期间取消后，不再创建新的 live runtime session。
+* Pi runtime task 等待 limiter 期间取消后，不再创建新的 live runtime session。
 
 * agent session id 未 ready 就终态时，task 有可诊断状态，replay/UI 不挂起。
 
@@ -218,7 +218,7 @@ v1 不新增 turn-level schema。只有未来引入 process pool、长期 ACP se
 
 * `finish_delegated_task` 中 `record_task_result` 或 `emit task_result` 失败会提前返回，导致 live runtime session release 和 task waiter wake 被跳过。这里必须改成 best-effort finalize：持久化/emit 失败只写 diagnostic，不能阻止 cleanup 和 waiter wake。
 
-* AstraPi delegated runtime 仍使用 per-thread single-flight lock，key 形如 `runtime:{threadId}:{threadKind}`。这会让同一个 brainstorm/debate thread 内多个 AstraPi participant/lane 串行，也可能拖慢同 batch 的非 AstraPi task。应替换为 planner/runtime 分离的 resource limiter。
+* Pi delegated runtime 仍使用 per-thread single-flight lock，key 形如 `runtime:{threadId}:{threadKind}`。这会让同一个 brainstorm/debate thread 内多个 Pi participant/lane 串行，也可能拖慢同 batch 的非 Pi task。应替换为 planner/runtime 分离的 resource limiter。
 
 * delegated task timeout 仍是单一 batch wall-clock deadline，尚未拆成 queue、startup、execution、cleanup timeout。limiter 等待时间不应挤占 runtime execution timeout。
 

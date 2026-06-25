@@ -28,7 +28,7 @@ pub struct RuntimeAgentBackendConfig {
 impl Default for RuntimeAgentBackendConfig {
     fn default() -> Self {
         Self {
-            agent: Agent::Pi,
+            agent: Agent::Codex,
             timeout_ms: ASTRA_ORCHESTRATOR_TIMEOUT_MS,
             model: None,
             effort: None,

@@ -14,7 +14,7 @@
 
 ### 会话浏览
 
-- 聚合 `Codex`、`Claude Code`、`Gemini` 以及内置 `Astra Pi` 的本地会话
+- 聚合 `Codex`、`Claude Code`、`Gemini`、`OpenCode` 以及外部 `Pi` 的本地会话
 - 使用 `SQLite` 建立本地索引，避免每次启动都全量扫盘
 - 监听文件变化（辅以定时轮询）并自动刷新列表
 - 侧边栏按项目分组浏览，支持未读标记与实时运行状态指示
@@ -50,8 +50,7 @@
 
 - Rust 原生、进程内的编排器，负责为 thread 规划任务并分发给各 agent
 - 计划轮次与任务支持依赖感知的波次分发、失败重试，任务产出写入 `<project>/.sessio/astra`
-- 编排所用的 agent / 模型 / 推理强度 / 权限模式均可配置
-- 内置 `astra-pi` sidecar（基于 [pi_agent_rust](https://github.com/Dicklesworthstone/pi_agent_rust) 构建），支持自定义 AI provider 渠道（base URL、API key、模型列表）
+- 编排所用的 agent / 模型 / 推理强度 / 权限模式均可配置，默认使用 `Codex` 作为规划 backend
 
 ### 其他
 
@@ -76,8 +75,8 @@ Sessio 直接读取本机已有的会话文件，不依赖云端服务。
 - Gemini
   - `~/.gemini/tmp`
   - `~/.gemini/projects.json`
-- Astra Pi（Sessio 自身创建的会话）
-  - `~/.sessio/astra-pi-agent/sessions`
+- Pi
+  - `~/.pi/agent/sessions`
 
 应用数据存放目录：
 
@@ -93,12 +92,12 @@ Sessio 直接读取本机已有的会话文件，不依赖云端服务。
 
 ## Agent 运行时
 
-实时对话会以 ACP 子进程方式启动 agent，默认命令：
+实时对话会以本地子进程方式启动 agent。ACP agent 使用 ACP adapter，Pi 使用 RPC 模式。默认命令：
 
-- Astra Pi：内置 `astra-pi` sidecar
 - Codex：`npx -y @agentclientprotocol/codex-acp@latest`
 - Claude Code：`npx -y @zed-industries/claude-code-acp@latest`
-- Gemini：`npx -y @google/gemini-cli@latest --experimental-acp`
+- OpenCode：`opencode acp`
+- Pi（默认关闭）：`pi --mode rpc`
 
 在设置 → Agents 中可以启用 / 禁用各 agent，并编辑模型目录、默认模型、推理强度和权限模式。Astra 编排器使用的 agent 也在同一设置区域单独配置。
 
@@ -137,14 +136,6 @@ Channels 可在设置 → Workflows → Channels 中配置。Sessio 会把各平
 
 ```bash
 pnpm install
-```
-
-准备 `astra-pi` sidecar 二进制（首次运行或打包桌面应用前需要执行一次）：
-
-```bash
-node scripts/prepare-astra-pi-sidecar.mjs <target-triple|all>
-# 例如在 Apple Silicon 上：
-node scripts/prepare-astra-pi-sidecar.mjs aarch64-apple-darwin
 ```
 
 启动前端开发服务器：
@@ -259,7 +250,7 @@ sessio memory resolve --record-id <id> --json
 ├── src/                  # React 前端
 ├── src-tauri/            # Tauri + Rust 后端
 ├── docs/                 # 设计与实现文档
-├── scripts/              # 发布与 sidecar 辅助脚本
+├── scripts/              # 发布辅助脚本
 ├── test/                 # 前端单元测试（vitest）
 ├── package.json
 └── README-cn.md

@@ -14,7 +14,7 @@
 
 ### Session browser
 
-- Aggregates local sessions from `Codex`, `Claude Code`, `Gemini`, and the bundled `Astra Pi` agent
+- Aggregates local sessions from `Codex`, `Claude Code`, `Gemini`, `OpenCode`, and external `Pi`
 - Builds a local `SQLite` index to avoid full disk scans on every launch
 - Watches file changes (plus periodic polling) and refreshes the list automatically
 - Groups sessions by project in the sidebar, with unread markers and live status indicators
@@ -50,8 +50,7 @@
 
 - Rust-native, in-process orchestrator that plans and dispatches thread work to agents
 - Plan rounds and tasks with dependency-aware dispatch waves, retries, and per-task output artifacts written to `<project>/.sessio/astra`
-- Configurable orchestrator agent / model / effort / permission mode
-- Ships with the bundled `astra-pi` sidecar (built from [pi_agent_rust](https://github.com/Dicklesworthstone/pi_agent_rust)), including custom AI provider channels (base URL, API key, model list)
+- Configurable orchestrator agent / model / effort / permission mode, with `Codex` as the default planner backend
 
 ### More
 
@@ -76,8 +75,8 @@ By default it scans:
 - Gemini
   - `~/.gemini/tmp`
   - `~/.gemini/projects.json`
-- Astra Pi (sessions created by Sessio itself)
-  - `~/.sessio/astra-pi-agent/sessions`
+- Pi
+  - `~/.pi/agent/sessions`
 
 App data lives under:
 
@@ -93,12 +92,12 @@ Examples:
 
 ## Agent Runtime
 
-Live chats spawn agents as ACP subprocesses. Default commands:
+Live chats spawn agents as local subprocesses. ACP agents use ACP adapters; Pi uses its RPC mode. Default commands:
 
-- Astra Pi: bundled `astra-pi` sidecar
 - Codex: `npx -y @agentclientprotocol/codex-acp@latest`
 - Claude Code: `npx -y @zed-industries/claude-code-acp@latest`
-- Gemini: `npx -y @google/gemini-cli@latest --experimental-acp`
+- OpenCode: `opencode acp`
+- Pi (disabled by default): `pi --mode rpc`
 
 Agents can be enabled / disabled in Settings → Agents, where you can also edit each agent's model catalog, default model, reasoning effort, and permission mode. The orchestrator agent used by Astra is configured separately in the same settings section.
 
@@ -137,14 +136,6 @@ Install dependencies:
 
 ```bash
 pnpm install
-```
-
-Prepare the `astra-pi` sidecar binary (required once before running or bundling the desktop app):
-
-```bash
-node scripts/prepare-astra-pi-sidecar.mjs <target-triple|all>
-# e.g. on Apple Silicon:
-node scripts/prepare-astra-pi-sidecar.mjs aarch64-apple-darwin
 ```
 
 Run the frontend dev server:
@@ -259,7 +250,7 @@ If the original session files are cleaned up by the agent, Sessio keeps the inde
 ├── src/                  # React frontend
 ├── src-tauri/            # Tauri + Rust backend
 ├── docs/                 # Design and implementation docs
-├── scripts/              # Release and sidecar helpers
+├── scripts/              # Release helpers
 ├── test/                 # Frontend unit tests (vitest)
 ├── package.json
 └── README.md

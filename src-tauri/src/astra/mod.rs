@@ -772,7 +772,7 @@ impl AstraService {
         source: &str,
     ) -> Result<SummarizeAutoTaskNotificationOutput> {
         let config = self.astra_backend_config();
-        let agent = config.agent.unwrap_or(Agent::Pi);
+        let agent = config.agent.unwrap_or(Agent::Codex);
         let runtime_config = runtime_agent_backend::RuntimeAgentBackendConfig {
             agent,
             timeout_ms: ASTRA_ORCHESTRATOR_TIMEOUT_MS,
@@ -2733,7 +2733,7 @@ fn run_to_record(run: &AstraRun) -> AstraRunRecord {
         .planner_backend
         .as_deref()
         .and_then(record_agent_for_backend)
-        .unwrap_or(Agent::Pi);
+        .unwrap_or(Agent::Codex);
     AstraRunRecord {
         run_id: run.run_id.clone(),
         thread_id: run.thread_id.clone(),

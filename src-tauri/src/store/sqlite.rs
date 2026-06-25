@@ -1402,7 +1402,7 @@ fn seed_astra_config(conn: &Connection, now: i64) -> Result<()> {
         ) VALUES (?, ?, ?, ?, ?, ?, ?)",
         params![
             1,
-            Some(Agent::Pi.as_str()),
+            Some(Agent::Codex.as_str()),
             Option::<&str>::None, // model
             Option::<&str>::None, // effort
             Option::<&str>::None, // permission_mode
@@ -1464,7 +1464,7 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
             ],
             permission_mode: None,
             permission_modes: Vec::new(),
-            enabled: true,
+            enabled: false,
             transport: RuntimeTransportKind::PiRpc,
             commands: AgentCommandsInfo {
                 session: vec!["pi --mode rpc".to_string()],
@@ -1551,8 +1551,8 @@ fn sync_pi_builtin_agent_defaults(conn: &Connection, now: i64) -> Result<()> {
     })?;
     conn.execute(
         "UPDATE agents
-         SET transport = ?, commands_json = ?, enabled = 1, updated_at = ?
-         WHERE id = ? AND (transport <> ? OR commands_json <> ? OR enabled = 0)",
+         SET transport = ?, commands_json = ?, updated_at = ?
+         WHERE id = ? AND (transport <> ? OR commands_json <> ?)",
         params![
             transport_kind_to_db(RuntimeTransportKind::PiRpc),
             commands_json,
@@ -1604,11 +1604,11 @@ fn runtime_agent_display_name(agent: Agent) -> &'static str {
 
 fn runtime_agent_order(agent: Agent) -> i64 {
     match agent {
-        Agent::Pi => 0,
-        Agent::Codex => 1,
-        Agent::Claude => 2,
-        Agent::Gemini => 3,
-        Agent::Opencode => 4,
+        Agent::Codex => 0,
+        Agent::Claude => 1,
+        Agent::Gemini => 2,
+        Agent::Opencode => 3,
+        Agent::Pi => 4,
     }
 }
 
@@ -14124,9 +14124,10 @@ mod schema_tests {
                 .iter()
                 .map(|agent| agent.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["pi", "codex", "claude", "opencode"]
+            vec!["codex", "claude", "opencode", "pi"]
         );
         let pi_agent = agents.iter().find(|agent| agent.id == "pi").unwrap();
+        assert!(!pi_agent.enabled);
         assert_eq!(pi_agent.transport, RuntimeTransportKind::PiRpc);
         assert_eq!(pi_agent.commands.session, vec!["pi --mode rpc".to_string()]);
         let codex_agent = agents.iter().find(|agent| agent.id == "codex").unwrap();
@@ -14933,6 +14934,10 @@ mod schema_tests {
         let path = unique_db("sessio-astra-config-update");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
+        assert_eq!(
+            store.get_astra_config().unwrap().agent.as_deref(),
+            Some("codex")
+        );
 
         let cleanup_path = path.clone();
         let (tx, rx) = std::sync::mpsc::channel();
