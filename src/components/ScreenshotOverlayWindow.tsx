@@ -33,6 +33,15 @@ type Point = {
   y: number;
 };
 
+type Rect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type ResizeHandle = "n" | "s" | "e" | "w" | "nw" | "ne" | "sw" | "se";
+
 type Annotation = {
   id: number;
   tool: EditorTool;
@@ -60,9 +69,14 @@ export default function ScreenshotOverlayWindow() {
   const [annotationDraft, setAnnotationDraft] = useState<Annotation | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [canvasCursor, setCanvasCursor] = useState("crosshair");
   const pointerStartRef = useRef<{
     point: Point;
     window: ScreenshotOverlayWindowCandidate | null;
+  } | null>(null);
+  const resizeGestureRef = useRef<{
+    handle: ResizeHandle;
+    initialRect: Rect;
   } | null>(null);
 
   useEffect(() => {
@@ -153,6 +167,21 @@ export default function ScreenshotOverlayWindow() {
     const point = imagePoint(event);
     if (!point) return;
     event.currentTarget.setPointerCapture(event.pointerId);
+    const resizeHandle = selection
+      ? resizeHandleAtPoint(point, selection, imageRef.current)
+      : null;
+    if (resizeHandle && selection) {
+      resizeGestureRef.current = {
+        handle: resizeHandle,
+        initialRect: normalizedRect(selection),
+      };
+      pointerStartRef.current = null;
+      setCanvasCursor(cursorForResizeHandle(resizeHandle));
+      setSelectionDraft(selection);
+      setAnnotationDraft(null);
+      setHoverWindow(null);
+      return;
+    }
     const hitWindow = source ? windowCandidateAtPoint(source.windows, point) : null;
     pointerStartRef.current = { point, window: hitWindow };
     if (selection && pointInRect(point, normalizedRect(selection))) {
@@ -176,6 +205,14 @@ export default function ScreenshotOverlayWindow() {
   const pointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const point = imagePoint(event);
     if (!point) return;
+    const resizeGesture = resizeGestureRef.current;
+    if (resizeGesture) {
+      setSelectionDraft(rectToAnnotation(
+        resizedSelectionRect(resizeGesture, point, imageRef.current),
+        selection?.id ?? Date.now(),
+      ));
+      return;
+    }
     if (annotationDraft) {
       setAnnotationDraft({ ...annotationDraft, end: point });
       return;
@@ -191,13 +228,39 @@ export default function ScreenshotOverlayWindow() {
       setSelectionDraft({ ...selectionDraft, end: point });
       return;
     }
+    if (selection) {
+      setCanvasCursor(cursorForResizeHandle(
+        resizeHandleAtPoint(point, selection, imageRef.current),
+      ));
+      return;
+    }
     if (!selection && source) {
-      setHoverWindow(windowCandidateAtPoint(source.windows, point));
+      const hitWindow = windowCandidateAtPoint(source.windows, point);
+      setHoverWindow(hitWindow);
+      setCanvasCursor(hitWindow ? "pointer" : "crosshair");
     }
   };
 
   const pointerUp = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const point = imagePoint(event);
+    const resizeGesture = resizeGestureRef.current;
+    if (resizeGesture) {
+      const next = rectToAnnotation(
+        resizedSelectionRect(resizeGesture, point ?? {
+          x: resizeGesture.initialRect.x,
+          y: resizeGesture.initialRect.y,
+        }, imageRef.current),
+        selection?.id ?? Date.now(),
+      );
+      setSelection(next);
+      setSelectionDraft(null);
+      resizeGestureRef.current = null;
+      pointerStartRef.current = null;
+      setCanvasCursor(cursorForResizeHandle(
+        resizeHandleAtPoint(point ?? next.end, next, imageRef.current),
+      ));
+      return;
+    }
     if (annotationDraft) {
       const next = { ...annotationDraft, end: point ?? annotationDraft.end };
       if (annotationLength(next) > 4) {
@@ -264,8 +327,12 @@ export default function ScreenshotOverlayWindow() {
         onPointerCancel={() => {
           setSelectionDraft(null);
           setAnnotationDraft(null);
+          resizeGestureRef.current = null;
+          pointerStartRef.current = null;
+          setCanvasCursor("crosshair");
         }}
         className="block h-screen w-screen"
+        style={{ cursor: canvasCursor }}
       />
       {!imageReady && !error && (
         <div className="pointer-events-none fixed inset-0 flex items-center justify-center bg-black">
@@ -646,7 +713,7 @@ function imagePointToViewportPoint(point: Point, image: HTMLImageElement): Point
 }
 
 function imageRectToViewportRect(
-  rect: { x: number; y: number; width: number; height: number },
+  rect: Rect,
   image: HTMLImageElement | null,
 ) {
   if (!image) return { left: 0, top: 0, width: 0, height: 0 };
@@ -690,7 +757,7 @@ function windowCandidateRect(candidate: ScreenshotOverlayWindowCandidate) {
   };
 }
 
-function normalizedRect(annotation: Annotation) {
+function normalizedRect(annotation: Annotation): Rect {
   const x = Math.min(annotation.start.x, annotation.end.x);
   const y = Math.min(annotation.start.y, annotation.end.y);
   return {
@@ -701,7 +768,105 @@ function normalizedRect(annotation: Annotation) {
   };
 }
 
-function pointInRect(point: Point, rect: { x: number; y: number; width: number; height: number }) {
+function resizeHandleAtPoint(
+  point: Point,
+  selection: Annotation,
+  image: HTMLImageElement | null,
+): ResizeHandle | null {
+  if (!image) return null;
+  const rect = normalizedRect(selection);
+  const tolerance = resizeToleranceInImagePx(image);
+  const nearLeft = Math.abs(point.x - rect.x) <= tolerance;
+  const nearRight = Math.abs(point.x - (rect.x + rect.width)) <= tolerance;
+  const nearTop = Math.abs(point.y - rect.y) <= tolerance;
+  const nearBottom = Math.abs(point.y - (rect.y + rect.height)) <= tolerance;
+  const withinX = point.x >= rect.x - tolerance && point.x <= rect.x + rect.width + tolerance;
+  const withinY = point.y >= rect.y - tolerance && point.y <= rect.y + rect.height + tolerance;
+  if (!withinX || !withinY) return null;
+  if (nearLeft && nearTop) return "nw";
+  if (nearRight && nearTop) return "ne";
+  if (nearLeft && nearBottom) return "sw";
+  if (nearRight && nearBottom) return "se";
+  if (nearTop) return "n";
+  if (nearBottom) return "s";
+  if (nearLeft) return "w";
+  if (nearRight) return "e";
+  return null;
+}
+
+function resizeToleranceInImagePx(image: HTMLImageElement): number {
+  const imagePerViewportX = image.naturalWidth / Math.max(1, window.innerWidth);
+  const imagePerViewportY = image.naturalHeight / Math.max(1, window.innerHeight);
+  return Math.max(8, 10 * Math.max(imagePerViewportX, imagePerViewportY));
+}
+
+function resizedSelectionRect(
+  gesture: { handle: ResizeHandle; initialRect: Rect },
+  point: Point,
+  image: HTMLImageElement | null,
+): Rect {
+  const bounds = image
+    ? { width: image.naturalWidth, height: image.naturalHeight }
+    : { width: Number.POSITIVE_INFINITY, height: Number.POSITIVE_INFINITY };
+  const minSize = image ? Math.max(12, resizeToleranceInImagePx(image)) : 12;
+  const initial = gesture.initialRect;
+  let left = initial.x;
+  let right = initial.x + initial.width;
+  let top = initial.y;
+  let bottom = initial.y + initial.height;
+  if (gesture.handle.includes("w")) left = point.x;
+  if (gesture.handle.includes("e")) right = point.x;
+  if (gesture.handle.includes("n")) top = point.y;
+  if (gesture.handle.includes("s")) bottom = point.y;
+  if (right - left < minSize) {
+    if (gesture.handle.includes("w")) left = right - minSize;
+    else right = left + minSize;
+  }
+  if (bottom - top < minSize) {
+    if (gesture.handle.includes("n")) top = bottom - minSize;
+    else bottom = top + minSize;
+  }
+  left = clamp(left, 0, bounds.width - minSize);
+  top = clamp(top, 0, bounds.height - minSize);
+  right = clamp(right, left + minSize, bounds.width);
+  bottom = clamp(bottom, top + minSize, bounds.height);
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+  };
+}
+
+function rectToAnnotation(rect: Rect, id: number): Annotation {
+  return {
+    id,
+    tool: "rect",
+    start: { x: rect.x, y: rect.y },
+    end: { x: rect.x + rect.width, y: rect.y + rect.height },
+  };
+}
+
+function cursorForResizeHandle(handle: ResizeHandle | null): string {
+  switch (handle) {
+    case "n":
+    case "s":
+      return "ns-resize";
+    case "e":
+    case "w":
+      return "ew-resize";
+    case "nw":
+    case "se":
+      return "nwse-resize";
+    case "ne":
+    case "sw":
+      return "nesw-resize";
+    default:
+      return "crosshair";
+  }
+}
+
+function pointInRect(point: Point, rect: Rect) {
   return (
     point.x >= rect.x &&
     point.x <= rect.x + rect.width &&
