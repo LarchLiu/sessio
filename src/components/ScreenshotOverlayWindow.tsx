@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  completeScreenshotOverlayCapture,
   finishScreenshotOverlay,
   getScreenshotOverlaySource,
   readLocalImageDataUrl,
@@ -25,6 +26,12 @@ import {
   type ScreenshotOverlaySource,
 } from "../api";
 import { useI18n } from "../i18n";
+import {
+  canSelectWindows,
+  selectableWindowCandidateAtPoint,
+  windowCandidateAtPoint,
+  windowCandidateRect,
+} from "./screenshotOverlayGeometry";
 
 type EditorTool = "rect" | "line" | "mosaic";
 
@@ -43,7 +50,7 @@ type Rect = {
 type ResizeHandle = "n" | "s" | "e" | "w" | "nw" | "ne" | "sw" | "se";
 
 type Annotation = {
-  id: number;
+  id: number | string;
   tool: EditorTool;
   start: Point;
   end: Point;
@@ -53,6 +60,10 @@ type OverlaySavedPayload = {
   requestId: string;
   path: string;
   previewDataUrl: string;
+};
+
+type OverlayCancelledPayload = {
+  requestId: string;
 };
 
 export default function ScreenshotOverlayWindow() {
@@ -131,8 +142,22 @@ export default function ScreenshotOverlayWindow() {
   }, [redraw]);
 
   const cancel = useCallback(() => {
-    void finishScreenshotOverlay(true);
-  }, []);
+    void (async () => {
+      try {
+        if (source) {
+          void emit<OverlayCancelledPayload>("screenshot_overlay_cancelled", {
+            requestId: source.requestId,
+          });
+          await completeScreenshotOverlayCapture({
+            requestId: source.requestId,
+            cancelled: true,
+          });
+        }
+      } finally {
+        await finishScreenshotOverlay();
+      }
+    })();
+  }, [source]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -182,7 +207,7 @@ export default function ScreenshotOverlayWindow() {
       setHoverWindow(null);
       return;
     }
-    const hitWindow = source ? windowCandidateAtPoint(source.windows, point) : null;
+    const hitWindow = selectableWindowCandidateAtPoint(source, point);
     pointerStartRef.current = { point, window: hitWindow };
     if (selection && pointInRect(point, normalizedRect(selection))) {
       setAnnotationDraft({ id: Date.now(), tool, start: point, end: point });
@@ -234,7 +259,7 @@ export default function ScreenshotOverlayWindow() {
       ));
       return;
     }
-    if (!selection && source) {
+    if (!selection && source && canSelectWindows(source)) {
       const hitWindow = windowCandidateAtPoint(source.windows, point);
       setHoverWindow(hitWindow);
       setCanvasCursor(hitWindow ? "pointer" : "crosshair");
@@ -300,16 +325,21 @@ export default function ScreenshotOverlayWindow() {
         mimeType: "image/png",
         dataBase64: dataUrlToBase64(dataUrl),
       });
+      await completeScreenshotOverlayCapture({
+        requestId: source.requestId,
+        path: saved.path,
+      });
       await emit<OverlaySavedPayload>("screenshot_overlay_saved", {
         requestId: source.requestId,
         path: saved.path,
         previewDataUrl: dataUrl,
       });
-      await finishScreenshotOverlay(true);
     } catch (err) {
       setError(t("screenshot.capture_failed", { error: String(err) }));
       setSaving(false);
+      return;
     }
+    await finishScreenshotOverlay();
   };
 
   const activeSelection = selectionDraft ?? selection;
@@ -496,7 +526,7 @@ function redrawOverlayCanvas(
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
   ctx.drawImage(image, 0, 0, window.innerWidth, window.innerHeight);
-  ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
+  ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
   ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
 
   if (!selection && hoverWindow) {
@@ -730,30 +760,12 @@ function imageRectToViewportRect(
   };
 }
 
-function windowCandidateAtPoint(
-  windows: ScreenshotOverlayWindowCandidate[],
-  point: Point,
-): ScreenshotOverlayWindowCandidate | null {
-  return (
-    windows.find((candidate) => pointInRect(point, windowCandidateRect(candidate))) ?? null
-  );
-}
-
 function windowCandidateToAnnotation(candidate: ScreenshotOverlayWindowCandidate): Annotation {
   return {
     id: candidate.id,
     tool: "rect",
     start: { x: candidate.x, y: candidate.y },
     end: { x: candidate.x + candidate.width, y: candidate.y + candidate.height },
-  };
-}
-
-function windowCandidateRect(candidate: ScreenshotOverlayWindowCandidate) {
-  return {
-    x: candidate.x,
-    y: candidate.y,
-    width: candidate.width,
-    height: candidate.height,
   };
 }
 
@@ -838,7 +850,7 @@ function resizedSelectionRect(
   };
 }
 
-function rectToAnnotation(rect: Rect, id: number): Annotation {
+function rectToAnnotation(rect: Rect, id: number | string): Annotation {
   return {
     id,
     tool: "rect",

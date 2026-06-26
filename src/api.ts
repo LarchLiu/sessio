@@ -167,6 +167,8 @@ export interface AppshotPermissionState {
 }
 
 export interface AppshotPermissionStatus {
+  platform: "macos" | "windows" | "linux" | "other" | string;
+  requiresPermission: boolean;
   screenshots: AppshotPermissionState;
   accessibility: AppshotPermissionState;
   canCapture: boolean;
@@ -1177,6 +1179,12 @@ export interface ScreenshotOverlayCaptureRequest {
   hideSelf?: boolean;
 }
 
+export interface ScreenshotOverlayCompleteRequest {
+  requestId: string;
+  path?: string;
+  cancelled?: boolean;
+}
+
 export interface ScreenshotOverlayWindow {
   label: string;
 }
@@ -1185,11 +1193,12 @@ export interface ScreenshotOverlaySource {
   requestId: string;
   sourcePath: string;
   fileName: string;
+  mode?: "interactive" | "selection";
   windows: ScreenshotOverlayWindowCandidate[];
 }
 
 export interface ScreenshotOverlayWindowCandidate {
-  id: number;
+  id: string;
   appName: string;
   title?: string | null;
   x: number;
@@ -2389,8 +2398,14 @@ export async function getScreenshotOverlaySource(): Promise<ScreenshotOverlaySou
   return invoke<ScreenshotOverlaySource>("get_screenshot_overlay_source");
 }
 
-export async function finishScreenshotOverlay(revealMain: boolean): Promise<void> {
-  return invoke<void>("finish_screenshot_overlay", { revealMain });
+export async function finishScreenshotOverlay(): Promise<void> {
+  return invoke<void>("finish_screenshot_overlay");
+}
+
+export async function completeScreenshotOverlayCapture(
+  req: ScreenshotOverlayCompleteRequest,
+): Promise<void> {
+  return invoke<void>("complete_screenshot_overlay_capture", { req });
 }
 
 export async function readLocalTextFile(path: string): Promise<string> {

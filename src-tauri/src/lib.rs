@@ -19,7 +19,7 @@ pub mod watch;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use std::thread;
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 use std::time::Duration;
@@ -104,6 +104,8 @@ struct AppshotPermissionStateDto {
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppshotPermissionStatusDto {
+    platform: String,
+    requires_permission: bool,
     screenshots: AppshotPermissionStateDto,
     accessibility: AppshotPermissionStateDto,
     can_capture: bool,
@@ -121,9 +123,19 @@ struct AppshotShortcutState {
     registered_shortcut: Mutex<Option<String>>,
 }
 
+/// How long a command-driven Windows screenshot overlay waits for the user to
+/// finish a selection before it gives up.
+#[cfg(windows)]
+const SCREENSHOT_OVERLAY_CAPTURE_TIMEOUT: Duration = Duration::from_secs(300);
+
 #[derive(Default)]
 struct ScreenshotOverlayState {
     sources: Mutex<HashMap<String, ScreenshotOverlaySourceDto>>,
+    reveal_main_on_finish: Mutex<HashMap<String, bool>>,
+    #[cfg(windows)]
+    pending_results: Mutex<HashMap<String, ScreenshotOverlayResultSender>>,
+    #[cfg(windows)]
+    completed_results: Mutex<HashMap<String, ScreenshotOverlayCompletion>>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -134,23 +146,38 @@ struct ScreenshotOverlayWindowDto {
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ScreenshotOverlayCancelledPayload {
+    request_id: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ScreenshotOverlaySourceDto {
     request_id: String,
     source_path: String,
     file_name: String,
+    mode: String,
     windows: Vec<ScreenshotOverlayWindowCandidateDto>,
 }
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScreenshotOverlayWindowCandidateDto {
-    id: u32,
+    id: String,
     app_name: String,
     title: Option<String>,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScreenshotOverlayCompleteRequest {
+    request_id: String,
+    path: Option<String>,
+    cancelled: Option<bool>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -3591,7 +3618,9 @@ fn capture_monitor_background_png(
         .map_err(|e| format!("Failed to start screenshot overlay capture: {e}"))?;
     if !status.success() {
         let _ = std::fs::remove_file(&path);
-        return Err(format!("Screenshot overlay capture failed with status {status}"));
+        return Err(format!(
+            "Screenshot overlay capture failed with status {status}"
+        ));
     }
 
     let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
@@ -3704,7 +3733,7 @@ fn screenshot_overlay_window_candidates(
         };
         let app_name = dict_string(&dict, key_owner_name).unwrap_or_else(|| "Window".to_string());
         candidates.push(ScreenshotOverlayWindowCandidateDto {
-            id,
+            id: id.to_string(),
             app_name,
             title: dict_string(&dict, key_window_name),
             x: clamp_f64(x, 0.0, monitor_width),
@@ -3729,15 +3758,21 @@ fn hide_main_window_now(window: WebviewWindow) {
 }
 
 #[cfg(target_os = "macos")]
-fn cleanup_screenshot_overlay(
-    app: &AppHandle,
-    label: &str,
-    reveal_main: bool,
-) {
+fn cleanup_screenshot_overlay(app: &AppHandle, label: &str, reveal_main: bool) {
+    let mut cancelled_request_id = None;
     if let Some(state) = app.try_state::<ScreenshotOverlayState>() {
         if let Ok(mut sources) = state.sources.lock() {
-            sources.remove(label);
+            cancelled_request_id = sources.remove(label).map(|source| source.request_id);
         }
+        if let Ok(mut reveal) = state.reveal_main_on_finish.lock() {
+            reveal.remove(label);
+        }
+    }
+    if let Some(request_id) = cancelled_request_id {
+        let _ = app.emit(
+            "screenshot_overlay_cancelled",
+            ScreenshotOverlayCancelledPayload { request_id },
+        );
     }
     if reveal_main {
         show_main_window(app);
@@ -3761,33 +3796,73 @@ async fn open_screenshot_overlay_capture(
         .or_else(|| app.primary_monitor().ok().flatten())
         .ok_or_else(|| "Could not find a screen for screenshot overlay".to_string())?;
 
-    if req.hide_self.unwrap_or(false) {
+    let hide_self = req.hide_self.unwrap_or(false);
+    let reveal_main_on_finish = hide_self && main_window.is_visible().unwrap_or(false);
+    if hide_self {
         hide_main_window_now(main_window);
         thread::sleep(Duration::from_millis(90));
     }
 
     let windows = screenshot_overlay_window_candidates(&monitor);
-    let source = capture_monitor_background_png(&monitor, Some("Screenshot.png"))?;
-    let label = format!("screenshot-overlay-{}", chrono::Utc::now().timestamp_millis());
+    let source = match capture_monitor_background_png(&monitor, Some("Screenshot.png")) {
+        Ok(source) => source,
+        Err(error) => {
+            if reveal_main_on_finish {
+                show_main_window(&app);
+            }
+            return Err(error);
+        }
+    };
+    let label = format!(
+        "screenshot-overlay-{}",
+        chrono::Utc::now().timestamp_millis()
+    );
     let file_name = safe_pasted_attachment_file_name(req.file_name.as_deref(), Some("image/png"));
+    let source_path_for_cleanup = source.path.clone();
     {
-        let mut sources = state.sources.lock().map_err(|e| e.to_string())?;
+        let mut sources = match state.sources.lock() {
+            Ok(sources) => sources,
+            Err(error) => {
+                if reveal_main_on_finish {
+                    show_main_window(&app);
+                }
+                let _ = std::fs::remove_file(&source_path_for_cleanup);
+                return Err(error.to_string());
+            }
+        };
         sources.insert(
             label.clone(),
             ScreenshotOverlaySourceDto {
                 request_id: req.request_id,
                 source_path: source.path,
                 file_name,
+                mode: "interactive".to_string(),
                 windows,
             },
         );
+    }
+    {
+        let mut reveal = match state.reveal_main_on_finish.lock() {
+            Ok(reveal) => reveal,
+            Err(error) => {
+                if let Ok(mut sources) = state.sources.lock() {
+                    sources.remove(&label);
+                }
+                if reveal_main_on_finish {
+                    show_main_window(&app);
+                }
+                let _ = std::fs::remove_file(&source_path_for_cleanup);
+                return Err(error.to_string());
+            }
+        };
+        reveal.insert(label.clone(), reveal_main_on_finish);
     }
 
     let pos = monitor.position();
     let size = monitor.size();
     let scale = monitor.scale_factor();
     let url = WebviewUrl::App("index.html?screenshotOverlay=1".into());
-    let overlay = WebviewWindowBuilder::new(&app, &label, url)
+    let overlay = match WebviewWindowBuilder::new(&app, &label, url)
         .title("Screenshot")
         .decorations(false)
         .shadow(false)
@@ -3798,12 +3873,28 @@ async fn open_screenshot_overlay_capture(
         .inner_size(size.width as f64 / scale, size.height as f64 / scale)
         .focused(true)
         .build()
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(overlay) => overlay,
+        Err(error) => {
+            cleanup_screenshot_overlay(&app, &label, reveal_main_on_finish);
+            return Err(error.to_string());
+        }
+    };
     let cleanup_app = app.clone();
     let cleanup_label = label.clone();
     overlay.on_window_event(move |event| {
         if matches!(event, WindowEvent::Destroyed) {
-            cleanup_screenshot_overlay(&cleanup_app, &cleanup_label, true);
+            let reveal_main = cleanup_app
+                .try_state::<ScreenshotOverlayState>()
+                .and_then(|state| {
+                    state
+                        .reveal_main_on_finish
+                        .lock()
+                        .ok()
+                        .and_then(|reveal| reveal.get(&cleanup_label).copied())
+                })
+                .unwrap_or(false);
+            cleanup_screenshot_overlay(&cleanup_app, &cleanup_label, reveal_main);
         }
     });
     let _ = overlay.set_focus();
@@ -3830,20 +3921,888 @@ fn finish_screenshot_overlay(
     app: AppHandle,
     window: WebviewWindow,
     state: State<ScreenshotOverlayState>,
-    reveal_main: bool,
 ) -> Result<(), String> {
+    let should_reveal_main = state
+        .reveal_main_on_finish
+        .lock()
+        .ok()
+        .and_then(|mut reveal| reveal.remove(window.label()))
+        .unwrap_or(false);
     {
         let mut sources = state.sources.lock().map_err(|e| e.to_string())?;
         sources.remove(window.label());
     }
     let close_result = window.close().map_err(|e| e.to_string());
-    if reveal_main {
+    if should_reveal_main {
         show_main_window(&app);
     }
     close_result
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn complete_screenshot_overlay_capture(
+    _state: State<ScreenshotOverlayState>,
+    req: ScreenshotOverlayCompleteRequest,
+) -> Result<(), String> {
+    let _ = (req.request_id, req.path, req.cancelled);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn ensure_appshot_can_capture(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn with_optional_hidden_main_window<F>(
+    app: &AppHandle,
+    hide_self: bool,
+    capture: F,
+) -> Result<SavedPastedAttachment, String>
+where
+    F: FnOnce() -> Result<SavedPastedAttachment, String>,
+{
+    let was_visible = app
+        .get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false);
+    if hide_self {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.hide();
+            thread::sleep(Duration::from_millis(110));
+        }
+    }
+
+    let result = capture();
+    if hide_self && was_visible {
+        show_main_window(app);
+    }
+    result
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct WindowsRect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+#[cfg(windows)]
+fn windows_virtual_screen_rect() -> WindowsRect {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+    unsafe {
+        WindowsRect {
+            x: GetSystemMetrics(SM_XVIRTUALSCREEN),
+            y: GetSystemMetrics(SM_YVIRTUALSCREEN),
+            width: GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1),
+            height: GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_monitor_rect_for_window(window: &WebviewWindow) -> WindowsRect {
+    use windows::Win32::{
+        Foundation::RECT,
+        Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        },
+    };
+    let hwnd = window.hwnd().ok();
+    unsafe {
+        let monitor = hwnd
+            .map(|hwnd| MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST))
+            .unwrap_or_default();
+        if !monitor.is_invalid() {
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetMonitorInfoW(monitor, &mut info as *mut _).as_bool() {
+                let RECT {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                } = info.rcMonitor;
+                return WindowsRect {
+                    x: left,
+                    y: top,
+                    width: (right - left).max(1),
+                    height: (bottom - top).max(1),
+                };
+            }
+        }
+    }
+    windows_virtual_screen_rect()
+}
+
+#[cfg(windows)]
+fn windows_window_scale_factor(window: &WebviewWindow) -> f64 {
+    if let Ok(hwnd) = window.hwnd() {
+        let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
+        if dpi > 0 {
+            return (dpi as f64 / 96.0).max(1.0);
+        }
+    }
+    window.scale_factor().unwrap_or(1.0).max(1.0)
+}
+
+#[cfg(windows)]
+fn windows_capture_screen_rect_png(
+    rect: WindowsRect,
+    file_name: Option<&str>,
+    prefix: &str,
+) -> Result<SavedPastedAttachment, String> {
+    use image::{ImageBuffer, Rgba};
+    use windows::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT,
+        DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, RGBQUAD, SRCCOPY,
+    };
+
+    struct ScreenDc(HDC);
+    impl Drop for ScreenDc {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = ReleaseDC(None, self.0);
+            }
+        }
+    }
+    struct MemDc(HDC);
+    impl Drop for MemDc {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DeleteDC(self.0);
+            }
+        }
+    }
+    struct Bitmap(HBITMAP);
+    impl Drop for Bitmap {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ::from(self.0));
+            }
+        }
+    }
+
+    if rect.width <= 0 || rect.height <= 0 {
+        return Err("Screenshot capture area is empty".to_string());
+    }
+
+    let width = rect.width;
+    let height = rect.height;
+    let mut buffer = vec![0u8; (width as usize) * (height as usize) * 4];
+    unsafe {
+        let screen_dc = ScreenDc(GetDC(None));
+        if screen_dc.0.is_invalid() {
+            return Err("Failed to get screen device context".to_string());
+        }
+        let mem_dc = MemDc(CreateCompatibleDC(Some(screen_dc.0)));
+        if mem_dc.0.is_invalid() {
+            return Err("Failed to create screenshot memory device context".to_string());
+        }
+        let bitmap = Bitmap(CreateCompatibleBitmap(screen_dc.0, width, height));
+        if bitmap.0.is_invalid() {
+            return Err("Failed to create screenshot bitmap".to_string());
+        }
+        let old = SelectObject(mem_dc.0, HGDIOBJ::from(bitmap.0));
+        if old.is_invalid() {
+            return Err("Failed to select screenshot bitmap".to_string());
+        }
+        if let Err(error) = BitBlt(
+            mem_dc.0,
+            0,
+            0,
+            width,
+            height,
+            Some(screen_dc.0),
+            rect.x,
+            rect.y,
+            SRCCOPY | CAPTUREBLT,
+        ) {
+            let _ = SelectObject(mem_dc.0, old);
+            return Err(format!("Failed to copy screen pixels: {error}"));
+        }
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            bmiColors: [RGBQUAD::default(); 1],
+        };
+        let lines = GetDIBits(
+            mem_dc.0,
+            bitmap.0,
+            0,
+            height as u32,
+            Some(buffer.as_mut_ptr() as *mut _),
+            &mut bmi as *mut _,
+            DIB_RGB_COLORS,
+        );
+        let _ = SelectObject(mem_dc.0, old);
+        if lines == 0 {
+            return Err("Failed to read screenshot pixels".to_string());
+        }
+    }
+
+    for px in buffer.chunks_exact_mut(4) {
+        px.swap(0, 2);
+        px[3] = 255;
+    }
+    let image = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(width as u32, height as u32, buffer)
+        .ok_or_else(|| "Failed to build screenshot image buffer".to_string())?;
+
+    let file_name = safe_pasted_attachment_file_name(file_name, Some("image/png"));
+    let dir = paste_cache_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!(
+        "{prefix}-{}-{file_name}",
+        chrono::Utc::now().timestamp_millis()
+    ));
+    image.save(&path).map_err(|e| e.to_string())?;
+    Ok(SavedPastedAttachment {
+        path: path.to_string_lossy().to_string(),
+    })
+}
+
+#[cfg(windows)]
+fn windows_window_text(hwnd: windows::Win32::Foundation::HWND) -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextLengthW, GetWindowTextW};
+    unsafe {
+        let len = GetWindowTextLengthW(hwnd);
+        if len <= 0 {
+            return None;
+        }
+        let mut buffer = vec![0u16; (len + 1) as usize];
+        let read = GetWindowTextW(hwnd, &mut buffer);
+        if read <= 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buffer[..read as usize]))
+    }
+}
+
+#[cfg(windows)]
+fn windows_process_name(pid: u32) -> Option<String> {
+    use windows::Win32::{
+        Foundation::{CloseHandle, MAX_PATH},
+        System::{
+            ProcessStatus::K32GetModuleBaseNameW,
+            Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ},
+        },
+    };
+    unsafe {
+        let handle = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+            false,
+            pid,
+        )
+        .ok()?;
+        let mut buffer = vec![0u16; MAX_PATH as usize];
+        let len = K32GetModuleBaseNameW(handle, None, &mut buffer);
+        let _ = CloseHandle(handle);
+        if len == 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buffer[..len as usize]))
+    }
+}
+
+#[cfg(windows)]
+fn windows_extended_window_rect(hwnd: windows::Win32::Foundation::HWND) -> Option<WindowsRect> {
+    use windows::Win32::{
+        Foundation::RECT,
+        Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
+        UI::WindowsAndMessaging::GetWindowRect,
+    };
+    unsafe {
+        let mut rect = RECT::default();
+        let dwm_ok = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut rect as *mut _ as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        )
+        .is_ok();
+        if !dwm_ok && GetWindowRect(hwnd, &mut rect as *mut _).is_err() {
+            return None;
+        }
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        Some(WindowsRect {
+            x: rect.left,
+            y: rect.top,
+            width,
+            height,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn windows_is_capture_candidate(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, GetWindowLongW, IsIconic, IsWindowVisible, GA_ROOT, GWL_EXSTYLE,
+        WS_EX_TOOLWINDOW,
+    };
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return false;
+        }
+        let mut cloaked = 0i32;
+        if DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut _ as *mut _,
+            std::mem::size_of::<i32>() as u32,
+        )
+        .is_ok()
+            && cloaked != 0
+        {
+            return false;
+        }
+        if GetAncestor(hwnd, GA_ROOT) != hwnd {
+            return false;
+        }
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if ex_style & WS_EX_TOOLWINDOW.0 != 0 {
+            return false;
+        }
+    }
+    windows_extended_window_rect(hwnd)
+        .map(|rect| rect.width >= 36 && rect.height >= 28)
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn windows_window_candidates_for_rect(
+    screen_rect: WindowsRect,
+) -> Vec<ScreenshotOverlayWindowCandidateDto> {
+    use windows::core::BOOL;
+    use windows::Win32::{
+        Foundation::{HWND, LPARAM},
+        UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId},
+    };
+    struct EnumState {
+        screen_rect: WindowsRect,
+        items: Vec<ScreenshotOverlayWindowCandidateDto>,
+    }
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let state = &mut *(lparam.0 as *mut EnumState);
+        if !windows_is_capture_candidate(hwnd) {
+            return true.into();
+        }
+        let Some(rect) = windows_extended_window_rect(hwnd) else {
+            return true.into();
+        };
+        let left = rect.x.max(state.screen_rect.x);
+        let top = rect.y.max(state.screen_rect.y);
+        let right = (rect.x + rect.width).min(state.screen_rect.x + state.screen_rect.width);
+        let bottom = (rect.y + rect.height).min(state.screen_rect.y + state.screen_rect.height);
+        if right <= left || bottom <= top {
+            return true.into();
+        }
+        let mut pid = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut _));
+        }
+        state.items.push(ScreenshotOverlayWindowCandidateDto {
+            id: (hwnd.0 as usize).to_string(),
+            app_name: windows_process_name(pid).unwrap_or_else(|| "Window".to_string()),
+            title: windows_window_text(hwnd),
+            x: f64::from(left - state.screen_rect.x),
+            y: f64::from(top - state.screen_rect.y),
+            width: f64::from(right - left),
+            height: f64::from(bottom - top),
+        });
+        true.into()
+    }
+
+    let mut state = EnumState {
+        screen_rect,
+        items: Vec::new(),
+    };
+    unsafe {
+        let _ = EnumWindows(Some(enum_proc), LPARAM(&mut state as *mut _ as isize));
+    }
+    state.items
+}
+
+#[cfg(windows)]
+fn capture_frontmost_window_png(
+    _app: &AppHandle,
+    file_name: Option<String>,
+) -> Result<SavedPastedAttachment, String> {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_invalid() {
+        return Err("Could not determine the foreground window".to_string());
+    }
+    let rect = windows_extended_window_rect(hwnd)
+        .ok_or_else(|| "Could not determine the foreground window bounds".to_string())?;
+    windows_capture_screen_rect_png(rect, file_name.as_deref(), "appshot")
+}
+
+#[cfg(windows)]
+type ScreenshotOverlayResultSender =
+    Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<SavedPastedAttachment, String>>>>>;
+
+#[cfg(windows)]
+#[derive(Clone)]
+enum ScreenshotOverlayCompletion {
+    Saved(String),
+    Cancelled,
+}
+
+#[cfg(windows)]
+fn start_windows_screenshot_overlay_capture(
+    app: &AppHandle,
+    state: &ScreenshotOverlayState,
+    request_id: String,
+    file_name: Option<String>,
+    mode: &str,
+    reveal_main_on_finish: bool,
+    cancel_sender: Option<ScreenshotOverlayResultSender>,
+) -> Result<ScreenshotOverlayWindowDto, String> {
+    let main_window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Main window is not available".to_string())?;
+    let screen_rect = windows_monitor_rect_for_window(&main_window);
+    let windows = if mode == "selection" {
+        Vec::new()
+    } else {
+        windows_window_candidates_for_rect(screen_rect)
+    };
+    let source = match capture_monitor_background_png(screen_rect, Some("Screenshot.png")) {
+        Ok(source) => source,
+        Err(error) => {
+            if reveal_main_on_finish {
+                show_main_window(app);
+            }
+            return Err(error);
+        }
+    };
+    let label = format!(
+        "screenshot-overlay-{}",
+        chrono::Utc::now().timestamp_millis()
+    );
+    let file_name = safe_pasted_attachment_file_name(file_name.as_deref(), Some("image/png"));
+    let source_path_for_cleanup = source.path.clone();
+    {
+        let mut sources = match state.sources.lock() {
+            Ok(sources) => sources,
+            Err(error) => {
+                let _ = std::fs::remove_file(&source_path_for_cleanup);
+                if reveal_main_on_finish {
+                    show_main_window(app);
+                }
+                return Err(error.to_string());
+            }
+        };
+        sources.insert(
+            label.clone(),
+            ScreenshotOverlaySourceDto {
+                request_id: request_id.clone(),
+                source_path: source.path,
+                file_name,
+                mode: mode.to_string(),
+                windows,
+            },
+        );
+    }
+    {
+        let mut reveal = match state.reveal_main_on_finish.lock() {
+            Ok(reveal) => reveal,
+            Err(error) => {
+                if let Ok(mut sources) = state.sources.lock() {
+                    sources.remove(&label);
+                }
+                let _ = std::fs::remove_file(&source_path_for_cleanup);
+                if reveal_main_on_finish {
+                    show_main_window(app);
+                }
+                return Err(error.to_string());
+            }
+        };
+        reveal.insert(label.clone(), reveal_main_on_finish);
+    }
+    if let Some(sender) = cancel_sender.as_ref() {
+        let mut pending = match state.pending_results.lock() {
+            Ok(pending) => pending,
+            Err(error) => {
+                cleanup_screenshot_overlay(app, &label, reveal_main_on_finish);
+                return Err(error.to_string());
+            }
+        };
+        pending.insert(request_id.clone(), Arc::clone(sender));
+    }
+
+    let scale = windows_window_scale_factor(&main_window);
+    let url = WebviewUrl::App("index.html?screenshotOverlay=1".into());
+    let overlay = match WebviewWindowBuilder::new(app, &label, url)
+        .title("Screenshot")
+        .decorations(false)
+        .shadow(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .position(screen_rect.x as f64 / scale, screen_rect.y as f64 / scale)
+        .inner_size(
+            screen_rect.width as f64 / scale,
+            screen_rect.height as f64 / scale,
+        )
+        .focused(true)
+        .build()
+    {
+        Ok(overlay) => overlay,
+        Err(error) => {
+            cleanup_screenshot_overlay(app, &label, reveal_main_on_finish);
+            if let Ok(mut pending) = state.pending_results.lock() {
+                pending.remove(&request_id);
+            }
+            return Err(error.to_string());
+        }
+    };
+    let cleanup_app = app.clone();
+    let cleanup_label = label.clone();
+    let cleanup_request_id = request_id.clone();
+    overlay.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Destroyed) {
+            if let Some(sender) = &cancel_sender {
+                let completion = cleanup_app
+                    .try_state::<ScreenshotOverlayState>()
+                    .and_then(|state| {
+                        take_screenshot_overlay_completion(state.inner(), &cleanup_request_id)
+                    })
+                    .unwrap_or(ScreenshotOverlayCompletion::Cancelled);
+                send_screenshot_overlay_completion(sender, completion);
+            }
+            let reveal_main = cleanup_app
+                .try_state::<ScreenshotOverlayState>()
+                .and_then(|state| {
+                    state
+                        .reveal_main_on_finish
+                        .lock()
+                        .ok()
+                        .and_then(|reveal| reveal.get(&cleanup_label).copied())
+                })
+                .unwrap_or(false);
+            cleanup_screenshot_overlay(&cleanup_app, &cleanup_label, reveal_main);
+        }
+    });
+    let _ = overlay.set_focus();
+
+    Ok(ScreenshotOverlayWindowDto { label })
+}
+
+#[cfg(windows)]
+fn send_screenshot_overlay_cancelled(sender: &ScreenshotOverlayResultSender) {
+    send_screenshot_overlay_completion(sender, ScreenshotOverlayCompletion::Cancelled);
+}
+
+#[cfg(windows)]
+fn send_screenshot_overlay_completion(
+    sender: &ScreenshotOverlayResultSender,
+    completion: ScreenshotOverlayCompletion,
+) {
+    if let Ok(mut sender) = sender.lock() {
+        if let Some(sender) = sender.take() {
+            let result = match completion {
+                ScreenshotOverlayCompletion::Saved(path) => Ok(SavedPastedAttachment { path }),
+                ScreenshotOverlayCompletion::Cancelled => {
+                    Err("Screenshot selection was cancelled".to_string())
+                }
+            };
+            let _ = sender.send(result);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn take_screenshot_overlay_completion(
+    state: &ScreenshotOverlayState,
+    request_id: &str,
+) -> Option<ScreenshotOverlayCompletion> {
+    state
+        .completed_results
+        .lock()
+        .ok()
+        .and_then(|mut completed| completed.remove(request_id))
+}
+
+#[cfg(windows)]
+fn send_stored_screenshot_overlay_completion(state: &ScreenshotOverlayState, request_id: &str) {
+    let Some(completion) = take_screenshot_overlay_completion(state, request_id) else {
+        return;
+    };
+    let sender = state
+        .pending_results
+        .lock()
+        .ok()
+        .and_then(|pending| pending.get(request_id).cloned());
+    if let Some(sender) = sender {
+        send_screenshot_overlay_completion(&sender, completion);
+    }
+}
+
+#[cfg(windows)]
+async fn with_optional_hidden_main_window_async<F, Fut>(
+    app: &AppHandle,
+    hide_self: bool,
+    capture: F,
+) -> Result<SavedPastedAttachment, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<SavedPastedAttachment, String>>,
+{
+    let was_visible = app
+        .get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false);
+    if hide_self {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.hide();
+            tokio::time::sleep(Duration::from_millis(110)).await;
+        }
+    }
+
+    let result = capture().await;
+    if hide_self && was_visible {
+        show_main_window(app);
+    }
+    result
+}
+
+#[cfg(windows)]
+async fn capture_screenshot_overlay_png_impl(
+    app: AppHandle,
+    state: &ScreenshotOverlayState,
+    file_name: Option<String>,
+    mode: &str,
+    reveal_main_on_finish: bool,
+) -> Result<SavedPastedAttachment, String> {
+    let request_id = format!(
+        "screenshot-command-{}",
+        chrono::Utc::now().timestamp_millis()
+    );
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<SavedPastedAttachment, String>>();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    let pending_request_id = request_id.clone();
+
+    let overlay_result = start_windows_screenshot_overlay_capture(
+        &app,
+        state,
+        request_id,
+        file_name,
+        mode,
+        reveal_main_on_finish,
+        Some(Arc::clone(&tx)),
+    );
+    if let Err(error) = overlay_result {
+        send_screenshot_overlay_cancelled(&tx);
+        return Err(error);
+    }
+
+    let result = match tokio::time::timeout(SCREENSHOT_OVERLAY_CAPTURE_TIMEOUT, rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("Screenshot selection was cancelled".to_string()),
+        Err(_) => Err("Screenshot selection timed out".to_string()),
+    };
+    if let Ok(mut pending) = state.pending_results.lock() {
+        pending.remove(&pending_request_id);
+    }
+    if let Ok(mut completed) = state.completed_results.lock() {
+        completed.remove(&pending_request_id);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn capture_monitor_background_png(
+    rect: WindowsRect,
+    file_name: Option<&str>,
+) -> Result<SavedPastedAttachment, String> {
+    windows_capture_screen_rect_png(rect, file_name, "screen-overlay")
+}
+
+#[cfg(windows)]
+fn cleanup_screenshot_overlay(app: &AppHandle, label: &str, reveal_main: bool) {
+    let mut cancelled_request_id = None;
+    if let Some(state) = app.try_state::<ScreenshotOverlayState>() {
+        if let Ok(mut sources) = state.sources.lock() {
+            cancelled_request_id = sources.remove(label).map(|source| source.request_id);
+        }
+        if let Ok(mut reveal) = state.reveal_main_on_finish.lock() {
+            reveal.remove(label);
+        }
+    }
+    if let Some(request_id) = cancelled_request_id {
+        let _ = app.emit(
+            "screenshot_overlay_cancelled",
+            ScreenshotOverlayCancelledPayload { request_id },
+        );
+    }
+    if reveal_main {
+        show_main_window(app);
+    }
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn capture_frontmost_app_window_png(
+    app: AppHandle,
+    req: ScreenshotCaptureRequest,
+) -> Result<SavedPastedAttachment, String> {
+    ensure_appshot_can_capture(&app)?;
+    with_optional_hidden_main_window(&app, req.hide_self.unwrap_or(false), || {
+        capture_frontmost_window_png(&app, req.file_name)
+    })
+}
+
+#[cfg(windows)]
+#[tauri::command]
+async fn capture_selected_screen_area_png(
+    app: AppHandle,
+    state: State<'_, ScreenshotOverlayState>,
+    req: ScreenshotCaptureRequest,
+) -> Result<SavedPastedAttachment, String> {
+    ensure_appshot_can_capture(&app)?;
+    let state = state.inner();
+    with_optional_hidden_main_window_async(&app, req.hide_self.unwrap_or(false), || {
+        capture_screenshot_overlay_png_impl(app.clone(), state, req.file_name, "selection", false)
+    })
+    .await
+}
+
+#[cfg(windows)]
+#[tauri::command]
+async fn capture_interactive_screen_png(
+    app: AppHandle,
+    state: State<'_, ScreenshotOverlayState>,
+    req: ScreenshotCaptureRequest,
+) -> Result<SavedPastedAttachment, String> {
+    ensure_appshot_can_capture(&app)?;
+    let state = state.inner();
+    with_optional_hidden_main_window_async(&app, req.hide_self.unwrap_or(false), || {
+        capture_screenshot_overlay_png_impl(app.clone(), state, req.file_name, "interactive", false)
+    })
+    .await
+}
+
+#[cfg(windows)]
+#[tauri::command]
+async fn open_screenshot_overlay_capture(
+    app: AppHandle,
+    state: State<'_, ScreenshotOverlayState>,
+    req: ScreenshotOverlayCaptureRequest,
+) -> Result<ScreenshotOverlayWindowDto, String> {
+    ensure_appshot_can_capture(&app)?;
+    let main_window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Main window is not available".to_string())?;
+
+    let hide_self = req.hide_self.unwrap_or(false);
+    let reveal_main_on_finish = hide_self && main_window.is_visible().unwrap_or(false);
+    if hide_self {
+        let _ = main_window.hide();
+        tokio::time::sleep(Duration::from_millis(110)).await;
+    }
+
+    start_windows_screenshot_overlay_capture(
+        &app,
+        &state,
+        req.request_id,
+        req.file_name,
+        "interactive",
+        reveal_main_on_finish,
+        None,
+    )
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn get_screenshot_overlay_source(
+    window: WebviewWindow,
+    state: State<ScreenshotOverlayState>,
+) -> Result<ScreenshotOverlaySourceDto, String> {
+    let sources = state.sources.lock().map_err(|e| e.to_string())?;
+    sources
+        .get(window.label())
+        .cloned()
+        .ok_or_else(|| "Screenshot overlay source is not available".to_string())
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn finish_screenshot_overlay(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<ScreenshotOverlayState>,
+) -> Result<(), String> {
+    let should_reveal_main = state
+        .reveal_main_on_finish
+        .lock()
+        .ok()
+        .and_then(|mut reveal| reveal.remove(window.label()))
+        .unwrap_or(false);
+    let request_id = {
+        let mut sources = state.sources.lock().map_err(|e| e.to_string())?;
+        sources
+            .remove(window.label())
+            .map(|source| source.request_id)
+    };
+    let close_result = window.close().map_err(|e| e.to_string());
+    if should_reveal_main {
+        show_main_window(&app);
+    }
+    if let Some(request_id) = request_id {
+        send_stored_screenshot_overlay_completion(&state, &request_id);
+    }
+    close_result
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn complete_screenshot_overlay_capture(
+    state: State<ScreenshotOverlayState>,
+    req: ScreenshotOverlayCompleteRequest,
+) -> Result<(), String> {
+    let sender = {
+        let pending = state.pending_results.lock().map_err(|e| e.to_string())?;
+        pending.get(&req.request_id).cloned()
+    };
+    if sender.is_none() {
+        return Ok(());
+    }
+    let completion = if req.cancelled.unwrap_or(false) {
+        ScreenshotOverlayCompletion::Cancelled
+    } else {
+        ScreenshotOverlayCompletion::Saved(
+            req.path
+                .ok_or_else(|| "Screenshot completion did not include an image path".to_string())?,
+        )
+    };
+    let mut completed = state.completed_results.lock().map_err(|e| e.to_string())?;
+    completed.insert(req.request_id, completion);
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 #[tauri::command]
 fn capture_frontmost_app_window_png(
     _app: AppHandle,
@@ -3852,7 +4811,7 @@ fn capture_frontmost_app_window_png(
     Err("Frontmost app screenshot is not implemented on this platform yet".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 #[tauri::command]
 fn capture_selected_screen_area_png(
     _app: AppHandle,
@@ -3861,7 +4820,7 @@ fn capture_selected_screen_area_png(
     Err("Selected area screenshot is not implemented on this platform yet".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 #[tauri::command]
 fn capture_interactive_screen_png(
     _app: AppHandle,
@@ -3870,7 +4829,7 @@ fn capture_interactive_screen_png(
     Err("Interactive screenshot is not implemented on this platform yet".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 #[tauri::command]
 async fn open_screenshot_overlay_capture(
     _app: AppHandle,
@@ -3880,7 +4839,7 @@ async fn open_screenshot_overlay_capture(
     Err("Screenshot overlay editing is not implemented on this platform yet".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 #[tauri::command]
 fn get_screenshot_overlay_source(
     _window: WebviewWindow,
@@ -3889,20 +4848,31 @@ fn get_screenshot_overlay_source(
     Err("Screenshot overlay editing is not implemented on this platform yet".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 #[tauri::command]
 fn finish_screenshot_overlay(
     _app: AppHandle,
     _window: WebviewWindow,
     _state: State<ScreenshotOverlayState>,
-    _reveal_main: bool,
 ) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+#[tauri::command]
+fn complete_screenshot_overlay_capture(
+    _state: State<ScreenshotOverlayState>,
+    req: ScreenshotOverlayCompleteRequest,
+) -> Result<(), String> {
+    let _ = (req.request_id, req.path, req.cancelled);
     Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
 fn appshot_permission_status() -> AppshotPermissionStatusDto {
     AppshotPermissionStatusDto {
+        platform: appshot_permission_platform().to_string(),
+        requires_permission: false,
         screenshots: AppshotPermissionStateDto {
             granted: true,
             supported: false,
@@ -3918,6 +4888,8 @@ fn appshot_permission_status() -> AppshotPermissionStatusDto {
 #[cfg(target_os = "macos")]
 fn appshot_permission_status() -> AppshotPermissionStatusDto {
     AppshotPermissionStatusDto {
+        platform: "macos".to_string(),
+        requires_permission: true,
         screenshots: AppshotPermissionStateDto {
             granted: appshot_screenshots_permission_granted(),
             supported: true,
@@ -3928,6 +4900,21 @@ fn appshot_permission_status() -> AppshotPermissionStatusDto {
         },
         can_capture: appshot_screenshots_permission_granted(),
     }
+}
+
+#[cfg(all(not(target_os = "macos"), windows))]
+fn appshot_permission_platform() -> &'static str {
+    "windows"
+}
+
+#[cfg(all(not(target_os = "macos"), target_os = "linux"))]
+fn appshot_permission_platform() -> &'static str {
+    "linux"
+}
+
+#[cfg(all(not(target_os = "macos"), not(windows), not(target_os = "linux")))]
+fn appshot_permission_platform() -> &'static str {
+    "other"
 }
 
 #[cfg(target_os = "macos")]
@@ -8468,6 +9455,7 @@ pub fn run() {
             open_screenshot_overlay_capture,
             get_screenshot_overlay_source,
             finish_screenshot_overlay,
+            complete_screenshot_overlay_capture,
             read_local_text_file,
             read_workspace_text_file,
             write_workspace_text_file,

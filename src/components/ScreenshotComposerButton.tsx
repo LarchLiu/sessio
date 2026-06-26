@@ -13,6 +13,10 @@ type OverlaySavedPayload = {
   previewDataUrl: string;
 };
 
+type OverlayCancelledPayload = {
+  requestId: string;
+};
+
 export default function ScreenshotComposerButton({
   composer,
   disabled = false,
@@ -26,19 +30,22 @@ export default function ScreenshotComposerButton({
   const [menuOpen, setMenuOpen] = useState(false);
   const [hideSelf, setHideSelf] = useState(false);
   const [capturing, setCapturing] = useState(false);
+  const [overlayActive, setOverlayActive] = useState(false);
   const unavailable =
     disabled ||
     !composer.supportsAttachments ||
     !composer.supportsImageAttachments ||
-    capturing;
+    capturing ||
+    overlayActive;
 
   useEffect(() => {
     let disposed = false;
-    const unlistenPromise = listen<OverlaySavedPayload>(
+    const unlistenSavedPromise = listen<OverlaySavedPayload>(
       "screenshot_overlay_saved",
       (event) => {
         if (disposed || pendingRequestRef.current !== event.payload.requestId) return;
         pendingRequestRef.current = null;
+        setOverlayActive(false);
         void (async () => {
           try {
             await composer.appendAttachments([
@@ -58,9 +65,19 @@ export default function ScreenshotComposerButton({
         })();
       },
     );
+    const unlistenCancelledPromise = listen<OverlayCancelledPayload>(
+      "screenshot_overlay_cancelled",
+      (event) => {
+        if (disposed || pendingRequestRef.current !== event.payload.requestId) return;
+        pendingRequestRef.current = null;
+        setOverlayActive(false);
+        window.requestAnimationFrame(() => composer.textareaRef.current?.focus());
+      },
+    );
     return () => {
       disposed = true;
-      void unlistenPromise.then((unlisten) => unlisten());
+      void unlistenSavedPromise.then((unlisten) => unlisten());
+      void unlistenCancelledPromise.then((unlisten) => unlisten());
     };
   }, [composer, t]);
 
@@ -74,6 +91,7 @@ export default function ScreenshotComposerButton({
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     pendingRequestRef.current = requestId;
+    setOverlayActive(true);
     try {
       await openScreenshotOverlayCapture({
         requestId,
@@ -82,6 +100,7 @@ export default function ScreenshotComposerButton({
       });
     } catch (err) {
       pendingRequestRef.current = null;
+      setOverlayActive(false);
       composer.setComposerError(t("screenshot.capture_failed", { error: String(err) }));
     } finally {
       setCapturing(false);

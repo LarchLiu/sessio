@@ -33,7 +33,7 @@ import {
   ZAI,
 } from "@lobehub/icons";
 import { ArrowLeft, AtSign, Bot, Check, Circle, Download, Eye, EyeOff, Globe2, GripVertical, Hash, Info, Languages, Link2, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Server, Settings2, Shield, Sparkles, SquareKanban, Sun, Trash2, Workflow, X } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AppshotConfig, AstraConfig, AssistantInfo, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
+import type { Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AppshotConfig, AppshotPermissionStatus, AstraConfig, AssistantInfo, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
 import {
   createProcessTemplate,
   detectTelegramUserIds,
@@ -75,6 +75,7 @@ import SegmentedTabs from "../components/SegmentedTabs";
 import SwitchControl from "../components/SwitchControl";
 import Tooltip from "../components/Tooltip";
 import { AiGenerate2Icon, ChannelShare24RegularIcon, DiscordLogoIcon, LarkLogoIcon, QrCodeIcon, Robot3LineIcon, TelegramLogoIcon, TokenOutlineIcon, WechatLogoIcon } from "../components/IconifyIcon";
+import { appshotPermissionPresentation } from "../appshotPermissionPresentation";
 import { type Lang, useI18n } from "../i18n";
 import type { ThemeMode } from "../theme";
 import { formatVersionLabel, type UpdateState } from "../updater";
@@ -315,11 +316,7 @@ function GeneralSettings({
   const { t } = useI18n();
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
   const [appshotConfig, setAppshotConfig] = useState<AppshotConfig | null>(null);
-  const [appshotPermissionStatus, setAppshotPermissionStatus] = useState<null | {
-    screenshots: { granted: boolean; supported: boolean };
-    accessibility: { granted: boolean; supported: boolean };
-    canCapture: boolean;
-  }>(null);
+  const [appshotPermissionStatus, setAppshotPermissionStatus] = useState<AppshotPermissionStatus | null>(null);
   const [proxyEnabled, setProxyEnabled] = useState(false);
   const [proxyUrl, setProxyUrl] = useState("");
   const [noProxy, setNoProxy] = useState("");
@@ -354,6 +351,8 @@ function GeneralSettings({
           if (disposed) return;
           setAppshotPermissionStatus((current) => {
             if (
+              current?.platform === status.platform &&
+              current?.requiresPermission === status.requiresPermission &&
               current?.canCapture === status.canCapture &&
               current?.screenshots.granted === status.screenshots.granted &&
               current?.screenshots.supported === status.screenshots.supported &&
@@ -433,6 +432,7 @@ function GeneralSettings({
   const appshotChanged = appshotConfig
     ? appshotShortcut.trim() !== appshotConfig.shortcut
     : false;
+  const appshotPermission = appshotPermissionPresentation(appshotPermissionStatus);
   return (
     <section className="min-w-0 max-w-full">
       <SettingsGroup title={t("settings.appearance")} flush>
@@ -477,38 +477,37 @@ function GeneralSettings({
         <SettingsRow
           icon={<Shield className="h-4 w-4" />}
           label={t("settings.appshot_permissions")}
-          description={
-            appshotPermissionStatus?.canCapture
-              ? t("settings.appshot_permissions_ready")
-              : t("settings.appshot_permissions_needed")
-          }
+          description={t(appshotPermission.descriptionKey)}
         >
           <div className="flex items-center justify-end gap-2">
-            <div className="flex items-center gap-2 text-caption text-ink/50">
-              <span className={appshotPermissionStatus?.screenshots.granted ? "text-emerald" : "text-amber"}>
-                {t(
-                  appshotPermissionStatus?.screenshots.granted
-                    ? "settings.appshot_screenshots_granted"
-                    : "settings.appshot_screenshots_missing",
+            {appshotPermission.requiresPermission ? (
+              <>
+                <div className="flex items-center gap-2 text-caption text-ink/50">
+                  <span className={appshotPermissionStatus?.screenshots.granted ? "text-emerald" : "text-amber"}>
+                    {t(appshotPermission.statusKey)}
+                  </span>
+                  <span className="text-ink/24">·</span>
+                  <span className={appshotPermissionStatus?.accessibility.granted ? "text-emerald" : "text-ink/42"}>
+                    {appshotPermission.accessibilityKey ? t(appshotPermission.accessibilityKey) : null}
+                  </span>
+                </div>
+                {appshotPermission.showManageButton && (
+                  <button
+                    type="button"
+                    onClick={() => void openAppshotPermissions()}
+                    className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]"
+                  >
+                    <Shield className="h-4 w-4" />
+                    {t("settings.appshot_manage_permissions")}
+                  </button>
                 )}
-              </span>
-              <span className="text-ink/24">·</span>
-              <span className={appshotPermissionStatus?.accessibility.granted ? "text-emerald" : "text-ink/42"}>
-                {t(
-                  appshotPermissionStatus?.accessibility.granted
-                    ? "settings.appshot_accessibility_granted"
-                    : "settings.appshot_accessibility_optional",
-                )}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => void openAppshotPermissions()}
-              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]"
-            >
-              <Shield className="h-4 w-4" />
-              {t("settings.appshot_manage_permissions")}
-            </button>
+              </>
+            ) : (
+              <div className="flex items-center gap-1.5 text-caption font-medium text-emerald">
+                <Check className="h-4 w-4" />
+                {t(appshotPermission.statusKey)}
+              </div>
+            )}
           </div>
         </SettingsRow>
       </SettingsGroup>
