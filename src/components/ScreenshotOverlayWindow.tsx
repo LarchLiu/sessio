@@ -1,0 +1,731 @@
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
+import { emit } from "@tauri-apps/api/event";
+import {
+  Check,
+  LoaderCircle,
+  Minus,
+  Save,
+  Square,
+  Undo2,
+  X,
+} from "lucide-react";
+import {
+  finishScreenshotOverlay,
+  getScreenshotOverlaySource,
+  readLocalImageDataUrl,
+  savePastedAttachment,
+  type ScreenshotOverlayWindowCandidate,
+  type ScreenshotOverlaySource,
+} from "../api";
+import { useI18n } from "../i18n";
+
+type EditorTool = "rect" | "line" | "mosaic";
+
+type Point = {
+  x: number;
+  y: number;
+};
+
+type Annotation = {
+  id: number;
+  tool: EditorTool;
+  start: Point;
+  end: Point;
+};
+
+type OverlaySavedPayload = {
+  requestId: string;
+  path: string;
+  previewDataUrl: string;
+};
+
+export default function ScreenshotOverlayWindow() {
+  const { t } = useI18n();
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const [source, setSource] = useState<ScreenshotOverlaySource | null>(null);
+  const [imageReady, setImageReady] = useState(false);
+  const [selection, setSelection] = useState<Annotation | null>(null);
+  const [selectionDraft, setSelectionDraft] = useState<Annotation | null>(null);
+  const [hoverWindow, setHoverWindow] = useState<ScreenshotOverlayWindowCandidate | null>(null);
+  const [tool, setTool] = useState<EditorTool>("rect");
+  const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [annotationDraft, setAnnotationDraft] = useState<Annotation | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const pointerStartRef = useRef<{
+    point: Point;
+    window: ScreenshotOverlayWindowCandidate | null;
+  } | null>(null);
+
+  useEffect(() => {
+    document.documentElement.style.background = "#000";
+    document.body.style.background = "#000";
+    let disposed = false;
+    getScreenshotOverlaySource()
+      .then(async (overlaySource) => {
+        if (disposed) return;
+        setSource(overlaySource);
+        const dataUrl = await readLocalImageDataUrl(overlaySource.sourcePath);
+        if (disposed) return;
+        const image = new Image();
+        image.onload = () => {
+          if (disposed) return;
+          imageRef.current = image;
+          setImageReady(true);
+        };
+        image.onerror = () => {
+          if (disposed) return;
+          setError(t("screenshot.capture_failed", { error: "Could not load screenshot" }));
+        };
+        image.src = dataUrl;
+      })
+      .catch((err) => setError(String(err)));
+    return () => {
+      disposed = true;
+    };
+  }, [t]);
+
+  const redraw = useCallback(() => {
+    redrawOverlayCanvas(
+      canvasRef.current,
+      imageRef.current,
+      selectionDraft ?? selection,
+      selection || selectionDraft ? null : hoverWindow,
+      annotations,
+      annotationDraft,
+    );
+  }, [annotationDraft, annotations, hoverWindow, selection, selectionDraft]);
+
+  useEffect(() => {
+    if (!imageReady) return;
+    const resize = () => redraw();
+    resize();
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, [imageReady, redraw]);
+
+  useEffect(() => {
+    redraw();
+  }, [redraw]);
+
+  const cancel = useCallback(() => {
+    void finishScreenshotOverlay(true);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancel();
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        setAnnotations((items) => items.slice(0, -1));
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [cancel]);
+
+  const imagePoint = (event: ReactPointerEvent<HTMLCanvasElement>): Point | null => {
+    const canvas = canvasRef.current;
+    const image = imageRef.current;
+    if (!canvas || !image) return null;
+    const rect = canvas.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * image.naturalWidth;
+    const y = ((event.clientY - rect.top) / rect.height) * image.naturalHeight;
+    return {
+      x: clamp(x, 0, image.naturalWidth),
+      y: clamp(y, 0, image.naturalHeight),
+    };
+  };
+
+  const pointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!imageReady) return;
+    const point = imagePoint(event);
+    if (!point) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const hitWindow = source ? windowCandidateAtPoint(source.windows, point) : null;
+    pointerStartRef.current = { point, window: hitWindow };
+    if (selection && pointInRect(point, normalizedRect(selection))) {
+      setAnnotationDraft({ id: Date.now(), tool, start: point, end: point });
+      return;
+    }
+    if (hitWindow) {
+      setSelection(null);
+      setSelectionDraft(null);
+      setAnnotations([]);
+      setAnnotationDraft(null);
+      setHoverWindow(hitWindow);
+      return;
+    }
+    setSelection(null);
+    setAnnotations([]);
+    setAnnotationDraft(null);
+    setSelectionDraft({ id: Date.now(), tool: "rect", start: point, end: point });
+  };
+
+  const pointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const point = imagePoint(event);
+    if (!point) return;
+    if (annotationDraft) {
+      setAnnotationDraft({ ...annotationDraft, end: point });
+      return;
+    }
+    const pointerStart = pointerStartRef.current;
+    if (pointerStart?.window && distance(pointerStart.point, point) > 6) {
+      setHoverWindow(null);
+      setSelectionDraft({ id: Date.now(), tool: "rect", start: pointerStart.point, end: point });
+      pointerStartRef.current = { point: pointerStart.point, window: null };
+      return;
+    }
+    if (selectionDraft) {
+      setSelectionDraft({ ...selectionDraft, end: point });
+      return;
+    }
+    if (!selection && source) {
+      setHoverWindow(windowCandidateAtPoint(source.windows, point));
+    }
+  };
+
+  const pointerUp = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const point = imagePoint(event);
+    if (annotationDraft) {
+      const next = { ...annotationDraft, end: point ?? annotationDraft.end };
+      if (annotationLength(next) > 4) {
+        setAnnotations((items) => [...items, next]);
+      }
+      setAnnotationDraft(null);
+      pointerStartRef.current = null;
+      return;
+    }
+    if (selectionDraft) {
+      const next = { ...selectionDraft, end: point ?? selectionDraft.end };
+      if (annotationLength(next) > 8) {
+        setSelection(next);
+      }
+      setSelectionDraft(null);
+      pointerStartRef.current = null;
+      return;
+    }
+    const pointerStart = pointerStartRef.current;
+    if (pointerStart?.window && point && distance(pointerStart.point, point) <= 6) {
+      setSelection(windowCandidateToAnnotation(pointerStart.window));
+      setHoverWindow(null);
+      pointerStartRef.current = null;
+      return;
+    }
+    pointerStartRef.current = null;
+  };
+
+  const save = async () => {
+    if (!source || !imageRef.current || saving) return;
+    setSaving(true);
+    try {
+      const output = renderFinalScreenshot(imageRef.current, selection, annotations);
+      const dataUrl = output.toDataURL("image/png");
+      const saved = await savePastedAttachment({
+        fileName: source.fileName || "Screenshot.png",
+        mimeType: "image/png",
+        dataBase64: dataUrlToBase64(dataUrl),
+      });
+      await emit<OverlaySavedPayload>("screenshot_overlay_saved", {
+        requestId: source.requestId,
+        path: saved.path,
+        previewDataUrl: dataUrl,
+      });
+      await finishScreenshotOverlay(true);
+    } catch (err) {
+      setError(t("screenshot.capture_failed", { error: String(err) }));
+      setSaving(false);
+    }
+  };
+
+  const activeSelection = selectionDraft ?? selection;
+  const toolbarRect = activeSelection
+    ? imageRectToViewportRect(normalizedRect(activeSelection), imageRef.current)
+    : null;
+
+  return (
+    <div className="fixed inset-0 cursor-crosshair overflow-hidden bg-black text-white">
+      <canvas
+        ref={canvasRef}
+        onPointerDown={pointerDown}
+        onPointerMove={pointerMove}
+        onPointerUp={pointerUp}
+        onPointerCancel={() => {
+          setSelectionDraft(null);
+          setAnnotationDraft(null);
+        }}
+        className="block h-screen w-screen"
+      />
+      {!imageReady && !error && (
+        <div className="pointer-events-none fixed inset-0 flex items-center justify-center bg-black">
+          <LoaderCircle className="h-6 w-6 animate-spin text-white/70" />
+        </div>
+      )}
+      {toolbarRect && (
+        <ScreenshotOverlayToolbar
+          rect={toolbarRect}
+          tool={tool}
+          saving={saving}
+          canUndo={annotations.length > 0}
+          labels={{
+            rect: t("screenshot.tool_rect"),
+            line: t("screenshot.tool_line"),
+            mosaic: t("screenshot.tool_mosaic"),
+            undo: t("screenshot.undo"),
+            cancel: t("screenshot.cancel"),
+            save: t("screenshot.save"),
+          }}
+          onToolChange={setTool}
+          onUndo={() => setAnnotations((items) => items.slice(0, -1))}
+          onCancel={cancel}
+          onSave={() => void save()}
+        />
+      )}
+      {error && (
+        <div className="fixed left-1/2 top-1/2 max-w-[520px] -translate-x-1/2 -translate-y-1/2 rounded-lg bg-white px-4 py-3 text-sm text-neutral-900 shadow-2xl">
+          {error}
+          <button
+            type="button"
+            onClick={cancel}
+            className="ml-3 rounded-md bg-neutral-900 px-2.5 py-1 text-white"
+          >
+            {t("screenshot.cancel")}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScreenshotOverlayToolbar({
+  rect,
+  tool,
+  saving,
+  canUndo,
+  labels,
+  onToolChange,
+  onUndo,
+  onCancel,
+  onSave,
+}: {
+  rect: { left: number; top: number; width: number; height: number };
+  tool: EditorTool;
+  saving: boolean;
+  canUndo: boolean;
+  labels: Record<"rect" | "line" | "mosaic" | "undo" | "cancel" | "save", string>;
+  onToolChange: (tool: EditorTool) => void;
+  onUndo: () => void;
+  onCancel: () => void;
+  onSave: () => void;
+}) {
+  const width = 330;
+  const left = clamp(rect.left + rect.width / 2 - width / 2, 12, window.innerWidth - width - 12);
+  const top = rect.top + rect.height + 12 > window.innerHeight - 62
+    ? Math.max(12, rect.top - 58)
+    : rect.top + rect.height + 12;
+  return (
+    <div
+      className="fixed z-10 flex h-12 items-center gap-1 rounded-lg border border-black/10 bg-white px-3 text-neutral-900 shadow-[0_10px_28px_rgba(0,0,0,0.28)]"
+      style={{ left, top, width }}
+    >
+      <ToolbarIconButton active={tool === "rect"} label={labels.rect} onClick={() => onToolChange("rect")}>
+        <Square className="h-5 w-5" />
+      </ToolbarIconButton>
+      <ToolbarIconButton active={tool === "line"} label={labels.line} onClick={() => onToolChange("line")}>
+        <Minus className="h-5 w-5" />
+      </ToolbarIconButton>
+      <ToolbarIconButton active={tool === "mosaic"} label={labels.mosaic} onClick={() => onToolChange("mosaic")}>
+        <Square className="h-5 w-5 fill-current opacity-70" />
+      </ToolbarIconButton>
+      <div className="mx-1 h-5 w-px bg-neutral-200" />
+      <ToolbarIconButton disabled={!canUndo} label={labels.undo} onClick={onUndo}>
+        <Undo2 className="h-5 w-5" />
+      </ToolbarIconButton>
+      <ToolbarIconButton disabled={saving} label={labels.save} onClick={onSave}>
+        {saving ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Save className="h-5 w-5" />}
+      </ToolbarIconButton>
+      <div className="ml-auto flex items-center gap-1">
+        <ToolbarIconButton disabled={saving} label={labels.cancel} tone="danger" onClick={onCancel}>
+          <X className="h-5 w-5" />
+        </ToolbarIconButton>
+        <ToolbarIconButton disabled={saving} label={labels.save} tone="ok" onClick={onSave}>
+          <Check className="h-5 w-5" />
+        </ToolbarIconButton>
+      </div>
+    </div>
+  );
+}
+
+function ToolbarIconButton({
+  active = false,
+  disabled = false,
+  tone = "default",
+  label,
+  children,
+  onClick,
+}: {
+  active?: boolean;
+  disabled?: boolean;
+  tone?: "default" | "danger" | "ok";
+  label: string;
+  children: ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      disabled={disabled}
+      onClick={onClick}
+      className={
+        "flex h-8 w-8 items-center justify-center rounded-md transition disabled:cursor-not-allowed disabled:opacity-30 " +
+        (active
+          ? "bg-emerald text-white"
+          : tone === "danger"
+            ? "text-red-500 hover:bg-red-50"
+            : tone === "ok"
+              ? "text-emerald hover:bg-emerald/10"
+              : "text-neutral-800 hover:bg-neutral-100")
+      }
+    >
+      {children}
+    </button>
+  );
+}
+
+function redrawOverlayCanvas(
+  canvas: HTMLCanvasElement | null,
+  image: HTMLImageElement | null,
+  selection: Annotation | null,
+  hoverWindow: ScreenshotOverlayWindowCandidate | null,
+  annotations: Annotation[],
+  draft: Annotation | null,
+) {
+  if (!canvas || !image) return;
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.round(window.innerWidth * dpr));
+  const height = Math.max(1, Math.round(window.innerHeight * dpr));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  canvas.style.width = `${window.innerWidth}px`;
+  canvas.style.height = `${window.innerHeight}px`;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+  ctx.drawImage(image, 0, 0, window.innerWidth, window.innerHeight);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+  if (!selection && hoverWindow) {
+    const sourceRect = windowCandidateRect(hoverWindow);
+    const viewportRect = imageRectToViewportRect(sourceRect, image);
+    drawUnmaskedImageRect(ctx, image, sourceRect, viewportRect);
+    drawSelectionFrame(ctx, viewportRect, true);
+    return;
+  }
+  if (!selection) return;
+  const viewportRect = imageRectToViewportRect(normalizedRect(selection), image);
+  const sourceRect = normalizedRect(selection);
+  drawUnmaskedImageRect(ctx, image, sourceRect, viewportRect);
+  drawAnnotations(ctx, image, annotations, draft);
+  drawSelectionFrame(ctx, viewportRect, false);
+}
+
+function drawUnmaskedImageRect(
+  ctx: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  sourceRect: { x: number; y: number; width: number; height: number },
+  viewportRect: { left: number; top: number; width: number; height: number },
+) {
+  ctx.drawImage(
+    image,
+    sourceRect.x,
+    sourceRect.y,
+    sourceRect.width,
+    sourceRect.height,
+    viewportRect.left,
+    viewportRect.top,
+    viewportRect.width,
+    viewportRect.height,
+  );
+}
+
+function drawSelectionFrame(
+  ctx: CanvasRenderingContext2D,
+  rect: { left: number; top: number; width: number; height: number },
+  hover: boolean,
+) {
+  ctx.save();
+  ctx.strokeStyle = hover ? "rgba(16, 209, 122, 0.78)" : "#10d17a";
+  ctx.lineWidth = hover ? 2 : 3;
+  if (hover) ctx.setLineDash([10, 7]);
+  ctx.strokeRect(rect.left, rect.top, rect.width, rect.height);
+  if (hover) {
+    ctx.restore();
+    return;
+  }
+  ctx.fillStyle = "#10d17a";
+  const handles = [
+    [rect.left, rect.top],
+    [rect.left + rect.width / 2, rect.top],
+    [rect.left + rect.width, rect.top],
+    [rect.left, rect.top + rect.height / 2],
+    [rect.left + rect.width, rect.top + rect.height / 2],
+    [rect.left, rect.top + rect.height],
+    [rect.left + rect.width / 2, rect.top + rect.height],
+    [rect.left + rect.width, rect.top + rect.height],
+  ];
+  for (const [x, y] of handles) {
+    ctx.fillRect(x - 4, y - 4, 8, 8);
+  }
+  ctx.restore();
+}
+
+function drawAnnotations(
+  ctx: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  annotations: Annotation[],
+  draft: Annotation | null,
+) {
+  for (const annotation of annotations) drawAnnotation(ctx, image, annotation, false);
+  if (draft) drawAnnotation(ctx, image, draft, true);
+}
+
+function drawAnnotation(
+  ctx: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  annotation: Annotation,
+  draft: boolean,
+) {
+  const start = imagePointToViewportPoint(annotation.start, image);
+  const end = imagePointToViewportPoint(annotation.end, image);
+  const x = Math.min(start.x, end.x);
+  const y = Math.min(start.y, end.y);
+  const width = Math.abs(end.x - start.x);
+  const height = Math.abs(end.y - start.y);
+  ctx.save();
+  if (annotation.tool === "mosaic") {
+    if (width >= 2 && height >= 2) {
+      drawViewportMosaic(ctx, x, y, width, height);
+    }
+    ctx.restore();
+    return;
+  }
+  ctx.strokeStyle = "#10d17a";
+  ctx.lineWidth = 3;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (draft) ctx.setLineDash([9, 6]);
+  if (annotation.tool === "rect") {
+    ctx.strokeRect(x, y, width, height);
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawViewportMosaic(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+) {
+  const block = Math.max(8, Math.round(Math.max(width, height) / 20));
+  const smallWidth = Math.max(1, Math.ceil(width / block));
+  const smallHeight = Math.max(1, Math.ceil(height / block));
+  const tmp = document.createElement("canvas");
+  tmp.width = smallWidth;
+  tmp.height = smallHeight;
+  const tmpCtx = tmp.getContext("2d");
+  if (!tmpCtx) return;
+  tmpCtx.drawImage(ctx.canvas, x, y, width, height, 0, 0, smallWidth, smallHeight);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(tmp, 0, 0, smallWidth, smallHeight, x, y, width, height);
+  ctx.imageSmoothingEnabled = true;
+}
+
+function renderFinalScreenshot(
+  image: HTMLImageElement,
+  selection: Annotation | null,
+  annotations: Annotation[],
+) {
+  const crop = selection
+    ? normalizedRect(selection)
+    : { x: 0, y: 0, width: image.naturalWidth, height: image.naturalHeight };
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(crop.width));
+  canvas.height = Math.max(1, Math.round(crop.height));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+  ctx.drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height);
+  for (const annotation of annotations) {
+    drawFinalAnnotation(ctx, annotation, crop);
+  }
+  return canvas;
+}
+
+function drawFinalAnnotation(
+  ctx: CanvasRenderingContext2D,
+  annotation: Annotation,
+  crop: { x: number; y: number; width: number; height: number },
+) {
+  const translated: Annotation = {
+    ...annotation,
+    start: { x: annotation.start.x - crop.x, y: annotation.start.y - crop.y },
+    end: { x: annotation.end.x - crop.x, y: annotation.end.y - crop.y },
+  };
+  const { x, y, width, height } = normalizedRect(translated);
+  ctx.save();
+  if (translated.tool === "mosaic") {
+    drawFinalMosaic(ctx, x, y, width, height);
+    ctx.restore();
+    return;
+  }
+  ctx.strokeStyle = "#10d17a";
+  ctx.lineWidth = Math.max(3, Math.round(ctx.canvas.width / 360));
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (translated.tool === "rect") {
+    ctx.strokeRect(x, y, width, height);
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(translated.start.x, translated.start.y);
+    ctx.lineTo(translated.end.x, translated.end.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawFinalMosaic(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+) {
+  if (width < 2 || height < 2) return;
+  const block = Math.max(8, Math.round(Math.max(width, height) / 24));
+  const smallWidth = Math.max(1, Math.ceil(width / block));
+  const smallHeight = Math.max(1, Math.ceil(height / block));
+  const tmp = document.createElement("canvas");
+  tmp.width = smallWidth;
+  tmp.height = smallHeight;
+  const tmpCtx = tmp.getContext("2d");
+  if (!tmpCtx) return;
+  tmpCtx.drawImage(ctx.canvas, x, y, width, height, 0, 0, smallWidth, smallHeight);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(tmp, 0, 0, smallWidth, smallHeight, x, y, width, height);
+  ctx.imageSmoothingEnabled = true;
+}
+
+function imagePointToViewportPoint(point: Point, image: HTMLImageElement): Point {
+  return {
+    x: (point.x / image.naturalWidth) * window.innerWidth,
+    y: (point.y / image.naturalHeight) * window.innerHeight,
+  };
+}
+
+function imageRectToViewportRect(
+  rect: { x: number; y: number; width: number; height: number },
+  image: HTMLImageElement | null,
+) {
+  if (!image) return { left: 0, top: 0, width: 0, height: 0 };
+  const topLeft = imagePointToViewportPoint({ x: rect.x, y: rect.y }, image);
+  const bottomRight = imagePointToViewportPoint(
+    { x: rect.x + rect.width, y: rect.y + rect.height },
+    image,
+  );
+  return {
+    left: topLeft.x,
+    top: topLeft.y,
+    width: bottomRight.x - topLeft.x,
+    height: bottomRight.y - topLeft.y,
+  };
+}
+
+function windowCandidateAtPoint(
+  windows: ScreenshotOverlayWindowCandidate[],
+  point: Point,
+): ScreenshotOverlayWindowCandidate | null {
+  return (
+    windows.find((candidate) => pointInRect(point, windowCandidateRect(candidate))) ?? null
+  );
+}
+
+function windowCandidateToAnnotation(candidate: ScreenshotOverlayWindowCandidate): Annotation {
+  return {
+    id: candidate.id,
+    tool: "rect",
+    start: { x: candidate.x, y: candidate.y },
+    end: { x: candidate.x + candidate.width, y: candidate.y + candidate.height },
+  };
+}
+
+function windowCandidateRect(candidate: ScreenshotOverlayWindowCandidate) {
+  return {
+    x: candidate.x,
+    y: candidate.y,
+    width: candidate.width,
+    height: candidate.height,
+  };
+}
+
+function normalizedRect(annotation: Annotation) {
+  const x = Math.min(annotation.start.x, annotation.end.x);
+  const y = Math.min(annotation.start.y, annotation.end.y);
+  return {
+    x,
+    y,
+    width: Math.abs(annotation.end.x - annotation.start.x),
+    height: Math.abs(annotation.end.y - annotation.start.y),
+  };
+}
+
+function pointInRect(point: Point, rect: { x: number; y: number; width: number; height: number }) {
+  return (
+    point.x >= rect.x &&
+    point.x <= rect.x + rect.width &&
+    point.y >= rect.y &&
+    point.y <= rect.y + rect.height
+  );
+}
+
+function annotationLength(annotation: Annotation): number {
+  return distance(annotation.start, annotation.end);
+}
+
+function distance(a: Point, b: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function dataUrlToBase64(dataUrl: string): string {
+  const marker = ";base64,";
+  const index = dataUrl.indexOf(marker);
+  return index >= 0 ? dataUrl.slice(index + marker.length) : dataUrl;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}

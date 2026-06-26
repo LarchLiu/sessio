@@ -1166,6 +1166,38 @@ export interface CaptureWindowAreaRequest {
   height: number;
 }
 
+export interface ScreenshotCaptureRequest {
+  fileName?: string;
+  hideSelf?: boolean;
+}
+
+export interface ScreenshotOverlayCaptureRequest {
+  requestId: string;
+  fileName?: string;
+  hideSelf?: boolean;
+}
+
+export interface ScreenshotOverlayWindow {
+  label: string;
+}
+
+export interface ScreenshotOverlaySource {
+  requestId: string;
+  sourcePath: string;
+  fileName: string;
+  windows: ScreenshotOverlayWindowCandidate[];
+}
+
+export interface ScreenshotOverlayWindowCandidate {
+  id: number;
+  appName: string;
+  title?: string | null;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface AgentInput {
   text: string;
   attachments?: AgentAttachment[];
@@ -2327,6 +2359,38 @@ export async function captureWindowAreaPng(
   req: CaptureWindowAreaRequest,
 ): Promise<SavedPastedAttachment> {
   return invoke<SavedPastedAttachment>("capture_window_area_png", { req });
+}
+
+export async function captureFrontmostAppWindowPng(
+  req: ScreenshotCaptureRequest,
+): Promise<SavedPastedAttachment> {
+  return invoke<SavedPastedAttachment>("capture_frontmost_app_window_png", { req });
+}
+
+export async function captureSelectedScreenAreaPng(
+  req: ScreenshotCaptureRequest,
+): Promise<SavedPastedAttachment> {
+  return invoke<SavedPastedAttachment>("capture_selected_screen_area_png", { req });
+}
+
+export async function captureInteractiveScreenPng(
+  req: ScreenshotCaptureRequest,
+): Promise<SavedPastedAttachment> {
+  return invoke<SavedPastedAttachment>("capture_interactive_screen_png", { req });
+}
+
+export async function openScreenshotOverlayCapture(
+  req: ScreenshotOverlayCaptureRequest,
+): Promise<ScreenshotOverlayWindow> {
+  return invoke<ScreenshotOverlayWindow>("open_screenshot_overlay_capture", { req });
+}
+
+export async function getScreenshotOverlaySource(): Promise<ScreenshotOverlaySource> {
+  return invoke<ScreenshotOverlaySource>("get_screenshot_overlay_source");
+}
+
+export async function finishScreenshotOverlay(revealMain: boolean): Promise<void> {
+  return invoke<void>("finish_screenshot_overlay", { revealMain });
 }
 
 export async function readLocalTextFile(path: string): Promise<string> {

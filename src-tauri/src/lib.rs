@@ -67,7 +67,8 @@ use tauri::RunEvent;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent,
+    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    WindowEvent,
 };
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -118,6 +119,38 @@ struct AppshotPermissionRequiredPayload {
 #[derive(Default)]
 struct AppshotShortcutState {
     registered_shortcut: Mutex<Option<String>>,
+}
+
+#[derive(Default)]
+struct ScreenshotOverlayState {
+    sources: Mutex<HashMap<String, ScreenshotOverlaySourceDto>>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScreenshotOverlayWindowDto {
+    label: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScreenshotOverlaySourceDto {
+    request_id: String,
+    source_path: String,
+    file_name: String,
+    windows: Vec<ScreenshotOverlayWindowCandidateDto>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScreenshotOverlayWindowCandidateDto {
+    id: u32,
+    app_name: String,
+    title: Option<String>,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -236,6 +269,21 @@ struct CaptureWindowAreaRequest {
     y: f64,
     width: f64,
     height: f64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScreenshotCaptureRequest {
+    file_name: Option<String>,
+    hide_self: Option<bool>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScreenshotOverlayCaptureRequest {
+    request_id: String,
+    file_name: Option<String>,
+    hide_self: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -3362,6 +3410,496 @@ fn capture_frontmost_window_png(
     })
 }
 
+#[cfg(target_os = "macos")]
+fn ensure_appshot_can_capture(app: &AppHandle) -> Result<(), String> {
+    let permissions = appshot_permission_status();
+    if permissions.can_capture {
+        return Ok(());
+    }
+    if let Err(error) = appshot_permission_panel::show(app.clone()) {
+        log::warn!("[appshot] failed to show permission panel from manual screenshot: {error}");
+    }
+    let _ = emit_appshot_permission_required(
+        app,
+        AppshotPermissionRequiredPayload {
+            shortcut: "manual".to_string(),
+            status: permissions,
+        },
+    );
+    Err("Appshot needs screen capture permission before it can capture other apps".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn with_optional_hidden_main_window<F>(
+    app: &AppHandle,
+    hide_self: bool,
+    capture: F,
+) -> Result<SavedPastedAttachment, String>
+where
+    F: FnOnce() -> Result<SavedPastedAttachment, String>,
+{
+    let was_visible = app
+        .get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false);
+    if hide_self {
+        if let Some(window) = app.get_webview_window("main") {
+            hide_main_window(window);
+            thread::sleep(Duration::from_millis(260));
+        }
+    }
+
+    let result = capture();
+    if hide_self && was_visible {
+        show_main_window(app);
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn capture_selected_screen_area_png_impl(
+    file_name: Option<String>,
+) -> Result<SavedPastedAttachment, String> {
+    let file_name = safe_pasted_attachment_file_name(file_name.as_deref(), Some("image/png"));
+    let dir = paste_cache_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!(
+        "screen-selection-{}-{file_name}",
+        chrono::Utc::now().timestamp_millis()
+    ));
+
+    let status = std::process::Command::new("screencapture")
+        .arg("-i")
+        .arg("-s")
+        .arg("-x")
+        .arg("-t")
+        .arg("png")
+        .arg(&path)
+        .status()
+        .map_err(|e| format!("Failed to start selected area capture: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&path);
+        return Err("Screenshot selection was cancelled".to_string());
+    }
+
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    if meta.len() == 0 {
+        let _ = std::fs::remove_file(&path);
+        return Err("Selected area capture produced an empty PNG".to_string());
+    }
+
+    Ok(SavedPastedAttachment {
+        path: path.to_string_lossy().to_string(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn capture_interactive_screen_png_impl(
+    file_name: Option<String>,
+) -> Result<SavedPastedAttachment, String> {
+    let file_name = safe_pasted_attachment_file_name(file_name.as_deref(), Some("image/png"));
+    let dir = paste_cache_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!(
+        "screen-interactive-{}-{file_name}",
+        chrono::Utc::now().timestamp_millis()
+    ));
+
+    let status = std::process::Command::new("screencapture")
+        .arg("-i")
+        .arg("-x")
+        .arg("-t")
+        .arg("png")
+        .arg(&path)
+        .status()
+        .map_err(|e| format!("Failed to start interactive screenshot: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&path);
+        return Err("Screenshot selection was cancelled".to_string());
+    }
+
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    if meta.len() == 0 {
+        let _ = std::fs::remove_file(&path);
+        return Err("Interactive screenshot produced an empty PNG".to_string());
+    }
+
+    Ok(SavedPastedAttachment {
+        path: path.to_string_lossy().to_string(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn capture_frontmost_app_window_png(
+    app: AppHandle,
+    req: ScreenshotCaptureRequest,
+) -> Result<SavedPastedAttachment, String> {
+    ensure_appshot_can_capture(&app)?;
+    with_optional_hidden_main_window(&app, req.hide_self.unwrap_or(false), || {
+        capture_frontmost_window_png(&app, req.file_name)
+    })
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn capture_selected_screen_area_png(
+    app: AppHandle,
+    req: ScreenshotCaptureRequest,
+) -> Result<SavedPastedAttachment, String> {
+    ensure_appshot_can_capture(&app)?;
+    with_optional_hidden_main_window(&app, req.hide_self.unwrap_or(false), || {
+        capture_selected_screen_area_png_impl(req.file_name)
+    })
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn capture_interactive_screen_png(
+    app: AppHandle,
+    req: ScreenshotCaptureRequest,
+) -> Result<SavedPastedAttachment, String> {
+    ensure_appshot_can_capture(&app)?;
+    with_optional_hidden_main_window(&app, req.hide_self.unwrap_or(false), || {
+        capture_interactive_screen_png_impl(req.file_name)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn capture_monitor_background_png(
+    monitor: &tauri::Monitor,
+    file_name: Option<&str>,
+) -> Result<SavedPastedAttachment, String> {
+    let file_name = safe_pasted_attachment_file_name(file_name, Some("image/png"));
+    let dir = paste_cache_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!(
+        "screen-overlay-{}-{file_name}",
+        chrono::Utc::now().timestamp_millis()
+    ));
+    let pos = monitor.position();
+    let size = monitor.size();
+    let rect = format!("{},{},{},{}", pos.x, pos.y, size.width, size.height);
+
+    let status = std::process::Command::new("screencapture")
+        .arg("-x")
+        .arg("-t")
+        .arg("png")
+        .arg(format!("-R{rect}"))
+        .arg(&path)
+        .status()
+        .map_err(|e| format!("Failed to start screenshot overlay capture: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("Screenshot overlay capture failed with status {status}"));
+    }
+
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    if meta.len() == 0 {
+        let _ = std::fs::remove_file(&path);
+        return Err("Screenshot overlay capture produced an empty PNG".to_string());
+    }
+
+    Ok(SavedPastedAttachment {
+        path: path.to_string_lossy().to_string(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn screenshot_overlay_window_candidates(
+    monitor: &tauri::Monitor,
+) -> Vec<ScreenshotOverlayWindowCandidateDto> {
+    use core::ffi::c_void;
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+    use core_graphics::display::CGDisplay;
+    use core_graphics::geometry::CGRect;
+    use core_graphics::window::{
+        kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
+        kCGWindowListOptionOnScreenOnly, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName,
+    };
+
+    fn dict_value(dict: &CFDictionary, key: *const c_void) -> Option<CFType> {
+        dict.find(key)
+            .map(|value| unsafe { CFType::wrap_under_get_rule(*value) })
+    }
+
+    fn dict_number_i64(dict: &CFDictionary, key: *const c_void) -> Option<i64> {
+        dict_value(dict, key)
+            .and_then(|value| value.downcast::<CFNumber>())
+            .and_then(|value| value.to_i64())
+    }
+
+    fn dict_number_f64(dict: &CFDictionary, key: *const c_void) -> Option<f64> {
+        dict_value(dict, key)
+            .and_then(|value| value.downcast::<CFNumber>())
+            .and_then(|value| value.to_f64())
+    }
+
+    fn dict_string(dict: &CFDictionary, key: *const c_void) -> Option<String> {
+        dict_value(dict, key)
+            .and_then(|value| value.downcast::<CFString>())
+            .map(|value| value.to_string())
+    }
+
+    let windows = match CGDisplay::window_list_info(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        None,
+    ) {
+        Some(windows) => windows,
+        None => return Vec::new(),
+    };
+    let key_window_number = unsafe { kCGWindowNumber as *const c_void };
+    let key_owner_name = unsafe { kCGWindowOwnerName as *const c_void };
+    let key_window_name = unsafe { kCGWindowName as *const c_void };
+    let key_window_layer = unsafe { kCGWindowLayer as *const c_void };
+    let key_window_alpha = unsafe { kCGWindowAlpha as *const c_void };
+    let key_window_bounds = unsafe { kCGWindowBounds as *const c_void };
+    let monitor_pos = monitor.position();
+    let monitor_size = monitor.size();
+    let monitor_x = f64::from(monitor_pos.x);
+    let monitor_y = f64::from(monitor_pos.y);
+    let monitor_width = f64::from(monitor_size.width);
+    let monitor_height = f64::from(monitor_size.height);
+    let mut candidates = Vec::new();
+
+    for value in &windows {
+        let cf_type = unsafe { CFType::wrap_under_get_rule(*value) };
+        let Some(dict) = cf_type.downcast::<CFDictionary>() else {
+            continue;
+        };
+        let layer = dict_number_i64(&dict, key_window_layer).unwrap_or_default();
+        if layer != 0 {
+            continue;
+        }
+        let alpha = dict_number_f64(&dict, key_window_alpha).unwrap_or(1.0);
+        if alpha <= 0.0 {
+            continue;
+        }
+        let Some(bounds_cf) = dict_value(&dict, key_window_bounds) else {
+            continue;
+        };
+        let Some(bounds_dict) = bounds_cf.downcast::<CFDictionary>() else {
+            continue;
+        };
+        let Some(bounds) = CGRect::from_dict_representation(&bounds_dict) else {
+            continue;
+        };
+        if bounds.is_empty() || bounds.size.width < 36.0 || bounds.size.height < 28.0 {
+            continue;
+        }
+        let x = bounds.origin.x - monitor_x;
+        let y = bounds.origin.y - monitor_y;
+        let right = x + bounds.size.width;
+        let bottom = y + bounds.size.height;
+        if right <= 0.0 || bottom <= 0.0 || x >= monitor_width || y >= monitor_height {
+            continue;
+        }
+        let Some(id) =
+            dict_number_i64(&dict, key_window_number).and_then(|value| u32::try_from(value).ok())
+        else {
+            continue;
+        };
+        let app_name = dict_string(&dict, key_owner_name).unwrap_or_else(|| "Window".to_string());
+        candidates.push(ScreenshotOverlayWindowCandidateDto {
+            id,
+            app_name,
+            title: dict_string(&dict, key_window_name),
+            x: clamp_f64(x, 0.0, monitor_width),
+            y: clamp_f64(y, 0.0, monitor_height),
+            width: clamp_f64(right, 0.0, monitor_width) - clamp_f64(x, 0.0, monitor_width),
+            height: clamp_f64(bottom, 0.0, monitor_height) - clamp_f64(y, 0.0, monitor_height),
+        });
+    }
+
+    candidates
+}
+
+#[cfg(target_os = "macos")]
+fn clamp_f64(value: f64, min: f64, max: f64) -> f64 {
+    value.max(min).min(max)
+}
+
+#[cfg(target_os = "macos")]
+fn hide_main_window_now(window: WebviewWindow) {
+    let _ = window.hide();
+    let _ = set_window_alpha(&window, 1.0);
+}
+
+#[cfg(target_os = "macos")]
+fn cleanup_screenshot_overlay(
+    app: &AppHandle,
+    label: &str,
+    reveal_main: bool,
+) {
+    if let Some(state) = app.try_state::<ScreenshotOverlayState>() {
+        if let Ok(mut sources) = state.sources.lock() {
+            sources.remove(label);
+        }
+    }
+    if reveal_main {
+        show_main_window(app);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn open_screenshot_overlay_capture(
+    app: AppHandle,
+    state: State<'_, ScreenshotOverlayState>,
+    req: ScreenshotOverlayCaptureRequest,
+) -> Result<ScreenshotOverlayWindowDto, String> {
+    ensure_appshot_can_capture(&app)?;
+    let main_window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Main window is not available".to_string())?;
+    let monitor = main_window
+        .current_monitor()
+        .map_err(|e| e.to_string())?
+        .or_else(|| app.primary_monitor().ok().flatten())
+        .ok_or_else(|| "Could not find a screen for screenshot overlay".to_string())?;
+
+    if req.hide_self.unwrap_or(false) {
+        hide_main_window_now(main_window);
+        thread::sleep(Duration::from_millis(90));
+    }
+
+    let windows = screenshot_overlay_window_candidates(&monitor);
+    let source = capture_monitor_background_png(&monitor, Some("Screenshot.png"))?;
+    let label = format!("screenshot-overlay-{}", chrono::Utc::now().timestamp_millis());
+    let file_name = safe_pasted_attachment_file_name(req.file_name.as_deref(), Some("image/png"));
+    {
+        let mut sources = state.sources.lock().map_err(|e| e.to_string())?;
+        sources.insert(
+            label.clone(),
+            ScreenshotOverlaySourceDto {
+                request_id: req.request_id,
+                source_path: source.path,
+                file_name,
+                windows,
+            },
+        );
+    }
+
+    let pos = monitor.position();
+    let size = monitor.size();
+    let scale = monitor.scale_factor();
+    let url = WebviewUrl::App("index.html?screenshotOverlay=1".into());
+    let overlay = WebviewWindowBuilder::new(&app, &label, url)
+        .title("Screenshot")
+        .decorations(false)
+        .shadow(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .position(pos.x as f64 / scale, pos.y as f64 / scale)
+        .inner_size(size.width as f64 / scale, size.height as f64 / scale)
+        .focused(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let cleanup_app = app.clone();
+    let cleanup_label = label.clone();
+    overlay.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Destroyed) {
+            cleanup_screenshot_overlay(&cleanup_app, &cleanup_label, true);
+        }
+    });
+    let _ = overlay.set_focus();
+
+    Ok(ScreenshotOverlayWindowDto { label })
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn get_screenshot_overlay_source(
+    window: WebviewWindow,
+    state: State<ScreenshotOverlayState>,
+) -> Result<ScreenshotOverlaySourceDto, String> {
+    let sources = state.sources.lock().map_err(|e| e.to_string())?;
+    sources
+        .get(window.label())
+        .cloned()
+        .ok_or_else(|| "Screenshot overlay source is not available".to_string())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn finish_screenshot_overlay(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<ScreenshotOverlayState>,
+    reveal_main: bool,
+) -> Result<(), String> {
+    {
+        let mut sources = state.sources.lock().map_err(|e| e.to_string())?;
+        sources.remove(window.label());
+    }
+    let close_result = window.close().map_err(|e| e.to_string());
+    if reveal_main {
+        show_main_window(&app);
+    }
+    close_result
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn capture_frontmost_app_window_png(
+    _app: AppHandle,
+    _req: ScreenshotCaptureRequest,
+) -> Result<SavedPastedAttachment, String> {
+    Err("Frontmost app screenshot is not implemented on this platform yet".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn capture_selected_screen_area_png(
+    _app: AppHandle,
+    _req: ScreenshotCaptureRequest,
+) -> Result<SavedPastedAttachment, String> {
+    Err("Selected area screenshot is not implemented on this platform yet".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn capture_interactive_screen_png(
+    _app: AppHandle,
+    _req: ScreenshotCaptureRequest,
+) -> Result<SavedPastedAttachment, String> {
+    Err("Interactive screenshot is not implemented on this platform yet".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn open_screenshot_overlay_capture(
+    _app: AppHandle,
+    _state: State<'_, ScreenshotOverlayState>,
+    _req: ScreenshotOverlayCaptureRequest,
+) -> Result<ScreenshotOverlayWindowDto, String> {
+    Err("Screenshot overlay editing is not implemented on this platform yet".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn get_screenshot_overlay_source(
+    _window: WebviewWindow,
+    _state: State<ScreenshotOverlayState>,
+) -> Result<ScreenshotOverlaySourceDto, String> {
+    Err("Screenshot overlay editing is not implemented on this platform yet".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn finish_screenshot_overlay(
+    _app: AppHandle,
+    _window: WebviewWindow,
+    _state: State<ScreenshotOverlayState>,
+    _reveal_main: bool,
+) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(not(target_os = "macos"))]
 fn appshot_permission_status() -> AppshotPermissionStatusDto {
     AppshotPermissionStatusDto {
@@ -3575,11 +4113,11 @@ mod appshot_permission_panel {
             fn dragging_session_ended_at_point_operation(
                 &self,
                 _session: &NSDraggingSession,
-                screen_point: NSPoint,
+                _screen_point: NSPoint,
                 _operation: NSDragOperation,
             ) {
                 self.ivars().drag_started.set(false);
-                if !_operation.is_empty() || point_is_inside_system_settings(screen_point) {
+                if !_operation.is_empty() {
                     finish_drag_guide_after_completed_drop();
                 }
             }
@@ -4067,33 +4605,12 @@ mod appshot_permission_panel {
         })
     }
 
-    fn ns_rect_contains_point(rect: NSRect, point: NSPoint) -> bool {
-        point.x >= rect.origin.x
-            && point.x <= rect.origin.x + rect.size.width
-            && point.y >= rect.origin.y
-            && point.y <= rect.origin.y + rect.size.height
-    }
-
-    fn point_is_inside_system_settings(point: NSPoint) -> bool {
-        system_settings_window_frame()
-            .map(|target| ns_rect_contains_point(target.frame, point))
-            .unwrap_or(false)
-    }
-
     fn drag_guide_origin_for_target(target: &TargetWindowFrame, panel_frame: NSRect) -> NSPoint {
         let margin = 18.0;
-        let min_x = target.frame.origin.x + margin;
-        let max_x =
-            target.frame.origin.x + target.frame.size.width - panel_frame.size.width - margin;
-        let centered_x =
-            target.frame.origin.x + ((target.frame.size.width - panel_frame.size.width) / 2.0);
-        let origin_x = if max_x >= min_x {
-            centered_x.max(min_x).min(max_x)
-        } else {
-            centered_x
-        };
-
-        NSPoint::new(origin_x, target.frame.origin.y + margin)
+        NSPoint::new(
+            target.frame.origin.x + target.frame.size.width - panel_frame.size.width - margin,
+            target.frame.origin.y + margin,
+        )
     }
 
     fn permission_card_tag(kind: AppshotPermissionKind) -> isize {
@@ -4823,7 +5340,8 @@ mod appshot_permission_panel {
 
     fn position_drag_guide_panel(panel: &NSPanel, mtm: MainThreadMarker) {
         let frame = panel.frame();
-        panel.setFrameOrigin(drag_guide_final_origin(frame, mtm));
+        let target_origin = drag_guide_final_origin(frame, mtm);
+        panel.setFrame_display_animate(NSRect::new(target_origin, frame.size), true, true);
     }
 
     fn show_panel(bundle_path: &Path) -> Result<(), String> {
@@ -7731,6 +8249,7 @@ pub fn run() {
             let store: Arc<dyn SessionStore> = Arc::new(CachedStore::new(inner)?);
             let app_config = config::load_config()?;
             app.manage(AppshotShortcutState::default());
+            app.manage(ScreenshotOverlayState::default());
             if let Err(error) = update_appshot_shortcut_registration(
                 &app.handle().clone(),
                 &app_config.appshot.shortcut,
@@ -7943,6 +8462,12 @@ pub fn run() {
             read_local_image_data_url,
             save_pasted_attachment,
             capture_window_area_png,
+            capture_frontmost_app_window_png,
+            capture_selected_screen_area_png,
+            capture_interactive_screen_png,
+            open_screenshot_overlay_capture,
+            get_screenshot_overlay_source,
+            finish_screenshot_overlay,
             read_local_text_file,
             read_workspace_text_file,
             write_workspace_text_file,

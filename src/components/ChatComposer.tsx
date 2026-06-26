@@ -20,6 +20,7 @@ import {
   ComposerAttachmentMenu,
 } from "./ComposerAttachments";
 import { RuntimeMenuSelect } from "./RuntimeMenuSelect";
+import ScreenshotComposerButton from "./ScreenshotComposerButton";
 import Tooltip from "./Tooltip";
 import {
   createImeCompositionState,
@@ -213,6 +214,12 @@ export default function ChatComposer({
                   <Plus className="h-5 w-5" />
                 </button>
               </Tooltip>
+            )}
+            {composer.supportsAttachments && composer.supportsImageAttachments && (
+              <ScreenshotComposerButton
+                composer={composer}
+                disabled={runtimeControlsDisabled}
+              />
             )}
             {composer.permissionOptions.length > 0 && (
               <RuntimeMenuSelect
