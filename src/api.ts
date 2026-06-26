@@ -2465,10 +2465,8 @@ export async function requestAppshotPermission(
   return invoke<AppshotPermissionStatus>("request_appshot_permission", { permission });
 }
 
-export async function openAppshotPermissionSettings(
-  permission: AppshotPermissionKind,
-): Promise<void> {
-  return invoke<void>("open_appshot_permission_settings", { permission });
+export async function openAppshotPermissionsPanel(): Promise<void> {
+  return invoke<void>("open_appshot_permissions_panel");
 }
 
 export async function updateAppshotConfig(config: AppshotConfig): Promise<AppshotConfig> {

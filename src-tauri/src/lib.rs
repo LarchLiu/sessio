@@ -19,11 +19,14 @@ pub mod watch;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 #[cfg(target_os = "macos")]
 use std::thread;
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 use std::time::Duration;
+use std::{
+    panic::{catch_unwind, AssertUnwindSafe},
+    sync::{Arc, Mutex},
+};
 
 use agents::runtime::metadata::{
     runtime_agents_from_db, startup_probe_runtime_agents, RuntimeAgentsCache,
@@ -128,7 +131,7 @@ struct RuntimeAgentSessionConfigDto {
     updated_at: i64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum AppshotPermissionKind {
     Screenshots,
     Accessibility,
@@ -159,10 +162,7 @@ fn emit_threads_updated(
     .map_err(|e| e.to_string())
 }
 
-fn emit_appshot_captured(
-    app: &AppHandle,
-    payload: AppshotCapturedPayload,
-) -> Result<(), String> {
+fn emit_appshot_captured(app: &AppHandle, payload: AppshotCapturedPayload) -> Result<(), String> {
     app.emit("appshot_captured", payload)
         .map_err(|e| e.to_string())
 }
@@ -3245,8 +3245,7 @@ fn capture_frontmost_window_png(
     };
     use objc2_app_kit::NSWorkspace;
 
-    let file_name =
-        safe_pasted_attachment_file_name(file_name.as_deref(), Some("image/png"));
+    let file_name = safe_pasted_attachment_file_name(file_name.as_deref(), Some("image/png"));
     let dir = paste_cache_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(format!(
@@ -3326,8 +3325,8 @@ fn capture_frontmost_window_png(
         if bounds.is_empty() || bounds.size.width < 2.0 || bounds.size.height < 2.0 {
             continue;
         }
-        let Some(window_id) = dict_number_i64(&dict, key_window_number)
-            .and_then(|value| u32::try_from(value).ok())
+        let Some(window_id) =
+            dict_number_i64(&dict, key_window_number).and_then(|value| u32::try_from(value).ok())
         else {
             continue;
         };
@@ -3400,7 +3399,9 @@ fn appshot_screenshots_permission_granted() -> bool {
 
 #[cfg(target_os = "macos")]
 fn appshot_request_screenshots_permission() -> bool {
-    core_graphics::access::ScreenCaptureAccess.request()
+    // Keep screenshots onboarding inside our native panel + drag guide flow
+    // instead of triggering the macOS prompt immediately.
+    core_graphics::access::ScreenCaptureAccess.preflight()
 }
 
 #[cfg(target_os = "macos")]
@@ -3408,8 +3409,8 @@ fn appshot_accessibility_permission_granted() -> bool {
     use core_foundation::base::TCFType;
     use core_foundation::boolean::CFBoolean;
     use core_foundation::dictionary::CFDictionary;
-    use core_foundation::string::CFString;
     use core_foundation::dictionary::CFDictionaryRef;
+    use core_foundation::string::CFString;
     use core_foundation::string::CFStringRef;
 
     #[link(name = "ApplicationServices", kind = "framework")]
@@ -3431,8 +3432,8 @@ fn appshot_request_accessibility_permission() -> bool {
     use core_foundation::base::TCFType;
     use core_foundation::boolean::CFBoolean;
     use core_foundation::dictionary::CFDictionary;
-    use core_foundation::string::CFString;
     use core_foundation::dictionary::CFDictionaryRef;
+    use core_foundation::string::CFString;
     use core_foundation::string::CFStringRef;
 
     #[link(name = "ApplicationServices", kind = "framework")]
@@ -3443,9 +3444,1564 @@ fn appshot_request_accessibility_permission() -> bool {
 
     unsafe {
         let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
-        let value = CFBoolean::true_value();
+        // Keep accessibility onboarding inside our native panel + drag guide flow
+        // instead of triggering the macOS prompt immediately.
+        let value = CFBoolean::false_value();
         let options = CFDictionary::from_CFType_pairs(&[(key, value)]);
         AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef())
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod appshot_permission_panel {
+    use std::{
+        cell::Cell,
+        path::{Path, PathBuf},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            OnceLock,
+        },
+        thread,
+        time::Duration,
+    };
+
+    use core::ffi::c_void;
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+    use core_graphics::display::CGDisplay;
+    use core_graphics::geometry::{CGPoint, CGRect};
+    use core_graphics::window::{
+        kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
+        kCGWindowListOptionOnScreenOnly, kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID,
+    };
+    use objc2::{
+        define_class, msg_send,
+        rc::Retained,
+        runtime::{AnyObject, NSObject, ProtocolObject},
+        sel, AnyThread, ClassType, DefinedClass, DowncastTarget, MainThreadMarker, MainThreadOnly,
+    };
+    use objc2_app_kit::{
+        NSApplication, NSBackingStoreType, NSBezelStyle, NSBezierPath, NSBox, NSBoxType, NSButton,
+        NSButtonType, NSCellImagePosition, NSColor, NSDragOperation, NSDraggingContext,
+        NSDraggingItem, NSDraggingSession, NSDraggingSource, NSEvent, NSFloatingWindowLevel,
+        NSFont, NSImage, NSImageScaling, NSImageView, NSPanel, NSPopUpMenuWindowLevel,
+        NSRunningApplication, NSScreen, NSTextAlignment, NSTextField, NSView, NSWindowDelegate,
+        NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
+    };
+    use objc2_foundation::{
+        NSArray, NSBundle, NSCopying, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize,
+        NSString, NSURL,
+    };
+    use tauri::AppHandle;
+
+    use super::{
+        appshot_accessibility_permission_granted, appshot_request_accessibility_permission,
+        appshot_request_screenshots_permission, appshot_screenshots_permission_granted,
+        open_appshot_permission_settings_impl, AppshotPermissionKind,
+    };
+
+    static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+    static PANEL_PTR: AtomicUsize = AtomicUsize::new(0);
+    static CONTROLLER_PTR: AtomicUsize = AtomicUsize::new(0);
+    static DRAG_GUIDE_PANEL_PTR: AtomicUsize = AtomicUsize::new(0);
+    static DRAG_GUIDE_KIND: AtomicUsize = AtomicUsize::new(0);
+    static DRAG_GUIDE_COMPLETED_MASK: AtomicUsize = AtomicUsize::new(0);
+    static WATCHER_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+    const TAG_SCREENSHOTS_STATUS: isize = 1101;
+    const TAG_SCREENSHOTS_BUTTON: isize = 1102;
+    const TAG_ACCESSIBILITY_STATUS: isize = 1201;
+    const TAG_ACCESSIBILITY_BUTTON: isize = 1202;
+    const TAG_DONE_BUTTON: isize = 1301;
+    const TAG_SCREENSHOTS_CARD: isize = 1401;
+    const TAG_ACCESSIBILITY_CARD: isize = 1402;
+    const TAG_SCREENSHOTS_PLACEHOLDER: isize = 1501;
+    const TAG_ACCESSIBILITY_PLACEHOLDER: isize = 1502;
+    const SYSTEM_SETTINGS_BUNDLE_ID: &str = "com.apple.systempreferences";
+
+    #[derive(Clone)]
+    struct DragSourceIvars {
+        bundle_url: Retained<NSURL>,
+        drag_image: Retained<NSImage>,
+        drag_origin: Cell<NSPoint>,
+        drag_started: Cell<bool>,
+    }
+
+    #[derive(Clone)]
+    struct TaggedIvars {
+        tag: Cell<isize>,
+    }
+
+    struct TargetWindowFrame {
+        frame: NSRect,
+    }
+
+    fn kind_code(kind: AppshotPermissionKind) -> usize {
+        match kind {
+            AppshotPermissionKind::Screenshots => 1,
+            AppshotPermissionKind::Accessibility => 2,
+        }
+    }
+
+    fn kind_from_code(code: usize) -> Option<AppshotPermissionKind> {
+        match code {
+            1 => Some(AppshotPermissionKind::Screenshots),
+            2 => Some(AppshotPermissionKind::Accessibility),
+            _ => None,
+        }
+    }
+
+    define_class!(
+        #[unsafe(super = NSView)]
+        #[thread_kind = MainThreadOnly]
+        #[ivars = DragSourceIvars]
+        struct AppBundleDragSourceView;
+
+        unsafe impl NSObjectProtocol for AppBundleDragSourceView {}
+
+        unsafe impl NSDraggingSource for AppBundleDragSourceView {
+            #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
+            fn dragging_session_source_operation_mask_for_dragging_context(
+                &self,
+                _session: &NSDraggingSession,
+                _context: NSDraggingContext,
+            ) -> NSDragOperation {
+                NSDragOperation::Copy
+            }
+
+            #[unsafe(method(draggingSession:endedAtPoint:operation:))]
+            fn dragging_session_ended_at_point_operation(
+                &self,
+                _session: &NSDraggingSession,
+                screen_point: NSPoint,
+                _operation: NSDragOperation,
+            ) {
+                self.ivars().drag_started.set(false);
+                if !_operation.is_empty() || point_is_inside_system_settings(screen_point) {
+                    finish_drag_guide_after_completed_drop();
+                }
+            }
+        }
+
+        impl AppBundleDragSourceView {
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, event: &NSEvent) {
+                let point = self.convertPoint_fromView(event.locationInWindow(), None);
+                self.ivars().drag_origin.set(point);
+                self.ivars().drag_started.set(false);
+            }
+
+            #[unsafe(method(mouseDragged:))]
+            fn mouse_dragged(&self, event: &NSEvent) {
+                if self.ivars().drag_started.get() {
+                    return;
+                }
+
+                let point = self.convertPoint_fromView(event.locationInWindow(), None);
+                let start = self.ivars().drag_origin.get();
+                let dx = point.x - start.x;
+                let dy = point.y - start.y;
+                if (dx * dx) + (dy * dy) < 9.0 {
+                    return;
+                }
+
+                self.ivars().drag_started.set(true);
+                self.begin_bundle_drag(event);
+            }
+
+            #[unsafe(method(mouseUp:))]
+            fn mouse_up(&self, _event: &NSEvent) {
+                self.ivars().drag_started.set(false);
+            }
+
+            #[unsafe(method(hitTest:))]
+            fn hit_test(&self, point: NSPoint) -> *mut NSView {
+                if self.mouse_inRect(point, self.bounds()) {
+                    self.as_super() as *const NSView as *mut NSView
+                } else {
+                    std::ptr::null_mut()
+                }
+            }
+
+            #[unsafe(method(acceptsFirstMouse:))]
+            fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+                true
+            }
+
+            #[unsafe(method(mouseDownCanMoveWindow))]
+            fn mouse_down_can_move_window(&self) -> bool {
+                false
+            }
+        }
+    );
+
+    define_class!(
+        #[unsafe(super = NSBox)]
+        #[thread_kind = MainThreadOnly]
+        #[ivars = TaggedIvars]
+        struct TaggedBox;
+
+        unsafe impl NSObjectProtocol for TaggedBox {}
+
+        impl TaggedBox {
+            #[unsafe(method(tag))]
+            fn tag(&self) -> isize {
+                self.ivars().tag.get()
+            }
+
+            #[unsafe(method(setTag:))]
+            fn set_tag(&self, tag: isize) {
+                self.ivars().tag.set(tag);
+            }
+        }
+    );
+
+    define_class!(
+        #[unsafe(super = NSView)]
+        #[thread_kind = MainThreadOnly]
+        #[ivars = TaggedIvars]
+        struct DashedPlaceholderView;
+
+        unsafe impl NSObjectProtocol for DashedPlaceholderView {}
+
+        impl DashedPlaceholderView {
+            #[unsafe(method(tag))]
+            fn tag(&self) -> isize {
+                self.ivars().tag.get()
+            }
+
+            #[unsafe(method(setTag:))]
+            fn set_tag(&self, tag: isize) {
+                self.ivars().tag.set(tag);
+            }
+
+            #[unsafe(method(drawRect:))]
+            fn draw_rect(&self, _dirty_rect: NSRect) {
+                let bounds = self.bounds();
+                let rect = NSRect::new(
+                    NSPoint::new(0.5, 0.5),
+                    NSSize::new((bounds.size.width - 1.0).max(1.0), (bounds.size.height - 1.0).max(1.0)),
+                );
+                let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, 16.0, 16.0);
+                let pattern = [4.0_f64, 5.0_f64];
+                unsafe {
+                    path.setLineDash_count_phase(pattern.as_ptr(), pattern.len() as isize, 0.0);
+                }
+                path.setLineWidth(1.0);
+                NSColor::quaternaryLabelColor()
+                    .colorWithAlphaComponent(0.55)
+                    .setStroke();
+                path.stroke();
+            }
+        }
+    );
+
+    impl AppBundleDragSourceView {
+        fn new(
+            mtm: MainThreadMarker,
+            frame: NSRect,
+            bundle_url: Retained<NSURL>,
+            drag_image: Retained<NSImage>,
+        ) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(DragSourceIvars {
+                bundle_url,
+                drag_image,
+                drag_origin: Cell::new(NSPoint::new(0.0, 0.0)),
+                drag_started: Cell::new(false),
+            });
+            let Some(view) = (unsafe { msg_send![super(this), initWithFrame: frame] }) else {
+                unreachable!("AppBundleDragSourceView initWithFrame returned nil");
+            };
+            view
+        }
+
+        fn begin_bundle_drag(&self, event: &NSEvent) {
+            let item = NSDraggingItem::initWithPasteboardWriter(
+                NSDraggingItem::alloc(),
+                ProtocolObject::<dyn objc2_app_kit::NSPasteboardWriting>::from_ref(
+                    &*self.ivars().bundle_url,
+                ),
+            );
+            let drag_image = self.ivars().drag_image.copy();
+            let image_size = drag_image.size();
+            let preview_width = image_size.width.max(36.0);
+            let preview_height = image_size.height.max(36.0);
+            let location = self.convertPoint_fromView(event.locationInWindow(), None);
+            let preview_rect = NSRect::new(
+                NSPoint::new(
+                    location.x - (preview_width / 2.0),
+                    location.y - (preview_height / 2.0),
+                ),
+                NSSize::new(preview_width, preview_height),
+            );
+            unsafe {
+                item.setDraggingFrame_contents(preview_rect, Some(drag_image.as_ref()));
+            }
+            let items = NSArray::from_retained_slice(&[item]);
+            let _ = self.beginDraggingSessionWithItems_event_source(
+                &items,
+                event,
+                ProtocolObject::from_ref(self),
+            );
+        }
+    }
+
+    impl TaggedBox {
+        fn new(mtm: MainThreadMarker, frame: NSRect, tag: isize) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(TaggedIvars {
+                tag: Cell::new(tag),
+            });
+            let Some(view) = (unsafe { msg_send![super(this), initWithFrame: frame] }) else {
+                unreachable!("TaggedBox initWithFrame returned nil");
+            };
+            view
+        }
+    }
+
+    impl DashedPlaceholderView {
+        fn new(mtm: MainThreadMarker, frame: NSRect, tag: isize) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(TaggedIvars {
+                tag: Cell::new(tag),
+            });
+            let Some(view) = (unsafe { msg_send![super(this), initWithFrame: frame] }) else {
+                unreachable!("DashedPlaceholderView initWithFrame returned nil");
+            };
+            view
+        }
+    }
+
+    define_class!(
+        #[unsafe(super = NSObject)]
+        #[thread_kind = MainThreadOnly]
+        struct PermissionPanelController;
+
+        unsafe impl NSObjectProtocol for PermissionPanelController {}
+
+        unsafe impl NSWindowDelegate for PermissionPanelController {
+            #[unsafe(method(windowWillClose:))]
+            fn window_will_close(&self, _notification: &NSNotification) {
+                release_handles();
+            }
+        }
+
+        impl PermissionPanelController {
+            #[unsafe(method(allowScreenshots:))]
+            fn allow_screenshots(&self, _sender: Option<&AnyObject>) {
+                request_permission(AppshotPermissionKind::Screenshots);
+            }
+
+            #[unsafe(method(allowAccessibility:))]
+            fn allow_accessibility(&self, _sender: Option<&AnyObject>) {
+                request_permission(AppshotPermissionKind::Accessibility);
+            }
+
+            #[unsafe(method(donePressed:))]
+            fn done_pressed(&self, _sender: Option<&AnyObject>) {
+                close_panel();
+            }
+
+            #[unsafe(method(backFromDragGuide:))]
+            fn back_from_drag_guide(&self, _sender: Option<&AnyObject>) {
+                cancel_drag_guide();
+            }
+        }
+    );
+
+    impl PermissionPanelController {
+        fn new(mtm: MainThreadMarker) -> Retained<Self> {
+            unsafe { msg_send![Self::alloc(mtm), init] }
+        }
+    }
+
+    fn panel_ptr() -> Option<*mut NSPanel> {
+        let ptr = PANEL_PTR.load(Ordering::Acquire);
+        if ptr == 0 {
+            None
+        } else {
+            Some(ptr as *mut NSPanel)
+        }
+    }
+
+    fn drag_guide_panel_ptr() -> Option<*mut NSPanel> {
+        let ptr = DRAG_GUIDE_PANEL_PTR.load(Ordering::Acquire);
+        if ptr == 0 {
+            None
+        } else {
+            Some(ptr as *mut NSPanel)
+        }
+    }
+
+    fn content_view() -> Option<Retained<NSView>> {
+        let panel = panel_ptr()?;
+        unsafe { (&*panel).contentView() }
+    }
+
+    fn view_by_tag<T: DowncastTarget>(root: &NSView, tag: isize) -> Option<Retained<T>> {
+        root.viewWithTag(tag)
+            .and_then(|view| view.downcast::<T>().ok())
+    }
+
+    fn bundle_file_url(bundle_path: &Path) -> Result<Retained<NSURL>, String> {
+        NSURL::from_file_path(bundle_path).ok_or_else(|| {
+            format!(
+                "Could not convert bundle path to file URL: {}",
+                bundle_path.display()
+            )
+        })
+    }
+
+    fn app_bundle_path() -> Option<PathBuf> {
+        let bundle = NSBundle::mainBundle();
+        let bundle_path = bundle.bundlePath().to_string();
+        let bundle_path = PathBuf::from(bundle_path);
+        if bundle_path.extension().and_then(|ext| ext.to_str()) == Some("app") {
+            return Some(bundle_path);
+        }
+
+        let exe = std::env::current_exe().ok()?;
+        for ancestor in exe.ancestors() {
+            if ancestor.extension().and_then(|ext| ext.to_str()) == Some("app") {
+                return Some(ancestor.to_path_buf());
+            }
+        }
+
+        let bundle = PathBuf::from(std::env::var_os("TAURI_BUNDLE_PATH")?);
+        if bundle.extension().and_then(|ext| ext.to_str()) == Some("app") {
+            return Some(bundle);
+        }
+        None
+    }
+
+    fn permission_status(kind: AppshotPermissionKind) -> (bool, &'static str, Retained<NSColor>) {
+        match kind {
+            AppshotPermissionKind::Screenshots => {
+                if appshot_screenshots_permission_granted() {
+                    (true, "Allowed", NSColor::systemGreenColor())
+                } else {
+                    (false, "Required", NSColor::systemOrangeColor())
+                }
+            }
+            AppshotPermissionKind::Accessibility => {
+                if appshot_accessibility_permission_granted() {
+                    (true, "Allowed", NSColor::systemGreenColor())
+                } else {
+                    (false, "Optional", NSColor::secondaryLabelColor())
+                }
+            }
+        }
+    }
+
+    fn permission_granted(kind: AppshotPermissionKind) -> bool {
+        match kind {
+            AppshotPermissionKind::Screenshots => appshot_screenshots_permission_granted(),
+            AppshotPermissionKind::Accessibility => appshot_accessibility_permission_granted(),
+        }
+    }
+
+    fn guide_message(kind: AppshotPermissionKind) -> &'static str {
+        match kind {
+            AppshotPermissionKind::Screenshots => {
+                "Drag Sessio to the list above to allow Screenshots"
+            }
+            AppshotPermissionKind::Accessibility => {
+                "Drag Sessio to the list above to allow Accessibility"
+            }
+        }
+    }
+
+    fn app_display_name(bundle_path: &Path) -> String {
+        bundle_path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Sessio")
+            .to_string()
+    }
+
+    fn dict_value(dict: &CFDictionary, key: *const c_void) -> Option<CFType> {
+        dict.find(key)
+            .map(|value| unsafe { CFType::wrap_under_get_rule(*value) })
+    }
+
+    fn dict_number_i64(dict: &CFDictionary, key: *const c_void) -> Option<i64> {
+        dict_value(dict, key)
+            .and_then(|value| value.downcast::<CFNumber>())
+            .and_then(|value| value.to_i64())
+    }
+
+    fn dict_number_f64(dict: &CFDictionary, key: *const c_void) -> Option<f64> {
+        dict_value(dict, key)
+            .and_then(|value| value.downcast::<CFNumber>())
+            .and_then(|value| value.to_f64())
+    }
+
+    fn dict_string(dict: &CFDictionary, key: *const c_void) -> Option<String> {
+        dict_value(dict, key)
+            .and_then(|value| value.downcast::<CFString>())
+            .map(|value| value.to_string())
+    }
+
+    fn system_settings_pid() -> Option<i32> {
+        let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(
+            &NSString::from_str(SYSTEM_SETTINGS_BUNDLE_ID),
+        );
+        apps.iter()
+            .find_map(|app| i32::try_from(app.processIdentifier()).ok())
+    }
+
+    fn rect_contains_point(rect: CGRect, point: CGPoint) -> bool {
+        point.x >= rect.origin.x
+            && point.x <= rect.origin.x + rect.size.width
+            && point.y >= rect.origin.y
+            && point.y <= rect.origin.y + rect.size.height
+    }
+
+    fn rects_nearly_equal(a: CGRect, b: NSRect) -> bool {
+        (a.origin.x - b.origin.x).abs() < 1.0
+            && (a.size.width - b.size.width).abs() < 1.0
+            && (a.size.height - b.size.height).abs() < 1.0
+    }
+
+    fn appkit_frame_from_cg_window_bounds(bounds: CGRect, mtm: MainThreadMarker) -> Option<NSRect> {
+        let window_center = CGPoint::new(
+            bounds.origin.x + (bounds.size.width / 2.0),
+            bounds.origin.y + (bounds.size.height / 2.0),
+        );
+        let display_bounds = CGDisplay::active_displays()
+            .ok()
+            .and_then(|display_ids| {
+                display_ids.into_iter().find_map(|display_id| {
+                    let display = CGDisplay::new(display_id);
+                    let display_bounds = display.bounds();
+                    rect_contains_point(display_bounds, window_center).then_some(display_bounds)
+                })
+            })
+            .unwrap_or_else(|| CGDisplay::main().bounds());
+
+        let screen = NSScreen::screens(mtm)
+            .iter()
+            .find(|screen| rects_nearly_equal(display_bounds, screen.frame()))
+            .or_else(|| NSScreen::mainScreen(mtm))?;
+        let screen_frame = screen.frame();
+
+        let y_from_screen_top = bounds.origin.y - display_bounds.origin.y;
+        let appkit_y = screen_frame.origin.y + screen_frame.size.height
+            - y_from_screen_top
+            - bounds.size.height;
+        Some(NSRect::new(
+            NSPoint::new(
+                screen_frame.origin.x + (bounds.origin.x - display_bounds.origin.x),
+                appkit_y,
+            ),
+            NSSize::new(bounds.size.width, bounds.size.height),
+        ))
+    }
+
+    fn system_settings_window_frame() -> Option<TargetWindowFrame> {
+        let target_pid = system_settings_pid()?;
+        let windows = CGDisplay::window_list_info(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            None,
+        )?;
+        let key_owner_pid = unsafe { kCGWindowOwnerPID as *const c_void };
+        let key_owner_name = unsafe { kCGWindowOwnerName as *const c_void };
+        let key_window_layer = unsafe { kCGWindowLayer as *const c_void };
+        let key_window_alpha = unsafe { kCGWindowAlpha as *const c_void };
+        let key_window_bounds = unsafe { kCGWindowBounds as *const c_void };
+        let _key_window_number = unsafe { kCGWindowNumber as *const c_void };
+
+        let mut best_frame: Option<CGRect> = None;
+        let mut best_area = 0.0_f64;
+
+        for value in &windows {
+            let cf_type = unsafe { CFType::wrap_under_get_rule(*value) };
+            let Some(dict) = cf_type.downcast::<CFDictionary>() else {
+                continue;
+            };
+
+            let pid = dict_number_i64(&dict, key_owner_pid).unwrap_or_default();
+            if pid != i64::from(target_pid) {
+                continue;
+            }
+
+            let owner_name = dict_string(&dict, key_owner_name).unwrap_or_default();
+            if owner_name != "System Settings" && owner_name != "System Preferences" {
+                continue;
+            }
+
+            let layer = dict_number_i64(&dict, key_window_layer).unwrap_or_default();
+            if layer != 0 {
+                continue;
+            }
+
+            let alpha = dict_number_f64(&dict, key_window_alpha).unwrap_or(1.0);
+            if alpha <= 0.0 {
+                continue;
+            }
+
+            let Some(bounds_cf) = dict_value(&dict, key_window_bounds) else {
+                continue;
+            };
+            let Some(bounds_dict) = bounds_cf.downcast::<CFDictionary>() else {
+                continue;
+            };
+            let Some(bounds) = CGRect::from_dict_representation(&bounds_dict) else {
+                continue;
+            };
+            if bounds.is_empty() || bounds.size.width < 80.0 || bounds.size.height < 80.0 {
+                continue;
+            }
+
+            let area = bounds.size.width * bounds.size.height;
+            if area > best_area {
+                best_area = area;
+                best_frame = Some(bounds);
+            }
+        }
+
+        let bounds = best_frame?;
+        let mtm = MainThreadMarker::new()?;
+        Some(TargetWindowFrame {
+            frame: appkit_frame_from_cg_window_bounds(bounds, mtm)?,
+        })
+    }
+
+    fn ns_rect_contains_point(rect: NSRect, point: NSPoint) -> bool {
+        point.x >= rect.origin.x
+            && point.x <= rect.origin.x + rect.size.width
+            && point.y >= rect.origin.y
+            && point.y <= rect.origin.y + rect.size.height
+    }
+
+    fn point_is_inside_system_settings(point: NSPoint) -> bool {
+        system_settings_window_frame()
+            .map(|target| ns_rect_contains_point(target.frame, point))
+            .unwrap_or(false)
+    }
+
+    fn drag_guide_origin_for_target(target: &TargetWindowFrame, panel_frame: NSRect) -> NSPoint {
+        let margin = 18.0;
+        let min_x = target.frame.origin.x + margin;
+        let max_x =
+            target.frame.origin.x + target.frame.size.width - panel_frame.size.width - margin;
+        let centered_x =
+            target.frame.origin.x + ((target.frame.size.width - panel_frame.size.width) / 2.0);
+        let origin_x = if max_x >= min_x {
+            centered_x.max(min_x).min(max_x)
+        } else {
+            centered_x
+        };
+
+        NSPoint::new(origin_x, target.frame.origin.y + margin)
+    }
+
+    fn permission_card_tag(kind: AppshotPermissionKind) -> isize {
+        match kind {
+            AppshotPermissionKind::Screenshots => TAG_SCREENSHOTS_CARD,
+            AppshotPermissionKind::Accessibility => TAG_ACCESSIBILITY_CARD,
+        }
+    }
+
+    fn drag_guide_origin_for_permission_card(
+        kind: AppshotPermissionKind,
+        panel_frame: NSRect,
+    ) -> Option<NSPoint> {
+        let root = content_view()?;
+        let card = view_by_tag::<NSView>(&root, permission_card_tag(kind))?;
+        let window = card.window()?;
+        let card_rect = card.convertRect_toView(card.bounds(), None);
+        let screen_rect = window.convertRectToScreen(card_rect);
+
+        Some(NSPoint::new(
+            screen_rect.origin.x + ((screen_rect.size.width - panel_frame.size.width) / 2.0),
+            screen_rect.origin.y + ((screen_rect.size.height - panel_frame.size.height) / 2.0),
+        ))
+    }
+
+    fn drag_guide_fallback_origin(panel_frame: NSRect, mtm: MainThreadMarker) -> NSPoint {
+        let Some(screen) = NSScreen::mainScreen(mtm) else {
+            return NSPoint::new(0.0, 0.0);
+        };
+        let visible = screen.visibleFrame();
+        NSPoint::new(
+            visible.origin.x + ((visible.size.width - panel_frame.size.width) / 2.0).max(0.0),
+            visible.origin.y + 22.0,
+        )
+    }
+
+    fn drag_guide_final_origin(panel_frame: NSRect, mtm: MainThreadMarker) -> NSPoint {
+        system_settings_window_frame()
+            .map(|target| drag_guide_origin_for_target(&target, panel_frame))
+            .unwrap_or_else(|| drag_guide_fallback_origin(panel_frame, mtm))
+    }
+
+    fn set_view_frame_if_needed(view: &NSView, frame: NSRect) {
+        let current = view.frame();
+        if (current.origin.x - frame.origin.x).abs() < 0.5
+            && (current.origin.y - frame.origin.y).abs() < 0.5
+            && (current.size.width - frame.size.width).abs() < 0.5
+            && (current.size.height - frame.size.height).abs() < 0.5
+        {
+            return;
+        }
+        view.setFrame(frame);
+    }
+
+    fn release_handles() {
+        WATCHER_ACTIVE.store(0, Ordering::Release);
+        DRAG_GUIDE_COMPLETED_MASK.store(0, Ordering::Release);
+        close_drag_guide_panel();
+
+        let panel_ptr = PANEL_PTR.swap(0, Ordering::AcqRel);
+        if panel_ptr != 0 {
+            let _ = unsafe { Retained::from_raw(panel_ptr as *mut NSPanel) };
+        }
+
+        let controller_ptr = CONTROLLER_PTR.swap(0, Ordering::AcqRel);
+        if controller_ptr != 0 {
+            let _ = unsafe { Retained::from_raw(controller_ptr as *mut PermissionPanelController) };
+        }
+    }
+
+    fn close_panel() {
+        WATCHER_ACTIVE.store(0, Ordering::Release);
+        DRAG_GUIDE_COMPLETED_MASK.store(0, Ordering::Release);
+        close_drag_guide_panel();
+
+        let panel_ptr = PANEL_PTR.swap(0, Ordering::AcqRel);
+        let controller_ptr = CONTROLLER_PTR.swap(0, Ordering::AcqRel);
+
+        if panel_ptr != 0 {
+            if let Some(panel) = unsafe { Retained::from_raw(panel_ptr as *mut NSPanel) } {
+                panel.close();
+            }
+        }
+
+        if controller_ptr != 0 {
+            let _ = unsafe { Retained::from_raw(controller_ptr as *mut PermissionPanelController) };
+        }
+    }
+
+    fn close_drag_guide_panel() {
+        DRAG_GUIDE_KIND.store(0, Ordering::Release);
+
+        let panel_ptr = DRAG_GUIDE_PANEL_PTR.swap(0, Ordering::AcqRel);
+        if panel_ptr != 0 {
+            if let Some(panel) = unsafe { Retained::from_raw(panel_ptr as *mut NSPanel) } {
+                panel.close();
+            }
+        }
+    }
+
+    fn cancel_drag_guide() {
+        let Some(kind) = kind_from_code(DRAG_GUIDE_KIND.load(Ordering::Acquire)) else {
+            close_drag_guide_panel();
+            update_panel_state();
+            return;
+        };
+        let code = kind_code(kind);
+        let panel_ptr = DRAG_GUIDE_PANEL_PTR.load(Ordering::Acquire);
+
+        DRAG_GUIDE_KIND.store(0, Ordering::Release);
+        DRAG_GUIDE_COMPLETED_MASK.fetch_and(!code, Ordering::AcqRel);
+
+        if panel_ptr != 0 {
+            if let Some(mtm) = MainThreadMarker::new() {
+                let panel = unsafe { &*(panel_ptr as *mut NSPanel) };
+                let frame = panel.frame();
+                let target_origin = drag_guide_origin_for_permission_card(kind, frame)
+                    .unwrap_or_else(|| drag_guide_fallback_origin(frame, mtm));
+                panel.setFrame_display_animate(NSRect::new(target_origin, frame.size), true, true);
+            }
+        }
+
+        let Some(app) = APP_HANDLE.get().cloned() else {
+            close_drag_guide_panel();
+            update_panel_state();
+            return;
+        };
+
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(280));
+            let _ = app.run_on_main_thread(move || {
+                if DRAG_GUIDE_PANEL_PTR.load(Ordering::Acquire) == panel_ptr {
+                    close_drag_guide_panel();
+                    update_panel_state();
+                }
+            });
+        });
+    }
+
+    fn mark_active_drag_guide_completed() {
+        let code = DRAG_GUIDE_KIND.load(Ordering::Acquire);
+        if code != 0 {
+            DRAG_GUIDE_COMPLETED_MASK.fetch_or(code, Ordering::AcqRel);
+        }
+    }
+
+    fn finish_drag_guide_after_completed_drop() {
+        let Some(app) = APP_HANDLE.get().cloned() else {
+            mark_active_drag_guide_completed();
+            close_drag_guide_panel();
+            update_panel_state();
+            return;
+        };
+
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(120));
+            let _ = app.run_on_main_thread(move || {
+                mark_active_drag_guide_completed();
+                close_drag_guide_panel();
+                update_panel_state();
+            });
+        });
+    }
+
+    fn update_panel_state() {
+        let Some(root) = content_view() else {
+            return;
+        };
+        let active_guide_kind = kind_from_code(DRAG_GUIDE_KIND.load(Ordering::Acquire));
+        let completed_mask = DRAG_GUIDE_COMPLETED_MASK.load(Ordering::Acquire);
+        let screenshots_granted = appshot_screenshots_permission_granted();
+        let accessibility_granted = appshot_accessibility_permission_granted();
+        let screenshots_guide_active =
+            matches!(active_guide_kind, Some(AppshotPermissionKind::Screenshots));
+        let accessibility_guide_active = matches!(
+            active_guide_kind,
+            Some(AppshotPermissionKind::Accessibility)
+        );
+        let screenshots_drag_completed =
+            completed_mask & kind_code(AppshotPermissionKind::Screenshots) != 0;
+        let accessibility_drag_completed =
+            completed_mask & kind_code(AppshotPermissionKind::Accessibility) != 0;
+        let screenshots_card_hidden =
+            screenshots_granted || screenshots_guide_active || screenshots_drag_completed;
+        let accessibility_card_hidden =
+            accessibility_granted || accessibility_guide_active || accessibility_drag_completed;
+        let screenshots_placeholder_visible =
+            screenshots_guide_active && !screenshots_granted && !screenshots_drag_completed;
+        let accessibility_placeholder_visible =
+            accessibility_guide_active && !accessibility_granted && !accessibility_drag_completed;
+
+        if let Some(status) = view_by_tag::<NSTextField>(&root, TAG_SCREENSHOTS_STATUS) {
+            let (granted, text, color) = permission_status(AppshotPermissionKind::Screenshots);
+            status.setStringValue(&NSString::from_str(text));
+            status.setTextColor(Some(&color));
+            if let Some(button) = view_by_tag::<NSButton>(&root, TAG_SCREENSHOTS_BUTTON) {
+                button.setTitle(&NSString::from_str(if granted {
+                    "Allowed"
+                } else {
+                    "Allow"
+                }));
+                button.setEnabled(!granted);
+                button.setHidden(screenshots_card_hidden);
+            }
+            if let Some(card) = view_by_tag::<NSView>(&root, TAG_SCREENSHOTS_CARD) {
+                card.setHidden(screenshots_card_hidden);
+            }
+        }
+
+        if let Some(status) = view_by_tag::<NSTextField>(&root, TAG_ACCESSIBILITY_STATUS) {
+            let (granted, text, color) = permission_status(AppshotPermissionKind::Accessibility);
+            status.setStringValue(&NSString::from_str(text));
+            status.setTextColor(Some(&color));
+            if let Some(button) = view_by_tag::<NSButton>(&root, TAG_ACCESSIBILITY_BUTTON) {
+                button.setTitle(&NSString::from_str(if granted {
+                    "Allowed"
+                } else {
+                    "Allow"
+                }));
+                button.setEnabled(!granted);
+                button.setHidden(accessibility_card_hidden);
+            }
+            if let Some(card) = view_by_tag::<NSView>(&root, TAG_ACCESSIBILITY_CARD) {
+                card.setHidden(accessibility_card_hidden);
+            }
+        }
+
+        if let Some(accessibility_card) = view_by_tag::<NSView>(&root, TAG_ACCESSIBILITY_CARD) {
+            let y = 154.0;
+            set_view_frame_if_needed(
+                accessibility_card.as_ref(),
+                NSRect::new(NSPoint::new(40.0, y), NSSize::new(520.0, 80.0)),
+            );
+        }
+        if let Some(screenshots_card) = view_by_tag::<NSView>(&root, TAG_SCREENSHOTS_CARD) {
+            let y = 64.0;
+            set_view_frame_if_needed(
+                screenshots_card.as_ref(),
+                NSRect::new(NSPoint::new(40.0, y), NSSize::new(520.0, 80.0)),
+            );
+        }
+        if let Some(placeholder) = view_by_tag::<NSView>(&root, TAG_ACCESSIBILITY_PLACEHOLDER) {
+            placeholder.setHidden(!accessibility_placeholder_visible);
+            set_view_frame_if_needed(
+                placeholder.as_ref(),
+                NSRect::new(NSPoint::new(40.0, 154.0), NSSize::new(520.0, 80.0)),
+            );
+        }
+        if let Some(placeholder) = view_by_tag::<NSView>(&root, TAG_SCREENSHOTS_PLACEHOLDER) {
+            placeholder.setHidden(!screenshots_placeholder_visible);
+            set_view_frame_if_needed(
+                placeholder.as_ref(),
+                NSRect::new(NSPoint::new(40.0, 64.0), NSSize::new(520.0, 80.0)),
+            );
+        }
+
+        if let Some(button) = view_by_tag::<NSButton>(&root, TAG_DONE_BUTTON) {
+            button.setEnabled(screenshots_granted);
+        }
+    }
+
+    fn build_button(
+        mtm: MainThreadMarker,
+        title: &str,
+        frame: NSRect,
+        tag: isize,
+        target: &PermissionPanelController,
+        action: objc2::runtime::Sel,
+    ) -> Retained<NSButton> {
+        let button = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                &NSString::from_str(title),
+                Some(target.as_ref()),
+                Some(action),
+                mtm,
+            )
+        };
+        button.setFrame(frame);
+        button.setBezelStyle(NSBezelStyle::Push);
+        button.setTag(tag);
+        button
+    }
+
+    fn build_permission_card(
+        mtm: MainThreadMarker,
+        content: &NSView,
+        tag: isize,
+        icon_kind: AppshotPermissionKind,
+        title: &str,
+        description: &str,
+        frame: NSRect,
+        status_tag: isize,
+        button_tag: isize,
+        target: &PermissionPanelController,
+        action: objc2::runtime::Sel,
+    ) {
+        let card = TaggedBox::new(mtm, frame, tag);
+        card.setBoxType(NSBoxType::Custom);
+        card.setBorderWidth(1.0);
+        card.setCornerRadius(16.0);
+        card.setBorderColor(&NSColor::separatorColor());
+        card.setFillColor(&NSColor::controlBackgroundColor());
+        card.setTransparent(false);
+        card.setContentViewMargins(NSSize::new(0.0, 0.0));
+
+        let card_content = NSView::new(mtm);
+        card_content.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+
+        let icon_ring = NSBox::initWithFrame(
+            NSBox::alloc(mtm),
+            NSRect::new(NSPoint::new(16.0, 13.0), NSSize::new(54.0, 54.0)),
+        );
+        icon_ring.setBoxType(NSBoxType::Custom);
+        icon_ring.setBorderWidth(1.0);
+        icon_ring.setCornerRadius(27.0);
+        icon_ring.setBorderColor(&NSColor::separatorColor());
+        icon_ring.setFillColor(&NSColor::clearColor());
+        icon_ring.setContentViewMargins(NSSize::new(0.0, 0.0));
+
+        let icon_frame = NSRect::new(NSPoint::new(7.0, 7.0), NSSize::new(40.0, 40.0));
+        match icon_kind {
+            AppshotPermissionKind::Accessibility => {
+                let icon_fill = NSBox::initWithFrame(NSBox::alloc(mtm), icon_frame);
+                icon_fill.setBoxType(NSBoxType::Custom);
+                icon_fill.setBorderWidth(0.0);
+                icon_fill.setCornerRadius(20.0);
+                icon_fill.setFillColor(&NSColor::controlAccentColor());
+                icon_fill.setContentViewMargins(NSSize::new(0.0, 0.0));
+
+                let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                    &NSString::from_str("figure.stand"),
+                    None,
+                )
+                .unwrap_or_else(|| {
+                    NSImage::initWithSize(NSImage::alloc(), NSSize::new(20.0, 20.0))
+                });
+                icon.setSize(NSSize::new(28.0, 28.0));
+                let icon_view = NSImageView::imageViewWithImage(&icon, mtm);
+                icon_view.setFrame(NSRect::new(NSPoint::new(6.0, 6.0), NSSize::new(28.0, 28.0)));
+                icon_view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+                icon_view.setContentTintColor(Some(&NSColor::whiteColor()));
+                icon_fill.addSubview(&icon_view);
+                icon_ring.addSubview(&icon_fill);
+            }
+            AppshotPermissionKind::Screenshots => {
+                let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                    &NSString::from_str("camera.viewfinder"),
+                    None,
+                )
+                .unwrap_or_else(|| {
+                    NSImage::initWithSize(NSImage::alloc(), NSSize::new(28.0, 28.0))
+                });
+                icon.setSize(NSSize::new(34.0, 34.0));
+                let icon_view = NSImageView::imageViewWithImage(&icon, mtm);
+                icon_view.setFrame(NSRect::new(
+                    NSPoint::new(10.0, 10.0),
+                    NSSize::new(34.0, 34.0),
+                ));
+                icon_view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+                icon_view.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+                icon_ring.addSubview(&icon_view);
+            }
+        }
+
+        let title_label = NSTextField::labelWithString(&NSString::from_str(title), mtm);
+        title_label.setFrame(NSRect::new(
+            NSPoint::new(84.0, frame.size.height - 42.0),
+            NSSize::new(250.0, 24.0),
+        ));
+        title_label.setFont(Some(&NSFont::boldSystemFontOfSize(15.0)));
+
+        let description_label = NSTextField::labelWithString(&NSString::from_str(description), mtm);
+        description_label.setFrame(NSRect::new(
+            NSPoint::new(84.0, 20.0),
+            NSSize::new(290.0, 20.0),
+        ));
+        description_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        description_label.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+
+        let status_label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+        status_label.setFrame(NSRect::new(
+            NSPoint::new(frame.size.width - 170.0, frame.size.height - 42.0),
+            NSSize::new(72.0, 22.0),
+        ));
+        status_label.setTag(status_tag);
+        status_label.setHidden(true);
+
+        let button = build_button(
+            mtm,
+            "Allow",
+            NSRect::new(
+                NSPoint::new(frame.size.width - 78.0, 28.0),
+                NSSize::new(56.0, 26.0),
+            ),
+            button_tag,
+            target,
+            action,
+        );
+        button.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+
+        card_content.addSubview(&icon_ring);
+        card_content.addSubview(&title_label);
+        card_content.addSubview(&description_label);
+        card_content.addSubview(&status_label);
+        card_content.addSubview(&button);
+        card.setContentView(Some(&card_content));
+        content.addSubview(&card.into_super());
+    }
+
+    fn build_panel(
+        mtm: MainThreadMarker,
+        bundle_path: &Path,
+        controller: &PermissionPanelController,
+    ) -> Retained<NSPanel> {
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 460.0));
+        let style = NSWindowStyleMask::Titled
+            | NSWindowStyleMask::Closable
+            | NSWindowStyleMask::FullSizeContentView
+            | NSWindowStyleMask::UtilityWindow;
+        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(mtm),
+            frame,
+            style,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+
+        let content = NSView::new(mtm);
+        content.setFrame(frame);
+
+        let workspace = NSWorkspace::sharedWorkspace();
+        let path_string = NSString::from_str(&bundle_path.to_string_lossy());
+        let app_icon = workspace.iconForFile(&path_string);
+        app_icon.setSize(NSSize::new(48.0, 48.0));
+        let app_icon_view = NSImageView::imageViewWithImage(&app_icon, mtm);
+        app_icon_view.setFrame(NSRect::new(
+            NSPoint::new((frame.size.width - 48.0) / 2.0, 366.0),
+            NSSize::new(48.0, 48.0),
+        ));
+
+        let title = NSTextField::labelWithString(&NSString::from_str("Enable Appshots"), mtm);
+        title.setFrame(NSRect::new(
+            NSPoint::new((frame.size.width - 240.0) / 2.0, 318.0),
+            NSSize::new(240.0, 40.0),
+        ));
+        title.setAlignment(NSTextAlignment::Center);
+        title.setFont(Some(&NSFont::boldSystemFontOfSize(24.0)));
+
+        let subtitle = NSTextField::wrappingLabelWithString(
+            &NSString::from_str(
+                "Codex needs these permissions to take appshots. Appshots are captured when you attach from the + menu or press both command keys simultaneously.",
+            ),
+            mtm,
+        );
+        subtitle.setFrame(NSRect::new(
+            NSPoint::new(48.0, 264.0),
+            NSSize::new(504.0, 44.0),
+        ));
+        subtitle.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        subtitle.setAlignment(NSTextAlignment::Center);
+        subtitle.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+
+        build_permission_card(
+            mtm,
+            &content,
+            TAG_ACCESSIBILITY_CARD,
+            AppshotPermissionKind::Accessibility,
+            "Accessibility",
+            "Allows Codex to read the text in apps",
+            NSRect::new(NSPoint::new(40.0, 154.0), NSSize::new(520.0, 80.0)),
+            TAG_ACCESSIBILITY_STATUS,
+            TAG_ACCESSIBILITY_BUTTON,
+            controller,
+            sel!(allowAccessibility:),
+        );
+
+        build_permission_card(
+            mtm,
+            &content,
+            TAG_SCREENSHOTS_CARD,
+            AppshotPermissionKind::Screenshots,
+            "Screenshots",
+            "Allows Codex to see the visuals in apps",
+            NSRect::new(NSPoint::new(40.0, 64.0), NSSize::new(520.0, 80.0)),
+            TAG_SCREENSHOTS_STATUS,
+            TAG_SCREENSHOTS_BUTTON,
+            controller,
+            sel!(allowScreenshots:),
+        );
+
+        let accessibility_placeholder = DashedPlaceholderView::new(
+            mtm,
+            NSRect::new(NSPoint::new(40.0, 154.0), NSSize::new(520.0, 80.0)),
+            TAG_ACCESSIBILITY_PLACEHOLDER,
+        );
+        accessibility_placeholder.setHidden(true);
+        let accessibility_placeholder_label =
+            NSTextField::labelWithString(&NSString::from_str("COMPLETE IN SYSTEM SETTINGS"), mtm);
+        accessibility_placeholder_label.setFrame(NSRect::new(
+            NSPoint::new(0.0, 28.0),
+            NSSize::new(520.0, 22.0),
+        ));
+        accessibility_placeholder_label.setAlignment(NSTextAlignment::Center);
+        accessibility_placeholder_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        accessibility_placeholder_label.setFont(Some(&NSFont::systemFontOfSize_weight(13.0, 0.23)));
+        accessibility_placeholder.addSubview(&accessibility_placeholder_label);
+
+        let screenshots_placeholder = DashedPlaceholderView::new(
+            mtm,
+            NSRect::new(NSPoint::new(40.0, 64.0), NSSize::new(520.0, 80.0)),
+            TAG_SCREENSHOTS_PLACEHOLDER,
+        );
+        screenshots_placeholder.setHidden(true);
+        let screenshots_placeholder_label =
+            NSTextField::labelWithString(&NSString::from_str("COMPLETE IN SYSTEM SETTINGS"), mtm);
+        screenshots_placeholder_label.setFrame(NSRect::new(
+            NSPoint::new(0.0, 28.0),
+            NSSize::new(520.0, 22.0),
+        ));
+        screenshots_placeholder_label.setAlignment(NSTextAlignment::Center);
+        screenshots_placeholder_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        screenshots_placeholder_label.setFont(Some(&NSFont::systemFontOfSize_weight(13.0, 0.23)));
+        screenshots_placeholder.addSubview(&screenshots_placeholder_label);
+
+        let done_button = build_button(
+            mtm,
+            "Done",
+            NSRect::new(NSPoint::new(470.0, 18.0), NSSize::new(88.0, 30.0)),
+            TAG_DONE_BUTTON,
+            controller,
+            sel!(donePressed:),
+        );
+        done_button.setHidden(true);
+
+        content.addSubview(&app_icon_view);
+        content.addSubview(&title);
+        content.addSubview(&subtitle);
+        content.addSubview(accessibility_placeholder.as_super());
+        content.addSubview(screenshots_placeholder.as_super());
+        content.addSubview(&done_button);
+
+        panel.setTitle(&NSString::from_str("Enable Appshots"));
+        panel.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+        panel.setTitlebarAppearsTransparent(true);
+        panel.setMovableByWindowBackground(true);
+        panel.setFloatingPanel(true);
+        panel.setBecomesKeyOnlyIfNeeded(false);
+        panel.setWorksWhenModal(true);
+        panel.setLevel(NSFloatingWindowLevel);
+        panel.setHidesOnDeactivate(false);
+        panel.setHasShadow(true);
+        panel.setOpaque(false);
+        panel.setBackgroundColor(Some(&NSColor::windowBackgroundColor()));
+        panel.setContentView(Some(&content));
+        panel.setDelegate(Some(ProtocolObject::from_ref(controller)));
+        panel.center();
+        unsafe {
+            panel.setReleasedWhenClosed(false);
+        }
+
+        update_panel_state();
+        panel
+    }
+
+    fn build_drag_guide_panel(
+        mtm: MainThreadMarker,
+        bundle_path: &Path,
+        kind: AppshotPermissionKind,
+        controller: &PermissionPanelController,
+    ) -> Retained<NSPanel> {
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(520.0, 110.0));
+        let style = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
+        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(mtm),
+            frame,
+            style,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+
+        let content = NSView::new(mtm);
+        content.setFrame(frame);
+
+        let background = NSBox::initWithFrame(
+            NSBox::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), frame.size),
+        );
+        background.setBoxType(NSBoxType::Custom);
+        background.setBorderWidth(0.0);
+        background.setCornerRadius(16.0);
+        background.setFillColor(&NSColor::windowBackgroundColor());
+        background.setTransparent(false);
+        background.setContentViewMargins(NSSize::new(0.0, 0.0));
+        let background_content = NSView::new(mtm);
+        background_content.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+
+        let back_icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str("chevron.left"),
+            Some(&NSString::from_str("Back")),
+        )
+        .unwrap_or_else(|| NSImage::initWithSize(NSImage::alloc(), NSSize::new(14.0, 14.0)));
+        back_icon.setSize(NSSize::new(14.0, 14.0));
+        let back_button = unsafe {
+            NSButton::buttonWithImage_target_action(
+                &back_icon,
+                Some(controller.as_ref()),
+                Some(sel!(backFromDragGuide:)),
+                mtm,
+            )
+        };
+        back_button.setFrame(NSRect::new(
+            NSPoint::new(18.0, 30.0),
+            NSSize::new(34.0, 34.0),
+        ));
+        back_button.setBezelStyle(NSBezelStyle::Circular);
+        back_button.setButtonType(NSButtonType::MomentaryChange);
+        back_button.setImagePosition(NSCellImagePosition::ImageOnly);
+        back_button.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+        background_content.addSubview(&back_button);
+
+        let workspace = NSWorkspace::sharedWorkspace();
+        let path_string = NSString::from_str(&bundle_path.to_string_lossy());
+        let app_name = app_display_name(bundle_path);
+        let icon = workspace.iconForFile(&path_string);
+        icon.setSize(NSSize::new(28.0, 28.0));
+
+        let arrow_icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str("arrow.up"),
+            None,
+        )
+        .unwrap_or_else(|| icon.copy());
+        let arrow_view = NSImageView::imageViewWithImage(&arrow_icon, mtm);
+        arrow_view.setFrame(NSRect::new(
+            NSPoint::new(72.0, 76.0),
+            NSSize::new(20.0, 20.0),
+        ));
+        arrow_view.setContentTintColor(Some(&NSColor::controlAccentColor()));
+        background_content.addSubview(&arrow_view);
+
+        let detail = NSTextField::labelWithString(&NSString::from_str(guide_message(kind)), mtm);
+        detail.setFrame(NSRect::new(
+            NSPoint::new(106.0, 75.0),
+            NSSize::new(388.0, 22.0),
+        ));
+        detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        detail.setFont(Some(&NSFont::systemFontOfSize(14.0)));
+        background_content.addSubview(&detail);
+
+        let card_width = 438.0;
+        let card_height = 42.0;
+        let card = NSBox::initWithFrame(
+            NSBox::alloc(mtm),
+            NSRect::new(
+                NSPoint::new(64.0, 18.0),
+                NSSize::new(card_width, card_height),
+            ),
+        );
+        card.setBoxType(NSBoxType::Custom);
+        card.setBorderWidth(1.0);
+        card.setCornerRadius(7.0);
+        card.setBorderColor(&NSColor::separatorColor());
+        card.setFillColor(&NSColor::controlBackgroundColor());
+        card.setTransparent(false);
+        card.setContentViewMargins(NSSize::new(0.0, 0.0));
+
+        let card_content = NSView::new(mtm);
+        card_content.setFrame(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(card_width, card_height),
+        ));
+
+        let app_icon_view = NSImageView::imageViewWithImage(&icon, mtm);
+        app_icon_view.setFrame(NSRect::new(
+            NSPoint::new(12.0, 7.0),
+            NSSize::new(28.0, 28.0),
+        ));
+        app_icon_view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+        card_content.addSubview(&app_icon_view);
+
+        let app_label = NSTextField::labelWithString(&NSString::from_str(&app_name), mtm);
+        app_label.setFrame(NSRect::new(
+            NSPoint::new(52.0, 11.0),
+            NSSize::new(330.0, 20.0),
+        ));
+        app_label.setFont(Some(&NSFont::systemFontOfSize_weight(14.0, 0.3)));
+        card_content.addSubview(&app_label);
+
+        card.setContentView(Some(&card_content));
+
+        let overlay = AppBundleDragSourceView::new(
+            mtm,
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(card_width, card_height)),
+            bundle_file_url(bundle_path)
+                .unwrap_or_else(|_| NSURL::from_file_path(bundle_path).unwrap()),
+            icon.copy(),
+        );
+        overlay.setFrame(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(card_width, card_height),
+        ));
+        if let Some(card_inner) = card.contentView() {
+            card_inner.addSubview(&overlay);
+        }
+
+        background_content.addSubview(&card.into_super());
+        background.setContentView(Some(&background_content));
+        content.addSubview(&background.into_super());
+
+        panel.setTitle(&NSString::from_str(""));
+        panel.setFloatingPanel(true);
+        panel.setBecomesKeyOnlyIfNeeded(true);
+        panel.setWorksWhenModal(true);
+        panel.setLevel(NSPopUpMenuWindowLevel);
+        panel.setHidesOnDeactivate(false);
+        panel.setHasShadow(true);
+        panel.setOpaque(false);
+        panel.setExcludedFromWindowsMenu(true);
+        panel.setBackgroundColor(Some(&NSColor::clearColor()));
+        panel.setAlphaValue(0.0);
+        panel.setContentView(Some(&content));
+        unsafe {
+            panel.setReleasedWhenClosed(false);
+        }
+
+        panel
+    }
+
+    fn position_drag_guide_panel(panel: &NSPanel, mtm: MainThreadMarker) {
+        let frame = panel.frame();
+        panel.setFrameOrigin(drag_guide_final_origin(frame, mtm));
+    }
+
+    fn show_panel(bundle_path: &Path) -> Result<(), String> {
+        let mtm =
+            MainThreadMarker::new().ok_or_else(|| "Must run on the main thread".to_string())?;
+        if let Some(existing) = panel_ptr() {
+            let panel = unsafe { &*existing };
+            panel.makeKeyAndOrderFront(None);
+            panel.orderFrontRegardless();
+            update_panel_state();
+            return Ok(());
+        }
+
+        let controller = PermissionPanelController::new(mtm);
+        let panel = build_panel(mtm, bundle_path, &controller);
+        let app = NSApplication::sharedApplication(mtm);
+
+        panel.makeKeyAndOrderFront(None);
+        panel.orderFrontRegardless();
+        app.activate();
+
+        CONTROLLER_PTR.store(Retained::into_raw(controller) as usize, Ordering::Release);
+        PANEL_PTR.store(Retained::into_raw(panel) as usize, Ordering::Release);
+        Ok(())
+    }
+
+    fn show_drag_guide_panel(
+        bundle_path: &Path,
+        kind: AppshotPermissionKind,
+    ) -> Result<(), String> {
+        let mtm =
+            MainThreadMarker::new().ok_or_else(|| "Must run on the main thread".to_string())?;
+        if let Some(existing_ptr) = drag_guide_panel_ptr() {
+            if kind_from_code(DRAG_GUIDE_KIND.load(Ordering::Acquire)) == Some(kind) {
+                let panel = unsafe { &*existing_ptr };
+                position_drag_guide_panel(panel, mtm);
+                panel.setAlphaValue(1.0);
+                panel.orderFrontRegardless();
+                return Ok(());
+            }
+            close_drag_guide_panel();
+        }
+
+        let controller_ptr = CONTROLLER_PTR.load(Ordering::Acquire);
+        if controller_ptr == 0 {
+            return Err("Permission panel controller is not available".to_string());
+        }
+        let controller = unsafe { &*(controller_ptr as *mut PermissionPanelController) };
+        let panel = build_drag_guide_panel(mtm, bundle_path, kind, controller);
+        let frame = panel.frame();
+        let source_origin = drag_guide_origin_for_permission_card(kind, frame)
+            .unwrap_or_else(|| drag_guide_final_origin(frame, mtm));
+        let final_origin = drag_guide_final_origin(frame, mtm);
+        panel.setFrameOrigin(source_origin);
+        panel.setAlphaValue(1.0);
+        panel.orderFrontRegardless();
+
+        DRAG_GUIDE_KIND.store(kind_code(kind), Ordering::Release);
+        let raw = Retained::into_raw(panel) as usize;
+        DRAG_GUIDE_PANEL_PTR.store(raw, Ordering::Release);
+        let panel = unsafe { &*(raw as *mut NSPanel) };
+        panel.setFrame_display_animate(NSRect::new(final_origin, frame.size), true, true);
+        Ok(())
+    }
+
+    fn bring_drag_guide_to_front() {
+        if let Some(panel_ptr) = drag_guide_panel_ptr() {
+            let panel = unsafe { &*panel_ptr };
+            panel.orderFrontRegardless();
+        }
+    }
+
+    fn show_drag_guide(kind: AppshotPermissionKind) {
+        let Some(app) = APP_HANDLE.get().cloned() else {
+            return;
+        };
+        let Some(bundle_path) = app_bundle_path() else {
+            return;
+        };
+
+        DRAG_GUIDE_COMPLETED_MASK.fetch_and(!kind_code(kind), Ordering::AcqRel);
+        DRAG_GUIDE_KIND.store(kind_code(kind), Ordering::Release);
+        update_panel_state();
+
+        thread::spawn(move || {
+            for delay_ms in [260_u64, 700, 1400] {
+                thread::sleep(Duration::from_millis(delay_ms));
+                if PANEL_PTR.load(Ordering::Acquire) == 0
+                    || kind_from_code(DRAG_GUIDE_KIND.load(Ordering::Acquire)) != Some(kind)
+                    || permission_granted(kind)
+                {
+                    break;
+                }
+                let app = app.clone();
+                let guide_path = bundle_path.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if PANEL_PTR.load(Ordering::Acquire) == 0 {
+                        close_drag_guide_panel();
+                        return;
+                    }
+                    if kind_from_code(DRAG_GUIDE_KIND.load(Ordering::Acquire)) != Some(kind) {
+                        return;
+                    }
+                    if permission_granted(kind) {
+                        close_drag_guide_panel();
+                        update_panel_state();
+                        return;
+                    }
+                    let _ = show_drag_guide_panel(&guide_path, kind);
+                    bring_drag_guide_to_front();
+                });
+            }
+        });
+    }
+
+    fn request_permission(kind: AppshotPermissionKind) {
+        let granted = match kind {
+            AppshotPermissionKind::Screenshots => appshot_request_screenshots_permission(),
+            AppshotPermissionKind::Accessibility => appshot_request_accessibility_permission(),
+        };
+
+        if !granted {
+            let _ = open_appshot_permission_settings_impl(kind);
+            show_drag_guide(kind);
+        }
+
+        update_panel_state();
+    }
+
+    fn spawn_state_watcher(app: AppHandle) {
+        if WATCHER_ACTIVE.swap(1, Ordering::AcqRel) != 0 {
+            return;
+        }
+
+        thread::spawn(move || loop {
+            if PANEL_PTR.load(Ordering::Acquire) == 0 {
+                WATCHER_ACTIVE.store(0, Ordering::Release);
+                break;
+            }
+
+            let screenshots_granted = appshot_screenshots_permission_granted();
+            let accessibility_granted = appshot_accessibility_permission_granted();
+            let drag_guide_granted = kind_from_code(DRAG_GUIDE_KIND.load(Ordering::Acquire))
+                .map(|kind| match kind {
+                    AppshotPermissionKind::Screenshots => screenshots_granted,
+                    AppshotPermissionKind::Accessibility => accessibility_granted,
+                })
+                .unwrap_or(false);
+
+            let _ = app.run_on_main_thread(move || {
+                if PANEL_PTR.load(Ordering::Acquire) == 0 {
+                    return;
+                }
+                if drag_guide_granted {
+                    close_drag_guide_panel();
+                }
+                update_panel_state();
+                if screenshots_granted && accessibility_granted {
+                    return;
+                }
+            });
+
+            thread::sleep(Duration::from_secs(1));
+        });
+    }
+
+    pub fn show(app: AppHandle) -> Result<(), String> {
+        let _ = APP_HANDLE.set(app.clone());
+        let bundle_path = app_bundle_path().ok_or_else(|| {
+            "Could not resolve Sessio.app bundle path for native permission panel".to_string()
+        })?;
+
+        app.run_on_main_thread(move || {
+            let _ = show_panel(&bundle_path);
+        })
+        .map_err(|e| e.to_string())?;
+        spawn_state_watcher(app);
+        Ok(())
     }
 }
 
@@ -5046,7 +6602,9 @@ fn normalized_appshot_shortcut(shortcut: &str) -> Result<String, String> {
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn parsed_appshot_shortcut(shortcut: &str) -> Result<tauri_plugin_global_shortcut::Shortcut, String> {
+fn parsed_appshot_shortcut(
+    shortcut: &str,
+) -> Result<tauri_plugin_global_shortcut::Shortcut, String> {
     use std::str::FromStr;
     tauri_plugin_global_shortcut::Shortcut::from_str(shortcut)
         .map_err(|e| format!("Invalid appshot shortcut: {e}"))
@@ -5062,10 +6620,7 @@ fn normalized_appshot_shortcut(shortcut: &str) -> Result<String, String> {
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn update_appshot_shortcut_registration(
-    app: &AppHandle,
-    shortcut: &str,
-) -> Result<String, String> {
+fn update_appshot_shortcut_registration(app: &AppHandle, shortcut: &str) -> Result<String, String> {
     let normalized = normalized_appshot_shortcut(shortcut)?;
     let parsed = parsed_appshot_shortcut(&normalized)?;
     let state = app.state::<AppshotShortcutState>();
@@ -5083,16 +6638,18 @@ fn update_appshot_shortcut_registration(
         .on_shortcut(parsed, {
             let normalized = normalized.clone();
             move |app, _shortcut, event| {
-                #[allow(deprecated)]
-                let is_pressed = matches!(
-                    event.state,
-                    tauri_plugin_global_shortcut::ShortcutState::Pressed
-                );
-                if !is_pressed {
-                    return;
-                }
-                if let Err(error) = capture_and_emit_frontmost_appshot(app, normalized.clone()) {
-                    log::warn!("[appshot] capture failed: {error}");
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    #[allow(deprecated)]
+                    let is_pressed = matches!(
+                        event.state,
+                        tauri_plugin_global_shortcut::ShortcutState::Pressed
+                    );
+                    if is_pressed {
+                        handle_appshot_shortcut_pressed(app.clone(), normalized.clone());
+                    }
+                }));
+                if result.is_err() {
+                    log::warn!("[appshot] global shortcut callback panicked");
                 }
             }
         })
@@ -5122,9 +6679,29 @@ fn update_appshot_shortcut_registration(
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn handle_appshot_shortcut_pressed(app: AppHandle, shortcut: String) {
+    thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            capture_and_emit_frontmost_appshot(&app, shortcut)
+        }));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => log::warn!("[appshot] capture failed: {error}"),
+            Err(_) => log::warn!("[appshot] capture task panicked"),
+        }
+    });
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn capture_and_emit_frontmost_appshot(app: &AppHandle, shortcut: String) -> Result<(), String> {
     let permissions = appshot_permission_status();
     if !permissions.can_capture {
+        #[cfg(target_os = "macos")]
+        {
+            if let Err(error) = appshot_permission_panel::show(app.clone()) {
+                log::warn!("[appshot] failed to show permission panel from shortcut: {error}");
+            }
+        }
         show_main_window(app);
         emit_appshot_permission_required(
             app,
@@ -5452,8 +7029,12 @@ fn get_appshot_permission_status() -> AppshotPermissionStatusDto {
 }
 
 #[tauri::command]
-fn request_appshot_permission(permission: String) -> Result<AppshotPermissionStatusDto, String> {
-    match AppshotPermissionKind::parse(&permission)? {
+fn request_appshot_permission(
+    app: AppHandle,
+    permission: String,
+) -> Result<AppshotPermissionStatusDto, String> {
+    let kind = AppshotPermissionKind::parse(&permission)?;
+    match kind {
         #[cfg(target_os = "macos")]
         AppshotPermissionKind::Screenshots => {
             let _ = appshot_request_screenshots_permission();
@@ -5465,7 +7046,32 @@ fn request_appshot_permission(permission: String) -> Result<AppshotPermissionSta
         #[cfg(not(target_os = "macos"))]
         _ => {}
     }
-    Ok(appshot_permission_status())
+    let status = appshot_permission_status();
+    #[cfg(target_os = "macos")]
+    {
+        let still_missing = match kind {
+            AppshotPermissionKind::Screenshots => !status.screenshots.granted,
+            AppshotPermissionKind::Accessibility => !status.accessibility.granted,
+        };
+        if still_missing {
+            let _ = open_appshot_permission_settings_impl(kind);
+            let _ = appshot_permission_panel::show(app);
+        }
+    }
+    Ok(status)
+}
+
+#[tauri::command]
+fn open_appshot_permissions_panel(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        appshot_permission_panel::show(app)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -6125,9 +7731,10 @@ pub fn run() {
             let store: Arc<dyn SessionStore> = Arc::new(CachedStore::new(inner)?);
             let app_config = config::load_config()?;
             app.manage(AppshotShortcutState::default());
-            if let Err(error) =
-                update_appshot_shortcut_registration(&app.handle().clone(), &app_config.appshot.shortcut)
-            {
+            if let Err(error) = update_appshot_shortcut_registration(
+                &app.handle().clone(),
+                &app_config.appshot.shortcut,
+            ) {
                 log::warn!("[appshot] failed to register shortcut at startup: {error}");
             }
             network::apply_network_proxy_env(&app_config.network.proxy);
@@ -6373,6 +7980,7 @@ pub fn run() {
             get_appshot_config,
             get_appshot_permission_status,
             request_appshot_permission,
+            open_appshot_permissions_panel,
             open_appshot_permission_settings,
             update_appshot_config,
             get_im_bridge_config,

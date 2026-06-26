@@ -124,7 +124,7 @@ export default function SettingsPage({
   appVersion: string;
   update: UpdateState;
   onOpenUpdate: () => void;
-  onOpenAppshotPermissions: () => void;
+  onOpenAppshotPermissions: () => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const [section, setSection] = useState<SettingsSection>("general");
@@ -310,7 +310,7 @@ function GeneralSettings({
   onError: (error: string | null) => void;
   onRebuildFinished: () => Promise<void> | void;
   onOpenUpdate: () => void;
-  onOpenAppshotPermissions: () => void;
+  onOpenAppshotPermissions: () => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
@@ -326,7 +326,6 @@ function GeneralSettings({
   const [appshotShortcut, setAppshotShortcut] = useState("");
   const [savingProxy, setSavingProxy] = useState(false);
   const [savingAppshot, setSavingAppshot] = useState(false);
-  const [refreshingAppshotPermission, setRefreshingAppshotPermission] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -347,19 +346,33 @@ function GeneralSettings({
     };
   }, [onError]);
 
-  const refreshAppshotPermission = async () => {
-    if (refreshingAppshotPermission) return;
-    setRefreshingAppshotPermission(true);
-    try {
-      const next = await getAppshotPermissionStatus();
-      setAppshotPermissionStatus(next);
-      onError(null);
-    } catch (err) {
-      onError(String(err));
-    } finally {
-      setRefreshingAppshotPermission(false);
-    }
-  };
+  useEffect(() => {
+    let disposed = false;
+    const timer = window.setInterval(() => {
+      void getAppshotPermissionStatus()
+        .then((status) => {
+          if (disposed) return;
+          setAppshotPermissionStatus((current) => {
+            if (
+              current?.canCapture === status.canCapture &&
+              current?.screenshots.granted === status.screenshots.granted &&
+              current?.screenshots.supported === status.screenshots.supported &&
+              current?.accessibility.granted === status.accessibility.granted &&
+              current?.accessibility.supported === status.accessibility.supported
+            ) {
+              return current;
+            }
+            return status;
+          });
+        })
+        .catch(() => {});
+    }, 1000);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const saveProxyConfig = async () => {
     if (savingProxy) return;
@@ -398,6 +411,17 @@ function GeneralSettings({
       onError(String(err));
     } finally {
       setSavingAppshot(false);
+    }
+  };
+
+  const openAppshotPermissions = async () => {
+    try {
+      setAppshotPermissionStatus(await getAppshotPermissionStatus());
+      await onOpenAppshotPermissions();
+      setAppshotPermissionStatus(await getAppshotPermissionStatus());
+      onError(null);
+    } catch (err) {
+      onError(String(err));
     }
   };
 
@@ -479,16 +503,7 @@ function GeneralSettings({
             </div>
             <button
               type="button"
-              disabled={refreshingAppshotPermission}
-              onClick={() => void refreshAppshotPermission()}
-              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35"
-            >
-              <RefreshCw className={"h-4 w-4 " + (refreshingAppshotPermission ? "animate-spin" : "")} />
-              {t("appshot.permission.refresh")}
-            </button>
-            <button
-              type="button"
-              onClick={onOpenAppshotPermissions}
+              onClick={() => void openAppshotPermissions()}
               className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]"
             >
               <Shield className="h-4 w-4" />

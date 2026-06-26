@@ -148,7 +148,7 @@ pub fn save_memory_config(config: &MemoryConfig) -> Result<()> {
     save_config(&app_config)
 }
 
-    pub fn save_config(config: &AppConfig) -> Result<()> {
+pub fn save_config(config: &AppConfig) -> Result<()> {
     let path = config_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
