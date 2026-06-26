@@ -66,6 +66,8 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent,
 };
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use terminal::{
     CloseTerminalRequest, CreateTerminalRequest, ResizeTerminalRequest, TerminalService,
     TerminalSessionSummary, WriteTerminalInputRequest,
@@ -79,6 +81,18 @@ const THREAD_WORK_SNAPSHOT_VERSION: i64 = 2;
 struct ThreadsUpdatedPayload {
     project_id: Option<String>,
     thread_id: Option<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppshotCapturedPayload {
+    path: String,
+    shortcut: String,
+}
+
+#[derive(Default)]
+struct AppshotShortcutState {
+    registered_shortcut: Mutex<Option<String>>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -105,6 +119,14 @@ fn emit_threads_updated(
         },
     )
     .map_err(|e| e.to_string())
+}
+
+fn emit_appshot_captured(
+    app: &AppHandle,
+    payload: AppshotCapturedPayload,
+) -> Result<(), String> {
+    app.emit("appshot_captured", payload)
+        .map_err(|e| e.to_string())
 }
 
 fn thread_project_id(store: &dyn SessionStore, thread_id: &str) -> Option<String> {
@@ -3160,6 +3182,141 @@ async fn capture_webview_area_png(
     }
 }
 
+#[cfg(target_os = "macos")]
+fn capture_frontmost_window_png(
+    app: &AppHandle,
+    file_name: Option<String>,
+) -> Result<SavedPastedAttachment, String> {
+    use core::ffi::c_void;
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_graphics::display::CGDisplay;
+    use core_graphics::geometry::CGRect;
+    use core_graphics::window::{
+        kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
+        kCGWindowListOptionOnScreenOnly, kCGWindowNumber, kCGWindowOwnerPID,
+    };
+    use objc2_app_kit::NSWorkspace;
+
+    let file_name =
+        safe_pasted_attachment_file_name(file_name.as_deref(), Some("image/png"));
+    let dir = paste_cache_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!(
+        "appshot-{}-{file_name}",
+        chrono::Utc::now().timestamp_millis()
+    ));
+
+    let frontmost_pid = {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let result = NSWorkspace::sharedWorkspace()
+                .frontmostApplication()
+                .map(|frontmost| frontmost.processIdentifier())
+                .ok_or_else(|| "Could not determine the frontmost application".to_string());
+            let _ = tx.send(result);
+        })
+        .map_err(|e| e.to_string())?;
+        rx.recv()
+            .map_err(|_| "Frontmost application lookup was cancelled".to_string())??
+    };
+
+    let windows = CGDisplay::window_list_info(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        None,
+    )
+    .ok_or_else(|| "Could not enumerate on-screen windows".to_string())?;
+    let key_owner_pid = unsafe { kCGWindowOwnerPID as *const c_void };
+    let key_window_layer = unsafe { kCGWindowLayer as *const c_void };
+    let key_window_alpha = unsafe { kCGWindowAlpha as *const c_void };
+    let key_window_bounds = unsafe { kCGWindowBounds as *const c_void };
+    let key_window_number = unsafe { kCGWindowNumber as *const c_void };
+
+    fn dict_value(dict: &CFDictionary, key: *const c_void) -> Option<CFType> {
+        dict.find(key)
+            .map(|value| unsafe { CFType::wrap_under_get_rule(*value) })
+    }
+
+    fn dict_number_i64(dict: &CFDictionary, key: *const c_void) -> Option<i64> {
+        dict_value(dict, key)
+            .and_then(|value| value.downcast::<CFNumber>())
+            .and_then(|value| value.to_i64())
+    }
+
+    fn dict_number_f64(dict: &CFDictionary, key: *const c_void) -> Option<f64> {
+        dict_value(dict, key)
+            .and_then(|value| value.downcast::<CFNumber>())
+            .and_then(|value| value.to_f64())
+    }
+
+    let mut target_window_id: Option<u32> = None;
+    for value in &windows {
+        let cf_type = unsafe { CFType::wrap_under_get_rule(*value) };
+        let Some(dict) = cf_type.downcast::<CFDictionary>() else {
+            continue;
+        };
+        let pid = dict_number_i64(&dict, key_owner_pid).unwrap_or_default();
+        if pid != i64::from(frontmost_pid) {
+            continue;
+        }
+        let layer = dict_number_i64(&dict, key_window_layer).unwrap_or_default();
+        if layer != 0 {
+            continue;
+        }
+        let alpha = dict_number_f64(&dict, key_window_alpha).unwrap_or(1.0);
+        if alpha <= 0.0 {
+            continue;
+        }
+        let Some(bounds_cf) = dict_value(&dict, key_window_bounds) else {
+            continue;
+        };
+        let Some(bounds_dict) = bounds_cf.downcast::<CFDictionary>() else {
+            continue;
+        };
+        let Some(bounds) = CGRect::from_dict_representation(&bounds_dict) else {
+            continue;
+        };
+        if bounds.is_empty() || bounds.size.width < 2.0 || bounds.size.height < 2.0 {
+            continue;
+        }
+        let Some(window_id) = dict_number_i64(&dict, key_window_number)
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            continue;
+        };
+        target_window_id = Some(window_id);
+        break;
+    }
+
+    let window_id = target_window_id
+        .ok_or_else(|| "Could not find a visible frontmost window to capture".to_string())?;
+
+    let status = std::process::Command::new("screencapture")
+        .arg("-x")
+        .arg("-o")
+        .arg("-t")
+        .arg("png")
+        .arg("-l")
+        .arg(window_id.to_string())
+        .arg(&path)
+        .status()
+        .map_err(|e| format!("Failed to start appshot capture: {e}"))?;
+    if !status.success() {
+        return Err(format!("Appshot capture failed with status {status}"));
+    }
+
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    if meta.len() == 0 {
+        let _ = std::fs::remove_file(&path);
+        return Err("Appshot capture produced an empty PNG".to_string());
+    }
+
+    Ok(SavedPastedAttachment {
+        path: path.to_string_lossy().to_string(),
+    })
+}
+
 #[cfg(windows)]
 #[tauri::command]
 async fn capture_window_area_png(
@@ -4712,6 +4869,110 @@ fn extension_for_pasted_mime(mime_type: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn normalized_appshot_shortcut(shortcut: &str) -> Result<String, String> {
+    use std::str::FromStr;
+    use tauri_plugin_global_shortcut::Shortcut;
+
+    let trimmed = shortcut.trim();
+    if trimmed.is_empty() {
+        return Err("Shortcut cannot be empty".to_string());
+    }
+    Shortcut::from_str(trimmed)
+        .map(|parsed| parsed.to_string())
+        .map_err(|e| format!("Invalid appshot shortcut: {e}"))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn parsed_appshot_shortcut(shortcut: &str) -> Result<tauri_plugin_global_shortcut::Shortcut, String> {
+    use std::str::FromStr;
+    tauri_plugin_global_shortcut::Shortcut::from_str(shortcut)
+        .map_err(|e| format!("Invalid appshot shortcut: {e}"))
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn normalized_appshot_shortcut(shortcut: &str) -> Result<String, String> {
+    let trimmed = shortcut.trim();
+    if trimmed.is_empty() {
+        return Err("Shortcut cannot be empty".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn update_appshot_shortcut_registration(
+    app: &AppHandle,
+    shortcut: &str,
+) -> Result<String, String> {
+    let normalized = normalized_appshot_shortcut(shortcut)?;
+    let parsed = parsed_appshot_shortcut(&normalized)?;
+    let state = app.state::<AppshotShortcutState>();
+    let mut guard = state
+        .registered_shortcut
+        .lock()
+        .map_err(|_| "Appshot shortcut state is poisoned".to_string())?;
+    let current = guard.clone();
+    if current.as_deref() == Some(normalized.as_str()) {
+        return Ok(normalized);
+    }
+
+    let manager = app.global_shortcut();
+    manager
+        .on_shortcut(parsed, {
+            let normalized = normalized.clone();
+            move |app, _shortcut, event| {
+                #[allow(deprecated)]
+                let is_pressed = matches!(
+                    event.state,
+                    tauri_plugin_global_shortcut::ShortcutState::Pressed
+                );
+                if !is_pressed {
+                    return;
+                }
+                if let Err(error) = capture_and_emit_frontmost_appshot(app, normalized.clone()) {
+                    log::warn!("[appshot] capture failed: {error}");
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    if let Some(previous) = current {
+        if previous != normalized {
+            if let Ok(previous_shortcut) = parsed_appshot_shortcut(&previous) {
+                if let Err(error) = manager.unregister(previous_shortcut) {
+                    log::warn!("[appshot] failed to unregister shortcut {previous}: {error}");
+                }
+            } else {
+                log::warn!("[appshot] previous shortcut could not be reparsed: {previous}");
+            }
+        }
+    }
+    *guard = Some(normalized.clone());
+    Ok(normalized)
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn update_appshot_shortcut_registration(
+    _app: &AppHandle,
+    shortcut: &str,
+) -> Result<String, String> {
+    normalized_appshot_shortcut(shortcut)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn capture_and_emit_frontmost_appshot(app: &AppHandle, shortcut: String) -> Result<(), String> {
+    let saved = capture_frontmost_window_png(app, Some("appshot.png".to_string()))?;
+    let result = emit_appshot_captured(
+        app,
+        AppshotCapturedPayload {
+            path: saved.path.clone(),
+            shortcut,
+        },
+    );
+    show_main_window(app);
+    result
+}
+
 fn local_image_mime(path: &Path) -> Option<&'static str> {
     match path
         .extension()
@@ -5002,6 +5263,25 @@ fn get_network_config() -> Result<config::NetworkConfig, String> {
 #[tauri::command]
 fn update_network_config(config: config::NetworkConfig) -> Result<config::NetworkConfig, String> {
     network::save_network_config(config).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_appshot_config() -> Result<config::AppshotConfig, String> {
+    config::load_config()
+        .map(|config| config.appshot)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_appshot_config(
+    app: AppHandle,
+    mut config: config::AppshotConfig,
+) -> Result<config::AppshotConfig, String> {
+    config.shortcut = update_appshot_shortcut_registration(&app, &config.shortcut)?;
+    let mut app_config = config::load_config().map_err(|e| e.to_string())?;
+    app_config.appshot = config.clone();
+    config::save_config(&app_config).map_err(|e| e.to_string())?;
+    Ok(config)
 }
 
 #[tauri::command]
@@ -5616,7 +5896,9 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init());
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build());
 
     builder
         .setup(|app| {
@@ -5640,6 +5922,12 @@ pub fn run() {
             let memory_store: Arc<dyn MemoryStore> = sqlite;
             let store: Arc<dyn SessionStore> = Arc::new(CachedStore::new(inner)?);
             let app_config = config::load_config()?;
+            app.manage(AppshotShortcutState::default());
+            if let Err(error) =
+                update_appshot_shortcut_registration(&app.handle().clone(), &app_config.appshot.shortcut)
+            {
+                log::warn!("[appshot] failed to register shortcut at startup: {error}");
+            }
             network::apply_network_proxy_env(&app_config.network.proxy);
             let runtime = RuntimeManager::new(app.handle().clone());
             app.manage(runtime.clone());
@@ -5880,6 +6168,8 @@ pub fn run() {
             get_debug_config,
             get_network_config,
             update_network_config,
+            get_appshot_config,
+            update_appshot_config,
             get_im_bridge_config,
             update_im_bridge_config,
             get_scheduled_tasks,

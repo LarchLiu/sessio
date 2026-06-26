@@ -37,6 +37,7 @@ import ToastStack from "./components/ToastStack";
 import UpdateConfirmDialog from "./components/UpdateConfirmDialog";
 import SettingsPage from "./pages/SettingsPage";
 import AutoTasksPage from "./pages/AutoTasksPage";
+import type { ToastStackMessage } from "./components/ToastStack";
 import { useAppData } from "./hooks/useAppData";
 import { usePendingNewChats } from "./hooks/usePendingNewChats";
 import { usePlanTaskRuntimeCompletion } from "./hooks/usePlanTaskRuntimeCompletion";
@@ -71,6 +72,7 @@ import {
   type Filter,
   type ProjectSelection,
 } from "./appUtils";
+import { appendAppshotToActiveComposer } from "./appshot";
 
 const VIEW_MODE_STORAGE_KEY = "sessio.viewMode";
 const RIGHT_SIDEBAR_OPEN_STORAGE_KEY = "sessio.rightSidebarOpen";
@@ -109,6 +111,7 @@ async function revealMainWindow(): Promise<void> {
 
 export default function App() {
   const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<ToastStackMessage | null>(null);
   const {
     sessions,
     setSessions,
@@ -214,6 +217,36 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const unlistenPromise = listen<{ path: string; shortcut: string }>(
+      "appshot_captured",
+      (event) => {
+        void (async () => {
+          try {
+            const inserted = await appendAppshotToActiveComposer(event.payload.path);
+            setToast({
+              message: inserted
+                ? t("appshot.inserted")
+                : t("appshot.no_active_composer"),
+              tone: inserted ? "info" : "error",
+            });
+          } catch (err) {
+            if (disposed) return;
+            setToast({
+              message: t("appshot.capture_failed", { error: String(err) }),
+              tone: "error",
+            });
+          }
+        })();
+      },
+    );
+    return () => {
+      disposed = true;
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [t]);
 
   const handleProjectGitRepoDetected = useCallback((projectPath: string, isRepo: boolean) => {
     if (!projectPath) return;
@@ -1094,6 +1127,7 @@ export default function App() {
           />
         )}
         <ToastStack message={error} onMessageConsumed={() => setError(null)} />
+        <ToastStack message={toast} onMessageConsumed={() => setToast(null)} />
       </div>
     );
   }
@@ -1192,6 +1226,7 @@ export default function App() {
         )}
       </AppLayout>
       <ToastStack message={error} onMessageConsumed={() => setError(null)} />
+      <ToastStack message={toast} onMessageConsumed={() => setToast(null)} />
     </div>
   );
 }

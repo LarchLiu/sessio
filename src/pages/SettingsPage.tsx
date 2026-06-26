@@ -33,10 +33,11 @@ import {
   ZAI,
 } from "@lobehub/icons";
 import { ArrowLeft, AtSign, Bot, Check, Circle, Download, Eye, EyeOff, Globe2, GripVertical, Hash, Info, Languages, Link2, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Server, Settings2, Shield, Sparkles, SquareKanban, Sun, Trash2, Workflow, X } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AstraConfig, AssistantInfo, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
+import type { Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AppshotConfig, AstraConfig, AssistantInfo, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
 import {
   createProcessTemplate,
   detectTelegramUserIds,
+  getAppshotConfig,
   getAstraConfig,
   getImBridgeConfig,
   getWechatQrcode,
@@ -53,6 +54,7 @@ import {
   testWechatBotConnection,
   pollWechatQrcodeStatus,
   updateAgentPreferences,
+  updateAppshotConfig,
   updateAstraConfig,
   updateImBridgeConfig,
   updateNetworkConfig,
@@ -306,20 +308,25 @@ function GeneralSettings({
 }) {
   const { t } = useI18n();
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
+  const [appshotConfig, setAppshotConfig] = useState<AppshotConfig | null>(null);
   const [proxyEnabled, setProxyEnabled] = useState(false);
   const [proxyUrl, setProxyUrl] = useState("");
   const [noProxy, setNoProxy] = useState("");
+  const [appshotShortcut, setAppshotShortcut] = useState("");
   const [savingProxy, setSavingProxy] = useState(false);
+  const [savingAppshot, setSavingAppshot] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    getNetworkConfig()
-      .then((config) => {
+    Promise.all([getNetworkConfig(), getAppshotConfig()])
+      .then(([config, nextAppshot]) => {
         if (cancelled) return;
         setNetworkConfig(config);
         setProxyEnabled(config.proxy.enabled);
         setProxyUrl(config.proxy.url ?? "");
         setNoProxy(config.proxy.noProxy ?? "");
+        setAppshotConfig(nextAppshot);
+        setAppshotShortcut(nextAppshot.shortcut);
       })
       .catch((err) => onError(String(err)));
     return () => {
@@ -350,10 +357,30 @@ function GeneralSettings({
     }
   };
 
+  const saveAppshotShortcut = async () => {
+    if (savingAppshot) return;
+    setSavingAppshot(true);
+    try {
+      const next = await updateAppshotConfig({
+        shortcut: appshotShortcut.trim(),
+      });
+      setAppshotConfig(next);
+      setAppshotShortcut(next.shortcut);
+      onError(null);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setSavingAppshot(false);
+    }
+  };
+
   const proxyChanged = networkConfig
     ? proxyEnabled !== networkConfig.proxy.enabled
       || proxyUrl.trim() !== (networkConfig.proxy.url ?? "")
       || noProxy.trim() !== (networkConfig.proxy.noProxy ?? "")
+    : false;
+  const appshotChanged = appshotConfig
+    ? appshotShortcut.trim() !== appshotConfig.shortcut
     : false;
   return (
     <section className="min-w-0 max-w-full">
@@ -370,6 +397,31 @@ function GeneralSettings({
         </SettingsRow>
         <SettingsRow icon={<Monitor className="h-4 w-4" />} label={t("sidebar.theme")} description={t("settings.theme_description")}>
           <ThemeSelector mode={themeMode} onChange={onThemeModeChange} />
+        </SettingsRow>
+      </SettingsGroup>
+      <SettingsGroup title={t("settings.appshot")} flush>
+        <SettingsRow
+          icon={<Monitor className="h-4 w-4" />}
+          label={t("settings.appshot_shortcut")}
+          description={t("settings.appshot_shortcut_description")}
+        >
+          <div className="flex items-center justify-end gap-2">
+            <input
+              value={appshotShortcut}
+              onChange={(event) => setAppshotShortcut(event.target.value)}
+              placeholder="CommandOrControl+Shift+Option+5"
+              className={inputClassName + " w-[320px]"}
+            />
+            <button
+              type="button"
+              disabled={savingAppshot || !appshotChanged || !appshotShortcut.trim()}
+              onClick={() => void saveAppshotShortcut()}
+              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35"
+            >
+              {savingAppshot ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+              {t("project.save")}
+            </button>
+          </div>
         </SettingsRow>
       </SettingsGroup>
       <SettingsGroup title={t("settings.network")} flush>

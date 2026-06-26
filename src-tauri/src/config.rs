@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub memory: Option<MemoryConfig>,
     pub index: IndexConfig,
     pub network: NetworkConfig,
+    pub appshot: AppshotConfig,
     pub debug: DebugConfig,
 }
 
@@ -33,6 +34,20 @@ pub struct NetworkProxyConfig {
     pub enabled: bool,
     pub url: Option<String>,
     pub no_proxy: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppshotConfig {
+    pub shortcut: String,
+}
+
+impl Default for AppshotConfig {
+    fn default() -> Self {
+        Self {
+            shortcut: "CommandOrControl+Shift+Option+5".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -62,6 +77,7 @@ struct RawConfig {
     memory: Option<RawMemoryConfig>,
     index: RawIndexConfig,
     network: RawNetworkConfig,
+    appshot: RawAppshotConfig,
     debug: RawDebugConfig,
 }
 
@@ -80,6 +96,11 @@ struct RawNetworkProxyConfig {
     enabled: Option<bool>,
     url: Option<String>,
     no_proxy: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RawAppshotConfig {
+    shortcut: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -127,7 +148,7 @@ pub fn save_memory_config(config: &MemoryConfig) -> Result<()> {
     save_config(&app_config)
 }
 
-pub fn save_config(config: &AppConfig) -> Result<()> {
+    pub fn save_config(config: &AppConfig) -> Result<()> {
     let path = config_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -238,6 +259,10 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 "no_proxy" => raw.network.proxy.no_proxy = value,
                 other => bail!("unknown key in [network.proxy]: {other}"),
             },
+            Section::Appshot => match key {
+                "shortcut" => raw.appshot.shortcut = value,
+                other => bail!("unknown key in [appshot]: {other}"),
+            },
             Section::Debug => match key {
                 "acp_config" => raw.debug.acp_config = value.map(parse_bool).transpose()?,
                 "update_preview" => raw.debug.update_preview = value.map(parse_bool).transpose()?,
@@ -257,6 +282,7 @@ enum Section {
     MemoryBackendsQmd,
     Index,
     NetworkProxy,
+    Appshot,
     Debug,
     Ignored,
 }
@@ -279,6 +305,7 @@ fn parse_section(line: &str) -> Result<Option<Section>> {
         [a] if a == "memory" => Section::Memory,
         [a] if a == "index" => Section::Index,
         [a, b] if a == "network" && b == "proxy" => Section::NetworkProxy,
+        [a] if a == "appshot" => Section::Appshot,
         [a, ..] if a == "astra" => Section::Ignored,
         [a] if a == "debug" => Section::Debug,
         [a, b, c] if a == "memory" && b == "backends" && c == "qmd" => Section::MemoryBackendsQmd,
@@ -365,6 +392,7 @@ fn resolve_app_config(raw: RawConfig, apply_env: bool) -> Result<AppConfig> {
         memory,
         index: resolve_index_config(raw.clone()),
         network: resolve_network_config(raw.clone()),
+        appshot: resolve_appshot_config(raw.clone()),
         debug: resolve_debug_config(raw),
     })
 }
@@ -383,6 +411,13 @@ fn resolve_network_config(raw: RawConfig) -> NetworkConfig {
             url: trimmed_string(proxy.url.as_deref()),
             no_proxy: trimmed_string(proxy.no_proxy.as_deref()),
         },
+    }
+}
+
+fn resolve_appshot_config(raw: RawConfig) -> AppshotConfig {
+    AppshotConfig {
+        shortcut: trimmed_string(raw.appshot.shortcut.as_deref())
+            .unwrap_or_else(|| AppshotConfig::default().shortcut),
     }
 }
 
@@ -464,6 +499,11 @@ fn raw_config_with_defaults(mut raw: RawConfig) -> Result<(RawConfig, bool)> {
         &mut changed,
     );
     merge_option(
+        &mut raw.appshot.shortcut,
+        defaults.appshot.shortcut,
+        &mut changed,
+    );
+    merge_option(
         &mut raw.debug.update_preview,
         defaults.debug.update_preview,
         &mut changed,
@@ -500,6 +540,7 @@ fn default_app_config() -> Result<AppConfig> {
             poll_interval_seconds: 60,
         },
         network: NetworkConfig::default(),
+        appshot: AppshotConfig::default(),
         debug: DebugConfig {
             acp_config: false,
             update_preview: false,
@@ -551,6 +592,8 @@ pub fn serialize_app_config(config: &AppConfig) -> String {
     out.push('\n');
     out.push_str(&serialize_network_config(&config.network));
     out.push('\n');
+    out.push_str(&serialize_appshot_config(&config.appshot));
+    out.push('\n');
     out.push_str(&serialize_debug_config(&config.debug));
     out
 }
@@ -584,6 +627,15 @@ fn serialize_network_config(config: &NetworkConfig) -> String {
         out.push_str(&toml_string(no_proxy));
         out.push('\n');
     }
+    out
+}
+
+fn serialize_appshot_config(config: &AppshotConfig) -> String {
+    let mut out = String::new();
+    out.push_str("[appshot]\n");
+    out.push_str("shortcut = ");
+    out.push_str(&toml_string(&config.shortcut));
+    out.push('\n');
     out
 }
 

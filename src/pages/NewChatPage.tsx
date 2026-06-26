@@ -58,6 +58,7 @@ import {
 import { useChatComposer } from "../hooks/useChatComposer";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession, ProjectGroup } from "../navigation";
+import { useAppshotComposerRegistration } from "../appshot";
 import {
   formatChatSlashCommandText,
   parseRuntimeSessionAvailableCommands,
@@ -131,6 +132,7 @@ export default function NewChatPage({
     onError,
     onPendingSession,
   });
+  useAppshotComposerRegistration(composer, true);
   const threadMode = mode !== "chat";
   const threadValidationError = threadMode
     ? validateThreadMode({

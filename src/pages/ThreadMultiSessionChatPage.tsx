@@ -63,6 +63,7 @@ import {
 import { useChatComposer } from "../hooks/useChatComposer";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession } from "../navigation";
+import { useAppshotComposerRegistration } from "../appshot";
 import {
   formatChatSlashCommandText,
   parseRuntimeSessionAvailableCommands,
@@ -168,6 +169,7 @@ export default function ThreadMultiSessionChatPage({
     onError,
     onPendingSession,
   });
+  useAppshotComposerRegistration(composer, true);
   const commandTrigger = useMemo(
     () => parseComposerCommandTrigger(composer.text, ["slash", "assistant"]),
     [composer.text],

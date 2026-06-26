@@ -147,6 +147,7 @@ import {
   MinimalMessageStrip,
 } from "../components/ChatBottomStrips";
 import SessionFileEditsCard from "../components/SessionFileEditsCard";
+import { useAppshotComposerRegistration } from "../appshot";
 
 export interface ChatPageProps {
   session: SessionInfo;
@@ -1580,6 +1581,7 @@ export function AcpTranscriptPanel({
     supportsEmbeddedContext,
     supportsImageAttachments,
   ]);
+  useAppshotComposerRegistration(chatComposerController, true);
 
   const sessionFileEdits = useMemo(
     () => aggregateSessionFileEdits(acpViewModel),

@@ -155,6 +155,10 @@ export interface NetworkProxyConfig {
   noProxy: string | null;
 }
 
+export interface AppshotConfig {
+  shortcut: string;
+}
+
 export interface ImBridgeConfig {
   enabled: boolean;
   idleTimeoutSecs: number;
@@ -2432,6 +2436,14 @@ export async function getNetworkConfig(): Promise<NetworkConfig> {
 
 export async function updateNetworkConfig(config: NetworkConfig): Promise<NetworkConfig> {
   return invoke<NetworkConfig>("update_network_config", { config });
+}
+
+export async function getAppshotConfig(): Promise<AppshotConfig> {
+  return invoke<AppshotConfig>("get_appshot_config");
+}
+
+export async function updateAppshotConfig(config: AppshotConfig): Promise<AppshotConfig> {
+  return invoke<AppshotConfig>("update_appshot_config", { config });
 }
 
 export async function getImBridgeConfig(): Promise<ImBridgeConfig> {
