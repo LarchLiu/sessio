@@ -50,6 +50,8 @@ struct PiMessageEnvelope {
     tool_name: Option<String>,
     #[serde(default, rename = "isError")]
     is_error: Option<bool>,
+    #[serde(default)]
+    details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -389,6 +391,19 @@ fn tool_result_event(
             serde_json::Value::String(id.to_string()),
         );
     }
+    if let Some(tool_name) = message
+        .tool_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        metadata.insert(
+            "tool_name".to_string(),
+            serde_json::Value::String(tool_name.to_string()),
+        );
+    }
+    if let Some(details) = message.details.clone() {
+        metadata.insert("tool_details".to_string(), details);
+    }
     Some(MessageEvent {
         source: source.clone(),
         event_id: Some(format!(
@@ -437,11 +452,9 @@ fn history_message_from_event(event: &MessageEvent) -> AcpProtocolMessage {
             tool.input.clone().unwrap_or(serde_json::Value::Null),
             event.timestamp,
         ),
-        MessageContent::ToolResult { result } => history_tool_result_message(
-            tool_call_id_from_event(event),
-            serde_json::Value::String(result.text.clone()),
-            event.timestamp,
-        ),
+        MessageContent::ToolResult { result } => {
+            history_tool_result_message_from_event(event, result)
+        }
         _ => {
             let text = text_from_message_content(&event.content);
             match event.role {
@@ -459,6 +472,51 @@ fn history_message_from_event(event: &MessageEvent) -> AcpProtocolMessage {
     };
     message.acp_session_id = Some(event.source.session_id.clone());
     message.turn_id = event.event_id.clone();
+    message
+}
+
+fn history_tool_result_message_from_event(
+    event: &MessageEvent,
+    result: &ToolResultEvent,
+) -> AcpProtocolMessage {
+    let mut message = history_tool_result_message(
+        tool_call_id_from_event(event),
+        serde_json::Value::String(result.text.clone()),
+        event.timestamp,
+    );
+    let Some(update) = message
+        .data
+        .get_mut("update")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return message;
+    };
+    if matches!(result.success, Some(false)) {
+        update.insert(
+            "status".to_string(),
+            serde_json::Value::String("failed".to_string()),
+        );
+    }
+    if let Some(tool_name) = event
+        .metadata
+        .get("tool_name")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| result.tool_name.clone())
+    {
+        update.insert(
+            "title".to_string(),
+            serde_json::Value::String(tool_name.clone()),
+        );
+        update.insert(
+            "kind".to_string(),
+            serde_json::Value::String(pi_tool_to_acp_kind(&tool_name).to_string()),
+        );
+    }
+    let content = pi_tool_result_content_from_event(event);
+    if !content.is_empty() {
+        update.insert("content".to_string(), serde_json::Value::Array(content));
+    }
     message
 }
 
@@ -485,6 +543,98 @@ fn tool_call_id_from_event(event: &MessageEvent) -> Option<String> {
         .get("tool_call_id")
         .and_then(|value| value.as_str())
         .map(ToString::to_string)
+}
+
+fn pi_tool_result_content_from_event(event: &MessageEvent) -> Vec<serde_json::Value> {
+    let tool_name = event
+        .metadata
+        .get("tool_name")
+        .and_then(serde_json::Value::as_str);
+    let Some(details) = event.metadata.get("tool_details") else {
+        return Vec::new();
+    };
+    pi_tool_result_content_from_details(tool_name, details)
+        .into_iter()
+        .collect()
+}
+
+fn pi_tool_result_content_from_details(
+    tool_name: Option<&str>,
+    details: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let has_diff_payload = details
+        .get("patch")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        || details
+            .get("diff")
+            .and_then(serde_json::Value::as_str)
+            .is_some();
+    if !has_diff_payload {
+        return None;
+    }
+    if let Some(tool_name) = tool_name {
+        let normalized = tool_name.trim().to_ascii_lowercase();
+        if normalized != "edit" && normalized != "patch" && normalized != "apply_patch" {
+            return None;
+        }
+    }
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "type".to_string(),
+        serde_json::Value::String("diff".to_string()),
+    );
+    if let Some(path) = details
+        .get("path")
+        .or_else(|| details.get("filePath"))
+        .or_else(|| details.get("file_path"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        out.insert(
+            "path".to_string(),
+            serde_json::Value::String(path.to_string()),
+        );
+    }
+    if let Some(patch) = details
+        .get("patch")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        out.insert(
+            "patch".to_string(),
+            serde_json::Value::String(patch.to_string()),
+        );
+    }
+    if let Some(diff) = details
+        .get("diff")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        out.insert(
+            "diff".to_string(),
+            serde_json::Value::String(diff.to_string()),
+        );
+        out.insert(
+            "detail".to_string(),
+            serde_json::Value::String(diff.to_string()),
+        );
+    }
+    if let Some(first_changed_line) = details
+        .get("firstChangedLine")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value > 0)
+    {
+        out.insert(
+            "meta".to_string(),
+            serde_json::json!({
+                "firstChangedLine": first_changed_line,
+                "startLine": first_changed_line,
+                "line": first_changed_line,
+            }),
+        );
+    }
+    Some(serde_json::Value::Object(out))
 }
 
 fn pi_tool_to_acp_kind(tool_name: &str) -> &'static str {
@@ -654,6 +804,75 @@ mod tests {
                 .to_string()
                 .contains("joke-draft.md"),
             "final assistant text should be present in history"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pi_jsonl_history_extracts_edit_diff_details_into_tool_result_update() {
+        let path = unique_temp_jsonl_path("pi-edit-history");
+        let content = concat!(
+            "{\"type\":\"session\",\"id\":\"session-1\",\"timestamp\":\"2026-06-25T18:48:15.425Z\",\"cwd\":\"/tmp/project\"}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"改一下文件\"}],\"timestamp\":1000}}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"call-edit-1\",\"name\":\"edit\",\"arguments\":{\"path\":\"world-cup.md\",\"edits\":[{\"oldText\":\"old\",\"newText\":\"new\"}]}}],\"timestamp\":1001}}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"call-edit-1\",\"toolName\":\"edit\",\"content\":[{\"type\":\"text\",\"text\":\"Successfully replaced 1 block(s) in world-cup.md.\"}],\"details\":{\"diff\":\"-1 old\\n+1 new\",\"patch\":\"--- world-cup.md\\n+++ world-cup.md\\n@@ -1 +1 @@\\n-old\\n+new\\n\",\"firstChangedLine\":1},\"isError\":false,\"timestamp\":1002}}\n"
+        );
+        std::fs::write(&path, content).expect("write temp pi jsonl");
+        let source = SessionSource {
+            agent: AgentKind::new("pi"),
+            session_id: "session-1".to_string(),
+            scope: "test".to_string(),
+            file_path: path.to_string_lossy().to_string(),
+            project: None,
+            source_kind: SourceKind::MainSession,
+            metadata: Default::default(),
+        };
+
+        let events = read_message_events(&path, &source).expect("read pi events");
+        let history = message_events_to_history_acp_messages(events);
+        let update = history[2]
+            .message
+            .data
+            .get("update")
+            .and_then(serde_json::Value::as_object)
+            .expect("tool result update");
+        assert_eq!(
+            update.get("title").and_then(serde_json::Value::as_str),
+            Some("edit")
+        );
+        assert_eq!(
+            update.get("kind").and_then(serde_json::Value::as_str),
+            Some("edit")
+        );
+        let content = update
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .expect("diff content");
+        assert_eq!(
+            content[0]["type"],
+            serde_json::Value::String("diff".to_string())
+        );
+        assert_eq!(
+            content[0]["patch"].as_str(),
+            Some("--- world-cup.md\n+++ world-cup.md\n@@ -1 +1 @@\n-old\n+new\n")
+        );
+        assert_eq!(content[0]["detail"].as_str(), Some("-1 old\n+1 new"));
+
+        let turns = crate::turns::session_history_turns_from_acp_messages(&history);
+        let file_edit = turns[0]
+            .blocks
+            .iter()
+            .find(|block| block.update_type.as_deref() == Some("file_edit"))
+            .expect("file_edit block");
+        let data = file_edit.data.as_ref().expect("file_edit data");
+        assert_eq!(
+            data["edits"][0]["path"],
+            serde_json::Value::String("world-cup.md".to_string())
+        );
+        assert_eq!(
+            data["edits"][0]["patch"].as_str(),
+            Some("--- world-cup.md\n+++ world-cup.md\n@@ -1 +1 @@\n-old\n+new\n")
         );
 
         let _ = std::fs::remove_file(path);

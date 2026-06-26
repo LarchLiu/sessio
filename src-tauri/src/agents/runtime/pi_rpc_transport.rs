@@ -20,6 +20,7 @@ use super::types::{
 };
 use crate::app_paths;
 use crate::models::Agent;
+use crate::turns::history_session_update_message;
 
 const PI_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 const PI_RPC_COMMAND_CHANNEL_SIZE: usize = 32;
@@ -632,6 +633,15 @@ fn handle_incoming_event(
         }
         Some("tool_execution_end") => {
             if let Some(turn_id) = current_turn(current_turn_id) {
+                if let Some(message) =
+                    pi_tool_execution_end_acp_message(sessio_runtime_session_id, &turn_id, &value)
+                {
+                    manager.emit(AgentRuntimeEventPayload::AcpProtocolMessage {
+                        sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+                        turn_id: Some(turn_id.clone()),
+                        message,
+                    })?;
+                }
                 manager.emit(tool_status_event(
                     sessio_runtime_session_id,
                     &turn_id,
@@ -821,6 +831,97 @@ fn tool_status_event(
         status,
         data: Some(value.clone()),
     }
+}
+
+fn pi_tool_execution_end_acp_message(
+    _sessio_runtime_session_id: &str,
+    _turn_id: &str,
+    value: &Value,
+) -> Option<crate::agents::runtime::types::AcpProtocolMessage> {
+    let body = event_data(value);
+    let tool_name = string_field(body, "toolName")
+        .or_else(|| string_field(body, "name"))
+        .unwrap_or_else(|| "tool".to_string());
+    let content = pi_tool_result_content_from_rpc_result(
+        &tool_name,
+        value_field(body, "args").as_ref(),
+        value_field(body, "result").as_ref(),
+    );
+    if content.is_empty() {
+        return None;
+    }
+    let tool_id = tool_id_from_value(body);
+    Some(history_session_update_message(
+        "tool_call_update",
+        json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": tool_id,
+            "title": tool_name,
+            "kind": "edit",
+            "status": "completed",
+            "content": content,
+            "rawOutput": value_field(body, "result").unwrap_or(Value::Null),
+        }),
+        None,
+    ))
+}
+
+fn pi_tool_result_content_from_rpc_result(
+    tool_name: &str,
+    args: Option<&Value>,
+    result: Option<&Value>,
+) -> Vec<Value> {
+    let normalized = tool_name.trim().to_ascii_lowercase();
+    if normalized != "edit" && normalized != "patch" && normalized != "apply_patch" {
+        return Vec::new();
+    }
+    let Some(result) = result else {
+        return Vec::new();
+    };
+    let Some(details) = result.get("details") else {
+        return Vec::new();
+    };
+    let patch = details
+        .get("patch")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let diff = details
+        .get("diff")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    if patch.is_none() && diff.is_none() {
+        return Vec::new();
+    }
+    let path = args
+        .and_then(|args| {
+            string_field(args, "path")
+                .or_else(|| string_field(args, "filePath"))
+                .or_else(|| string_field(args, "file_path"))
+        })
+        .or_else(|| {
+            details
+                .get("path")
+                .or_else(|| details.get("filePath"))
+                .or_else(|| details.get("file_path"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        });
+    let first_changed_line = details
+        .get("firstChangedLine")
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0);
+    vec![json!({
+        "type": "diff",
+        "path": path,
+        "patch": patch,
+        "diff": diff,
+        "detail": diff,
+        "meta": first_changed_line.map(|line| json!({
+            "firstChangedLine": line,
+            "startLine": line,
+            "line": line,
+        })).unwrap_or(Value::Null),
+    })]
 }
 
 #[derive(Debug)]
@@ -1906,5 +2007,53 @@ mod tests {
             final_assistant_text_from_event(&event).as_deref(),
             Some("I need to keep spaces.")
         );
+    }
+
+    #[test]
+    fn pi_tool_execution_end_emits_edit_diff_tool_update() {
+        let event = json!({
+            "type": "tool_execution_end",
+            "data": {
+                "toolCallId": "call-edit-1",
+                "toolName": "edit",
+                "args": {
+                    "path": "world-cup.md",
+                    "edits": [{ "oldText": "old", "newText": "new" }]
+                },
+                "result": {
+                    "content": [
+                        { "type": "text", "text": "Successfully replaced 1 block(s) in world-cup.md." }
+                    ],
+                    "details": {
+                        "diff": "-1 old\n+1 new",
+                        "patch": "--- world-cup.md\n+++ world-cup.md\n@@ -1 +1 @@\n-old\n+new\n",
+                        "firstChangedLine": 1
+                    }
+                },
+                "isError": false
+            }
+        });
+
+        let message = pi_tool_execution_end_acp_message("runtime-1", "turn-1", &event)
+            .expect("tool update message");
+        let update = message
+            .data
+            .get("update")
+            .and_then(Value::as_object)
+            .expect("tool update payload");
+        assert_eq!(
+            update.get("toolCallId").and_then(Value::as_str),
+            Some("call-edit-1")
+        );
+        let content = update
+            .get("content")
+            .and_then(Value::as_array)
+            .expect("content");
+        assert_eq!(content[0]["path"].as_str(), Some("world-cup.md"));
+        assert_eq!(
+            content[0]["patch"].as_str(),
+            Some("--- world-cup.md\n+++ world-cup.md\n@@ -1 +1 @@\n-old\n+new\n")
+        );
+        assert_eq!(content[0]["detail"].as_str(), Some("-1 old\n+1 new"));
     }
 }

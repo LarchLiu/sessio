@@ -1765,15 +1765,21 @@ fn tool_content_to_file_edit(tool: &SessionHistoryToolCall, content: &Value) -> 
     if string_field(content, "type").as_deref() != Some("diff") {
         return None;
     }
-    let path = string_field(content, "path").or_else(|| string_field(content, "filePath"));
+    let path = string_field(content, "path")
+        .or_else(|| string_field(content, "filePath"))
+        .or_else(|| string_field(&tool.raw_input, "path"))
+        .or_else(|| string_field(&tool.raw_input, "filePath"))
+        .or_else(|| path_from_patch_value(content));
     let old_content =
         string_field(content, "oldText").or_else(|| string_field(content, "old_text"));
     let new_content =
         string_field(content, "newText").or_else(|| string_field(content, "new_text"));
-    if path.is_none() && old_content.is_none() && new_content.is_none() {
+    let patch = string_field(content, "patch").or_else(|| string_field(content, "diff"));
+    let detail = string_field(content, "detail").or_else(|| string_field(content, "diff"));
+    if path.is_none() && old_content.is_none() && new_content.is_none() && patch.is_none() {
         return None;
     }
-    let patch = path.as_deref().and_then(|value| {
+    let synthetic_patch = path.as_deref().and_then(|value| {
         synthetic_tool_diff_patch(
             value,
             old_content.as_deref(),
@@ -1782,16 +1788,26 @@ fn tool_content_to_file_edit(tool: &SessionHistoryToolCall, content: &Value) -> 
             content,
         )
     });
+    let (additions, deletions) = if let Some(patch_text) = patch.as_deref() {
+        patch_change_counts(patch_text)
+    } else {
+        (
+            count_non_empty_lines(new_content.as_deref()),
+            count_non_empty_lines(old_content.as_deref()),
+        )
+    };
     Some(json!({
         "path": path.clone().unwrap_or_else(|| "file".to_string()),
         "displayPath": path.clone().unwrap_or_else(|| "file".to_string()),
         "kind": if old_content.is_none() { "create" } else { "modify" },
-        "additions": count_non_empty_lines(new_content.as_deref()),
-        "deletions": count_non_empty_lines(old_content.as_deref()),
-        "patch": patch,
+        "additions": additions,
+        "deletions": deletions,
+        "patch": patch.or(synthetic_patch),
         "oldContent": old_content,
         "newContent": new_content,
-        "detail": if path.is_none() {
+        "detail": if detail.is_some() {
+            detail
+        } else if path.is_none() {
             serde_json::to_string_pretty(content).ok()
         } else {
             None
@@ -1899,6 +1915,67 @@ fn same_file_path(left: &str, right: &str) -> bool {
 
 fn patch_display_path(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches('/').to_string()
+}
+
+fn path_from_patch_value(content: &Value) -> Option<String> {
+    let patch = string_field(content, "patch").or_else(|| string_field(content, "diff"))?;
+    path_from_patch_text(&patch)
+}
+
+fn path_from_patch_text(patch: &str) -> Option<String> {
+    for line in patch.lines() {
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(path) = line.strip_prefix("+++ ") {
+            let trimmed = path
+                .trim()
+                .trim_start_matches("b/")
+                .trim_start_matches("./");
+            if !trimmed.is_empty() && trimmed != "/dev/null" {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(path) = line.strip_prefix("--- a/") {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(path) = line.strip_prefix("--- ") {
+            let trimmed = path
+                .trim()
+                .trim_start_matches("a/")
+                .trim_start_matches("./");
+            if !trimmed.is_empty() && trimmed != "/dev/null" {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn patch_change_counts(patch: &str) -> (i64, i64) {
+    let mut additions = 0i64;
+    let mut deletions = 0i64;
+    for line in patch.lines() {
+        if line.starts_with("+++")
+            || line.starts_with("---")
+            || line.starts_with("@@")
+            || line.starts_with("diff --git")
+        {
+            continue;
+        }
+        if line.starts_with('+') {
+            additions += 1;
+        } else if line.starts_with('-') {
+            deletions += 1;
+        }
+    }
+    (additions, deletions)
 }
 
 fn patch_line_count(value: Option<&str>) -> usize {
@@ -4136,6 +4213,65 @@ mod tests {
         let data = file_edits[0].data.as_ref().unwrap();
         assert_eq!(data["source"], "codex");
         assert_eq!(data["edits"][0]["path"], "src/explicit.rs");
+    }
+
+    #[test]
+    fn runtime_builder_emits_file_edit_block_from_patch_only_tool_diff() {
+        let mut state = RuntimeTurnState::new(
+            "runtime-1",
+            Agent::Codex,
+            "agent-1",
+            RuntimeTransportKind::Acp,
+            "/tmp/project",
+            RuntimeCapabilitySet::fake(),
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::TurnStarted {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            },
+            10,
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::AcpProtocolMessage {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                message: history_session_update_message(
+                    "tool_call",
+                    json!({
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tool-1",
+                        "title": "edit",
+                        "status": "completed",
+                        "content": [{
+                            "type": "diff",
+                            "patch": "--- src/main.rs\n+++ src/main.rs\n@@ -1 +1 @@\n-old\n+new\n",
+                            "detail": "-1 old\n+1 new"
+                        }]
+                    }),
+                    Some(20),
+                ),
+            },
+            20,
+        );
+
+        let file_edit = state.turns[0]
+            .blocks
+            .iter()
+            .find(|block| block.update_type.as_deref() == Some("file_edit"))
+            .expect("file_edit block");
+        let data = file_edit.data.as_ref().unwrap();
+        assert_eq!(data["files"], 1);
+        assert_eq!(data["edits"][0]["path"], "src/main.rs");
+        assert_eq!(data["edits"][0]["additions"], 1);
+        assert_eq!(data["edits"][0]["deletions"], 1);
+        assert_eq!(
+            data["edits"][0]["patch"].as_str(),
+            Some("--- src/main.rs\n+++ src/main.rs\n@@ -1 +1 @@\n-old\n+new\n")
+        );
+        assert_eq!(data["edits"][0]["detail"].as_str(), Some("-1 old\n+1 new"));
     }
 
     #[test]
