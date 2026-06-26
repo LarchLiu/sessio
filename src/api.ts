@@ -159,6 +159,19 @@ export interface AppshotConfig {
   shortcut: string;
 }
 
+export type AppshotPermissionKind = "screenshots" | "accessibility";
+
+export interface AppshotPermissionState {
+  granted: boolean;
+  supported: boolean;
+}
+
+export interface AppshotPermissionStatus {
+  screenshots: AppshotPermissionState;
+  accessibility: AppshotPermissionState;
+  canCapture: boolean;
+}
+
 export interface ImBridgeConfig {
   enabled: boolean;
   idleTimeoutSecs: number;
@@ -2440,6 +2453,22 @@ export async function updateNetworkConfig(config: NetworkConfig): Promise<Networ
 
 export async function getAppshotConfig(): Promise<AppshotConfig> {
   return invoke<AppshotConfig>("get_appshot_config");
+}
+
+export async function getAppshotPermissionStatus(): Promise<AppshotPermissionStatus> {
+  return invoke<AppshotPermissionStatus>("get_appshot_permission_status");
+}
+
+export async function requestAppshotPermission(
+  permission: AppshotPermissionKind,
+): Promise<AppshotPermissionStatus> {
+  return invoke<AppshotPermissionStatus>("request_appshot_permission", { permission });
+}
+
+export async function openAppshotPermissionSettings(
+  permission: AppshotPermissionKind,
+): Promise<void> {
+  return invoke<void>("open_appshot_permission_settings", { permission });
 }
 
 export async function updateAppshotConfig(config: AppshotConfig): Promise<AppshotConfig> {

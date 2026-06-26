@@ -90,6 +90,28 @@ struct AppshotCapturedPayload {
     shortcut: String,
 }
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppshotPermissionStateDto {
+    granted: bool,
+    supported: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppshotPermissionStatusDto {
+    screenshots: AppshotPermissionStateDto,
+    accessibility: AppshotPermissionStateDto,
+    can_capture: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppshotPermissionRequiredPayload {
+    shortcut: String,
+    status: AppshotPermissionStatusDto,
+}
+
 #[derive(Default)]
 struct AppshotShortcutState {
     registered_shortcut: Mutex<Option<String>>,
@@ -104,6 +126,22 @@ struct RuntimeAgentSessionConfigDto {
     config_options_json: String,
     created_at: i64,
     updated_at: i64,
+}
+
+#[derive(Clone, Copy)]
+enum AppshotPermissionKind {
+    Screenshots,
+    Accessibility,
+}
+
+impl AppshotPermissionKind {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "screenshots" | "screen_capture" | "screen-capture" => Ok(Self::Screenshots),
+            "accessibility" => Ok(Self::Accessibility),
+            other => Err(format!("Unknown appshot permission: {other}")),
+        }
+    }
 }
 
 fn emit_threads_updated(
@@ -126,6 +164,14 @@ fn emit_appshot_captured(
     payload: AppshotCapturedPayload,
 ) -> Result<(), String> {
     app.emit("appshot_captured", payload)
+        .map_err(|e| e.to_string())
+}
+
+fn emit_appshot_permission_required(
+    app: &AppHandle,
+    payload: AppshotPermissionRequiredPayload,
+) -> Result<(), String> {
+    app.emit("appshot_permission_required", payload)
         .map_err(|e| e.to_string())
 }
 
@@ -3317,6 +3363,122 @@ fn capture_frontmost_window_png(
     })
 }
 
+#[cfg(not(target_os = "macos"))]
+fn appshot_permission_status() -> AppshotPermissionStatusDto {
+    AppshotPermissionStatusDto {
+        screenshots: AppshotPermissionStateDto {
+            granted: true,
+            supported: false,
+        },
+        accessibility: AppshotPermissionStateDto {
+            granted: true,
+            supported: false,
+        },
+        can_capture: true,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn appshot_permission_status() -> AppshotPermissionStatusDto {
+    AppshotPermissionStatusDto {
+        screenshots: AppshotPermissionStateDto {
+            granted: appshot_screenshots_permission_granted(),
+            supported: true,
+        },
+        accessibility: AppshotPermissionStateDto {
+            granted: appshot_accessibility_permission_granted(),
+            supported: true,
+        },
+        can_capture: appshot_screenshots_permission_granted(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn appshot_screenshots_permission_granted() -> bool {
+    core_graphics::access::ScreenCaptureAccess.preflight()
+}
+
+#[cfg(target_os = "macos")]
+fn appshot_request_screenshots_permission() -> bool {
+    core_graphics::access::ScreenCaptureAccess.request()
+}
+
+#[cfg(target_os = "macos")]
+fn appshot_accessibility_permission_granted() -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+    use core_foundation::dictionary::CFDictionaryRef;
+    use core_foundation::string::CFStringRef;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        static kAXTrustedCheckOptionPrompt: CFStringRef;
+        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+    }
+
+    unsafe {
+        let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
+        let value = CFBoolean::false_value();
+        let options = CFDictionary::from_CFType_pairs(&[(key, value)]);
+        AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn appshot_request_accessibility_permission() -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+    use core_foundation::dictionary::CFDictionaryRef;
+    use core_foundation::string::CFStringRef;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        static kAXTrustedCheckOptionPrompt: CFStringRef;
+        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+    }
+
+    unsafe {
+        let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
+        let value = CFBoolean::true_value();
+        let options = CFDictionary::from_CFType_pairs(&[(key, value)]);
+        AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_appshot_permission_settings_impl(kind: AppshotPermissionKind) -> Result<(), String> {
+    let url = match kind {
+        AppshotPermissionKind::Screenshots => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        }
+        AppshotPermissionKind::Accessibility => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        }
+    };
+    std::process::Command::new("open")
+        .arg(url)
+        .status()
+        .map_err(|e| format!("Failed to open System Settings: {e}"))
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "System Settings returned an unexpected status {status}"
+                ))
+            }
+        })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_appshot_permission_settings_impl(_kind: AppshotPermissionKind) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(windows)]
 #[tauri::command]
 async fn capture_window_area_png(
@@ -4961,6 +5123,18 @@ fn update_appshot_shortcut_registration(
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn capture_and_emit_frontmost_appshot(app: &AppHandle, shortcut: String) -> Result<(), String> {
+    let permissions = appshot_permission_status();
+    if !permissions.can_capture {
+        show_main_window(app);
+        emit_appshot_permission_required(
+            app,
+            AppshotPermissionRequiredPayload {
+                shortcut,
+                status: permissions,
+            },
+        )?;
+        return Ok(());
+    }
     let saved = capture_frontmost_window_png(app, Some("appshot.png".to_string()))?;
     let result = emit_appshot_captured(
         app,
@@ -5270,6 +5444,34 @@ fn get_appshot_config() -> Result<config::AppshotConfig, String> {
     config::load_config()
         .map(|config| config.appshot)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_appshot_permission_status() -> AppshotPermissionStatusDto {
+    appshot_permission_status()
+}
+
+#[tauri::command]
+fn request_appshot_permission(permission: String) -> Result<AppshotPermissionStatusDto, String> {
+    match AppshotPermissionKind::parse(&permission)? {
+        #[cfg(target_os = "macos")]
+        AppshotPermissionKind::Screenshots => {
+            let _ = appshot_request_screenshots_permission();
+        }
+        #[cfg(target_os = "macos")]
+        AppshotPermissionKind::Accessibility => {
+            let _ = appshot_request_accessibility_permission();
+        }
+        #[cfg(not(target_os = "macos"))]
+        _ => {}
+    }
+    Ok(appshot_permission_status())
+}
+
+#[tauri::command]
+fn open_appshot_permission_settings(permission: String) -> Result<(), String> {
+    let kind = AppshotPermissionKind::parse(&permission)?;
+    open_appshot_permission_settings_impl(kind)
 }
 
 #[tauri::command]
@@ -6169,6 +6371,9 @@ pub fn run() {
             get_network_config,
             update_network_config,
             get_appshot_config,
+            get_appshot_permission_status,
+            request_appshot_permission,
+            open_appshot_permission_settings,
             update_appshot_config,
             get_im_bridge_config,
             update_im_bridge_config,

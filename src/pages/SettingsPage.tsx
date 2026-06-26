@@ -38,6 +38,7 @@ import {
   createProcessTemplate,
   detectTelegramUserIds,
   getAppshotConfig,
+  getAppshotPermissionStatus,
   getAstraConfig,
   getImBridgeConfig,
   getWechatQrcode,
@@ -109,6 +110,7 @@ export default function SettingsPage({
   appVersion,
   update,
   onOpenUpdate,
+  onOpenAppshotPermissions,
 }: {
   lang: Lang;
   onLangChange: (lang: Lang) => void;
@@ -122,6 +124,7 @@ export default function SettingsPage({
   appVersion: string;
   update: UpdateState;
   onOpenUpdate: () => void;
+  onOpenAppshotPermissions: () => void;
 }) {
   const { t } = useI18n();
   const [section, setSection] = useState<SettingsSection>("general");
@@ -189,6 +192,7 @@ export default function SettingsPage({
                 appVersion={appVersion}
                 update={update}
                 onOpenUpdate={onOpenUpdate}
+                onOpenAppshotPermissions={onOpenAppshotPermissions}
               />
             )}
             {section === "agents" && <AgentsSettings onError={onError} />}
@@ -293,6 +297,7 @@ function GeneralSettings({
   onError,
   onRebuildFinished,
   onOpenUpdate,
+  onOpenAppshotPermissions,
 }: {
   lang: Lang;
   themeMode: ThemeMode;
@@ -305,21 +310,28 @@ function GeneralSettings({
   onError: (error: string | null) => void;
   onRebuildFinished: () => Promise<void> | void;
   onOpenUpdate: () => void;
+  onOpenAppshotPermissions: () => void;
 }) {
   const { t } = useI18n();
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
   const [appshotConfig, setAppshotConfig] = useState<AppshotConfig | null>(null);
+  const [appshotPermissionStatus, setAppshotPermissionStatus] = useState<null | {
+    screenshots: { granted: boolean; supported: boolean };
+    accessibility: { granted: boolean; supported: boolean };
+    canCapture: boolean;
+  }>(null);
   const [proxyEnabled, setProxyEnabled] = useState(false);
   const [proxyUrl, setProxyUrl] = useState("");
   const [noProxy, setNoProxy] = useState("");
   const [appshotShortcut, setAppshotShortcut] = useState("");
   const [savingProxy, setSavingProxy] = useState(false);
   const [savingAppshot, setSavingAppshot] = useState(false);
+  const [refreshingAppshotPermission, setRefreshingAppshotPermission] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getNetworkConfig(), getAppshotConfig()])
-      .then(([config, nextAppshot]) => {
+    Promise.all([getNetworkConfig(), getAppshotConfig(), getAppshotPermissionStatus()])
+      .then(([config, nextAppshot, permissionStatus]) => {
         if (cancelled) return;
         setNetworkConfig(config);
         setProxyEnabled(config.proxy.enabled);
@@ -327,12 +339,27 @@ function GeneralSettings({
         setNoProxy(config.proxy.noProxy ?? "");
         setAppshotConfig(nextAppshot);
         setAppshotShortcut(nextAppshot.shortcut);
+        setAppshotPermissionStatus(permissionStatus);
       })
       .catch((err) => onError(String(err)));
     return () => {
       cancelled = true;
     };
   }, [onError]);
+
+  const refreshAppshotPermission = async () => {
+    if (refreshingAppshotPermission) return;
+    setRefreshingAppshotPermission(true);
+    try {
+      const next = await getAppshotPermissionStatus();
+      setAppshotPermissionStatus(next);
+      onError(null);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setRefreshingAppshotPermission(false);
+    }
+  };
 
   const saveProxyConfig = async () => {
     if (savingProxy) return;
@@ -420,6 +447,52 @@ function GeneralSettings({
             >
               {savingAppshot ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
               {t("project.save")}
+            </button>
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          icon={<Shield className="h-4 w-4" />}
+          label={t("settings.appshot_permissions")}
+          description={
+            appshotPermissionStatus?.canCapture
+              ? t("settings.appshot_permissions_ready")
+              : t("settings.appshot_permissions_needed")
+          }
+        >
+          <div className="flex items-center justify-end gap-2">
+            <div className="flex items-center gap-2 text-caption text-ink/50">
+              <span className={appshotPermissionStatus?.screenshots.granted ? "text-emerald" : "text-amber"}>
+                {t(
+                  appshotPermissionStatus?.screenshots.granted
+                    ? "settings.appshot_screenshots_granted"
+                    : "settings.appshot_screenshots_missing",
+                )}
+              </span>
+              <span className="text-ink/24">·</span>
+              <span className={appshotPermissionStatus?.accessibility.granted ? "text-emerald" : "text-ink/42"}>
+                {t(
+                  appshotPermissionStatus?.accessibility.granted
+                    ? "settings.appshot_accessibility_granted"
+                    : "settings.appshot_accessibility_optional",
+                )}
+              </span>
+            </div>
+            <button
+              type="button"
+              disabled={refreshingAppshotPermission}
+              onClick={() => void refreshAppshotPermission()}
+              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35"
+            >
+              <RefreshCw className={"h-4 w-4 " + (refreshingAppshotPermission ? "animate-spin" : "")} />
+              {t("appshot.permission.refresh")}
+            </button>
+            <button
+              type="button"
+              onClick={onOpenAppshotPermissions}
+              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]"
+            >
+              <Shield className="h-4 w-4" />
+              {t("settings.appshot_manage_permissions")}
             </button>
           </div>
         </SettingsRow>

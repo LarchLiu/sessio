@@ -14,6 +14,7 @@ import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import {
   Agent,
+  getAppshotPermissionStatus,
   getDebugConfig,
   getProjectGitSummary,
   listThreadIndex,
@@ -21,6 +22,7 @@ import {
   removeSessionsByScope,
   removeSessionFiles,
   updateSessionRenameTitle,
+  type AppshotPermissionStatus,
   type SessionScope,
   type ThreadIndexItemInfo,
 } from "./api";
@@ -30,6 +32,7 @@ import { type ActiveMessageMeta } from "./pages/ChatPage";
 import AppHeader from "./components/AppHeader";
 import AppMain from "./components/AppMain";
 import AppOverlays, { type DeleteTarget } from "./components/AppOverlays";
+import AppshotPermissionDialog from "./components/AppshotPermissionDialog";
 import AppSidebar from "./components/AppSidebar";
 import AppRightSidebar from "./components/AppRightSidebar";
 import TerminalDock from "./components/TerminalDock";
@@ -112,6 +115,11 @@ async function revealMainWindow(): Promise<void> {
 export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastStackMessage | null>(null);
+  const [appshotPermissionOpen, setAppshotPermissionOpen] = useState(false);
+  const [appshotPermissionMounted, setAppshotPermissionMounted] = useState(false);
+  const [appshotPermissionStatus, setAppshotPermissionStatus] =
+    useState<AppshotPermissionStatus | null>(null);
+  const [appshotPermissionShortcut, setAppshotPermissionShortcut] = useState("");
   const {
     sessions,
     setSessions,
@@ -242,6 +250,44 @@ export default function App() {
         })();
       },
     );
+    return () => {
+      disposed = true;
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [t]);
+
+  const openAppshotPermissions = useCallback(
+    async (shortcut = "") => {
+      try {
+        const status = await getAppshotPermissionStatus();
+        setAppshotPermissionStatus(status);
+        setAppshotPermissionShortcut(shortcut);
+        setAppshotPermissionOpen(true);
+        setAppshotPermissionMounted(true);
+        setError(null);
+      } catch (err) {
+        setError(String(err));
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    let disposed = false;
+    const unlistenPromise = listen<{
+      shortcut: string;
+      status: AppshotPermissionStatus;
+    }>("appshot_permission_required", (event) => {
+      if (disposed) return;
+      setAppshotPermissionStatus(event.payload.status);
+      setAppshotPermissionShortcut(event.payload.shortcut);
+      setAppshotPermissionOpen(true);
+      setAppshotPermissionMounted(true);
+      setToast({
+        message: t("appshot.permission.required"),
+        tone: "error",
+      });
+    });
     return () => {
       disposed = true;
       void unlistenPromise.then((unlisten) => unlisten());
@@ -1105,6 +1151,9 @@ export default function App() {
           appVersion={__APP_VERSION__}
           update={update}
           onOpenUpdate={openUpdateConfirm}
+          onOpenAppshotPermissions={() => {
+            void openAppshotPermissions();
+          }}
         />
         {updateConfirmMounted && update.latestVersion && (
           <UpdateConfirmDialog
@@ -1124,6 +1173,17 @@ export default function App() {
               void handleInstallUpdate();
             }}
             onExited={() => setUpdateConfirmMounted(false)}
+          />
+        )}
+        {appshotPermissionMounted && (
+          <AppshotPermissionDialog
+            open={appshotPermissionOpen}
+            status={appshotPermissionStatus}
+            shortcut={appshotPermissionShortcut}
+            onClose={() => setAppshotPermissionOpen(false)}
+            onExited={() => setAppshotPermissionMounted(false)}
+            onStatusChange={setAppshotPermissionStatus}
+            onError={setError}
           />
         )}
         <ToastStack message={error} onMessageConsumed={() => setError(null)} />
@@ -1227,6 +1287,17 @@ export default function App() {
       </AppLayout>
       <ToastStack message={error} onMessageConsumed={() => setError(null)} />
       <ToastStack message={toast} onMessageConsumed={() => setToast(null)} />
+      {appshotPermissionMounted && (
+        <AppshotPermissionDialog
+          open={appshotPermissionOpen}
+          status={appshotPermissionStatus}
+          shortcut={appshotPermissionShortcut}
+          onClose={() => setAppshotPermissionOpen(false)}
+          onExited={() => setAppshotPermissionMounted(false)}
+          onStatusChange={setAppshotPermissionStatus}
+          onError={setError}
+        />
+      )}
     </div>
   );
 }
