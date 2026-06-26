@@ -67,6 +67,9 @@ fn poll_once(
     if enabled_agents.contains(&Agent::Claude) {
         poll_claude(&indexed, claude_index_mtimes, store.as_ref(), indexer)?;
     }
+    if enabled_agents.contains(&Agent::Pi) {
+        poll_pi(&indexed, store.as_ref(), indexer)?;
+    }
     if enabled_agents.contains(&Agent::Opencode) {
         poll_opencode(&indexed, store.as_ref(), indexer)?;
     }
@@ -350,6 +353,64 @@ fn poll_opencode(
     let mut seen_scopes = HashSet::new();
     seen_scopes.insert(scope);
     store.mark_missing_scopes_unavailable(Agent::Opencode, &seen_scopes)?;
+    Ok(())
+}
+
+fn poll_pi(
+    indexed: &[IndexedSessionRecord],
+    store: &dyn SessionStore,
+    indexer: &IndexerHandle,
+) -> Result<()> {
+    let Some(root) = crate::agents::sources::pi::parser::root_dir()? else {
+        store.mark_missing_scopes_unavailable(Agent::Pi, &HashSet::new())?;
+        return Ok(());
+    };
+
+    let mut known_main: HashMap<String, &IndexedSessionRecord> = indexed
+        .iter()
+        .filter(|row| row.agent == Agent::Pi && !row.file_path.is_empty())
+        .map(|row| (row.file_path.clone(), row))
+        .collect();
+    let mut seen_main: HashSet<String> = HashSet::new();
+    let mut seen_scopes: HashSet<String> = HashSet::new();
+
+    for entry in std::fs::read_dir(&root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir = entry.path();
+        let scope = dir.to_string_lossy().into_owned();
+        seen_scopes.insert(scope);
+
+        for child in std::fs::read_dir(&dir)? {
+            let child = child?;
+            if !child.file_type()?.is_file() {
+                continue;
+            }
+            let path = child.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let path_str = path.to_string_lossy().into_owned();
+            seen_main.insert(path_str.clone());
+            let needs_reindex = match known_main.remove(&path_str) {
+                Some(row) => !row.available || file_changed(&path, row.file_size, row.file_mtime),
+                None => true,
+            };
+            if needs_reindex {
+                indexer.submit(IndexTask::ReindexPiFile(path))?;
+            }
+        }
+    }
+
+    for stale in known_main.into_values() {
+        if stale.available {
+            indexer.submit(IndexTask::DeleteFile(PathBuf::from(&stale.file_path)))?;
+        }
+    }
+
+    store.mark_missing_scopes_unavailable(Agent::Pi, &seen_scopes)?;
     Ok(())
 }
 

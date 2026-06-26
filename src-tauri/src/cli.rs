@@ -2007,6 +2007,7 @@ fn parse_agent(s: &str) -> Result<Agent> {
     match s {
         "codex" => Ok(Agent::Codex),
         "claude" => Ok(Agent::Claude),
+        "pi" => Ok(Agent::Pi),
         "opencode" => Ok(Agent::Opencode),
         _ => bail!("unknown agent '{s}'"),
     }

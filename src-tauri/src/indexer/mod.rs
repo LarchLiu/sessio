@@ -559,6 +559,42 @@ fn full_rebuild(store: &dyn SessionStore, enabled_agents: &HashSet<Agent>) -> Re
         store.mark_missing_scopes_unavailable(Agent::Claude, &claude_scopes)?;
     }
 
+    if enabled_agents.contains(&Agent::Pi) {
+        let mut pi_scopes: HashSet<String> = HashSet::new();
+        if let Some(root) = crate::agents::sources::pi::parser::root_dir()? {
+            for entry in std::fs::read_dir(&root)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let dir = entry.path();
+                let scope = dir.to_string_lossy().into_owned();
+                let mut sessions = Vec::new();
+                for child in std::fs::read_dir(&dir)? {
+                    let child = child?;
+                    if !child.file_type()?.is_file() {
+                        continue;
+                    }
+                    let path = child.path();
+                    if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    match crate::agents::sources::pi::parser::parse_session_file(&path) {
+                        Ok(Some(info)) => {
+                            insert_session_project(&mut affected_projects, &info);
+                            sessions.push(info);
+                        }
+                        Ok(None) => {}
+                        Err(e) => log::warn!("pi parse {} failed: {e}", path.display()),
+                    }
+                }
+                store.replace_by_scope(&scope, Agent::Pi, &sessions)?;
+                pi_scopes.insert(scope);
+            }
+        }
+        store.mark_missing_scopes_unavailable(Agent::Pi, &pi_scopes)?;
+    }
+
     if enabled_agents.contains(&Agent::Opencode) {
         rebuild_opencode_scope(store, &mut affected_projects)?;
     }
