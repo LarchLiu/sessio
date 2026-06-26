@@ -17,6 +17,11 @@ export type ComposerAttachment = AgentAttachment & {
   name: string;
 };
 
+export type ComposerImageAttachmentPreview = {
+  alt: string;
+  src: string;
+};
+
 export type AttachmentMenuKey = "images" | "files";
 
 export type ComposerAttachmentMenuOption = PopupMenuOption<AttachmentMenuKey>;
@@ -331,9 +336,11 @@ export function attachmentMenuOptions({
 export function ComposerAttachmentPreviewList({
   attachments,
   onRemove,
+  onPreviewImage,
 }: {
   attachments: ComposerAttachment[];
   onRemove: (path: string) => void;
+  onPreviewImage?: (image: ComposerImageAttachmentPreview) => void;
 }) {
   if (attachments.length === 0) return null;
   return (
@@ -344,6 +351,7 @@ export function ComposerAttachmentPreviewList({
             key={attachment.path}
             attachment={attachment}
             onRemove={onRemove}
+            onPreviewImage={onPreviewImage}
           />
         ) : (
           <ComposerFileAttachmentCard
@@ -384,9 +392,11 @@ export function ComposerAttachmentMenu({
 function ComposerImageAttachmentCard({
   attachment,
   onRemove,
+  onPreviewImage,
 }: {
   attachment: ComposerAttachment;
   onRemove: (path: string) => void;
+  onPreviewImage?: (image: ComposerImageAttachmentPreview) => void;
 }) {
   const [src, setSrc] = useState<string | null>(attachment.previewDataUrl ?? null);
 
@@ -412,11 +422,23 @@ function ComposerImageAttachmentCard({
   return (
     <span className="relative block h-16 w-20 overflow-hidden rounded-lg border border-ink/8 bg-bg-panel shadow-sm">
       {src ? (
-        <img
-          src={src}
-          alt={attachment.name}
-          className="h-full w-full object-cover"
-        />
+        <button
+          type="button"
+          onClick={() =>
+            onPreviewImage?.({
+              src,
+              alt: attachment.displayName ?? attachment.name,
+            })
+          }
+          className="block h-full w-full cursor-zoom-in focus:outline-none focus:ring-2 focus:ring-inset focus:ring-ink/25"
+          aria-label={`Preview ${attachment.name}`}
+        >
+          <img
+            src={src}
+            alt={attachment.name}
+            className="h-full w-full object-cover"
+          />
+        </button>
       ) : (
         <span className="flex h-full w-full items-center justify-center bg-ink/[0.035] text-ink/40">
           <ImageIcon className="h-5 w-5" />
@@ -424,8 +446,11 @@ function ComposerImageAttachmentCard({
       )}
       <button
         type="button"
-        onClick={() => onRemove(attachment.path)}
-        className="absolute right-1 top-1 rounded-full bg-ink text-[rgb(var(--color-bg-panel))] p-0.5 transition hover:bg-ink/75"
+        onClick={(event) => {
+          event.stopPropagation();
+          onRemove(attachment.path);
+        }}
+        className="absolute right-1 top-1 z-10 rounded-full bg-ink text-[rgb(var(--color-bg-panel))] p-0.5 transition hover:bg-ink/75"
         aria-label={`Remove ${attachment.name}`}
       >
         <X className="h-3 w-3" />

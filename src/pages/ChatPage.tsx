@@ -1525,6 +1525,7 @@ export function AcpTranscriptPanel({
       <ComposerAttachmentPreviewList
         attachments={attachments}
         onRemove={removeAttachment}
+        onPreviewImage={onPreviewImage}
       />
     ),
     attachments,
@@ -5524,7 +5525,7 @@ function MarkdownImageFallback({ image }: { image: MarkdownImage }) {
   );
 }
 
-function ImagePreviewOverlay({
+export function ImagePreviewOverlay({
   image,
   onClose,
 }: {

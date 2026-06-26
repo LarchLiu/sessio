@@ -31,6 +31,7 @@ import {
 import {
   ComposerAttachmentPreviewList,
   type ComposerAttachmentDraft,
+  type ComposerImageAttachmentPreview,
   useComposerAttachments,
 } from "../components/ComposerAttachments";
 import { RuntimeEffortControl, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
@@ -114,6 +115,7 @@ export function useChatComposer({
   dispatchLiveEvent,
   onError,
   onPendingSession,
+  onPreviewImageAttachment,
 }: {
   runtimeAgents: RuntimeAgentMetadata[];
   lastRuntimeAgentSelection: RuntimeAgentSelection | null;
@@ -122,6 +124,7 @@ export function useChatComposer({
   dispatchLiveEvent: Dispatch<LiveRuntimeAction>;
   onError: (error: string | null) => void;
   onPendingSession: (session: PendingNewChatSession) => void;
+  onPreviewImageAttachment?: (image: ComposerImageAttachmentPreview) => void;
 }): ChatComposerController {
   const initialRuntimeAgent =
     runtimeAgentForSelection(runtimeAgents, lastRuntimeAgentSelection) ?? runtimeAgents[0] ?? null;
@@ -425,6 +428,7 @@ export function useChatComposer({
     attachmentPreview: createElement(ComposerAttachmentPreviewList, {
       attachments,
       onRemove: removeAttachment,
+      onPreviewImage: onPreviewImageAttachment,
     }),
     attachments,
     supportsAttachments,

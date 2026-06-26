@@ -43,6 +43,7 @@ import ChatComposer, {
 import ComposerCommandMenu from "../components/ComposerCommandMenu";
 import type { InlineMenuSelectOption } from "../components/InlineMenuSelect";
 import InlineMenuSelect from "../components/InlineMenuSelect";
+import { ImagePreviewOverlay, type MarkdownImage } from "./ChatPage";
 import { RuntimeMenuSelect } from "../components/RuntimeMenuSelect";
 import StageSelectChip from "../components/StageSelectChip";
 import Tooltip from "../components/Tooltip";
@@ -120,6 +121,7 @@ export default function NewChatPage({
   const [selectedAssistant, setSelectedAssistant] = useState<AssistantInfo | null>(null);
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<AcpAvailableCommand | null>(null);
   const [cachedAvailableCommands, setCachedAvailableCommands] = useState<AcpAvailableCommand[]>([]);
+  const [previewImage, setPreviewImage] = useState<MarkdownImage | null>(null);
   const project = projects.find((p) => p.key === projectKeyValue) ?? projects[0] ?? null;
   const workspacePath = project?.path ?? null;
   const projectId = project?.project.id ?? null;
@@ -131,6 +133,7 @@ export default function NewChatPage({
     dispatchLiveEvent,
     onError,
     onPendingSession,
+    onPreviewImageAttachment: setPreviewImage,
   });
   useAppshotComposerRegistration(composer, true);
   const threadMode = mode !== "chat";
@@ -610,6 +613,12 @@ export default function NewChatPage({
           )}
         </div>
       </div>
+      {previewImage && (
+        <ImagePreviewOverlay
+          image={previewImage}
+          onClose={() => setPreviewImage(null)}
+        />
+      )}
     </div>
   );
 }

@@ -103,6 +103,7 @@ import {
 import { projectStageIcon, projectStageLabel } from "../utils/stageDisplay";
 import {
   AcpRenderItems,
+  ImagePreviewOverlay,
   liveWorkingIndicatorTurn,
   type MarkdownImage,
 } from "./ChatPage";
@@ -160,6 +161,7 @@ export default function ThreadMultiSessionChatPage({
   const [cachedAvailableCommands, setCachedAvailableCommands] = useState<AcpAvailableCommand[]>([]);
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<AcpAvailableCommand | null>(null);
   const [selectedAssistant, setSelectedAssistant] = useState<AssistantInfo | null>(null);
+  const [previewImage, setPreviewImage] = useState<MarkdownImage | null>(null);
   const composer = useChatComposer({
     runtimeAgents,
     lastRuntimeAgentSelection,
@@ -168,6 +170,7 @@ export default function ThreadMultiSessionChatPage({
     dispatchLiveEvent,
     onError,
     onPendingSession,
+    onPreviewImageAttachment: setPreviewImage,
   });
   useAppshotComposerRegistration(composer, true);
   const commandTrigger = useMemo(
@@ -757,6 +760,12 @@ export default function ThreadMultiSessionChatPage({
           )}
         </div>
       </div>
+      {previewImage && (
+        <ImagePreviewOverlay
+          image={previewImage}
+          onClose={() => setPreviewImage(null)}
+        />
+      )}
     </div>
   );
 }
