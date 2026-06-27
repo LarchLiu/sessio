@@ -57,7 +57,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 core-foundation = "0.10"
-core-graphics = "0.25"
+core-graphics = { version = "0.25", features = ["highsierra", "elcapitan"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSEvent", "NSApplication", "NSBezierPath", "NSBitmapImageRep", "NSBox", "NSButton", "NSColor", "NSControl", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSFont", "NSGraphics", "NSImage", "NSImageRep", "NSImageView", "NSPanel", "NSPathControl", "NSResponder", "NSRunningApplication", "NSTextField", "NSView", "NSWindow", "NSWorkspace"] }
 objc2-core-foundation = "0.3"

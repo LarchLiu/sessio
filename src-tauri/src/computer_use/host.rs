@@ -66,6 +66,12 @@ impl ComputerUseHost {
         }
     }
 
+    /// Construct a host backed by the platform's real provider (macOS today,
+    /// an unsupported stub elsewhere). Used by the runtime/injection layer.
+    pub fn with_platform_provider(settings: ComputerUseSettings) -> Self {
+        Self::new(super::platform::default_provider(), settings)
+    }
+
     pub fn approvals(&self) -> &ApprovalRegistry {
         &self.approvals
     }
@@ -518,5 +524,16 @@ mod tests {
         assert!(s.can_observe);
         assert!(!s.can_inspect);
         assert!(!s.can_control);
+    }
+
+    #[test]
+    fn platform_provider_host_constructs() {
+        // The platform provider host is the constructor the Phase 4 injection
+        // layer uses. On non-macOS it wraps the unsupported stub; either way
+        // construction must succeed and stay disabled by default policy.
+        let h = ComputerUseHost::with_platform_provider(ComputerUseSettings::default());
+        let p = perm(false, false, false);
+        let s = h.status("s1", &p);
+        assert!(!s.enabled);
     }
 }

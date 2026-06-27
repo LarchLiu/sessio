@@ -16,12 +16,14 @@ pub mod approvals;
 pub mod host;
 pub mod lease;
 pub mod permissions;
+pub mod platform;
 pub mod provider;
 pub mod settings;
 
 pub use approvals::{AppApproval, ApprovalDecision, ApprovalRegistry, SessionApproval};
 pub use host::{ComputerUseError, ComputerUseHost};
 pub use lease::{Lease, LeaseRegistry, SnapshotId};
+pub use platform::default_provider;
 pub use provider::{
     AllowedAction, AppState, AppTarget, ComputerUseProvider, DisplayMetadata, ElementId,
     InstalledApp, UiElement,
