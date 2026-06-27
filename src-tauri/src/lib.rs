@@ -4602,7 +4602,7 @@ fn desktop_control_inputs() -> desktop_control::DesktopControlInputs {
 
 /// The shared, tiered desktop-control permission status. Single source of truth
 /// for both Appshot and computer use.
-fn desktop_control_permission_status() -> desktop_control::DesktopControlPermissionStatus {
+pub fn desktop_control_permission_status() -> desktop_control::DesktopControlPermissionStatus {
     desktop_control::DesktopControlPermissionStatus::derive(desktop_control_inputs())
 }
 
@@ -8509,6 +8509,24 @@ fn start_agent_session(
 }
 
 #[tauri::command]
+fn get_computer_use_status(
+    sessio_runtime_session_id: String,
+    runtime: State<'_, RuntimeManager>,
+) -> Option<computer_use::host::ComputerUseStatus> {
+    runtime.computer_use_status(&sessio_runtime_session_id)
+}
+
+#[tauri::command]
+fn set_computer_use_app_approval(
+    sessio_runtime_session_id: String,
+    app_id: String,
+    approved: bool,
+    runtime: State<'_, RuntimeManager>,
+) {
+    runtime.set_computer_use_app_approval(&sessio_runtime_session_id, &app_id, approved);
+}
+
+#[tauri::command]
 fn fork_agent_session(
     mut req: StartAgentSession,
     store: State<'_, Arc<dyn SessionStore>>,
@@ -9208,6 +9226,8 @@ pub fn run() {
             get_appshot_config,
             get_appshot_permission_status,
             get_desktop_control_permission_status,
+            get_computer_use_status,
+            set_computer_use_app_approval,
             request_appshot_permission,
             open_appshot_permissions_panel,
             open_appshot_permission_settings,

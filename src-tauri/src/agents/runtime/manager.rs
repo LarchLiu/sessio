@@ -45,6 +45,10 @@ struct RuntimeManagerInner {
     sessions: Mutex<HashMap<String, RuntimeSessionState>>,
     event_listeners: Mutex<Vec<RuntimeEventListener>>,
     snapshot_queue: Mutex<HashMap<String, PendingRuntimeSnapshot>>,
+    /// Lazily-built computer-use runtime (desktop MCP server + host). Only
+    /// constructed when a session first requests computer use, so ordinary
+    /// sessions never start the loopback server.
+    computer_use: std::sync::OnceLock<std::sync::Arc<super::computer_use_runtime::ComputerUseRuntime>>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,8 +108,29 @@ impl RuntimeManager {
                 sessions: Mutex::new(HashMap::new()),
                 event_listeners: Mutex::new(Vec::new()),
                 snapshot_queue: Mutex::new(HashMap::new()),
+                computer_use: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    /// Access the lazily-built computer-use runtime, constructing it (and its
+    /// desktop MCP server, on first injection) if needed. The permission
+    /// provider reads the live shared desktop-control status.
+    pub(crate) fn computer_use(
+        &self,
+    ) -> std::sync::Arc<super::computer_use_runtime::ComputerUseRuntime> {
+        self.inner
+            .computer_use
+            .get_or_init(|| {
+                use crate::computer_use::settings::ComputerUseSettings;
+                std::sync::Arc::new(super::computer_use_runtime::ComputerUseRuntime::new(
+                    // Observation+inspection enabled by default; input injection
+                    // stays gated behind settings until it is trusted.
+                    ComputerUseSettings::observe_only(),
+                    std::sync::Arc::new(crate::desktop_control_permission_status),
+                ))
+            })
+            .clone()
     }
 
     pub fn subscribe_events(&self) -> Result<mpsc::Receiver<AgentRuntimeEvent>> {
@@ -267,6 +292,12 @@ impl RuntimeManager {
     }
 
     pub fn dispose_session_silent(&self, sessio_runtime_session_id: &str) -> Result<()> {
+        // Revoke any computer-use token + release lease/approval for this session
+        // so its MCP endpoint stops working immediately (session end / recreate).
+        if let Some(runtime) = self.inner.computer_use.get() {
+            runtime.teardown_session(sessio_runtime_session_id);
+        }
+
         let should_emit = self
             .inner
             .sessions
@@ -394,8 +425,84 @@ impl RuntimeManager {
         report
     }
 
-    pub fn start_session(&self, req: StartAgentSession) -> Result<AgentSessionHandle> {
-        if req.workspace_path.trim().is_empty() {
+    /// Computer-use status for a session, combining host policy/approval state
+    /// with the live desktop-control permission tiers. Returns `None` when the
+    /// computer-use runtime has never been initialized (no session opted in).
+    pub fn computer_use_status(
+        &self,
+        sessio_runtime_session_id: &str,
+    ) -> Option<crate::computer_use::host::ComputerUseStatus> {
+        let runtime = self.inner.computer_use.get()?;
+        let perm = crate::desktop_control_permission_status();
+        Some(runtime.host().status(sessio_runtime_session_id, &perm))
+    }
+
+    /// Approve or revoke control of a specific app for a session. Used by the
+    /// per-app approval UI before any control action is permitted.
+    pub fn set_computer_use_app_approval(
+        &self,
+        sessio_runtime_session_id: &str,
+        app_id: &str,
+        approved: bool,
+    ) {
+        let runtime = self.computer_use();
+        let approvals = runtime.host().approvals();
+        if approved {
+            approvals.approve_app(sessio_runtime_session_id, &app_id.to_string());
+        } else {
+            approvals.revoke_app(sessio_runtime_session_id, &app_id.to_string());
+        }
+    }
+
+    /// Resolve an agent's probed runtime capabilities from the metadata cache,
+    /// if available. Used to gate computer-use injection on `mcp_injection.http`.
+    fn probed_capabilities(&self, agent: Agent) -> Option<RuntimeCapabilitySet> {
+        let cache = self
+            .inner
+            .app
+            .try_state::<super::metadata::RuntimeAgentsCache>()?;
+        cache
+            .get()
+            .into_iter()
+            .find(|metadata| metadata.agent == agent)
+            .and_then(|metadata| metadata.capabilities)
+    }
+
+    /// If the session requested computer use and the agent is eligible (HTTP MCP
+    /// injection capable), start/reuse the desktop MCP server, issue a token,
+    /// and attach the injection to `config`. No-op otherwise.
+    fn attach_computer_use_injection(
+        &self,
+        agent: Agent,
+        sessio_runtime_session_id: &str,
+        options: &super::types::RuntimeMetadata,
+        config: &mut AgentRuntimeSessionConfig,
+    ) {
+        let capabilities = self.probed_capabilities(agent);
+        if !super::computer_use_runtime::should_inject(options, capabilities.as_ref()) {
+            return;
+        }
+        let runtime = self.computer_use();
+        match runtime.prepare_injection(sessio_runtime_session_id) {
+            Ok(injection) => {
+                log::info!(
+                    "[sessio-runtime:computer-use] injecting MCP server for session={} agent={:?}",
+                    sessio_runtime_session_id,
+                    agent
+                );
+                config.computer_use = Some(injection);
+            }
+            Err(error) => {
+                log::warn!(
+                    "[sessio-runtime:computer-use] failed to prepare injection for session={}: {}",
+                    sessio_runtime_session_id,
+                    error
+                );
+            }
+        }
+    }
+
+    pub fn start_session(&self, req: StartAgentSession) -> Result<AgentSessionHandle> {        if req.workspace_path.trim().is_empty() {
             bail!("workspace_path is required");
         }
         let workspace = Path::new(&req.workspace_path);
@@ -407,7 +514,7 @@ impl RuntimeManager {
         }
 
         let transport = self.requested_transport(req.agent, &req.options);
-        let runtime_config = session_config_from_options(req.agent, &req.options);
+        let mut runtime_config = session_config_from_options(req.agent, &req.options);
         let id = self.next_id("runtime");
         let agent_session_id = self.next_id("fake-agent-session");
         let capabilities = runtime_capabilities_for_transport(transport);
@@ -416,6 +523,13 @@ impl RuntimeManager {
         let mut pi_rpc_worker = None;
         match transport {
             RuntimeTransportKind::Acp => {
+                // Computer-use injection applies only to ACP (HTTP MCP) sessions.
+                self.attach_computer_use_injection(
+                    req.agent,
+                    &id,
+                    &req.options,
+                    &mut runtime_config,
+                );
                 let command = acp_transport::command_from_options(req.agent, &req.options);
                 let start = match (&req.source_session_id, req.source_agent) {
                     (Some(source_session_id), Some(source_agent)) if source_agent == req.agent => {
@@ -560,7 +674,7 @@ impl RuntimeManager {
         }
 
         let transport = self.requested_transport(req.agent, &req.options);
-        let runtime_config = session_config_from_options(req.agent, &req.options);
+        let mut runtime_config = session_config_from_options(req.agent, &req.options);
         let agent_session_id = req
             .agent_runtime_session_id
             .clone()
@@ -571,6 +685,13 @@ impl RuntimeManager {
         let mut pi_rpc_worker = None;
         match transport {
             RuntimeTransportKind::Acp => {
+                // Computer-use injection applies only to ACP (HTTP MCP) sessions.
+                self.attach_computer_use_injection(
+                    req.agent,
+                    &req.sessio_runtime_session_id,
+                    &req.options,
+                    &mut runtime_config,
+                );
                 let start = req
                     .agent_runtime_session_id
                     .as_ref()
