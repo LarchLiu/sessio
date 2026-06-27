@@ -2,7 +2,7 @@ use crate::{
     app_paths::paste_cache_dir, safe_pasted_attachment_file_name, SavedPastedAttachment,
     ScreenshotOverlayWindowCandidateDto,
 };
-use tauri::{Manager, WebviewWindow};
+use tauri::WebviewWindow;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Rect {

@@ -728,6 +728,8 @@ fn kill_child_process_group(child: &mut TokioChild, group: &ChildProcessGroup) {
         }
         return;
     }
+    #[cfg(not(unix))]
+    let _ = group;
     let _ = child.start_kill();
 }
 
