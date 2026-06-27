@@ -11,7 +11,8 @@
 //! then dispatches to the [`ComputerUseProvider`]. The provider performs the
 //! privileged work (Phase 3); the host owns the policy.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use crate::desktop_control::DesktopControlPermissionStatus;
 
@@ -51,6 +52,9 @@ pub struct ComputerUseHost {
     leases: Arc<LeaseRegistry>,
     approvals: Arc<ApprovalRegistry>,
     settings: Arc<ComputerUseSettings>,
+    /// Sessions currently performing a foreground takeover (an agent is actively
+    /// driving input). Drives the takeover warning overlay + abort affordance.
+    foreground: Arc<Mutex<HashSet<String>>>,
 }
 
 impl ComputerUseHost {
@@ -63,6 +67,7 @@ impl ComputerUseHost {
             leases: Arc::new(LeaseRegistry::new()),
             approvals: Arc::new(ApprovalRegistry::new()),
             settings: Arc::new(settings),
+            foreground: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -103,6 +108,16 @@ impl ComputerUseHost {
         }
     }
 
+    fn require_session_approval(&self, session_id: &str) -> Result<(), ComputerUseError> {
+        if self.approvals.session_approved(session_id) {
+            Ok(())
+        } else {
+            Err(ComputerUseError::Approval(
+                ApprovalDecision::SessionNotApproved,
+            ))
+        }
+    }
+
     // --- Tool surface ----------------------------------------------------
 
     /// `computer_status` — report whether the session can use computer use and
@@ -112,6 +127,7 @@ impl ComputerUseHost {
         session_id: &str,
         perm: &DesktopControlPermissionStatus,
     ) -> ComputerUseStatus {
+        let active_app_id = self.leases.target(session_id).ok().map(|target| target.app_id);
         ComputerUseStatus {
             enabled: self.settings.enabled,
             session_approved: self.approvals.session_approved(session_id),
@@ -119,6 +135,8 @@ impl ComputerUseHost {
             can_observe: perm.can_observe,
             can_inspect: perm.can_inspect,
             can_control: perm.can_control && self.settings.allow_input_injection,
+            foreground_active: self.foreground_active(session_id),
+            active_app_id,
         }
     }
 
@@ -134,7 +152,9 @@ impl ComputerUseHost {
     }
 
     /// `computer_start` — open a lease on a target app. Requires the feature on,
-    /// observe permission, and session+app approval.
+    /// observe permission, and session approval. App approval is deferred to
+    /// control actions so observe/inspect remain usable in the current
+    /// observe-first rollout.
     pub fn start(
         &self,
         session_id: &str,
@@ -143,7 +163,7 @@ impl ComputerUseHost {
     ) -> Result<String, ComputerUseError> {
         self.require_enabled()?;
         self.require_permission(perm, RequiredCapability::Observe)?;
-        self.require_approval(session_id, &target.app_id)?;
+        self.require_session_approval(session_id)?;
         Ok(self.leases.open(session_id, target)?)
     }
 
@@ -224,6 +244,10 @@ impl ComputerUseHost {
                 "input injection",
             )));
         }
+        // A control action is about to run: the agent is driving input, so the
+        // session is in foreground takeover until it stops/aborts. This is what
+        // the takeover warning overlay observes.
+        self.begin_foreground(session_id);
         Ok(target)
     }
 
@@ -281,6 +305,33 @@ impl ComputerUseHost {
     /// `computer_stop` — release the session's lease. Idempotent.
     pub fn stop(&self, session_id: &str) {
         self.leases.close(session_id);
+        self.end_foreground(session_id);
+    }
+
+    // --- Foreground takeover + abort ------------------------------------
+
+    fn begin_foreground(&self, session_id: &str) {
+        self.foreground
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string());
+    }
+
+    fn end_foreground(&self, session_id: &str) {
+        self.foreground.lock().unwrap().remove(session_id);
+    }
+
+    /// Whether the session is currently in a foreground takeover.
+    pub fn foreground_active(&self, session_id: &str) -> bool {
+        self.foreground.lock().unwrap().contains(session_id)
+    }
+
+    /// Reliable cancel path for the takeover overlay: end the foreground
+    /// takeover and release the lease. Idempotent; safe to call when nothing is
+    /// active.
+    pub fn abort(&self, session_id: &str) {
+        self.end_foreground(session_id);
+        self.leases.close(session_id);
     }
 }
 
@@ -294,6 +345,11 @@ pub struct ComputerUseStatus {
     pub can_observe: bool,
     pub can_inspect: bool,
     pub can_control: bool,
+    /// True while the session is actively driving input (foreground takeover).
+    pub foreground_active: bool,
+    /// The app currently leased for control, when the session has an active
+    /// target. Surfaced so the foreground overlay can say what is being driven.
+    pub active_app_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -340,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn start_requires_session_and_app_approval() {
+    fn start_requires_session_approval_only() {
         let h = host(ComputerUseSettings::observe_only());
         let p = perm(true, true, false);
 
@@ -350,17 +406,29 @@ mod tests {
             Err(ComputerUseError::Approval(ApprovalDecision::SessionNotApproved))
         ));
 
-        // Session approved, app not.
+        // Session approval is enough to begin observe/inspect.
         h.approvals().approve_session("s1");
-        assert!(matches!(
-            h.start("s1", target(), &p),
-            Err(ComputerUseError::Approval(ApprovalDecision::AppNotApproved))
-        ));
-
-        // Both approved → lease opens.
-        h.approvals().approve_app("s1", &target().app_id);
         let lease = h.start("s1", target(), &p).unwrap();
         assert!(lease.starts_with("lease-s1-"));
+    }
+
+    #[test]
+    fn control_still_requires_app_approval_after_start() {
+        let h = host(ComputerUseSettings {
+            enabled: true,
+            allow_input_injection: true,
+            allow_foreground_takeover: false,
+        });
+        h.approvals().approve_session("s1");
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+        let snap = SnapshotId(state.snapshot_id);
+
+        assert!(matches!(
+            h.type_text("s1", &snap, "hi", &p),
+            Err(ComputerUseError::Approval(ApprovalDecision::AppNotApproved))
+        ));
     }
 
     #[test]
@@ -521,9 +589,67 @@ mod tests {
         let s = h.status("s1", &p);
         assert!(s.enabled);
         assert!(!s.session_approved);
+        assert_eq!(s.active_app_id, None);
         assert!(s.can_observe);
         assert!(!s.can_inspect);
         assert!(!s.can_control);
+    }
+
+    #[test]
+    fn status_includes_active_app_when_session_holds_lease() {
+        let h = host(ComputerUseSettings::observe_only());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app("s1", &target().app_id);
+        let p = perm(true, true, false);
+        h.start("s1", target(), &p).unwrap();
+
+        let status = h.status("s1", &p);
+        assert_eq!(status.active_app_id.as_deref(), Some("com.example.app"));
+    }
+
+    #[test]
+    fn control_action_marks_foreground_and_abort_clears_it() {
+        let h = host(ComputerUseSettings {
+            enabled: true,
+            allow_input_injection: true,
+            allow_foreground_takeover: false,
+        });
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app("s1", &target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+        let snap = SnapshotId(state.snapshot_id);
+
+        assert!(!h.foreground_active("s1"));
+        h.type_text("s1", &snap, "hi", &p).unwrap();
+        assert!(h.foreground_active("s1"), "control action enters foreground");
+        assert!(h.status("s1", &p).foreground_active);
+
+        // Abort clears foreground and releases the lease; idempotent.
+        h.abort("s1");
+        assert!(!h.foreground_active("s1"));
+        assert!(!h.leases.has_lease("s1"));
+        h.abort("s1"); // no panic
+    }
+
+    #[test]
+    fn stop_also_clears_foreground() {
+        let h = host(ComputerUseSettings {
+            enabled: true,
+            allow_input_injection: true,
+            allow_foreground_takeover: false,
+        });
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app("s1", &target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+        h.press_key("s1", &SnapshotId(state.snapshot_id), "Enter", &p)
+            .unwrap();
+        assert!(h.foreground_active("s1"));
+        h.stop("s1");
+        assert!(!h.foreground_active("s1"));
     }
 
     #[test]

@@ -33,8 +33,7 @@ pub fn computer_use_requested(options: &RuntimeMetadata) -> bool {
 }
 
 /// Whether the session may inject computer use: requested AND the agent's
-/// capabilities advertise HTTP MCP injection. Product eligibility is folded into
-/// `mcp_injection` upstream (the probe sets it), so this is the runtime gate.
+/// capabilities advertise HTTP MCP injection.
 ///
 /// Per plan v3, the MVP gates on `mcp_injection.http`; `acp` does not gate.
 pub fn should_inject(
@@ -107,15 +106,10 @@ impl ComputerUseRuntime {
 
     /// Prepare an injection for an eligible session: ensure the server is up,
     /// issue a bearer token, and return the URL + token to attach to
-    /// `session/new`. Also approves the session at the host (the chat-level
-    /// opt-in is the session approval; per-app approval is still required before
-    /// any control action).
+    /// `session/new`.
     pub fn prepare_injection(&self, session_id: &str) -> Result<ComputerUseInjection, String> {
         let server = self.server()?;
         let token = server.issue_token(session_id);
-        // The session-scoped opt-in counts as session approval; app approval is
-        // a separate gate enforced by the host on control actions.
-        self.host.approvals().approve_session(session_id);
         Ok(ComputerUseInjection {
             url: server.mcp_url(),
             bearer_token: token.0,
@@ -203,8 +197,9 @@ mod tests {
         assert!(injection.url.starts_with("http://127.0.0.1:"));
         assert!(injection.url.ends_with("/mcp"));
         assert!(!injection.bearer_token.is_empty());
-        // Session is approved by the opt-in.
-        assert!(rt.host().approvals().session_approved("s1"));
+        // Injection alone does not grant session approval; the UI does that
+        // explicitly after session start.
+        assert!(!rt.host().approvals().session_approved("s1"));
     }
 
     #[test]

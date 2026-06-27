@@ -197,6 +197,17 @@ export interface DesktopControlPermissionStatus {
   canControl: boolean;
 }
 
+export interface ComputerUseStatus {
+  enabled: boolean;
+  sessionApproved: boolean;
+  hasLease: boolean;
+  canObserve: boolean;
+  canInspect: boolean;
+  canControl: boolean;
+  foregroundActive: boolean;
+  activeAppId: string | null;
+}
+
 export interface ImBridgeConfig {
   enabled: boolean;
   idleTimeoutSecs: number;
@@ -2580,6 +2591,42 @@ export async function getAppshotPermissionStatus(): Promise<AppshotPermissionSta
 
 export async function getDesktopControlPermissionStatus(): Promise<DesktopControlPermissionStatus> {
   return invoke<DesktopControlPermissionStatus>("get_desktop_control_permission_status");
+}
+
+export async function getComputerUseStatus(
+  sessioRuntimeSessionId: string,
+): Promise<ComputerUseStatus | null> {
+  return invoke<ComputerUseStatus | null>("get_computer_use_status", {
+    sessioRuntimeSessionId,
+  });
+}
+
+export async function setComputerUseAppApproval(
+  sessioRuntimeSessionId: string,
+  appId: string,
+  approved: boolean,
+): Promise<void> {
+  return invoke<void>("set_computer_use_app_approval", {
+    sessioRuntimeSessionId,
+    appId,
+    approved,
+  });
+}
+
+export async function setComputerUseSessionApproval(
+  sessioRuntimeSessionId: string,
+  approved: boolean,
+): Promise<void> {
+  return invoke<void>("set_computer_use_session_approval", {
+    sessioRuntimeSessionId,
+    approved,
+  });
+}
+
+export async function computerUseAbort(sessioRuntimeSessionId: string): Promise<void> {
+  return invoke<void>("computer_use_abort", {
+    sessioRuntimeSessionId,
+  });
 }
 
 export async function requestAppshotPermission(

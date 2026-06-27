@@ -8527,6 +8527,23 @@ fn set_computer_use_app_approval(
 }
 
 #[tauri::command]
+fn set_computer_use_session_approval(
+    sessio_runtime_session_id: String,
+    approved: bool,
+    runtime: State<'_, RuntimeManager>,
+) {
+    runtime.set_computer_use_session_approval(&sessio_runtime_session_id, approved);
+}
+
+#[tauri::command]
+fn computer_use_abort(
+    sessio_runtime_session_id: String,
+    runtime: State<'_, RuntimeManager>,
+) {
+    runtime.computer_use_abort(&sessio_runtime_session_id);
+}
+
+#[tauri::command]
 fn fork_agent_session(
     mut req: StartAgentSession,
     store: State<'_, Arc<dyn SessionStore>>,
@@ -9228,6 +9245,8 @@ pub fn run() {
             get_desktop_control_permission_status,
             get_computer_use_status,
             set_computer_use_app_approval,
+            set_computer_use_session_approval,
+            computer_use_abort,
             request_appshot_permission,
             open_appshot_permissions_panel,
             open_appshot_permission_settings,

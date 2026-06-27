@@ -29,6 +29,8 @@ import {
   type AgentAttachment,
   type Agent,
   type AssistantInfo,
+  computerUseAbort,
+  type ComputerUseStatus,
   getRuntimeAgentSessionConfig,
   type SessionHistorySnapshotGroup,
   type SessionHistoryTurn,
@@ -37,6 +39,8 @@ import {
   RuntimeAgentMetadata,
   RuntimeCapabilitySet,
   SubagentInfo,
+  getComputerUseStatus,
+  setComputerUseSessionApproval,
   ensureAgentRuntimeSession,
   getSessionHistory,
   getSessionHistorySnapshots,
@@ -150,6 +154,8 @@ import {
 } from "../components/ChatBottomStrips";
 import SessionFileEditsCard from "../components/SessionFileEditsCard";
 import { useAppshotComposerRegistration } from "../appshot";
+import ComputerUseTakeoverOverlay from "../components/ComputerUseTakeoverOverlay";
+import { runtimeSessionOptions as buildRuntimeSessionOptions } from "../hooks/useChatComposer";
 
 export interface ChatPageProps {
   session: SessionInfo;
@@ -220,14 +226,6 @@ function initialRuntimeModel(agent: RuntimeAgentMetadata | null): string {
 
 function initialRuntimePermission(agent: RuntimeAgentMetadata | null): string {
   return agent?.permissionMode ?? agent?.permissionModes[0]?.value ?? "";
-}
-
-function runtimeSessionOptions(model: string, permissionMode: string, effort = ""): Record<string, unknown> {
-  return {
-    ...(model ? { model } : {}),
-    ...(effort ? { effort } : {}),
-    ...(permissionMode ? { permissionMode } : {}),
-  };
 }
 
 function runtimeEffortConfigId(agent: Agent): string {
@@ -690,6 +688,8 @@ export function AcpTranscriptPanel({
   const [composerModel, setComposerModel] = useState("");
   const [composerEffort, setComposerEffort] = useState("");
   const [composerPermissionMode, setComposerPermissionMode] = useState("");
+  const [computerUseEnabled, setComputerUseEnabled] = useState(false);
+  const [computerUseStatus, setComputerUseStatus] = useState<ComputerUseStatus | null>(null);
   const [cachedAvailableCommands, setCachedAvailableCommands] = useState<AcpAvailableCommand[]>([]);
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<AcpAvailableCommand | null>(null);
   const [selectedAssistant, setSelectedAssistant] = useState<AssistantInfo | null>(null);
@@ -718,6 +718,7 @@ export function AcpTranscriptPanel({
   const selectedAgentModelValue = agentModelSelectValue(composerAgent, composerModel);
   const selectedComposerAgent =
     runtimeAgents.find((item) => item.agent === composerAgent) ?? null;
+  const composerComputerUseEligible = selectedComposerAgent?.computerUseEligible ?? false;
   const handleComposerEffortChange = useCallback(async (targetAgent: Agent, nextValue: string) => {
     if (targetAgent === composerAgent) setComposerEffort(nextValue);
     try {
@@ -1171,6 +1172,36 @@ export function AcpTranscriptPanel({
     selectedComposerAgent?.permissionModes,
   ]);
 
+  useEffect(() => {
+    if (composerComputerUseEligible) return;
+    setComputerUseEnabled(false);
+  }, [composerComputerUseEligible]);
+
+  useEffect(() => {
+    let disposed = false;
+    if (!runtimeSessionId || (!activeTurnId && !computerUseStatus?.foregroundActive)) {
+      setComputerUseStatus((current) => (current?.foregroundActive ? null : current));
+      return;
+    }
+
+    const poll = () => {
+      void getComputerUseStatus(runtimeSessionId)
+        .then((status) => {
+          if (!disposed) setComputerUseStatus(status);
+        })
+        .catch(() => {
+          if (!disposed) setComputerUseStatus(null);
+        });
+    };
+
+    poll();
+    const timer = window.setInterval(poll, 1000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [activeTurnId, computerUseStatus?.foregroundActive, runtimeSessionId]);
+
   const handleComposerAgentModelChange = useCallback(async (nextValue: string) => {
     const parsed = parseAgentModelSelectValue(nextValue);
     if (!parsed) return;
@@ -1302,8 +1333,16 @@ export function AcpTranscriptPanel({
             workspacePath,
             sourceAgent: agent,
             sourceSessionId: sessionId,
-            options: runtimeSessionOptions(composerModel, composerPermissionMode, composerEffort),
+            options: buildRuntimeSessionOptions(
+              composerModel,
+              composerPermissionMode,
+              composerEffort,
+              computerUseEnabled,
+            ),
           });
+      if (!sameAgent && computerUseEnabled) {
+        await setComputerUseSessionApproval(handle.sessioRuntimeSessionId, true);
+      }
       if (sameAgent) {
         if (composerModel) {
           await setAgentSessionConfigOption(handle.sessioRuntimeSessionId, {
@@ -1479,6 +1518,21 @@ export function AcpTranscriptPanel({
     }
   }, [activeTurnId, runtimeSessionId]);
 
+  const handleComputerUseAbort = useCallback(async () => {
+    try {
+      await computerUseAbort(runtimeSessionId);
+      if (activeTurnId) {
+        const turnId = activeRuntimeTurnIdRef.current ?? activeTurnId;
+        await cancelAgentTurn(runtimeSessionId, turnId).catch(() => {});
+      }
+      setComputerUseStatus((current) =>
+        current ? { ...current, foregroundActive: false, hasLease: false } : current,
+      );
+    } catch (err) {
+      setComposerError(String(err));
+    }
+  }, [activeTurnId, runtimeSessionId]);
+
   const sendWithContext = useCallback(
     async (
       prompt: string,
@@ -1542,6 +1596,9 @@ export function AcpTranscriptPanel({
     selectedEffort: composerEffort,
     selectedAgentModelValue,
     permissionMode: composerPermissionMode,
+    computerUseEnabled,
+    setComputerUseEnabled,
+    computerUseEligible: composerComputerUseEligible,
     agentModelOptions,
     permissionOptions: composerPermissionOptions,
     handleAgentModelChange: handleComposerAgentModelChange,
@@ -1560,6 +1617,8 @@ export function AcpTranscriptPanel({
     composerError,
     composerModel,
     composerPermissionMode,
+    composerComputerUseEligible,
+    computerUseEnabled,
     composerText,
     composerPermissionOptions,
     handleComposerAgentModelChange,
@@ -1618,6 +1677,10 @@ export function AcpTranscriptPanel({
   return (
     <div className="flex-1 min-h-0 flex flex-col">
       <div className="relative flex flex-1 min-h-0 flex-col">
+        <ComputerUseTakeoverOverlay
+          status={computerUseStatus}
+          onAbort={() => void handleComputerUseAbort()}
+        />
         {isFilesView ? (
           <div className="flex flex-1 min-h-0 flex-col">
             {!available && (

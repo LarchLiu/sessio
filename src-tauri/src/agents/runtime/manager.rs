@@ -454,6 +454,30 @@ impl RuntimeManager {
         }
     }
 
+    /// Approve or revoke computer use for a session (the session-level gate that
+    /// precedes any app approval). The chat toggle drives this explicitly.
+    pub fn set_computer_use_session_approval(
+        &self,
+        sessio_runtime_session_id: &str,
+        approved: bool,
+    ) {
+        let runtime = self.computer_use();
+        let approvals = runtime.host().approvals();
+        if approved {
+            approvals.approve_session(sessio_runtime_session_id);
+        } else {
+            approvals.revoke_session(sessio_runtime_session_id);
+        }
+    }
+
+    /// Reliable cancel path for the foreground-takeover overlay: end the
+    /// takeover and release the session's lease. Idempotent.
+    pub fn computer_use_abort(&self, sessio_runtime_session_id: &str) {
+        if let Some(runtime) = self.inner.computer_use.get() {
+            runtime.host().abort(sessio_runtime_session_id);
+        }
+    }
+
     /// Resolve an agent's probed runtime capabilities from the metadata cache,
     /// if available. Used to gate computer-use injection on `mcp_injection.http`.
     fn probed_capabilities(&self, agent: Agent) -> Option<RuntimeCapabilitySet> {

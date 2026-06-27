@@ -40,6 +40,7 @@ import {
   getAppshotConfig,
   getAppshotPermissionStatus,
   getAstraConfig,
+  getDesktopControlPermissionStatus,
   getImBridgeConfig,
   getWechatQrcode,
   getNetworkConfig,
@@ -76,6 +77,7 @@ import SwitchControl from "../components/SwitchControl";
 import Tooltip from "../components/Tooltip";
 import { AiGenerate2Icon, ChannelShare24RegularIcon, DiscordLogoIcon, LarkLogoIcon, QrCodeIcon, Robot3LineIcon, TelegramLogoIcon, TokenOutlineIcon, WechatLogoIcon } from "../components/IconifyIcon";
 import { appshotPermissionPresentation } from "../appshotPermissionPresentation";
+import { desktopControlPermissionPresentation } from "../desktopControlPermissionPresentation";
 import { type Lang, useI18n } from "../i18n";
 import type { ThemeMode } from "../theme";
 import { formatVersionLabel, type UpdateState } from "../updater";
@@ -317,6 +319,7 @@ function GeneralSettings({
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
   const [appshotConfig, setAppshotConfig] = useState<AppshotConfig | null>(null);
   const [appshotPermissionStatus, setAppshotPermissionStatus] = useState<AppshotPermissionStatus | null>(null);
+  const [desktopControlPermissionStatus, setDesktopControlPermissionStatus] = useState<import("../api").DesktopControlPermissionStatus | null>(null);
   const [proxyEnabled, setProxyEnabled] = useState(false);
   const [proxyUrl, setProxyUrl] = useState("");
   const [noProxy, setNoProxy] = useState("");
@@ -326,8 +329,13 @@ function GeneralSettings({
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getNetworkConfig(), getAppshotConfig(), getAppshotPermissionStatus()])
-      .then(([config, nextAppshot, permissionStatus]) => {
+    Promise.all([
+      getNetworkConfig(),
+      getAppshotConfig(),
+      getAppshotPermissionStatus(),
+      getDesktopControlPermissionStatus(),
+    ])
+      .then(([config, nextAppshot, permissionStatus, desktopStatus]) => {
         if (cancelled) return;
         setNetworkConfig(config);
         setProxyEnabled(config.proxy.enabled);
@@ -336,6 +344,7 @@ function GeneralSettings({
         setAppshotConfig(nextAppshot);
         setAppshotShortcut(nextAppshot.shortcut);
         setAppshotPermissionStatus(permissionStatus);
+        setDesktopControlPermissionStatus(desktopStatus);
       })
       .catch((err) => onError(String(err)));
     return () => {
@@ -345,31 +354,52 @@ function GeneralSettings({
 
   useEffect(() => {
     let disposed = false;
-    const timer = window.setInterval(() => {
-      void getAppshotPermissionStatus()
-        .then((status) => {
+    const refreshPermissions = () => {
+      void Promise.all([getAppshotPermissionStatus(), getDesktopControlPermissionStatus()])
+        .then(([appshotStatus, desktopStatus]) => {
           if (disposed) return;
           setAppshotPermissionStatus((current) => {
             if (
-              current?.platform === status.platform &&
-              current?.requiresPermission === status.requiresPermission &&
-              current?.canCapture === status.canCapture &&
-              current?.screenshots.granted === status.screenshots.granted &&
-              current?.screenshots.supported === status.screenshots.supported &&
-              current?.accessibility.granted === status.accessibility.granted &&
-              current?.accessibility.supported === status.accessibility.supported
+              current?.platform === appshotStatus.platform &&
+              current?.requiresPermission === appshotStatus.requiresPermission &&
+              current?.canCapture === appshotStatus.canCapture &&
+              current?.screenshots.granted === appshotStatus.screenshots.granted &&
+              current?.screenshots.supported === appshotStatus.screenshots.supported &&
+              current?.accessibility.granted === appshotStatus.accessibility.granted &&
+              current?.accessibility.supported === appshotStatus.accessibility.supported
             ) {
               return current;
             }
-            return status;
+            return appshotStatus;
+          });
+          setDesktopControlPermissionStatus((current) => {
+            if (
+              current?.platform === desktopStatus.platform &&
+              current?.requiresPermission === desktopStatus.requiresPermission &&
+              current?.canObserve === desktopStatus.canObserve &&
+              current?.canInspect === desktopStatus.canInspect &&
+              current?.canControl === desktopStatus.canControl &&
+              current?.screenshots.granted === desktopStatus.screenshots.granted &&
+              current?.screenshots.supported === desktopStatus.screenshots.supported &&
+              current?.accessibility.granted === desktopStatus.accessibility.granted &&
+              current?.accessibility.supported === desktopStatus.accessibility.supported
+            ) {
+              return current;
+            }
+            return desktopStatus;
           });
         })
         .catch(() => {});
-    }, 1000);
+    };
+
+    refreshPermissions();
+    const timer = window.setInterval(refreshPermissions, 1000);
+    window.addEventListener("focus", refreshPermissions);
 
     return () => {
       disposed = true;
       window.clearInterval(timer);
+      window.removeEventListener("focus", refreshPermissions);
     };
   }, []);
 
@@ -433,6 +463,7 @@ function GeneralSettings({
     ? appshotShortcut.trim() !== appshotConfig.shortcut
     : false;
   const appshotPermission = appshotPermissionPresentation(appshotPermissionStatus);
+  const desktopControlPermission = desktopControlPermissionPresentation(desktopControlPermissionStatus);
   return (
     <section className="min-w-0 max-w-full">
       <SettingsGroup title={t("settings.appearance")} flush>
@@ -507,6 +538,39 @@ function GeneralSettings({
                 <Check className="h-4 w-4" />
                 {t(appshotPermission.statusKey)}
               </div>
+            )}
+          </div>
+        </SettingsRow>
+      </SettingsGroup>
+      <SettingsGroup title={t("settings.desktop_control")} flush>
+        <SettingsRow
+          icon={<Shield className="h-4 w-4" />}
+          label={t("settings.desktop_control")}
+          description={t(desktopControlPermission.descriptionKey)}
+        >
+          <div className="flex items-center justify-end gap-2">
+            <div className="flex items-center gap-2 text-caption text-ink/50">
+              <span className={desktopControlPermissionStatus?.screenshots.granted ? "text-emerald" : "text-amber"}>
+                {t(desktopControlPermission.screenshotKey)}
+              </span>
+              <span className="text-ink/24">·</span>
+              <span className={desktopControlPermissionStatus?.accessibility.granted ? "text-emerald" : "text-amber"}>
+                {t(desktopControlPermission.accessibilityKey)}
+              </span>
+              <span className="text-ink/24">·</span>
+              <span className={desktopControlPermissionStatus?.canControl ? "text-emerald" : "text-ink/42"}>
+                {t(desktopControlPermission.controlKey)}
+              </span>
+            </div>
+            {desktopControlPermission.showManageButton && (
+              <button
+                type="button"
+                onClick={() => void openAppshotPermissions()}
+                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]"
+              >
+                <Shield className="h-4 w-4" />
+                {t("settings.appshot_manage_permissions")}
+              </button>
             )}
           </div>
         </SettingsRow>

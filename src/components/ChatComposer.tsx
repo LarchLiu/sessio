@@ -8,6 +8,7 @@ import {
 import {
   ArrowUp,
   ChevronDown,
+  MonitorCog,
   LoaderCircle,
   Plus,
   Square,
@@ -220,6 +221,26 @@ export default function ChatComposer({
                 composer={composer}
                 disabled={runtimeControlsDisabled}
               />
+            )}
+            {composer.computerUseEligible && (
+              <Tooltip content={t("computer_use.toggle_tooltip")} placement="top">
+                <button
+                  type="button"
+                  disabled={runtimeControlsDisabled}
+                  onClick={() => composer.setComputerUseEnabled((enabled) => !enabled)}
+                  className={
+                    "flex h-7 items-center justify-center rounded-full px-2.5 text-ink/55 transition " +
+                    (composer.computerUseEnabled
+                      ? "bg-ink/12 text-ink"
+                      : "hover:bg-ink/8 hover:text-ink") +
+                    " disabled:cursor-not-allowed disabled:text-ink/28 disabled:hover:bg-transparent disabled:hover:text-ink/28"
+                  }
+                  aria-label={t("computer_use.toggle_tooltip")}
+                  aria-pressed={composer.computerUseEnabled}
+                >
+                  <MonitorCog className="h-4 w-4" />
+                </button>
+              </Tooltip>
             )}
             {composer.permissionOptions.length > 0 && (
               <RuntimeMenuSelect

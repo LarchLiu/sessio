@@ -17,6 +17,7 @@ import type {
   SetRuntimeAgentSelectionRequest,
 } from "../api";
 import {
+  setComputerUseSessionApproval,
   sendAgentInput,
   startAgentSession,
   updateRuntimeAgentPreferences,
@@ -94,6 +95,9 @@ export interface ChatComposerController {
   selectedEffort: string;
   selectedAgentModelValue: string;
   permissionMode: string;
+  computerUseEnabled: boolean;
+  setComputerUseEnabled: Dispatch<SetStateAction<boolean>>;
+  computerUseEligible: boolean;
   agentModelOptions: ReturnType<typeof agentModelSelectOptions>;
   permissionOptions: ReturnType<typeof runtimePermissionModeOptions>;
   handleAgentModelChange: (nextValue: string) => Promise<void>;
@@ -141,6 +145,7 @@ export function useChatComposer({
   const [permissionMode, setPermissionMode] = useState(() =>
     initialRuntimeAgent ? selectionPermissionMode(initialRuntimeAgent, lastRuntimeAgentSelection) : "",
   );
+  const [computerUseEnabled, setComputerUseEnabled] = useState(false);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
@@ -150,6 +155,7 @@ export function useChatComposer({
   const selectedAgentModelValue = agent ? agentModelSelectValue(agent, model) : "";
   const selectedRuntimeAgent =
     agent ? runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent) ?? null : null;
+  const computerUseEligible = selectedRuntimeAgent?.computerUseEligible ?? false;
 
   const handleEffortChange = useCallback(async (targetAgent: Agent, nextValue: string) => {
     if (targetAgent === agent) setEffort(nextValue);
@@ -244,6 +250,11 @@ export function useChatComposer({
     selectedRuntimeAgent?.permissionMode,
     selectedRuntimeAgent?.permissionModes,
   ]);
+
+  useEffect(() => {
+    if (computerUseEligible) return;
+    setComputerUseEnabled(false);
+  }, [computerUseEligible]);
 
   useEffect(() => {
     if (!supportsAttachments) {
@@ -359,8 +370,11 @@ export function useChatComposer({
       const handle = await startAgentSession({
         agent,
         workspacePath: options.workspacePath,
-        options: runtimeSessionOptions(model, permissionMode, effort),
+        options: runtimeSessionOptions(model, permissionMode, effort, computerUseEnabled),
       });
+      if (computerUseEnabled) {
+        await setComputerUseSessionApproval(handle.sessioRuntimeSessionId, true);
+      }
       await rememberRuntimeAgentSelection({
         agent,
         model,
@@ -451,6 +465,9 @@ export function useChatComposer({
     selectedEffort: effort,
     selectedAgentModelValue,
     permissionMode,
+    computerUseEnabled,
+    setComputerUseEnabled,
+    computerUseEligible,
     agentModelOptions,
     permissionOptions,
     handleAgentModelChange,
@@ -468,10 +485,16 @@ function initialRuntimeModel(agent: RuntimeAgentMetadata | null): string {
   return agent?.model ?? agent?.models.find((option) => option.enabled)?.value ?? "";
 }
 
-function runtimeSessionOptions(model: string, permissionMode: string, effort = ""): Record<string, unknown> {
+export function runtimeSessionOptions(
+  model: string,
+  permissionMode: string,
+  effort = "",
+  computerUse = false,
+): Record<string, unknown> {
   return {
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
     ...(permissionMode ? { permissionMode } : {}),
+    ...(computerUse ? { computerUse: true } : {}),
   };
 }
