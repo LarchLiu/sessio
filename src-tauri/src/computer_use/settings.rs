@@ -1,8 +1,7 @@
 //! Computer-use settings.
 //!
 //! Host-side knobs that shape what the feature permits, independent of OS
-//! permission and per-session approval. Kept minimal for Phase 2; the persisted
-//! config home is wired in Phase 4 alongside the session option semantics.
+//! permission and per-session approval.
 
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +40,16 @@ impl ComputerUseSettings {
             allow_foreground_takeover: false,
         }
     }
+
+    /// Recommended desktop default: computer use is on and full control is
+    /// available when the OS permission layer allows it.
+    pub fn recommended() -> Self {
+        Self {
+            enabled: true,
+            allow_input_injection: true,
+            allow_foreground_takeover: true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -60,6 +69,14 @@ mod tests {
         let s = ComputerUseSettings::observe_only();
         assert!(s.enabled);
         assert!(!s.allow_input_injection);
+    }
+
+    #[test]
+    fn recommended_enables_control_and_takeover() {
+        let s = ComputerUseSettings::recommended();
+        assert!(s.enabled);
+        assert!(s.allow_input_injection);
+        assert!(s.allow_foreground_takeover);
     }
 
     #[test]

@@ -123,14 +123,23 @@ impl RuntimeManager {
             .computer_use
             .get_or_init(|| {
                 use crate::computer_use::settings::ComputerUseSettings;
+                let settings = crate::computer_use::config::load_settings()
+                    .unwrap_or_else(|_| ComputerUseSettings::recommended());
                 std::sync::Arc::new(super::computer_use_runtime::ComputerUseRuntime::new(
-                    // Observation+inspection enabled by default; input injection
-                    // stays gated behind settings until it is trusted.
-                    ComputerUseSettings::observe_only(),
+                    settings,
                     std::sync::Arc::new(crate::desktop_control_permission_status),
                 ))
             })
             .clone()
+    }
+
+    pub fn update_computer_use_settings(
+        &self,
+        settings: crate::computer_use::settings::ComputerUseSettings,
+    ) {
+        if let Some(runtime) = self.inner.computer_use.get() {
+            runtime.update_settings(settings);
+        }
     }
 
     pub fn subscribe_events(&self) -> Result<mpsc::Receiver<AgentRuntimeEvent>> {

@@ -33,11 +33,12 @@ import {
   ZAI,
 } from "@lobehub/icons";
 import { ArrowLeft, AtSign, Bot, Check, Circle, Download, Eye, EyeOff, Globe2, GripVertical, Hash, Info, Languages, Link2, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Server, Settings2, Shield, Sparkles, SquareKanban, Sun, Trash2, Workflow, X } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AppshotConfig, AppshotPermissionStatus, AstraConfig, AssistantInfo, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
+import type { Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AppshotConfig, AppshotPermissionStatus, AstraConfig, AssistantInfo, ComputerUseSettings, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
 import {
   createProcessTemplate,
   detectTelegramUserIds,
   getAppshotConfig,
+  getComputerUseSettings,
   getAppshotPermissionStatus,
   getAstraConfig,
   getDesktopControlPermissionStatus,
@@ -57,6 +58,7 @@ import {
   pollWechatQrcodeStatus,
   updateAgentPreferences,
   updateAppshotConfig,
+  updateComputerUseSettings,
   updateAstraConfig,
   updateImBridgeConfig,
   updateNetworkConfig,
@@ -318,24 +320,30 @@ function GeneralSettings({
   const { t } = useI18n();
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
   const [appshotConfig, setAppshotConfig] = useState<AppshotConfig | null>(null);
+  const [computerUseSettings, setComputerUseSettings] = useState<ComputerUseSettings | null>(null);
   const [appshotPermissionStatus, setAppshotPermissionStatus] = useState<AppshotPermissionStatus | null>(null);
   const [desktopControlPermissionStatus, setDesktopControlPermissionStatus] = useState<import("../api").DesktopControlPermissionStatus | null>(null);
   const [proxyEnabled, setProxyEnabled] = useState(false);
   const [proxyUrl, setProxyUrl] = useState("");
   const [noProxy, setNoProxy] = useState("");
   const [appshotShortcut, setAppshotShortcut] = useState("");
+  const [desktopControlEnabled, setDesktopControlEnabled] = useState(false);
+  const [inputControlEnabled, setInputControlEnabled] = useState(true);
+  const [foregroundTakeoverEnabled, setForegroundTakeoverEnabled] = useState(true);
   const [savingProxy, setSavingProxy] = useState(false);
   const [savingAppshot, setSavingAppshot] = useState(false);
+  const [savingDesktopControl, setSavingDesktopControl] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     Promise.all([
       getNetworkConfig(),
       getAppshotConfig(),
+      getComputerUseSettings(),
       getAppshotPermissionStatus(),
       getDesktopControlPermissionStatus(),
     ])
-      .then(([config, nextAppshot, permissionStatus, desktopStatus]) => {
+      .then(([config, nextAppshot, nextComputerUse, permissionStatus, desktopStatus]) => {
         if (cancelled) return;
         setNetworkConfig(config);
         setProxyEnabled(config.proxy.enabled);
@@ -343,6 +351,10 @@ function GeneralSettings({
         setNoProxy(config.proxy.noProxy ?? "");
         setAppshotConfig(nextAppshot);
         setAppshotShortcut(nextAppshot.shortcut);
+        setComputerUseSettings(nextComputerUse);
+        setDesktopControlEnabled(nextComputerUse.enabled);
+        setInputControlEnabled(nextComputerUse.allowInputInjection);
+        setForegroundTakeoverEnabled(nextComputerUse.allowForegroundTakeover);
         setAppshotPermissionStatus(permissionStatus);
         setDesktopControlPermissionStatus(desktopStatus);
       })
@@ -443,6 +455,27 @@ function GeneralSettings({
     }
   };
 
+  const saveDesktopControlSettings = async () => {
+    if (savingDesktopControl) return;
+    setSavingDesktopControl(true);
+    try {
+      const next = await updateComputerUseSettings({
+        enabled: desktopControlEnabled,
+        allowInputInjection: inputControlEnabled,
+        allowForegroundTakeover: foregroundTakeoverEnabled,
+      });
+      setComputerUseSettings(next);
+      setDesktopControlEnabled(next.enabled);
+      setInputControlEnabled(next.allowInputInjection);
+      setForegroundTakeoverEnabled(next.allowForegroundTakeover);
+      onError(null);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setSavingDesktopControl(false);
+    }
+  };
+
   const openAppshotPermissions = async () => {
     try {
       setAppshotPermissionStatus(await getAppshotPermissionStatus());
@@ -461,6 +494,11 @@ function GeneralSettings({
     : false;
   const appshotChanged = appshotConfig
     ? appshotShortcut.trim() !== appshotConfig.shortcut
+    : false;
+  const desktopControlChanged = computerUseSettings
+    ? desktopControlEnabled !== computerUseSettings.enabled
+      || inputControlEnabled !== computerUseSettings.allowInputInjection
+      || foregroundTakeoverEnabled !== computerUseSettings.allowForegroundTakeover
     : false;
   const appshotPermission = appshotPermissionPresentation(appshotPermissionStatus);
   const desktopControlPermission = desktopControlPermissionPresentation(desktopControlPermissionStatus);
@@ -572,6 +610,60 @@ function GeneralSettings({
                 {t("settings.appshot_manage_permissions")}
               </button>
             )}
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          icon={<Monitor className="h-4 w-4" />}
+          label={t("settings.desktop_control_enable")}
+          description={t("settings.desktop_control_enable_description")}
+        >
+          <div className="flex items-center justify-end gap-3">
+            <span className="text-caption text-ink/45">
+              {desktopControlEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}
+            </span>
+            <SwitchControl
+              checked={desktopControlEnabled}
+              tooltip={t("settings.desktop_control_enable")}
+              onToggle={() => setDesktopControlEnabled((value) => !value)}
+            />
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          icon={<Bot className="h-4 w-4" />}
+          label={t("settings.desktop_control_input_control")}
+          description={t("settings.desktop_control_input_control_description")}
+        >
+          <div className="flex items-center justify-end gap-3">
+            <span className="text-caption text-ink/45">
+              {inputControlEnabled ? t("settings.desktop_control_control_ready") : t("settings.desktop_control_control_unavailable")}
+            </span>
+            <SwitchControl
+              checked={inputControlEnabled}
+              tooltip={t("settings.desktop_control_input_control")}
+              onToggle={() => setInputControlEnabled((value) => !value)}
+            />
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          icon={<SquareKanban className="h-4 w-4" />}
+          label={t("settings.desktop_control_foreground_takeover")}
+          description={t("settings.desktop_control_foreground_takeover_description")}
+        >
+          <div className="flex items-center justify-end gap-2">
+            <SwitchControl
+              checked={foregroundTakeoverEnabled}
+              tooltip={t("settings.desktop_control_foreground_takeover")}
+              onToggle={() => setForegroundTakeoverEnabled((value) => !value)}
+            />
+            <button
+              type="button"
+              disabled={savingDesktopControl || !desktopControlChanged}
+              onClick={() => void saveDesktopControlSettings()}
+              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35"
+            >
+              {savingDesktopControl ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+              {t("project.save")}
+            </button>
           </div>
         </SettingsRow>
       </SettingsGroup>

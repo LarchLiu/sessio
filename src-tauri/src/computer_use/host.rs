@@ -12,7 +12,7 @@
 //! privileged work (Phase 3); the host owns the policy.
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::desktop_control::DesktopControlPermissionStatus;
 
@@ -51,7 +51,7 @@ pub struct ComputerUseHost {
     provider: Arc<dyn ComputerUseProvider>,
     leases: Arc<LeaseRegistry>,
     approvals: Arc<ApprovalRegistry>,
-    settings: Arc<ComputerUseSettings>,
+    settings: Arc<RwLock<ComputerUseSettings>>,
     /// Sessions currently performing a foreground takeover (an agent is actively
     /// driving input). Drives the takeover warning overlay + abort affordance.
     foreground: Arc<Mutex<HashSet<String>>>,
@@ -66,7 +66,7 @@ impl ComputerUseHost {
             provider,
             leases: Arc::new(LeaseRegistry::new()),
             approvals: Arc::new(ApprovalRegistry::new()),
-            settings: Arc::new(settings),
+            settings: Arc::new(RwLock::new(settings)),
             foreground: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -81,8 +81,20 @@ impl ComputerUseHost {
         &self.approvals
     }
 
+    pub fn settings(&self) -> ComputerUseSettings {
+        self.settings.read().unwrap().clone()
+    }
+
+    pub fn update_settings(&self, settings: ComputerUseSettings) {
+        *self.settings.write().unwrap() = settings;
+    }
+
+    fn control_enabled(&self, settings: &ComputerUseSettings) -> bool {
+        settings.allow_input_injection && settings.allow_foreground_takeover
+    }
+
     fn require_enabled(&self) -> Result<(), ComputerUseError> {
-        if self.settings.enabled {
+        if self.settings().enabled {
             Ok(())
         } else {
             Err(ComputerUseError::Disabled)
@@ -128,13 +140,14 @@ impl ComputerUseHost {
         perm: &DesktopControlPermissionStatus,
     ) -> ComputerUseStatus {
         let active_app_id = self.leases.target(session_id).ok().map(|target| target.app_id);
+        let settings = self.settings();
         ComputerUseStatus {
-            enabled: self.settings.enabled,
+            enabled: settings.enabled,
             session_approved: self.approvals.session_approved(session_id),
             has_lease: self.leases.has_lease(session_id),
             can_observe: perm.can_observe,
             can_inspect: perm.can_inspect,
-            can_control: perm.can_control && self.settings.allow_input_injection,
+            can_control: perm.can_control && self.control_enabled(&settings),
             foreground_active: self.foreground_active(session_id),
             active_app_id,
         }
@@ -207,8 +220,9 @@ impl ComputerUseHost {
         perm: &DesktopControlPermissionStatus,
         can_inspect: bool,
     ) -> Vec<AllowedAction> {
+        let settings = self.settings();
         let control_ready = perm.can_control
-            && self.settings.allow_input_injection
+            && self.control_enabled(&settings)
             && self.provider.supports_control();
         if !control_ready {
             return Vec::new();
@@ -230,7 +244,8 @@ impl ComputerUseHost {
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppTarget, ComputerUseError> {
         self.require_enabled()?;
-        if !self.settings.allow_input_injection {
+        let settings = self.settings();
+        if !self.control_enabled(&settings) {
             return Err(ComputerUseError::ControlDisabled);
         }
         self.require_permission(perm, RequiredCapability::Control)?;
@@ -417,7 +432,7 @@ mod tests {
         let h = host(ComputerUseSettings {
             enabled: true,
             allow_input_injection: true,
-            allow_foreground_takeover: false,
+            allow_foreground_takeover: true,
         });
         h.approvals().approve_session("s1");
         let p = perm(true, true, true);
@@ -436,7 +451,7 @@ mod tests {
         let h = host(ComputerUseSettings {
             enabled: true,
             allow_input_injection: true,
-            allow_foreground_takeover: false,
+            allow_foreground_takeover: true,
         });
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
@@ -473,7 +488,7 @@ mod tests {
         let h = host(ComputerUseSettings {
             enabled: true,
             allow_input_injection: true,
-            allow_foreground_takeover: false,
+            allow_foreground_takeover: true,
         });
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
@@ -489,7 +504,7 @@ mod tests {
         let h = host(ComputerUseSettings {
             enabled: true,
             allow_input_injection: true,
-            allow_foreground_takeover: false,
+            allow_foreground_takeover: true,
         });
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
@@ -530,7 +545,7 @@ mod tests {
         let h = host(ComputerUseSettings {
             enabled: true,
             allow_input_injection: true,
-            allow_foreground_takeover: false,
+            allow_foreground_takeover: true,
         });
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
@@ -566,7 +581,7 @@ mod tests {
             ComputerUseSettings {
                 enabled: true,
                 allow_input_injection: true,
-                allow_foreground_takeover: false,
+                allow_foreground_takeover: true,
             },
         );
         h.approvals().approve_session("s1");
@@ -612,7 +627,7 @@ mod tests {
         let h = host(ComputerUseSettings {
             enabled: true,
             allow_input_injection: true,
-            allow_foreground_takeover: false,
+            allow_foreground_takeover: true,
         });
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
@@ -638,7 +653,7 @@ mod tests {
         let h = host(ComputerUseSettings {
             enabled: true,
             allow_input_injection: true,
-            allow_foreground_takeover: false,
+            allow_foreground_takeover: true,
         });
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);

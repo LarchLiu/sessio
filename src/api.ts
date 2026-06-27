@@ -159,6 +159,12 @@ export interface AppshotConfig {
   shortcut: string;
 }
 
+export interface ComputerUseSettings {
+  enabled: boolean;
+  allowInputInjection: boolean;
+  allowForegroundTakeover: boolean;
+}
+
 export type AppshotPermissionKind = "screenshots" | "accessibility";
 
 export interface AppshotPermissionState {
@@ -2585,6 +2591,10 @@ export async function getAppshotConfig(): Promise<AppshotConfig> {
   return invoke<AppshotConfig>("get_appshot_config");
 }
 
+export async function getComputerUseSettings(): Promise<ComputerUseSettings> {
+  return invoke<ComputerUseSettings>("get_computer_use_settings");
+}
+
 export async function getAppshotPermissionStatus(): Promise<AppshotPermissionStatus> {
   return invoke<AppshotPermissionStatus>("get_appshot_permission_status");
 }
@@ -2641,6 +2651,12 @@ export async function openAppshotPermissionsPanel(): Promise<void> {
 
 export async function updateAppshotConfig(config: AppshotConfig): Promise<AppshotConfig> {
   return invoke<AppshotConfig>("update_appshot_config", { config });
+}
+
+export async function updateComputerUseSettings(
+  settings: ComputerUseSettings,
+): Promise<ComputerUseSettings> {
+  return invoke<ComputerUseSettings>("update_computer_use_settings", { settings });
 }
 
 export async function getImBridgeConfig(): Promise<ImBridgeConfig> {

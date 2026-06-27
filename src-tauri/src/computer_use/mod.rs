@@ -13,6 +13,7 @@
 //! a deterministic fake provider.
 
 pub mod approvals;
+pub mod config;
 pub mod host;
 pub mod lease;
 pub mod mcp_http;

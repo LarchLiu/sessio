@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::app_paths;
+use crate::computer_use::settings::ComputerUseSettings;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppConfig {
@@ -13,6 +14,7 @@ pub struct AppConfig {
     pub index: IndexConfig,
     pub network: NetworkConfig,
     pub appshot: AppshotConfig,
+    pub computer_use: ComputerUseSettings,
     pub debug: DebugConfig,
 }
 
@@ -78,6 +80,7 @@ struct RawConfig {
     index: RawIndexConfig,
     network: RawNetworkConfig,
     appshot: RawAppshotConfig,
+    computer_use: RawComputerUseConfig,
     debug: RawDebugConfig,
 }
 
@@ -101,6 +104,13 @@ struct RawNetworkProxyConfig {
 #[derive(Debug, Clone, Default)]
 struct RawAppshotConfig {
     shortcut: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RawComputerUseConfig {
+    enabled: Option<bool>,
+    allow_input_injection: Option<bool>,
+    allow_foreground_takeover: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -263,6 +273,18 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 "shortcut" => raw.appshot.shortcut = value,
                 other => bail!("unknown key in [appshot]: {other}"),
             },
+            Section::ComputerUse => match key {
+                "enabled" => raw.computer_use.enabled = value.map(parse_bool).transpose()?,
+                "allow_input_injection" => {
+                    raw.computer_use.allow_input_injection =
+                        value.map(parse_bool).transpose()?
+                }
+                "allow_foreground_takeover" => {
+                    raw.computer_use.allow_foreground_takeover =
+                        value.map(parse_bool).transpose()?
+                }
+                other => bail!("unknown key in [computer_use]: {other}"),
+            },
             Section::Debug => match key {
                 "acp_config" => raw.debug.acp_config = value.map(parse_bool).transpose()?,
                 "update_preview" => raw.debug.update_preview = value.map(parse_bool).transpose()?,
@@ -283,6 +305,7 @@ enum Section {
     Index,
     NetworkProxy,
     Appshot,
+    ComputerUse,
     Debug,
     Ignored,
 }
@@ -306,6 +329,7 @@ fn parse_section(line: &str) -> Result<Option<Section>> {
         [a] if a == "index" => Section::Index,
         [a, b] if a == "network" && b == "proxy" => Section::NetworkProxy,
         [a] if a == "appshot" => Section::Appshot,
+        [a] if a == "computer_use" => Section::ComputerUse,
         [a, ..] if a == "astra" => Section::Ignored,
         [a] if a == "debug" => Section::Debug,
         [a, b, c] if a == "memory" && b == "backends" && c == "qmd" => Section::MemoryBackendsQmd,
@@ -393,6 +417,7 @@ fn resolve_app_config(raw: RawConfig, apply_env: bool) -> Result<AppConfig> {
         index: resolve_index_config(raw.clone()),
         network: resolve_network_config(raw.clone()),
         appshot: resolve_appshot_config(raw.clone()),
+        computer_use: resolve_computer_use_config(raw.clone()),
         debug: resolve_debug_config(raw),
     })
 }
@@ -418,6 +443,21 @@ fn resolve_appshot_config(raw: RawConfig) -> AppshotConfig {
     AppshotConfig {
         shortcut: trimmed_string(raw.appshot.shortcut.as_deref())
             .unwrap_or_else(|| AppshotConfig::default().shortcut),
+    }
+}
+
+fn resolve_computer_use_config(raw: RawConfig) -> ComputerUseSettings {
+    let defaults = ComputerUseSettings::recommended();
+    ComputerUseSettings {
+        enabled: raw.computer_use.enabled.unwrap_or(defaults.enabled),
+        allow_input_injection: raw
+            .computer_use
+            .allow_input_injection
+            .unwrap_or(defaults.allow_input_injection),
+        allow_foreground_takeover: raw
+            .computer_use
+            .allow_foreground_takeover
+            .unwrap_or(defaults.allow_foreground_takeover),
     }
 }
 
@@ -504,6 +544,21 @@ fn raw_config_with_defaults(mut raw: RawConfig) -> Result<(RawConfig, bool)> {
         &mut changed,
     );
     merge_option(
+        &mut raw.computer_use.enabled,
+        defaults.computer_use.enabled,
+        &mut changed,
+    );
+    merge_option(
+        &mut raw.computer_use.allow_input_injection,
+        defaults.computer_use.allow_input_injection,
+        &mut changed,
+    );
+    merge_option(
+        &mut raw.computer_use.allow_foreground_takeover,
+        defaults.computer_use.allow_foreground_takeover,
+        &mut changed,
+    );
+    merge_option(
         &mut raw.debug.update_preview,
         defaults.debug.update_preview,
         &mut changed,
@@ -541,6 +596,7 @@ fn default_app_config() -> Result<AppConfig> {
         },
         network: NetworkConfig::default(),
         appshot: AppshotConfig::default(),
+        computer_use: ComputerUseSettings::recommended(),
         debug: DebugConfig {
             acp_config: false,
             update_preview: false,
@@ -594,6 +650,8 @@ pub fn serialize_app_config(config: &AppConfig) -> String {
     out.push('\n');
     out.push_str(&serialize_appshot_config(&config.appshot));
     out.push('\n');
+    out.push_str(&serialize_computer_use_config(&config.computer_use));
+    out.push('\n');
     out.push_str(&serialize_debug_config(&config.debug));
     out
 }
@@ -635,6 +693,29 @@ fn serialize_appshot_config(config: &AppshotConfig) -> String {
     out.push_str("[appshot]\n");
     out.push_str("shortcut = ");
     out.push_str(&toml_string(&config.shortcut));
+    out.push('\n');
+    out
+}
+
+fn serialize_computer_use_config(config: &ComputerUseSettings) -> String {
+    let mut out = String::new();
+    out.push_str("[computer_use]\n");
+    out.push_str("enabled = ");
+    out.push_str(if config.enabled { "true" } else { "false" });
+    out.push('\n');
+    out.push_str("allow_input_injection = ");
+    out.push_str(if config.allow_input_injection {
+        "true"
+    } else {
+        "false"
+    });
+    out.push('\n');
+    out.push_str("allow_foreground_takeover = ");
+    out.push_str(if config.allow_foreground_takeover {
+        "true"
+    } else {
+        "false"
+    });
     out.push('\n');
     out
 }
@@ -895,8 +976,29 @@ mod tests {
         assert!(changed);
         assert!(config.memory.is_none());
         assert_eq!(config.index.poll_interval_seconds, 60);
+        assert!(config.computer_use.enabled);
+        assert!(config.computer_use.allow_input_injection);
+        assert!(config.computer_use.allow_foreground_takeover);
         assert!(!config.debug.acp_config);
         assert!(!config.debug.update_preview);
+    }
+
+    #[test]
+    fn parses_computer_use_config() {
+        let raw = parse_raw_config(
+            r#"
+            [computer_use]
+            enabled = false
+            allow_input_injection = true
+            allow_foreground_takeover = false
+            "#,
+        )
+        .unwrap();
+        let config = super::resolve_app_config(raw, false).unwrap();
+
+        assert!(!config.computer_use.enabled);
+        assert!(config.computer_use.allow_input_injection);
+        assert!(!config.computer_use.allow_foreground_takeover);
     }
 
     #[test]

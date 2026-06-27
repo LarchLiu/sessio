@@ -8237,6 +8237,11 @@ fn get_appshot_config() -> Result<config::AppshotConfig, String> {
 }
 
 #[tauri::command]
+fn get_computer_use_settings() -> Result<computer_use::settings::ComputerUseSettings, String> {
+    computer_use::config::load_settings().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_appshot_permission_status() -> AppshotPermissionStatusDto {
     appshot_permission_status()
 }
@@ -8310,6 +8315,16 @@ fn update_appshot_config(
     app_config.appshot = config.clone();
     config::save_config(&app_config).map_err(|e| e.to_string())?;
     Ok(config)
+}
+
+#[tauri::command]
+fn update_computer_use_settings(
+    settings: computer_use::settings::ComputerUseSettings,
+    runtime: State<'_, RuntimeManager>,
+) -> Result<computer_use::settings::ComputerUseSettings, String> {
+    let settings = computer_use::config::save_settings(settings).map_err(|e| e.to_string())?;
+    runtime.update_computer_use_settings(settings.clone());
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -9241,6 +9256,7 @@ pub fn run() {
             get_network_config,
             update_network_config,
             get_appshot_config,
+            get_computer_use_settings,
             get_appshot_permission_status,
             get_desktop_control_permission_status,
             get_computer_use_status,
@@ -9251,6 +9267,7 @@ pub fn run() {
             open_appshot_permissions_panel,
             open_appshot_permission_settings,
             update_appshot_config,
+            update_computer_use_settings,
             get_im_bridge_config,
             update_im_bridge_config,
             get_scheduled_tasks,

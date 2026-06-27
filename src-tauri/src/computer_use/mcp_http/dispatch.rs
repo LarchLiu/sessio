@@ -198,7 +198,7 @@ mod tests {
             ComputerUseSettings {
                 enabled: true,
                 allow_input_injection: true,
-                allow_foreground_takeover: false,
+                allow_foreground_takeover: true,
             },
         )
     }

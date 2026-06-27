@@ -219,7 +219,7 @@ mod tests {
     fn test_host() -> ComputerUseHost {
         ComputerUseHost::new(
             Arc::new(FakeProvider::default()),
-            ComputerUseSettings::observe_only(),
+            ComputerUseSettings::recommended(),
         )
     }
 

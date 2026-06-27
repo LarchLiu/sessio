@@ -78,6 +78,10 @@ impl ComputerUseRuntime {
         &self.host
     }
 
+    pub fn update_settings(&self, settings: ComputerUseSettings) {
+        self.host.update_settings(settings);
+    }
+
     /// Lazily start (once) and return the shared MCP server handle.
     fn server(&self) -> Result<&McpServerHandle, String> {
         // Fast path: already initialized.
