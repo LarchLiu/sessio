@@ -234,6 +234,22 @@ export function renderItemKeys(items: AcpRenderItem[]): string[] {
   });
 }
 
+export function laterTurnEventFlagsForRenderItems(
+  items: AcpRenderItem[],
+  contextItems: AcpRenderItem[] = items,
+): boolean[] {
+  const flagsByItem = new Map<AcpRenderItem, boolean>();
+  const seenLaterTurnIds = new Set<string>();
+  for (let index = contextItems.length - 1; index >= 0; index -= 1) {
+    const item = contextItems[index];
+    flagsByItem.set(item, seenLaterTurnIds.has(item.turn.turnId));
+    if (isLaterTurnEventRenderItem(item)) {
+      seenLaterTurnIds.add(item.turn.turnId);
+    }
+  }
+  return items.map((item) => flagsByItem.get(item) ?? false);
+}
+
 function latestTurnWithIds(turns: LiveTurn[], ids: Set<string>): LiveTurn | null {
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index];
@@ -274,6 +290,10 @@ function renderItemKey(item: AcpRenderItem): string {
   }
   if (item.kind === "permission") return `acp:${item.turn.turnId}:permission:${item.permission.requestId}`;
   return `acp:${item.turn.turnId}:error`;
+}
+
+function isLaterTurnEventRenderItem(item: AcpRenderItem): boolean {
+  return item.kind !== "turnStatus" && item.kind !== "workingIndicator";
 }
 
 function mergedFileEditRenderBlock(

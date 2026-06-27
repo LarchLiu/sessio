@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   acpViewModelToRenderItems,
+  laterTurnEventFlagsForRenderItems,
   liveOrLatestTurnFileEdits,
   parseFileEditSummary,
   renderItemKeys,
@@ -387,5 +388,138 @@ describe("acpViewModelToRenderItems", () => {
       deletions: 0,
     });
     expect(summary.edits).toEqual([]);
+  });
+
+  it("marks earlier live message items as having later turn events within the same turn", () => {
+    const viewModel: AcpViewModel = {
+      turns: [
+        {
+          turnId: "turn-1",
+          status: "streaming",
+          blocks: [
+            {
+              kind: "thought",
+              blocks: [{ type: "text", text: "Thinking..." }],
+              raw: {},
+              timestamp: 1,
+            },
+            {
+              kind: "assistant",
+              blocks: [{ type: "text", text: "Answer" }],
+              raw: {},
+              timestamp: 2,
+            },
+          ],
+          tools: [],
+          permissions: [],
+          protocolMessages: [],
+          stopReason: null,
+          error: null,
+          startedAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      sessionState: {
+        plan: null,
+        availableCommands: [],
+        currentModeId: null,
+        configOptions: [],
+        sessionInfo: null,
+      },
+      protocolMessages: [],
+      ended: false,
+    };
+
+    const items = acpViewModelToRenderItems(viewModel, new Set(["turn-1"]), "");
+
+    expect(items.map((item) => item.kind)).toEqual(["turnStatus", "block", "block"]);
+    expect(laterTurnEventFlagsForRenderItems(items)).toEqual([true, true, false]);
+  });
+
+  it("uses full render context so preview subsets still cancel older typewriter items", () => {
+    const viewModel: AcpViewModel = {
+      turns: [
+        {
+          turnId: "turn-1",
+          status: "streaming",
+          blocks: [
+            {
+              kind: "thought",
+              blocks: [{ type: "text", text: "Thinking..." }],
+              raw: {},
+              timestamp: 1,
+            },
+            {
+              kind: "assistant",
+              blocks: [{ type: "text", text: "Answer" }],
+              raw: {},
+              timestamp: 2,
+            },
+          ],
+          tools: [],
+          permissions: [],
+          protocolMessages: [],
+          stopReason: null,
+          error: null,
+          startedAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      sessionState: {
+        plan: null,
+        availableCommands: [],
+        currentModeId: null,
+        configOptions: [],
+        sessionInfo: null,
+      },
+      protocolMessages: [],
+      ended: false,
+    };
+
+    const items = acpViewModelToRenderItems(viewModel, new Set(["turn-1"]), "");
+    const subset = [items[1], items[2]];
+
+    expect(laterTurnEventFlagsForRenderItems(subset)).toEqual([true, false]);
+    expect(laterTurnEventFlagsForRenderItems(subset, items)).toEqual([true, false]);
+  });
+
+  it("does not treat working indicators as later turn events for the final live message", () => {
+    const viewModel: AcpViewModel = {
+      turns: [
+        {
+          turnId: "turn-1",
+          status: "streaming",
+          blocks: [
+            {
+              kind: "assistant",
+              blocks: [{ type: "text", text: "Answer" }],
+              raw: {},
+              timestamp: 1,
+            },
+          ],
+          tools: [],
+          permissions: [],
+          protocolMessages: [],
+          stopReason: null,
+          error: null,
+          startedAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      sessionState: {
+        plan: null,
+        availableCommands: [],
+        currentModeId: null,
+        configOptions: [],
+        sessionInfo: null,
+      },
+      protocolMessages: [],
+      ended: false,
+    };
+
+    const items = acpViewModelToRenderItems(viewModel, new Set(["turn-1"]), "turn-1");
+
+    expect(items.map((item) => item.kind)).toEqual(["turnStatus", "block", "workingIndicator"]);
+    expect(laterTurnEventFlagsForRenderItems(items)).toEqual([true, false, false]);
   });
 });

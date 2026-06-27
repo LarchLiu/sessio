@@ -135,6 +135,7 @@ import {
   acpViewModelToRenderItems,
   aggregateSessionFileEdits,
   fileEditMatchesPath,
+  laterTurnEventFlagsForRenderItems,
   liveOrLatestTurnFileEdits,
   parseFileEditSummary as parseSharedFileEditSummary,
   renderItemKeys,
@@ -1703,6 +1704,7 @@ export function AcpTranscriptPanel({
                 />
                 <AcpRenderItems
                   items={visibleDisplayItems}
+                  contextItems={displayItems}
                   itemKeys={visibleDisplayItemKeys}
                   bubbleRefs={bubbleRefs}
                   sessioRuntimeSessionId={runtimeSessionId}
@@ -2454,6 +2456,7 @@ function scrollBlockStartIntoView(el: HTMLElement | null) {
 
 export function AcpRenderItems({
   items,
+  contextItems,
   itemKeys,
   bubbleRefs,
   sessioRuntimeSessionId,
@@ -2467,6 +2470,7 @@ export function AcpRenderItems({
   onPermissionResponse,
 }: {
   items: AcpRenderItem[];
+  contextItems?: AcpRenderItem[];
   itemKeys: string[];
   bubbleRefs: React.RefObject<(HTMLDivElement | null)[]>;
   sessioRuntimeSessionId: string;
@@ -2483,6 +2487,10 @@ export function AcpRenderItems({
     optionId: string,
   ) => Promise<void>;
 }) {
+  const laterTurnEventFlags = useMemo(
+    () => laterTurnEventFlagsForRenderItems(items, contextItems),
+    [contextItems, items],
+  );
   return (
     <>
       {items.map((item, i) => (
@@ -2504,6 +2512,7 @@ export function AcpRenderItems({
             onFilePreviewError={onFilePreviewError}
             onOpenProjectFile={onOpenProjectFile}
             onPermissionResponse={onPermissionResponse}
+            hasLaterTurnEvent={laterTurnEventFlags[i] ?? false}
           />
         </div>
       ))}
@@ -2522,6 +2531,7 @@ function AcpLiveItem({
   onFilePreviewError,
   onOpenProjectFile,
   onPermissionResponse,
+  hasLaterTurnEvent,
 }: {
   item: AcpRenderItem;
   sessioRuntimeSessionId: string;
@@ -2537,6 +2547,7 @@ function AcpLiveItem({
     requestId: string,
     optionId: string,
   ) => Promise<void>;
+  hasLaterTurnEvent: boolean;
 }) {
   const { lang } = useI18n();
   if (item.kind === "turnStatus") {
@@ -2588,7 +2599,8 @@ function AcpLiveItem({
     <AcpContentBlockGroup
       block={item.block}
       timestamp={item.block.timestamp ?? item.turn.updatedAt}
-      typewriterActive={isTypewriterBlockActive(item.turn, item.block, messageFinished)}
+      typewriterActive={isTypewriterBlockActive(item.turn, item.block, messageFinished, hasLaterTurnEvent)}
+      typewriterCancelled={hasLaterTurnEvent}
       typewriterKey={`${item.turn.turnId}:${item.block.kind}`}
       messageFinished={messageFinished}
       defaultMessageExpanded={defaultMessageExpanded}
@@ -2709,6 +2721,7 @@ function AcpContentBlockGroup({
   block,
   timestamp,
   typewriterActive = false,
+  typewriterCancelled = false,
   typewriterKey,
   messageFinished = true,
   defaultMessageExpanded,
@@ -2721,6 +2734,7 @@ function AcpContentBlockGroup({
   block: AcpRenderBlock;
   timestamp: number;
   typewriterActive?: boolean;
+  typewriterCancelled?: boolean;
   typewriterKey?: string;
   messageFinished?: boolean;
   defaultMessageExpanded?: boolean;
@@ -2852,6 +2866,7 @@ function AcpContentBlockGroup({
               blocks={bodyBlocks}
               imageAlign={isUser ? "right" : undefined}
               typewriterActive={!isUser && typewriterActive}
+              typewriterCancelled={!isUser && typewriterCancelled}
               typewriterKey={typewriterKey}
               onPreviewImage={onPreviewImage}
             />
@@ -3018,16 +3033,23 @@ function AcpContentBlocks({
   blocks,
   imageAlign,
   typewriterActive = false,
+  typewriterCancelled = false,
   typewriterKey,
   onPreviewImage,
 }: {
   blocks: AcpContentBlock[];
   imageAlign?: "left" | "right";
   typewriterActive?: boolean;
+  typewriterCancelled?: boolean;
   typewriterKey?: string;
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
-  const visibleBlocks = useTypewriterContentBlocks(blocks, typewriterActive, typewriterKey);
+  const visibleBlocks = useTypewriterContentBlocks(
+    blocks,
+    typewriterActive,
+    typewriterCancelled,
+    typewriterKey,
+  );
   return (
     <div className="space-y-2">
       {visibleBlocks.map((block, index) => (
@@ -3048,16 +3070,26 @@ const TYPEWRITER_MAX_CHARS_PER_SECOND = 360;
 const TYPEWRITER_DRAIN_CHARS_PER_SECOND = 220;
 const TYPEWRITER_TICK_MS = 24;
 const MESSAGE_COLLAPSE_LINES = 20;
+const typewriterVisibleCharsCache = new Map<string, number>();
 
 function useTypewriterContentBlocks(
   blocks: AcpContentBlock[],
   active: boolean,
+  cancelled: boolean,
   typewriterKey: string | undefined,
 ): AcpContentBlock[] {
   const totalChars = useMemo(() => textContentLength(blocks), [blocks]);
   const streamKey = typewriterKey ?? "default";
-  const [visibleChars, setVisibleChars] = useState(() => active ? 0 : totalChars);
-  const visibleCharsRef = useRef(active ? 0 : totalChars);
+  const [visibleChars, setVisibleChars] = useState(() => {
+    if (!active || cancelled) return totalChars;
+    const cachedVisibleChars = typewriterVisibleCharsCache.get(streamKey);
+    return clampNumber(cachedVisibleChars ?? 0, 0, totalChars);
+  });
+  const visibleCharsRef = useRef(
+    !active || cancelled
+      ? totalChars
+      : clampNumber(typewriterVisibleCharsCache.get(streamKey) ?? 0, 0, totalChars),
+  );
   const stateRef = useRef({
     streamKey,
     targetChars: totalChars,
@@ -3077,10 +3109,24 @@ function useTypewriterContentBlocks(
       state.lastTargetChars = totalChars;
       state.lastTargetAt = now;
       state.charsPerSecond = TYPEWRITER_INITIAL_CHARS_PER_SECOND;
-      state.wasActive = active;
-      const initialVisible = active ? 0 : totalChars;
+      state.wasActive = active && !cancelled;
+      const initialVisible = active && !cancelled
+        ? clampNumber(typewriterVisibleCharsCache.get(streamKey) ?? 0, 0, totalChars)
+        : totalChars;
       visibleCharsRef.current = initialVisible;
       setVisibleChars(initialVisible);
+      return;
+    }
+
+    if (cancelled) {
+      state.targetChars = totalChars;
+      state.lastTargetChars = totalChars;
+      state.lastTargetAt = now;
+      state.charsPerSecond = TYPEWRITER_INITIAL_CHARS_PER_SECOND;
+      state.wasActive = false;
+      visibleCharsRef.current = totalChars;
+      typewriterVisibleCharsCache.delete(streamKey);
+      setVisibleChars(totalChars);
       return;
     }
 
@@ -3089,6 +3135,7 @@ function useTypewriterContentBlocks(
       state.lastTargetChars = totalChars;
       state.lastTargetAt = now;
       visibleCharsRef.current = totalChars;
+      typewriterVisibleCharsCache.delete(streamKey);
       setVisibleChars(totalChars);
       return;
     }
@@ -3123,7 +3170,17 @@ function useTypewriterContentBlocks(
       state.charsPerSecond = Math.max(state.charsPerSecond, TYPEWRITER_DRAIN_CHARS_PER_SECOND);
     }
     state.wasActive = state.wasActive || active || visibleCharsRef.current < state.targetChars;
-  }, [active, streamKey, totalChars]);
+  }, [active, cancelled, streamKey, totalChars]);
+
+  useEffect(() => {
+    if (!active || cancelled || visibleChars >= totalChars) {
+      if (!active || cancelled) {
+        typewriterVisibleCharsCache.delete(streamKey);
+      }
+      return;
+    }
+    typewriterVisibleCharsCache.set(streamKey, visibleChars);
+  }, [active, cancelled, streamKey, totalChars, visibleChars]);
 
   const shouldAnimate = visibleChars < totalChars;
   useEffect(() => {
@@ -4023,10 +4080,12 @@ function isTypewriterBlockActive(
   turn: LiveTurn,
   block: AcpRenderBlock,
   messageFinished = isAcpMessageBlockFinished(turn, block),
+  hasLaterTurnEvent = false,
 ): boolean {
   return (
     isTypewriterTurn(turn) &&
     !messageFinished &&
+    !hasLaterTurnEvent &&
     (block.kind === "assistant" || block.kind === "thought")
   );
 }

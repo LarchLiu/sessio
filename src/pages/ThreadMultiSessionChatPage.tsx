@@ -1398,6 +1398,7 @@ function ThreadPlannerSummaryMessage({
     <div className="grid min-w-0 gap-2">
       <AcpRenderItems
         items={items}
+        contextItems={items}
         itemKeys={itemKeys}
         bubbleRefs={bubbleRefs}
         sessioRuntimeSessionId=""
@@ -1532,6 +1533,7 @@ function ThreadSessionLatestMessage({
           {userPromptItems.length > 0 && (
             <AcpRenderItems
               items={userPromptItems}
+              contextItems={renderItems}
               itemKeys={userPromptItemKeys}
               bubbleRefs={bubbleRefs}
               sessioRuntimeSessionId={permissionSessionId}
@@ -1550,6 +1552,7 @@ function ThreadSessionLatestMessage({
           {workingIndicatorItems.length > 0 && (
             <AcpRenderItems
               items={workingIndicatorItems}
+              contextItems={renderItems}
               itemKeys={workingIndicatorItemKeys}
               bubbleRefs={bubbleRefs}
               sessioRuntimeSessionId={permissionSessionId}
@@ -1565,6 +1568,7 @@ function ThreadSessionLatestMessage({
         <div className="grid min-w-0 gap-2">
           <AcpRenderItems
             items={visibleItems}
+            contextItems={renderItems}
             itemKeys={itemKeys}
             bubbleRefs={bubbleRefs}
             sessioRuntimeSessionId={permissionSessionId}
