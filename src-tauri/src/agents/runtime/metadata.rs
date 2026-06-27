@@ -81,15 +81,12 @@ pub fn derive_computer_use_eligible(
 }
 
 /// Product-level allowlist of agents Sessio supports the computer-use contract
-/// for. Empty until Phase 0's injection spike confirms a real agent end-to-end;
-/// confirmed agents are added here so the composer toggle only appears once the
-/// path is proven, never on capability advertisement alone.
-fn computer_use_product_supported(_agent: Agent) -> bool {
-    // Phase 0 (live injection spike) gates which agents land here. Today no
-    // agent has been confirmed through Sessio's own session loop, so the
-    // product layer reports false for all of them even when the transport is
-    // injectable. Confirmed agents will be matched explicitly here.
-    false
+/// for. As of the v3 implementation plan, the supported MVP set is the ACP
+/// agents verified to accept desktop-owned HTTP MCP injection: Codex and Claude.
+/// Pi remains a separate extension path and OpenCode has not yet been verified
+/// against the computer-use contract end-to-end.
+fn computer_use_product_supported(agent: Agent) -> bool {
+    matches!(agent, Agent::Codex | Agent::Claude)
 }
 
 pub fn runtime_agents_from_db(
@@ -393,8 +390,7 @@ mod tests {
         // No capabilities probed yet → not eligible.
         assert!(!derive_computer_use_eligible(Agent::Pi, None));
 
-        // Injectable transport but no product support yet → still not eligible
-        // (the product allowlist is empty until Phase 0 confirms an agent).
+        // Injectable transport but no product support yet → still not eligible.
         let injectable = pi_rpc_transport::runtime_capabilities();
         assert!(injectable.mcp_injection.is_injectable());
         assert!(!derive_computer_use_eligible(Agent::Pi, Some(&injectable)));
@@ -405,6 +401,12 @@ mod tests {
         not_injectable.mcp_injection = Default::default();
         assert!(!not_injectable.mcp_injection.is_injectable());
         assert!(!derive_computer_use_eligible(Agent::Pi, Some(&not_injectable)));
+
+        let mut acp_http = RuntimeCapabilitySet::fake();
+        acp_http.mcp_injection.http = true;
+        assert!(derive_computer_use_eligible(Agent::Codex, Some(&acp_http)));
+        assert!(derive_computer_use_eligible(Agent::Claude, Some(&acp_http)));
+        assert!(!derive_computer_use_eligible(Agent::Opencode, Some(&acp_http)));
     }
 
     #[test]
