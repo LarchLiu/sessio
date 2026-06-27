@@ -52,6 +52,7 @@ libc = "0.2"
 tauri-plugin-notification = "2"
 portable-pty = "0.9"
 uuid = { version = "1", features = ["v4"] }
+tiny_http = "0.12"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
