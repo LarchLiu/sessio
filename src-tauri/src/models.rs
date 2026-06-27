@@ -1598,6 +1598,13 @@ pub struct RuntimeAgentMetadata {
     pub version_command: Option<String>,
     pub detected_version: Option<String>,
     pub capabilities: Option<RuntimeCapabilitySet>,
+    /// Whether this agent is eligible for the session-scoped `computer use`
+    /// feature. Derived from two layers: (1) the transport can accept an injected
+    /// tool server (`capabilities.mcp_injection.is_injectable()`), and (2) Sessio
+    /// supports the computer-use contract for this agent. Surfaced to the UI so
+    /// the composer toggle is shown only for eligible agents.
+    #[serde(default)]
+    pub computer_use_eligible: bool,
     pub updated_at: Option<i64>,
 }
 

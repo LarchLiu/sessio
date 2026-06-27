@@ -42,6 +42,41 @@ pub struct RuntimeCapabilitySet {
     pub supports_embedded_context: bool,
     pub supports_attachments: bool,
     pub supports_modes: bool,
+    /// MCP tool-injection capabilities, surfaced so the host can decide whether a
+    /// `computer use` tool server can be attached to a session for this agent.
+    ///
+    /// For ACP agents these mirror `AgentCapabilities.mcp_capabilities`
+    /// (`http` / `sse` / `acp`). For non-ACP transports they describe whatever
+    /// native injection path the transport provides (e.g. Pi's extension system),
+    /// reported through [`McpInjectionCapabilities`] so a single field can express
+    /// "this agent can accept an injected tool server" regardless of mechanism.
+    #[serde(default)]
+    pub mcp_injection: McpInjectionCapabilities,
+}
+
+/// How (and whether) a runtime can have a Sessio-provided tool server injected
+/// into a session. Used by the computer-use eligibility check.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpInjectionCapabilities {
+    /// Agent accepts an HTTP MCP server (`McpServer::Http`).
+    pub http: bool,
+    /// Agent accepts an SSE MCP server (`McpServer::Sse`).
+    pub sse: bool,
+    /// Agent accepts an in-process / ACP MCP server (`McpServer::Acp`).
+    /// Only meaningful when the ACP `unstable_mcp_over_acp` capability is present.
+    pub acp: bool,
+    /// Agent exposes a native, non-MCP extension path that Sessio can target
+    /// (e.g. Pi's `pi.registerTool` extension system). When set, the agent is
+    /// injectable even though the MCP sub-capabilities above are all false.
+    pub native_extension: bool,
+}
+
+impl McpInjectionCapabilities {
+    /// True when at least one injection mechanism is available.
+    pub fn is_injectable(&self) -> bool {
+        self.http || self.sse || self.acp || self.native_extension
+    }
 }
 
 impl RuntimeCapabilitySet {
@@ -58,6 +93,7 @@ impl RuntimeCapabilitySet {
             supports_embedded_context: false,
             supports_attachments: false,
             supports_modes: false,
+            mcp_injection: McpInjectionCapabilities::default(),
         }
     }
 }

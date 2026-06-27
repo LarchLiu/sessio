@@ -140,6 +140,15 @@ pub fn runtime_capabilities() -> RuntimeCapabilitySet {
         supports_embedded_context: true,
         supports_attachments: true,
         supports_modes: false,
+        // Pi is not an ACP agent and exposes no MCP server channel, but it does
+        // have a native extension system (`pi.registerTool`) that Sessio can
+        // target — so it is injectable via the `native_extension` path.
+        mcp_injection: crate::agents::runtime::types::McpInjectionCapabilities {
+            http: false,
+            sse: false,
+            acp: false,
+            native_extension: true,
+        },
     }
 }
 

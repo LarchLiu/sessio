@@ -205,6 +205,17 @@ pub fn runtime_capabilities_from_acp(capabilities: &AgentCapabilities) -> Runtim
     let supports_image_attachments = capabilities.prompt_capabilities.image;
     let supports_audio_attachments = capabilities.prompt_capabilities.audio;
     let supports_embedded_context = capabilities.prompt_capabilities.embedded_context;
+    let mcp = &capabilities.mcp_capabilities;
+    // `acp` (MCP-over-ACP) is gated behind the schema crate's `unstable_mcp_over_acp`
+    // feature, which Sessio does not enable today (only `unstable_session_fork`).
+    // Until that feature is turned on and the capability stabilizes, report acp
+    // injection as unavailable.
+    let mcp_injection = crate::agents::runtime::types::McpInjectionCapabilities {
+        http: mcp.http,
+        sse: mcp.sse,
+        acp: false,
+        native_extension: false,
+    };
     RuntimeCapabilitySet {
         supports_cancel: true,
         supports_permissions: true,
@@ -219,6 +230,7 @@ pub fn runtime_capabilities_from_acp(capabilities: &AgentCapabilities) -> Runtim
             || supports_audio_attachments
             || supports_embedded_context,
         supports_modes: false,
+        mcp_injection,
     }
 }
 

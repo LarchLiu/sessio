@@ -34,6 +34,9 @@ pub fn runtime_metadata_from_agent_info(
     cached: Option<&RuntimeAgentMetadata>,
 ) -> Option<RuntimeAgentMetadata> {
     let runtime_agent = Agent::from_db_str(&agent.id)?;
+    let capabilities = cached.and_then(|metadata| metadata.capabilities.clone());
+    let computer_use_eligible =
+        derive_computer_use_eligible(runtime_agent, capabilities.as_ref());
     Some(RuntimeAgentMetadata {
         agent: runtime_agent,
         enabled: agent.enabled,
@@ -49,9 +52,44 @@ pub fn runtime_metadata_from_agent_info(
         session_command: agent.commands.session.first().cloned(),
         version_command: agent.commands.version.first().cloned(),
         detected_version: cached.and_then(|metadata| metadata.detected_version.clone()),
-        capabilities: cached.and_then(|metadata| metadata.capabilities.clone()),
+        capabilities,
+        computer_use_eligible,
         updated_at: Some(agent.updated_at),
     })
+}
+
+/// Whether an agent is eligible for the session-scoped `computer use` feature.
+///
+/// Two layers, per the implementation plan:
+/// 1. **Transport injectability** — the runtime can accept a Sessio-provided
+///    tool server (`mcp_injection.is_injectable()`): an ACP MCP server
+///    (`http`/`sse`/`acp`) or a native extension path (Pi).
+/// 2. **Product support** — Sessio actually supports the computer-use contract
+///    for this agent. Phase 0's per-agent spike narrows this set; until an agent
+///    is confirmed it stays out of [`COMPUTER_USE_SUPPORTED_AGENTS`].
+///
+/// Both must hold. Capability data may be absent (agent not yet probed), in
+/// which case the agent is not eligible until a probe populates it.
+pub fn derive_computer_use_eligible(
+    agent: Agent,
+    capabilities: Option<&RuntimeCapabilitySet>,
+) -> bool {
+    let injectable = capabilities
+        .map(|caps| caps.mcp_injection.is_injectable())
+        .unwrap_or(false);
+    injectable && computer_use_product_supported(agent)
+}
+
+/// Product-level allowlist of agents Sessio supports the computer-use contract
+/// for. Empty until Phase 0's injection spike confirms a real agent end-to-end;
+/// confirmed agents are added here so the composer toggle only appears once the
+/// path is proven, never on capability advertisement alone.
+fn computer_use_product_supported(_agent: Agent) -> bool {
+    // Phase 0 (live injection spike) gates which agents land here. Today no
+    // agent has been confirmed through Sessio's own session loop, so the
+    // product layer reports false for all of them even when the transport is
+    // injectable. Confirmed agents will be matched explicitly here.
+    false
 }
 
 pub fn runtime_agents_from_db(
@@ -142,6 +180,11 @@ pub fn startup_probe_runtime_agents(
             cached
         };
 
+        let capabilities = capability_record
+            .as_ref()
+            .and_then(|record| derive_runtime_capabilities(&record.raw_capabilities_json).ok());
+        let computer_use_eligible =
+            derive_computer_use_eligible(runtime_agent, capabilities.as_ref());
         out.push(RuntimeAgentMetadata {
             agent: runtime_agent,
             enabled: agent.enabled,
@@ -159,9 +202,8 @@ pub fn startup_probe_runtime_agents(
             detected_version: capability_record
                 .as_ref()
                 .and_then(|record| record.version.clone()),
-            capabilities: capability_record
-                .as_ref()
-                .and_then(|record| derive_runtime_capabilities(&record.raw_capabilities_json).ok()),
+            capabilities,
+            computer_use_eligible,
             updated_at: capability_record.as_ref().map(|record| record.updated_at),
         });
     }
@@ -337,5 +379,52 @@ mod tests {
             serde_json::from_str(&probe.raw_capabilities_json).expect("capabilities json");
         assert!(capabilities.supports_cancel);
         assert!(capabilities.supports_image_attachments);
+    }
+
+    #[test]
+    fn pi_rpc_capabilities_advertise_native_extension_injection() {
+        let capabilities = pi_rpc_transport::runtime_capabilities();
+        assert!(capabilities.mcp_injection.native_extension);
+        assert!(capabilities.mcp_injection.is_injectable());
+    }
+
+    #[test]
+    fn computer_use_eligibility_requires_injectable_and_product_support() {
+        // No capabilities probed yet → not eligible.
+        assert!(!derive_computer_use_eligible(Agent::Pi, None));
+
+        // Injectable transport but no product support yet → still not eligible
+        // (the product allowlist is empty until Phase 0 confirms an agent).
+        let injectable = pi_rpc_transport::runtime_capabilities();
+        assert!(injectable.mcp_injection.is_injectable());
+        assert!(!derive_computer_use_eligible(Agent::Pi, Some(&injectable)));
+
+        // A non-injectable capability set is never eligible regardless of product
+        // support.
+        let mut not_injectable = RuntimeCapabilitySet::fake();
+        not_injectable.mcp_injection = Default::default();
+        assert!(!not_injectable.mcp_injection.is_injectable());
+        assert!(!derive_computer_use_eligible(Agent::Pi, Some(&not_injectable)));
+    }
+
+    #[test]
+    fn stored_capabilities_without_mcp_injection_field_deserialize() {
+        // Capability JSON persisted before the field existed must still parse,
+        // defaulting mcp_injection to all-false (not injectable).
+        let legacy = r#"{
+            "supportsCancel": true,
+            "supportsPermissions": true,
+            "supportsToolDeltas": true,
+            "supportsLoadSession": true,
+            "supportsResume": false,
+            "supportsFork": false,
+            "supportsImageAttachments": false,
+            "supportsAudioAttachments": false,
+            "supportsEmbeddedContext": false,
+            "supportsAttachments": false,
+            "supportsModes": false
+        }"#;
+        let caps = derive_runtime_capabilities(legacy).expect("legacy caps parse");
+        assert!(!caps.mcp_injection.is_injectable());
     }
 }

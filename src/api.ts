@@ -1015,6 +1015,14 @@ export interface RuntimeCapabilitySet {
   supportsEmbeddedContext: boolean;
   supportsAttachments: boolean;
   supportsModes: boolean;
+  mcpInjection?: McpInjectionCapabilities;
+}
+
+export interface McpInjectionCapabilities {
+  http: boolean;
+  sse: boolean;
+  acp: boolean;
+  nativeExtension: boolean;
 }
 
 export interface RuntimeStatus {
@@ -1043,6 +1051,7 @@ export interface RuntimeAgentMetadata {
   versionCommand: string | null;
   detectedVersion: string | null;
   capabilities: RuntimeCapabilitySet | null;
+  computerUseEligible?: boolean;
   updatedAt: number | null;
 }
 
