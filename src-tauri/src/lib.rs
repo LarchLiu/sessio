@@ -3,6 +3,7 @@ pub mod app_paths;
 pub mod astra;
 pub mod cli;
 pub mod config;
+pub mod desktop_control;
 pub mod file_preview_watch;
 pub mod im_bridge;
 pub mod indexer;
@@ -4568,52 +4569,59 @@ fn complete_screenshot_overlay_capture(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn appshot_permission_status() -> AppshotPermissionStatusDto {
-    AppshotPermissionStatusDto {
-        platform: appshot_permission_platform().to_string(),
+fn desktop_control_inputs() -> desktop_control::DesktopControlInputs {
+    use desktop_control::{DesktopControlInputs, DesktopPlatform, PermissionTier};
+    DesktopControlInputs {
+        platform: DesktopPlatform::current(),
         requires_permission: false,
-        screenshots: AppshotPermissionStateDto {
-            granted: true,
-            supported: false,
-        },
-        accessibility: AppshotPermissionStateDto {
-            granted: true,
-            supported: false,
-        },
-        can_capture: true,
+        // Non-macOS platforms do not gate screen capture / accessibility behind
+        // an OS permission Sessio checks today; treat them as not-gated (usable)
+        // rather than denied.
+        screenshots: PermissionTier::new(true, false),
+        accessibility: PermissionTier::new(true, false),
+        // Input injection is net-new (Phase 3) and not yet implemented for any
+        // platform's provider.
+        input_injection_supported: false,
     }
 }
 
 #[cfg(target_os = "macos")]
-fn appshot_permission_status() -> AppshotPermissionStatusDto {
-    AppshotPermissionStatusDto {
-        platform: "macos".to_string(),
+fn desktop_control_inputs() -> desktop_control::DesktopControlInputs {
+    use desktop_control::{DesktopControlInputs, DesktopPlatform, PermissionTier};
+    DesktopControlInputs {
+        platform: DesktopPlatform::Macos,
         requires_permission: true,
-        screenshots: AppshotPermissionStateDto {
-            granted: appshot_screenshots_permission_granted(),
-            supported: true,
-        },
-        accessibility: AppshotPermissionStateDto {
-            granted: appshot_accessibility_permission_granted(),
-            supported: true,
-        },
-        can_capture: appshot_screenshots_permission_granted(),
+        screenshots: PermissionTier::new(appshot_screenshots_permission_granted(), true),
+        accessibility: PermissionTier::new(appshot_accessibility_permission_granted(), true),
+        // Input injection is net-new (Phase 3); no provider yet, so control is
+        // not yet supported even when accessibility is trusted.
+        input_injection_supported: false,
     }
 }
 
-#[cfg(all(not(target_os = "macos"), windows))]
-fn appshot_permission_platform() -> &'static str {
-    "windows"
+/// The shared, tiered desktop-control permission status. Single source of truth
+/// for both Appshot and computer use.
+fn desktop_control_permission_status() -> desktop_control::DesktopControlPermissionStatus {
+    desktop_control::DesktopControlPermissionStatus::derive(desktop_control_inputs())
 }
 
-#[cfg(all(not(target_os = "macos"), target_os = "linux"))]
-fn appshot_permission_platform() -> &'static str {
-    "linux"
-}
-
-#[cfg(all(not(target_os = "macos"), not(windows), not(target_os = "linux")))]
-fn appshot_permission_platform() -> &'static str {
-    "other"
+/// Appshot's view of the permission state, derived from the shared layer so its
+/// UX does not regress: it consumes only the screenshot tier and `canObserve`.
+fn appshot_permission_status() -> AppshotPermissionStatusDto {
+    let status = desktop_control_permission_status();
+    AppshotPermissionStatusDto {
+        platform: status.platform,
+        requires_permission: status.requires_permission,
+        screenshots: AppshotPermissionStateDto {
+            granted: status.screenshots.granted,
+            supported: status.screenshots.supported,
+        },
+        accessibility: AppshotPermissionStateDto {
+            granted: status.accessibility.granted,
+            supported: status.accessibility.supported,
+        },
+        can_capture: status.can_observe,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -8233,6 +8241,11 @@ fn get_appshot_permission_status() -> AppshotPermissionStatusDto {
 }
 
 #[tauri::command]
+fn get_desktop_control_permission_status() -> desktop_control::DesktopControlPermissionStatus {
+    desktop_control_permission_status()
+}
+
+#[tauri::command]
 fn request_appshot_permission(
     app: AppHandle,
     permission: String,
@@ -9193,6 +9206,7 @@ pub fn run() {
             update_network_config,
             get_appshot_config,
             get_appshot_permission_status,
+            get_desktop_control_permission_status,
             request_appshot_permission,
             open_appshot_permissions_panel,
             open_appshot_permission_settings,

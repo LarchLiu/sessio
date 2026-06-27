@@ -174,6 +174,29 @@ export interface AppshotPermissionStatus {
   canCapture: boolean;
 }
 
+/** A single OS-permission tier plus whether the platform gates it at all. */
+export interface DesktopControlPermissionTier {
+  granted: boolean;
+  supported: boolean;
+}
+
+/**
+ * Shared desktop-control permission status. Single source of truth for both
+ * Appshot (screenshot tier) and computer use (all three tiers).
+ */
+export interface DesktopControlPermissionStatus {
+  platform: "macos" | "windows" | "linux" | "other" | string;
+  requiresPermission: boolean;
+  screenshots: DesktopControlPermissionTier;
+  accessibility: DesktopControlPermissionTier;
+  /** Capture screenshots / visual state. */
+  canObserve: boolean;
+  /** Inspect the accessibility / UI hierarchy. */
+  canInspect: boolean;
+  /** Inject input under the current platform/provider policy. */
+  canControl: boolean;
+}
+
 export interface ImBridgeConfig {
   enabled: boolean;
   idleTimeoutSecs: number;
@@ -2553,6 +2576,10 @@ export async function getAppshotConfig(): Promise<AppshotConfig> {
 
 export async function getAppshotPermissionStatus(): Promise<AppshotPermissionStatus> {
   return invoke<AppshotPermissionStatus>("get_appshot_permission_status");
+}
+
+export async function getDesktopControlPermissionStatus(): Promise<DesktopControlPermissionStatus> {
+  return invoke<DesktopControlPermissionStatus>("get_desktop_control_permission_status");
 }
 
 export async function requestAppshotPermission(
