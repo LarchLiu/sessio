@@ -3,6 +3,7 @@ pub mod app_paths;
 pub mod astra;
 pub mod cli;
 pub mod config;
+pub mod computer_use;
 pub mod desktop_control;
 pub mod file_preview_watch;
 pub mod im_bridge;
