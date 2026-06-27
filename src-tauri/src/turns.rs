@@ -523,7 +523,7 @@ pub fn session_history_turns_from_acp_messages(
         turn.touch(timestamp);
         turn.turn.protocol_messages =
             append_turn_protocol_message(&turn.turn.protocol_messages, message);
-        apply_acp_message_to_turn(&mut turn.turn, message, timestamp);
+        apply_acp_message_to_turn(&mut turn.turn, message, timestamp, false);
     }
 
     if let Some(turn) = current {
@@ -617,7 +617,7 @@ pub fn apply_runtime_event_to_state(
                 turn.protocol_messages =
                     append_turn_protocol_message(&turn.protocol_messages, message);
                 turn.touch(timestamp);
-                apply_acp_message_to_turn(turn, message, timestamp);
+                apply_acp_message_to_turn(turn, message, timestamp, true);
             }
         }
         AgentRuntimeEventPayload::TextDelta { turn_id, text, .. } => {
@@ -1013,6 +1013,7 @@ fn apply_acp_message_to_turn(
     turn: &mut SessionHistoryTurn,
     message: &AcpProtocolMessage,
     timestamp: i64,
+    skip_live_runtime_chunk_duplicates: bool,
 ) {
     if message.method == "session/prompt" && message.direction == "client_to_agent" {
         let prompt = as_object(&message.data)
@@ -1070,6 +1071,13 @@ fn apply_acp_message_to_turn(
     if should_ignore_session_update_type(&update_type) {
         return;
     }
+    if should_skip_live_runtime_chunk_duplicate(
+        message,
+        &update_type,
+        skip_live_runtime_chunk_duplicates,
+    ) {
+        return;
+    }
 
     match update_type.as_str() {
         "user_message_chunk" => {
@@ -1116,6 +1124,40 @@ fn apply_acp_message_to_turn(
             postprocess_turn(turn);
         }
     }
+}
+
+fn should_skip_live_runtime_chunk_duplicate(
+    message: &AcpProtocolMessage,
+    update_type: &str,
+    enabled: bool,
+) -> bool {
+    enabled
+        && message.method == "session/update"
+        && message.message_kind == "notification"
+        && message.acp_session_id.is_some()
+        && session_update_is_text_only_chunk(&message.data)
+        && matches!(update_type, "agent_message_chunk" | "agent_thought_chunk")
+}
+
+fn session_update_is_text_only_chunk(data: &Value) -> bool {
+    let update = as_object(data).get("update").unwrap_or(data);
+    let Some(content) = as_object(update).get("content") else {
+        return false;
+    };
+    content_blocks_are_text_only(content)
+}
+
+fn content_blocks_are_text_only(value: &Value) -> bool {
+    if let Some(array) = value.as_array() {
+        return !array.is_empty() && array.iter().all(content_blocks_are_text_only);
+    }
+    let Some(record) = value.as_object() else {
+        return false;
+    };
+    if let Some(content) = record.get("content") {
+        return content_blocks_are_text_only(content);
+    }
+    record.get("type").and_then(Value::as_str) == Some("text")
 }
 
 fn should_ignore_session_update_type(update_type: &str) -> bool {
@@ -1790,6 +1832,12 @@ fn tool_content_to_file_edit(tool: &SessionHistoryToolCall, content: &Value) -> 
     });
     let (additions, deletions) = if let Some(patch_text) = patch.as_deref() {
         patch_change_counts(patch_text)
+    } else if let (Some(old_text), Some(new_text)) =
+        (old_content.as_deref(), new_content.as_deref())
+    {
+        line_change_counts(old_text, new_text)
+    } else if let Some(patch_text) = synthetic_patch.as_deref() {
+        patch_change_counts(patch_text)
     } else {
         (
             count_non_empty_lines(new_content.as_deref()),
@@ -1976,6 +2024,71 @@ fn patch_change_counts(patch: &str) -> (i64, i64) {
         }
     }
     (additions, deletions)
+}
+
+fn line_change_counts(old_text: &str, new_text: &str) -> (i64, i64) {
+    let old_lines = diff_lines(old_text);
+    let new_lines = diff_lines(new_text);
+    if old_lines == new_lines {
+        return (0, 0);
+    }
+    let distance = myers_line_edit_distance(&old_lines, &new_lines);
+    let lcs = (old_lines.len() + new_lines.len() - distance) / 2;
+    (
+        new_lines.len().saturating_sub(lcs) as i64,
+        old_lines.len().saturating_sub(lcs) as i64,
+    )
+}
+
+fn diff_lines(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.lines().collect()
+    }
+}
+
+fn myers_line_edit_distance(old_lines: &[&str], new_lines: &[&str]) -> usize {
+    let old_len = old_lines.len();
+    let new_len = new_lines.len();
+    if old_len == 0 {
+        return new_len;
+    }
+    if new_len == 0 {
+        return old_len;
+    }
+
+    let max_distance = old_len + new_len;
+    let offset = max_distance + 1;
+    let mut frontier = vec![0isize; max_distance * 2 + 3];
+    for distance in 0..=max_distance {
+        let distance = distance as isize;
+        let mut diagonal = -distance;
+        while diagonal <= distance {
+            let index = (offset as isize + diagonal) as usize;
+            let mut old_index = if diagonal == -distance
+                || (diagonal != distance && frontier[index - 1] < frontier[index + 1])
+            {
+                frontier[index + 1]
+            } else {
+                frontier[index - 1] + 1
+            };
+            let mut new_index = old_index - diagonal;
+            while old_index < old_len as isize
+                && new_index < new_len as isize
+                && old_lines[old_index as usize] == new_lines[new_index as usize]
+            {
+                old_index += 1;
+                new_index += 1;
+            }
+            frontier[index] = old_index;
+            if old_index >= old_len as isize && new_index >= new_len as isize {
+                return distance as usize;
+            }
+            diagonal += 2;
+        }
+    }
+    max_distance
 }
 
 fn patch_line_count(value: Option<&str>) -> usize {
@@ -4275,6 +4388,66 @@ mod tests {
     }
 
     #[test]
+    fn runtime_builder_counts_old_new_snapshots_by_net_line_diff() {
+        let mut state = RuntimeTurnState::new(
+            "runtime-1",
+            Agent::Codex,
+            "agent-1",
+            RuntimeTransportKind::Acp,
+            "/tmp/project",
+            RuntimeCapabilitySet::fake(),
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::TurnStarted {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            },
+            10,
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::AcpProtocolMessage {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                message: history_session_update_message(
+                    "tool_call",
+                    json!({
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tool-1",
+                        "title": "edit",
+                        "status": "completed",
+                        "rawInput": {
+                            "path": "src/main.rs",
+                            "startLine": 10
+                        },
+                        "content": [{
+                            "type": "diff",
+                            "path": "src/main.rs",
+                            "oldText": "same\nold\nline\n",
+                            "newText": "same\nnew\nline\nmore\n"
+                        }]
+                    }),
+                    Some(20),
+                ),
+            },
+            20,
+        );
+
+        let file_edit = state.turns[0]
+            .blocks
+            .iter()
+            .find(|block| block.update_type.as_deref() == Some("file_edit"))
+            .expect("file_edit block");
+        let data = file_edit.data.as_ref().unwrap();
+        assert_eq!(data["files"], 1);
+        assert_eq!(data["edits"][0]["additions"], 2);
+        assert_eq!(data["edits"][0]["deletions"], 1);
+        assert_eq!(data["additions"], 2);
+        assert_eq!(data["deletions"], 1);
+    }
+
+    #[test]
     fn runtime_builder_ignores_usage_updates_in_turn_blocks() {
         let mut state = RuntimeTurnState::new(
             "runtime-1",
@@ -4603,6 +4776,142 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].kind, "text");
         assert_eq!(blocks[0].text.as_deref(), Some(text.trim()));
+    }
+
+    #[test]
+    fn runtime_builder_does_not_duplicate_agent_message_chunk_from_protocol_and_delta() {
+        let mut state = RuntimeTurnState::new(
+            "runtime-1",
+            Agent::Codex,
+            "agent-1",
+            RuntimeTransportKind::Acp,
+            "/tmp",
+            RuntimeCapabilitySet::fake(),
+        );
+
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::TurnStarted {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            },
+            10,
+        );
+
+        let mut protocol_chunk = history_assistant_message("我已经", Some(11));
+        protocol_chunk.acp_session_id = Some("agent-1".to_string());
+
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::AcpProtocolMessage {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                message: protocol_chunk,
+            },
+            11,
+        );
+
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::TextDelta {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                text: "我已经".to_string(),
+            },
+            12,
+        );
+
+        let assistant_blocks = state.turns[0]
+            .blocks
+            .iter()
+            .filter(|block| block.kind == "assistant")
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_blocks.len(), 1);
+        assert_eq!(assistant_blocks[0].blocks.len(), 1);
+        assert_eq!(
+            assistant_blocks[0].blocks[0].text.as_deref(),
+            Some("我已经")
+        );
+    }
+
+    #[test]
+    fn runtime_builder_keeps_non_text_agent_chunk_from_protocol_path() {
+        let mut state = RuntimeTurnState::new(
+            "runtime-1",
+            Agent::Codex,
+            "agent-1",
+            RuntimeTransportKind::Acp,
+            "/tmp",
+            RuntimeCapabilitySet::fake(),
+        );
+
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::TurnStarted {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            },
+            10,
+        );
+
+        let mut protocol_chunk = history_content_update(
+            "agent_message_chunk",
+            vec![json!({
+                "type": "image",
+                "mimeType": "image/png",
+                "uri": "file:///tmp/test.png",
+                "data": "AQID"
+            })],
+            Some(11),
+        );
+        protocol_chunk.acp_session_id = Some("agent-1".to_string());
+
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::AcpProtocolMessage {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                message: protocol_chunk,
+            },
+            11,
+        );
+
+        let assistant_blocks = state.turns[0]
+            .blocks
+            .iter()
+            .filter(|block| block.kind == "assistant")
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_blocks.len(), 1);
+        assert_eq!(assistant_blocks[0].blocks.len(), 1);
+        assert_eq!(assistant_blocks[0].blocks[0].kind, "image");
+        assert_eq!(
+            assistant_blocks[0].blocks[0].uri.as_deref(),
+            Some("file:///tmp/test.png")
+        );
+    }
+
+    #[test]
+    fn history_builder_keeps_pi_agent_chunks_with_acp_session_id() {
+        let mut thought = history_thought_message("I am thinking", Some(20));
+        thought.acp_session_id = Some("pi-session-1".to_string());
+        let mut assistant = history_assistant_message("final answer", Some(30));
+        assistant.acp_session_id = Some("pi-session-1".to_string());
+
+        let rows = vec![
+            row(history_user_message("hello", Some(10)), Some(10)),
+            row(thought, Some(20)),
+            row(assistant, Some(30)),
+        ];
+        let turns = session_history_turns_from_acp_messages(&rows);
+
+        assert_eq!(turns.len(), 1);
+        let block_kinds = turns[0]
+            .blocks
+            .iter()
+            .map(|block| block.kind.as_str())
+            .collect::<Vec<_>>();
+        assert!(block_kinds.contains(&"thought"), "{block_kinds:?}");
+        assert!(block_kinds.contains(&"assistant"), "{block_kinds:?}");
     }
 
     #[test]

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use agent_client_protocol::schema::ImageContent;
 use agent_client_protocol::schema::{
     ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
@@ -113,16 +115,26 @@ pub fn convert_session_notification(
 ) -> Result<Option<AgentRuntimeEventPayload>> {
     let event = match &notification.update {
         SessionUpdate::UserMessageChunk(_) => return Ok(None),
-        SessionUpdate::AgentMessageChunk(chunk) => AgentRuntimeEventPayload::TextDelta {
-            sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
-            turn_id: turn_id.to_string(),
-            text: content_chunk_text(chunk)?,
-        },
-        SessionUpdate::AgentThoughtChunk(chunk) => AgentRuntimeEventPayload::ReasoningDelta {
-            sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
-            turn_id: turn_id.to_string(),
-            text: content_chunk_text(chunk)?,
-        },
+        SessionUpdate::AgentMessageChunk(chunk) => {
+            let Some(text) = content_chunk_text_delta(chunk) else {
+                return Ok(None);
+            };
+            AgentRuntimeEventPayload::TextDelta {
+                sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                text,
+            }
+        }
+        SessionUpdate::AgentThoughtChunk(chunk) => {
+            let Some(text) = content_chunk_text_delta(chunk) else {
+                return Ok(None);
+            };
+            AgentRuntimeEventPayload::ReasoningDelta {
+                sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                text,
+            }
+        }
         SessionUpdate::ToolCall(tool_call) => AgentRuntimeEventPayload::ToolStarted {
             sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
             turn_id: turn_id.to_string(),
@@ -263,8 +275,18 @@ fn text_chunk(text: impl Into<String>) -> ContentChunk {
     ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
 }
 
-fn content_chunk_text(chunk: &ContentChunk) -> Result<String> {
-    content_block_text(&chunk.content)
+#[cfg(test)]
+fn image_chunk(mime_type: impl Into<String>, uri: impl Into<String>) -> ContentChunk {
+    ContentChunk::new(ContentBlock::Image(
+        ImageContent::new(String::new(), mime_type.into()).uri(uri.into()),
+    ))
+}
+
+fn content_chunk_text_delta(chunk: &ContentChunk) -> Option<String> {
+    match &chunk.content {
+        ContentBlock::Text(text) => Some(text.text.clone()),
+        _ => None,
+    }
 }
 
 fn content_block_text(content: &ContentBlock) -> Result<String> {
@@ -448,6 +470,17 @@ mod tests {
             AgentRuntimeEventPayload::TextDelta { text, .. } => assert_eq!(text, "hello"),
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn ignores_non_text_agent_message_chunk_for_delta_conversion() {
+        let notification = SessionNotification::new(
+            "fake-acp-session",
+            SessionUpdate::AgentMessageChunk(image_chunk("image/png", "file:///tmp/test.png")),
+        );
+
+        let event = convert_session_notification(&notification, "sess", "turn").unwrap();
+        assert!(event.is_none());
     }
 
     #[test]
