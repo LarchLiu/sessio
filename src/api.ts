@@ -1189,12 +1189,20 @@ export interface ScreenshotOverlayWindow {
   label: string;
 }
 
+export interface ScreenshotOverlayInitialSelection {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface ScreenshotOverlaySource {
   requestId: string;
   sourcePath: string;
   fileName: string;
   mode?: "interactive" | "selection";
   windows: ScreenshotOverlayWindowCandidate[];
+  initialSelection?: ScreenshotOverlayInitialSelection | null;
 }
 
 export interface ScreenshotOverlayWindowCandidate {

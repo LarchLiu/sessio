@@ -4466,11 +4466,14 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tungstenite",
+ "url",
  "uuid",
  "walkdir",
  "webkit2gtk",
  "webview2-com",
  "windows",
+ "x11rb",
+ "zbus",
 ]
 
 [[package]]

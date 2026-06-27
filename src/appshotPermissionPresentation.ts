@@ -4,6 +4,7 @@ export type AppshotPermissionPresentation = {
   requiresPermission: boolean;
   descriptionKey:
     | "settings.appshot_permissions_not_required"
+    | "settings.appshot_permissions_portal"
     | "settings.appshot_permissions_ready"
     | "settings.appshot_permissions_needed";
   showManageButton: boolean;
@@ -24,7 +25,10 @@ export function appshotPermissionPresentation(
   if (!requiresPermission) {
     return {
       requiresPermission: false,
-      descriptionKey: "settings.appshot_permissions_not_required",
+      descriptionKey:
+        status?.platform === "linux"
+          ? "settings.appshot_permissions_portal"
+          : "settings.appshot_permissions_not_required",
       showManageButton: false,
       statusKey: "settings.appshot_permissions_unrestricted",
       accessibilityKey: null,

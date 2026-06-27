@@ -98,6 +98,9 @@ export default function ScreenshotOverlayWindow() {
       .then(async (overlaySource) => {
         if (disposed) return;
         setSource(overlaySource);
+        if (overlaySource.initialSelection) {
+          setSelection(rectToAnnotation(overlaySource.initialSelection, "initial-selection"));
+        }
         const dataUrl = await readLocalImageDataUrl(overlaySource.sourcePath);
         if (disposed) return;
         const image = new Image();

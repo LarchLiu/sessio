@@ -40,6 +40,22 @@ describe("appshot permission presentation", () => {
     });
   });
 
+  it("shows Linux screenshot capture as portal-managed without permission management", () => {
+    expect(appshotPermissionPresentation(status({
+      platform: "linux",
+      requiresPermission: false,
+      screenshots: { granted: true, supported: false },
+      accessibility: { granted: true, supported: false },
+      canCapture: true,
+    }))).toEqual({
+      requiresPermission: false,
+      descriptionKey: "settings.appshot_permissions_portal",
+      showManageButton: false,
+      statusKey: "settings.appshot_permissions_unrestricted",
+      accessibilityKey: null,
+    });
+  });
+
   it("keeps macOS permission management visible when screen capture is missing", () => {
     expect(appshotPermissionPresentation(status({
       platform: "macos",
