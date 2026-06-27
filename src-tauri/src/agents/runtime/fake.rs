@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use agent_client_protocol::schema::{ContentBlock, PromptRequest, SessionId, TextContent};
+use agent_client_protocol::schema::v1::{
+    ContentBlock, PromptRequest, SessionId, SessionUpdate, TextContent,
+};
 
 use super::acp::{
     acp_protocol_event, convert_session_notification, fake_session_notification,
@@ -202,20 +204,18 @@ fn emit_fake_acp(
     Ok(())
 }
 
-fn fake_session_update_type(update: &agent_client_protocol::schema::SessionUpdate) -> &'static str {
+fn fake_session_update_type(update: &SessionUpdate) -> &'static str {
     match update {
-        agent_client_protocol::schema::SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
-        agent_client_protocol::schema::SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
-        agent_client_protocol::schema::SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
-        agent_client_protocol::schema::SessionUpdate::ToolCall(_) => "tool_call",
-        agent_client_protocol::schema::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
-        agent_client_protocol::schema::SessionUpdate::Plan(_) => "plan",
-        agent_client_protocol::schema::SessionUpdate::AvailableCommandsUpdate(_) => {
-            "available_commands"
-        }
-        agent_client_protocol::schema::SessionUpdate::CurrentModeUpdate(_) => "current_mode",
-        agent_client_protocol::schema::SessionUpdate::ConfigOptionUpdate(_) => "config_options",
-        agent_client_protocol::schema::SessionUpdate::SessionInfoUpdate(_) => "session_info",
+        SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
+        SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
+        SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
+        SessionUpdate::ToolCall(_) => "tool_call",
+        SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
+        SessionUpdate::Plan(_) => "plan",
+        SessionUpdate::AvailableCommandsUpdate(_) => "available_commands",
+        SessionUpdate::CurrentModeUpdate(_) => "current_mode",
+        SessionUpdate::ConfigOptionUpdate(_) => "config_options",
+        SessionUpdate::SessionInfoUpdate(_) => "session_info",
         _ => "unknown",
     }
 }

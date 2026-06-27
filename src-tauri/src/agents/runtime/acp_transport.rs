@@ -3,13 +3,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::{
-    CancelNotification, ContentBlock, EmbeddedResource, EmbeddedResourceResource,
-    ForkSessionRequest, ImageContent, InitializeRequest, LoadSessionRequest, NewSessionRequest,
-    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SessionId, SessionNotification, SessionUpdate,
-    StopReason, TextContent, TextResourceContents,
+use agent_client_protocol::schema::v1::{
+    AgentCapabilities, CancelNotification, ContentBlock, EmbeddedResource,
+    EmbeddedResourceResource, ForkSessionRequest, ImageContent, InitializeRequest,
+    LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest, SessionId,
+    SessionNotification, SessionUpdate, StopReason, TextContent, TextResourceContents,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{
     Agent as AcpAgentRole, ByteStreams, Client as AcpClientRole, ConnectionTo, UntypedMessage,
 };
@@ -200,9 +201,7 @@ pub fn probe_initialize_response(
     })
 }
 
-pub fn runtime_capabilities_from_acp(
-    capabilities: &agent_client_protocol::schema::AgentCapabilities,
-) -> RuntimeCapabilitySet {
+pub fn runtime_capabilities_from_acp(capabilities: &AgentCapabilities) -> RuntimeCapabilitySet {
     let supports_image_attachments = capabilities.prompt_capabilities.image;
     let supports_audio_attachments = capabilities.prompt_capabilities.audio;
     let supports_embedded_context = capabilities.prompt_capabilities.embedded_context;
@@ -1655,6 +1654,8 @@ fn transport_from_str(transport: &str) -> RuntimeTransportKind {
 
 #[cfg(test)]
 mod tests {
+    use agent_client_protocol::schema::v1::{ConfigOptionUpdate, ContentChunk, SessionInfoUpdate};
+
     use super::*;
 
     #[test]
@@ -1875,38 +1876,32 @@ mod tests {
 
     #[test]
     fn turn_content_updates_extend_quiet_period() {
-        let update =
-            SessionUpdate::AgentMessageChunk(agent_client_protocol::schema::ContentChunk::new(
-                ContentBlock::Text(TextContent::new("hello")),
-            ));
+        let update = SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+            TextContent::new("hello"),
+        )));
 
         assert!(session_update_extends_turn_quiet_period(&update));
     }
 
     #[test]
     fn session_metadata_updates_do_not_extend_quiet_period() {
-        let update = SessionUpdate::SessionInfoUpdate(
-            agent_client_protocol::schema::SessionInfoUpdate::new(),
-        );
+        let update = SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new());
 
         assert!(!session_update_extends_turn_quiet_period(&update));
     }
 
     #[test]
     fn config_updates_are_classified_as_session_scoped() {
-        let update = SessionUpdate::ConfigOptionUpdate(
-            agent_client_protocol::schema::ConfigOptionUpdate::new(vec![]),
-        );
+        let update = SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![]));
 
         assert!(session_update_is_session_scoped(&update));
     }
 
     #[test]
     fn turn_content_updates_are_not_classified_as_session_scoped() {
-        let update =
-            SessionUpdate::AgentMessageChunk(agent_client_protocol::schema::ContentChunk::new(
-                ContentBlock::Text(TextContent::new("hello")),
-            ));
+        let update = SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+            TextContent::new("hello"),
+        )));
 
         assert!(!session_update_is_session_scoped(&update));
     }

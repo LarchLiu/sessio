@@ -246,7 +246,7 @@ fn derive_runtime_capabilities(raw_capabilities_json: &str) -> Result<RuntimeCap
     if let Ok(capabilities) = serde_json::from_str::<RuntimeCapabilitySet>(raw_capabilities_json) {
         return Ok(capabilities);
     }
-    let capabilities: agent_client_protocol::schema::AgentCapabilities =
+    let capabilities: agent_client_protocol::schema::v1::AgentCapabilities =
         serde_json::from_str(raw_capabilities_json).context("parse ACP capabilities json")?;
     Ok(acp_transport::runtime_capabilities_from_acp(&capabilities))
 }

@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use tauri::{AppHandle, Emitter, Manager};
 
-use agent_client_protocol::schema::RequestPermissionRequest;
+use agent_client_protocol::schema::v1::{
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+};
 
 use super::acp::{
     convert_permission_request, fake_permission_request, permission_resolved_event,
@@ -960,11 +962,7 @@ impl RuntimeManager {
         let acp_response = option_id
             .as_deref()
             .map(|id| permission_response_from_decision(&acp_request, id))
-            .unwrap_or_else(|| {
-                agent_client_protocol::schema::RequestPermissionResponse::new(
-                    agent_client_protocol::schema::RequestPermissionOutcome::Cancelled,
-                )
-            });
+            .unwrap_or_else(|| RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
         log::info!(
             "[sessio-runtime:fake-acp:permission-response] {:?}",
             acp_response

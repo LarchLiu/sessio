@@ -1,6 +1,6 @@
 #[cfg(test)]
-use agent_client_protocol::schema::ImageContent;
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::ImageContent;
+use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionNotification, SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
@@ -27,7 +27,7 @@ pub fn fake_session_notification(update: AcpFakeSessionUpdate) -> SessionNotific
                 id,
                 ToolCallUpdateFields::new()
                     .content(vec![ToolCallContent::from(output)])
-                    .status(agent_client_protocol::schema::ToolCallStatus::Completed),
+                    .status(ToolCallStatus::Completed),
             ))
         }
         AcpFakeSessionUpdate::ToolCallInputUpdate { id, input } => SessionUpdate::ToolCallUpdate(
@@ -53,7 +53,7 @@ pub fn fake_permission_request(
             ToolCallUpdateFields::new()
                 .title(tool_name)
                 .raw_input(input)
-                .status(agent_client_protocol::schema::ToolCallStatus::Pending),
+                .status(ToolCallStatus::Pending),
         ),
         vec![
             PermissionOption::new("allow_once", "Allow once", PermissionOptionKind::AllowOnce),
