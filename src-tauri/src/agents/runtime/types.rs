@@ -117,6 +117,20 @@ pub struct AgentRuntimeSessionConfig {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
+    /// When set, a desktop-owned `computer use` MCP server is injected into this
+    /// ACP session at `session/new`. Carries the loopback URL and the
+    /// per-session bearer token issued by the computer-use runtime.
+    pub computer_use: Option<ComputerUseInjection>,
+}
+
+/// The desktop-owned HTTP MCP endpoint + per-session auth to inject into an ACP
+/// `session/new` request as `McpServer::Http`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputerUseInjection {
+    /// Loopback MCP URL, e.g. `http://127.0.0.1:54321/mcp`.
+    pub url: String,
+    /// Per-session bearer token for the `Authorization` header.
+    pub bearer_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

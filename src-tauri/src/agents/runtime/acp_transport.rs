@@ -840,6 +840,21 @@ fn new_session_request(
     config: Option<&AgentRuntimeSessionConfig>,
 ) -> NewSessionRequest {
     let mut request = NewSessionRequest::new(workspace_path);
+
+    // Inject the desktop-owned computer-use MCP server (agent-agnostic; gated by
+    // eligibility before this point). Done first so it applies to every agent,
+    // not just Claude's meta-options path below.
+    if let Some(injection) = config.and_then(|c| c.computer_use.as_ref()) {
+        use agent_client_protocol::schema::v1::{HttpHeader, McpServer, McpServerHttp};
+        let server = McpServerHttp::new("sessio-computer-use", injection.url.clone()).headers(
+            vec![HttpHeader::new(
+                "Authorization",
+                format!("Bearer {}", injection.bearer_token),
+            )],
+        );
+        request.mcp_servers.push(McpServer::Http(server));
+    }
+
     if agent != Agent::Claude {
         return request;
     }
@@ -1956,5 +1971,58 @@ mod tests {
         );
 
         assert!(!completed);
+    }
+
+    #[test]
+    fn new_session_request_omits_mcp_server_without_injection() {
+        let request = new_session_request(Agent::Codex, "/tmp/ws".to_string(), None);
+        assert!(request.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn new_session_request_injects_http_mcp_server_with_bearer() {
+        use agent_client_protocol::schema::v1::McpServer;
+        let config = AgentRuntimeSessionConfig {
+            computer_use: Some(super::super::types::ComputerUseInjection {
+                url: "http://127.0.0.1:54321/mcp".into(),
+                bearer_token: "tok-abc".into(),
+            }),
+            ..Default::default()
+        };
+        let request =
+            new_session_request(Agent::Codex, "/tmp/ws".to_string(), Some(&config));
+        assert_eq!(request.mcp_servers.len(), 1);
+        match &request.mcp_servers[0] {
+            McpServer::Http(http) => {
+                assert_eq!(http.name, "sessio-computer-use");
+                assert_eq!(http.url, "http://127.0.0.1:54321/mcp");
+                let auth = http
+                    .headers
+                    .iter()
+                    .find(|h| h.name == "Authorization")
+                    .expect("authorization header");
+                assert_eq!(auth.value, "Bearer tok-abc");
+            }
+            other => panic!("expected Http MCP server, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_session_request_injects_for_claude_alongside_meta_options() {
+        use agent_client_protocol::schema::v1::McpServer;
+        let config = AgentRuntimeSessionConfig {
+            model: Some("opus".into()),
+            computer_use: Some(super::super::types::ComputerUseInjection {
+                url: "http://127.0.0.1:9/mcp".into(),
+                bearer_token: "t".into(),
+            }),
+            ..Default::default()
+        };
+        let request =
+            new_session_request(Agent::Claude, "/tmp/ws".to_string(), Some(&config));
+        // Both the injected MCP server and Claude's meta options are present.
+        assert_eq!(request.mcp_servers.len(), 1);
+        assert!(matches!(request.mcp_servers[0], McpServer::Http(_)));
+        assert!(request.meta.is_some());
     }
 }

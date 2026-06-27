@@ -1630,6 +1630,9 @@ fn session_config_from_options(
                 .or_else(|| option_string(options, "permission_mode"))
                 .map(|mode| normalize_runtime_permission_mode(agent, &mode))
         },
+        // Injection endpoint is attached later by the computer-use runtime once
+        // the session is confirmed eligible and a server token is issued.
+        computer_use: None,
     }
 }
 
