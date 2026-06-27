@@ -692,7 +692,6 @@ export function AcpTranscriptPanel({
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<AcpAvailableCommand | null>(null);
   const [selectedAssistant, setSelectedAssistant] = useState<AssistantInfo | null>(null);
   const [historyRenderReady, setHistoryRenderReady] = useState(hasCachedHistory);
-  const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const composerAttachmentButtonRef = useRef<HTMLButtonElement>(null);
   const [composerAttachmentMenuOpen, setComposerAttachmentMenuOpen] = useState(false);
@@ -1129,13 +1128,6 @@ export function AcpTranscriptPanel({
     }, 80);
     return () => window.clearTimeout(timeout);
   }, [displayItems.length, historyRenderReady, liveSession]);
-
-  useEffect(() => {
-    if (!liveActiveKey) return;
-    setRuntimeNow(Date.now());
-    const timer = window.setInterval(() => setRuntimeNow(Date.now()), 500);
-    return () => window.clearInterval(timer);
-  }, [liveActiveKey]);
 
   useEffect(() => {
     if (!activeTurnId) activeRuntimeTurnIdRef.current = null;
@@ -1713,7 +1705,6 @@ export function AcpTranscriptPanel({
                   itemKeys={visibleDisplayItemKeys}
                   bubbleRefs={bubbleRefs}
                   sessioRuntimeSessionId={runtimeSessionId}
-                  now={runtimeNow}
                   showThreadPromptPlaceholders={showThreadPromptPlaceholders}
                   threadPromptFallbacks={threadPromptFallbacks}
                   onPreviewImage={onPreviewImage}
@@ -2465,7 +2456,6 @@ export function AcpRenderItems({
   itemKeys,
   bubbleRefs,
   sessioRuntimeSessionId,
-  now,
   defaultMessageExpanded,
   showThreadPromptPlaceholders = false,
   threadPromptFallbacks = [],
@@ -2479,7 +2469,6 @@ export function AcpRenderItems({
   itemKeys: string[];
   bubbleRefs: React.RefObject<(HTMLDivElement | null)[]>;
   sessioRuntimeSessionId: string;
-  now: number;
   defaultMessageExpanded?: boolean;
   showThreadPromptPlaceholders?: boolean;
   threadPromptFallbacks?: ThreadPromptDisplayMeta[];
@@ -2506,7 +2495,6 @@ export function AcpRenderItems({
           <AcpLiveItem
             item={item}
             sessioRuntimeSessionId={sessioRuntimeSessionId}
-            now={now}
             defaultMessageExpanded={defaultMessageExpanded}
             showThreadPromptPlaceholders={showThreadPromptPlaceholders}
             threadPromptFallbacks={threadPromptFallbacks}
@@ -2525,7 +2513,6 @@ export function AcpRenderItems({
 function AcpLiveItem({
   item,
   sessioRuntimeSessionId,
-  now,
   defaultMessageExpanded,
   showThreadPromptPlaceholders,
   threadPromptFallbacks,
@@ -2537,7 +2524,6 @@ function AcpLiveItem({
 }: {
   item: AcpRenderItem;
   sessioRuntimeSessionId: string;
-  now: number;
   defaultMessageExpanded: boolean | undefined;
   showThreadPromptPlaceholders: boolean;
   threadPromptFallbacks: ThreadPromptDisplayMeta[];
@@ -2553,7 +2539,7 @@ function AcpLiveItem({
 }) {
   const { lang } = useI18n();
   if (item.kind === "turnStatus") {
-    return <RuntimeStatusContent text={liveTurnStatusText(item.turn, now)} />;
+    return <RuntimeStatusContent text={liveTurnStatusText(item.turn)} />;
   }
   if (item.kind === "workingIndicator") {
     return <LemniscateBloomIndicator />;
@@ -3145,123 +3131,17 @@ function clampNumber(value: number, min: number, max: number): number {
 }
 
 function LemniscateBloomIndicator() {
-  const groupRef = useRef<SVGGElement>(null);
-  const pathRef = useRef<SVGPathElement>(null);
-  const particlesRef = useRef<SVGCircleElement[]>([]);
-
-  useEffect(() => {
-    const group = groupRef.current;
-    const path = pathRef.current;
-    if (!group || !path) return;
-    let frame = 0;
-    const startedAt = performance.now();
-    const render = (now: number) => {
-      const time = now - startedAt;
-      const progress = (time % LEMNISCATE_CONFIG.durationMs) / LEMNISCATE_CONFIG.durationMs;
-      const detailScale = lemniscateDetailScale(time);
-      path.setAttribute("d", lemniscatePath(detailScale));
-      particlesRef.current.forEach((node, index) => {
-        const particle = lemniscateParticle(index, progress, detailScale);
-        node.setAttribute("cx", particle.x.toFixed(2));
-        node.setAttribute("cy", particle.y.toFixed(2));
-        node.setAttribute("r", particle.radius.toFixed(2));
-        node.setAttribute("opacity", particle.opacity.toFixed(3));
-      });
-      frame = requestAnimationFrame(render);
-    };
-    frame = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(frame);
-  }, []);
-
   return (
-    <div className="flex justify-start text-ink/45" aria-label="Working">
-      <svg
-        className="h-4 w-8 overflow-visible"
-        viewBox="18 34 64 32"
-        fill="none"
-        preserveAspectRatio="xMinYMid meet"
-        aria-hidden="true"
-      >
-        <g ref={groupRef}>
-          <path
-            ref={pathRef}
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={LEMNISCATE_STROKE_WIDTH}
-            opacity="0.1"
-          />
-          {Array.from({ length: LEMNISCATE_CONFIG.particleCount }, (_, index) => (
-            <circle
-              key={index}
-              ref={(node) => {
-                if (node) particlesRef.current[index] = node;
-              }}
-              fill="currentColor"
-            />
-          ))}
-        </g>
-      </svg>
+    <div
+      className="chat-status-grid-beat text-ink/45"
+      aria-label="Working"
+      role="status"
+    >
+      {Array.from({ length: 9 }).map((_, index) => (
+        <div key={index} />
+      ))}
     </div>
   );
-}
-
-const LEMNISCATE_STROKE_WIDTH = 4.8;
-const LEMNISCATE_CONFIG = {
-  particleCount: 70,
-  trailSpan: 0.4,
-  durationMs: 2800,
-  pulseDurationMs: 2600,
-  lemniscateA: 20,
-  lemniscateBoost: 7,
-};
-
-function lemniscatePoint(progress: number, detailScale: number): { x: number; y: number } {
-  const t = normalizeUnitProgress(progress) * Math.PI * 2;
-  const scale = LEMNISCATE_CONFIG.lemniscateA + detailScale * LEMNISCATE_CONFIG.lemniscateBoost;
-  const denom = 1 + Math.sin(t) ** 2;
-  return {
-    x: 50 + (scale * Math.cos(t)) / denom,
-    y: 50 + (scale * Math.sin(t) * Math.cos(t)) / denom,
-  };
-}
-
-function lemniscateDetailScale(time: number): number {
-  const pulseProgress = (time % LEMNISCATE_CONFIG.pulseDurationMs) / LEMNISCATE_CONFIG.pulseDurationMs;
-  const pulseAngle = pulseProgress * Math.PI * 2;
-  return 0.52 + ((Math.sin(pulseAngle + 0.55) + 1) / 2) * 0.48;
-}
-
-function lemniscatePath(detailScale: number, steps = 180): string {
-  return Array.from({ length: steps + 1 }, (_, index) => {
-    const point = lemniscatePoint(index / steps, detailScale);
-    return `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
-  }).join(" ");
-}
-
-function lemniscateParticle(
-  index: number,
-  progress: number,
-  detailScale: number,
-): { x: number; y: number; radius: number; opacity: number } {
-  const tailOffset = index / (LEMNISCATE_CONFIG_SAFE_PARTICLE_COUNT - 1);
-  const point = lemniscatePoint(
-    progress - tailOffset * LEMNISCATE_CONFIG.trailSpan,
-    detailScale,
-  );
-  const fade = Math.pow(1 - tailOffset, 0.56);
-  return {
-    x: point.x,
-    y: point.y,
-    radius: 0.9 + fade * 2.7,
-    opacity: 0.04 + fade * 0.96,
-  };
-}
-
-const LEMNISCATE_CONFIG_SAFE_PARTICLE_COUNT = Math.max(2, LEMNISCATE_CONFIG.particleCount);
-
-function normalizeUnitProgress(progress: number): number {
-  return ((progress % 1) + 1) % 1;
 }
 
 function AcpContentBlockView({
@@ -4043,14 +3923,13 @@ function trimHistoryViewCache(): void {
   }
 }
 
-function liveTurnStatusText(turn: LiveTurn, now: number): string {
+function liveTurnStatusText(turn: LiveTurn): string {
   const running =
     turn.status === "pending" ||
     turn.status === "streaming" ||
     turn.status === "cancelling";
-  const elapsedMs = Math.max(0, (running ? now : turn.updatedAt) - turn.startedAt);
   const state = running ? "running" : turn.status === "completed" ? "completed" : "done";
-  return `${state}|${formatDuration(elapsedMs)}`;
+  return state;
 }
 
 function renderItemSide(item: AcpRenderItem): "assistant" | "user" | "other" {
@@ -4116,14 +3995,6 @@ function composerInputHistoryEntriesFromRoleNavItems(items: AcpRenderItem[]): st
     entries.push(text);
   }
   return entries;
-}
-
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.round(ms / 1000));
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}m ${seconds}s`;
 }
 
 function sessionIdFromRecord(input: Record<string, unknown>): string | null {
@@ -4675,14 +4546,12 @@ function CodeScrollArea({
 
 export function LiveSessionStatusBadge({
   liveSession,
-  now,
 }: {
   liveSession: LiveRuntimeSession | null | undefined;
-  now: number;
 }) {
   const turn = latestStatusTurn(liveSession);
   if (!turn) return null;
-  return <RuntimeStatusContent text={liveTurnStatusText(turn, now)} />;
+  return <RuntimeStatusContent text={liveTurnStatusText(turn)} />;
 }
 
 function latestStatusTurn(liveSession: LiveRuntimeSession | null | undefined): LiveTurn | null {
@@ -4701,21 +4570,8 @@ function latestStatusTurn(liveSession: LiveRuntimeSession | null | undefined): L
   return null;
 }
 
-function RuntimeStatusContent({ text }: { text: string }) {
-  const [state = "running", duration = "0s"] = text.split("|");
-  const running = state === "running";
-  const successful = state === "completed";
-  return (
-    <div className="flex items-center gap-2 text-body-sm text-ink/50">
-      <span
-        className={
-          "h-1.5 w-1.5 shrink-0 rounded-full " +
-          (running || successful ? "bg-[rgb(var(--color-emerald))]" : "bg-ink/30")
-        }
-      />
-      <span>{running ? "Working for" : "Worked for"} {duration}</span>
-    </div>
-  );
+function RuntimeStatusContent(_: { text: string }) {
+  return null;
 }
 
 function ToolPairRow({

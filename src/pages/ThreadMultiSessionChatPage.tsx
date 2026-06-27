@@ -630,7 +630,6 @@ export default function ThreadMultiSessionChatPage({
                   rows={timelineRows}
                   thread={thread}
                   laneRefs={laneRefs}
-                  now={Date.now()}
                 />
               )}
             </div>
@@ -774,14 +773,12 @@ function ThreadSessionLaneCard({
   lane,
   thread,
   laneRefs,
-  now,
   content,
   plannerRun,
 }: {
   lane: ThreadSessionLane;
   thread: ThreadWorkState;
   laneRefs: React.RefObject<Record<string, HTMLElement | null>>;
-  now: number;
   content?: ReactNode;
   plannerRun?: AstraHandle | null;
 }) {
@@ -809,7 +806,7 @@ function ThreadSessionLaneCard({
           {meta.title}
         </h2>
       </header>
-      {content ?? <ThreadSessionLatestMessage lane={lane} now={now} plannerRun={plannerRun} />}
+      {content ?? <ThreadSessionLatestMessage lane={lane} plannerRun={plannerRun} />}
     </section>
   );
 }
@@ -1243,12 +1240,10 @@ function ThreadTimeline({
   rows,
   thread,
   laneRefs,
-  now,
 }: {
   rows: ThreadTimelineRow[];
   thread: ThreadWorkState;
   laneRefs: React.RefObject<Record<string, HTMLElement | null>>;
-  now: number;
 }) {
   return (
     <section className="grid content-start gap-4">
@@ -1273,7 +1268,6 @@ function ThreadTimeline({
                   id={row.round?.id ?? row.key}
                   timestamp={timestamp}
                   text={summaryText}
-                  now={now}
                 />
               </ThreadTimelineStaticCard>
             );
@@ -1286,13 +1280,11 @@ function ThreadTimeline({
                   lane={lane}
                   thread={thread}
                   laneRefs={laneRefs}
-                  now={now}
                   plannerRun={row.run}
                   content={row.round && summaryText ? (
                     <ThreadPlanRoundSummaryMessage
                       round={row.round}
                       text={summaryText}
-                      now={now}
                     />
                   ) : undefined}
                 />
@@ -1311,7 +1303,6 @@ function ThreadTimeline({
                 lane={lane}
                 thread={thread}
                 laneRefs={laneRefs}
-                now={now}
               />
             ))}
           </div>
@@ -1355,18 +1346,15 @@ function ThreadTimelineStaticCard({
 function ThreadPlanRoundSummaryMessage({
   round,
   text,
-  now,
 }: {
   round: PlanRoundInfo;
   text: string;
-  now: number;
 }) {
   return (
     <ThreadPlannerSummaryMessage
       id={round.id}
       timestamp={round.updatedAt || round.createdAt}
       text={text}
-      now={now}
     />
   );
 }
@@ -1375,12 +1363,10 @@ function ThreadPlannerSummaryMessage({
   id,
   timestamp,
   text,
-  now,
 }: {
   id: string;
   timestamp: number;
   text: string;
-  now: number;
 }) {
   const bubbleRefs = useRef<(HTMLDivElement | null)[]>([]);
   const onPreviewImage = useCallback((_image: MarkdownImage) => undefined, []);
@@ -1415,7 +1401,6 @@ function ThreadPlannerSummaryMessage({
         itemKeys={itemKeys}
         bubbleRefs={bubbleRefs}
         sessioRuntimeSessionId=""
-        now={now}
         defaultMessageExpanded={false}
         onPreviewImage={onPreviewImage}
         onPreviewFile={onPreviewFile}
@@ -1428,11 +1413,9 @@ function ThreadPlannerSummaryMessage({
 
 function ThreadSessionLatestMessage({
   lane,
-  now,
   plannerRun,
 }: {
   lane: ThreadSessionLane;
-  now: number;
   plannerRun?: AstraHandle | null;
 }) {
   const { t } = useI18n();
@@ -1552,7 +1535,6 @@ function ThreadSessionLatestMessage({
               itemKeys={userPromptItemKeys}
               bubbleRefs={bubbleRefs}
               sessioRuntimeSessionId={permissionSessionId}
-              now={now}
               defaultMessageExpanded={false}
               onPreviewImage={onPreviewImage}
               onPreviewFile={onPreviewFile}
@@ -1564,7 +1546,6 @@ function ThreadSessionLatestMessage({
             id={lane.laneId}
             timestamp={plannerSummary.timestamp}
             text={plannerSummary.text}
-            now={now}
           />
           {workingIndicatorItems.length > 0 && (
             <AcpRenderItems
@@ -1572,7 +1553,6 @@ function ThreadSessionLatestMessage({
               itemKeys={workingIndicatorItemKeys}
               bubbleRefs={bubbleRefs}
               sessioRuntimeSessionId={permissionSessionId}
-              now={now}
               defaultMessageExpanded={false}
               onPreviewImage={onPreviewImage}
               onPreviewFile={onPreviewFile}
@@ -1588,7 +1568,6 @@ function ThreadSessionLatestMessage({
             itemKeys={itemKeys}
             bubbleRefs={bubbleRefs}
             sessioRuntimeSessionId={permissionSessionId}
-            now={now}
             defaultMessageExpanded={false}
             onPreviewImage={onPreviewImage}
             onPreviewFile={onPreviewFile}
