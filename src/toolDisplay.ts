@@ -46,10 +46,12 @@ function compactToolDescription(value: string | undefined): string | null {
 }
 
 function canonicalizeAcpTool(tool: AcpToolCall): AcpToolCall {
+  const titleOverride = specialToolTitleDisplay(tool.title);
   const inlineTitle = splitInlineToolTitle(tool.title);
   const webActionDisplay = webActionToolDisplay(tool.rawInput);
   const display =
     webActionDisplay ??
+    titleOverride ??
     (inlineTitle
       ? {
           ...canonicalToolDisplay(inlineTitle.main, tool.rawInput ?? inlineTitle.detail, tool.kind),
@@ -68,6 +70,23 @@ function canonicalizeAcpTool(tool: AcpToolCall): AcpToolCall {
       hidden: hidden || meta.hidden === true,
     },
   };
+}
+
+function specialToolTitleDisplay(title: string): ToolTitleParts | null {
+  const normalized = title.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  if (/^editing files?$/i.test(normalized)) {
+    return { main: "Edit" };
+  }
+  const agentMatch = normalized.match(/^agent\s+(.+)$/i);
+  if (agentMatch) {
+    return { main: "Agent", detail: agentMatch[1]?.trim() || undefined };
+  }
+  const gitMatch = normalized.match(/^git\s+(.+)$/i);
+  if (gitMatch) {
+    return { main: "Git", detail: gitMatch[1]?.trim() || undefined };
+  }
+  return null;
 }
 
 function acpToolDisplayDetail(tool: AcpToolCall): { title: ToolTitleParts; command: string } {
@@ -197,7 +216,7 @@ function inlineToolDetail(detail: string): string | undefined {
     .filter((part) => part && !/^click(?:\s+to\s+copy)?$/i.test(part))
     .join(" ");
   if (!normalized) return undefined;
-  return basenameFromUri(normalized) ?? normalized;
+  return cleanDisplayToken(basenameFromUri(normalized) ?? normalized);
 }
 
 function toolInputCommand(body: unknown): string {
@@ -246,12 +265,27 @@ function shouldHideTool(name: string, body: unknown): boolean {
 
 function commandToolDisplay(command: string): ToolTitleParts {
   const first = firstShellCommandToken(command);
+  if (first === "git") {
+    return gitCommandToolDisplay(command);
+  }
   if (["cat", "sed", "tail", "head", "nl"].includes(first)) {
     return { main: "Read", detail: commandDisplayFile(command) ?? undefined };
   }
   if (first === "rg" || first === "grep") return { main: "Grep" };
   if (first === "ls" || first === "find") return { main: "LS" };
   return { main: "Bash" };
+}
+
+function gitCommandToolDisplay(command: string): ToolTitleParts {
+  const tokens = shellTokens(command).map(stripShellTokenQuotes);
+  const gitIndex = tokens.findIndex((token) => token === "git");
+  if (gitIndex < 0) return { main: "Git" };
+  const detail = tokens
+    .slice(gitIndex + 1)
+    .filter((token) => token && token !== "--")
+    .join(" ")
+    .trim();
+  return { main: "Git", detail: detail || undefined };
 }
 
 function canonicalKnownToolName(name: string): string | null {
@@ -268,6 +302,8 @@ function canonicalKnownToolName(name: string): string | null {
     case "Grep":
     case "Glob":
     case "Bash":
+    case "Git":
+    case "Agent":
     case "WebFetch":
     case "WebSearch":
     case "NotebookEdit":
@@ -627,7 +663,11 @@ function basenameFromUri(uri: string): string | null {
   if (!uri) return null;
   const decoded = uri.startsWith("file://") ? uri.slice("file://".length) : uri;
   const name = decoded.split(/[/\\]/).filter(Boolean).pop();
-  return name || null;
+  return name ? cleanDisplayToken(name) : null;
+}
+
+function cleanDisplayToken(value: string): string {
+  return value.trim().replace(/^['"]+|['"]+$/g, "").trim();
 }
 
 function isTodoTool(tool: AcpToolCall): boolean {

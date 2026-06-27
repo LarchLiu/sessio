@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   BookOpen,
+  Bot,
   Brain,
   ClipboardList,
   Code2,
@@ -25,10 +26,11 @@ import {
   Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { FileEditItem } from "../acpRenderItems";
+import { parseFileEditSummary, type FileEditItem } from "../acpRenderItems";
 import type { AcpViewModel, LiveTurn } from "../runtimeChat";
 import { acpToolStripDisplay, type AcpToolStripDisplay } from "../toolDisplay";
 import { useI18n } from "../i18n";
+import IconifyIcon from "./IconifyIcon";
 import ScrollArea from "./ScrollArea";
 import SessionFileEditsCard from "./SessionFileEditsCard";
 import Tooltip from "./Tooltip";
@@ -81,7 +83,11 @@ function pickFromTurn(turn: LiveTurn, workingTurnId: string | null): MinimalStri
     if (block.kind === "sessionUpdate") {
       if (block.updateType === "file_edit") continue;
       const text = sessionUpdateText(block.data);
-      if (text) return { icon: null, text: clampText(text), busy };
+      if (text) {
+        const editStrip = fileEditingStripItem(turn, clampText(text), busy);
+        if (editStrip) return editStrip;
+        return { icon: null, text: clampText(text), busy };
+      }
       continue;
     }
     if (block.kind === "assistant") {
@@ -118,6 +124,89 @@ function pickFromTurn(turn: LiveTurn, workingTurnId: string | null): MinimalStri
     };
   }
   return null;
+}
+
+function fileEditingStripItem(
+  turn: LiveTurn,
+  text: string,
+  busy: boolean,
+): MinimalStripItem | null {
+  if (!isFileEditingStatusText(text)) return null;
+  const tool = latestFileMutationToolDisplay(turn);
+  if (tool) {
+    return {
+      icon: null,
+      text: tool.tooltip ?? tool.name,
+      tool,
+      fullText: tool.tooltip,
+      busy,
+    };
+  }
+  const fallback = latestFileEditFallbackDisplay(turn);
+  if (!fallback) return null;
+  return {
+    icon: null,
+    text: fallback.tooltip ?? fallback.name,
+    tool: fallback,
+    fullText: fallback.tooltip,
+    busy,
+  };
+}
+
+function isFileEditingStatusText(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return normalized === "editing files"
+    || normalized === "editing file"
+    || normalized.startsWith("editing file ");
+}
+
+function latestFileMutationToolDisplay(turn: LiveTurn): AcpToolStripDisplay | null {
+  for (let i = turn.blocks.length - 1; i >= 0; i -= 1) {
+    const block = turn.blocks[i];
+    if (block.kind !== "tool") continue;
+    const tool = turn.tools.find((item) => item.toolId === block.toolId);
+    if (!tool || !isFileMutationToolTitle(tool.title)) continue;
+    const display = acpToolStripDisplay(tool);
+    if (display.hidden) continue;
+    return display;
+  }
+  return null;
+}
+
+function latestFileEditFallbackDisplay(turn: LiveTurn): AcpToolStripDisplay | null {
+  for (let i = turn.blocks.length - 1; i >= 0; i -= 1) {
+    const block = turn.blocks[i];
+    if (block.kind !== "sessionUpdate" || block.updateType !== "file_edit") continue;
+    const summary = parseFileEditSummary(block.data);
+    const edit = summary?.edits?.at(-1);
+    if (!edit) continue;
+    const detail = fileEditBasename(edit);
+    const tooltip = [detail ? "Edit" : null, detail].filter(Boolean).join(" ").trim() || "Edit";
+    return {
+      iconName: "Edit",
+      name: "Edit",
+      description: detail || null,
+      tooltip,
+      hidden: false,
+    };
+  }
+  return null;
+}
+
+function isFileMutationToolTitle(title: string): boolean {
+  return title === "Write"
+    || title === "Edit"
+    || title === "MultiEdit"
+    || title === "Delete"
+    || title === "Move";
+}
+
+function fileEditBasename(edit: FileEditItem): string {
+  const value = edit.displayPath || edit.path || "";
+  if (!value) return "";
+  const normalized = value.replace(/^file:\/\//, "").replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? normalized;
 }
 
 function sessionUpdateText(data: unknown): string {
@@ -288,6 +377,10 @@ function ToolStripIcon({ name }: { name: string }) {
       return <MoveRight className={className} aria-label="Move" />;
     case "Bash":
       return <SquareTerminal className={className} aria-label="Terminal" />;
+    case "Agent":
+      return <Bot className={className} aria-label="Agent" />;
+    case "Git":
+      return <IconifyIcon iconClassName="icon-[mdi--git]" className={className} aria-label="Git" />;
     case "Search":
     case "Grep":
       return <Search className={className} aria-label="Search" />;

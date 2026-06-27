@@ -11,7 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ArrowDownToLine, BookOpen, Brain, Check, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, Copy, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, MoveRight, Pen, Search, SearchCheck, Square, SquareTerminal, Trash2, UserKey, Wrench } from "lucide-react";
+import { ArrowDownToLine, BookOpen, Bot, Brain, Check, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, Copy, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, MoveRight, Pen, Search, SearchCheck, Square, SquareTerminal, Trash2, UserKey, Wrench } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -53,6 +53,7 @@ import {
 } from "../api";
 import ScrollArea from "../components/ScrollArea";
 import Tooltip from "../components/Tooltip";
+import IconifyIcon from "../components/IconifyIcon";
 import AssistantBotIcon from "../components/AssistantBotIcon";
 import SharedChatComposer, {
   AssistantModeChip,
@@ -2577,6 +2578,7 @@ function AcpLiveItem({
       <AcpSessionUpdateView
         update={item.block}
         locale={localeTag(lang)}
+        turn={item.turn}
         onOpenProjectFile={onOpenProjectFile}
       />
     );
@@ -2602,10 +2604,12 @@ function AcpLiveItem({
 function AcpSessionUpdateView({
   update,
   locale,
+  turn,
   onOpenProjectFile,
 }: {
   update: Extract<AcpRenderBlock, { kind: "sessionUpdate" }>;
   locale: string;
+  turn: LiveTurn;
   onOpenProjectFile?: (path: string) => void;
 }) {
   const data = asRecord(update.data);
@@ -2646,6 +2650,8 @@ function AcpSessionUpdateView({
   if (update.updateType === "plan") {
     return <PlanUpdateCard plan={update.data} />;
   }
+  const fileEditStatus = sessionUpdateFileEditStatusCard(turn, update);
+  if (fileEditStatus) return fileEditStatus;
   return (
     <PlainTextContent
       text={
@@ -2654,6 +2660,49 @@ function AcpSessionUpdateView({
       }
     />
   );
+}
+
+function sessionUpdateFileEditStatusCard(
+  turn: LiveTurn,
+  update: Extract<AcpRenderBlock, { kind: "sessionUpdate" }>,
+): ReactNode | null {
+  const text = sessionUpdatePrimaryText(update.data);
+  if (!isFileEditingStatusText(text)) return null;
+  const detail = latestFileEditStatusDetail(turn);
+  return <ToolTimelineFrame title={{ main: "Edit", detail: detail ?? undefined }} iconName="Edit">{null}</ToolTimelineFrame>;
+}
+
+function sessionUpdatePrimaryText(data: unknown): string {
+  if (typeof data === "string") return data.trim();
+  const record = asRecord(data);
+  const text = record.text ?? record.message ?? record.summary;
+  return typeof text === "string" ? text.trim() : "";
+}
+
+function isFileEditingStatusText(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return normalized === "editing files"
+    || normalized === "editing file"
+    || normalized.startsWith("editing file ");
+}
+
+function latestFileEditStatusDetail(turn: LiveTurn): string | null {
+  for (let index = turn.blocks.length - 1; index >= 0; index -= 1) {
+    const block = turn.blocks[index];
+    if (block.kind === "tool") {
+      const tool = turn.tools.find((item) => item.toolId === block.toolId);
+      if (!tool || !isFileMutationTool(tool.title)) continue;
+      const detail = acpToolDisplayDetail(canonicalizeAcpTool(tool)).title.detail;
+      if (detail) return detail;
+    }
+    if (block.kind === "sessionUpdate" && block.updateType === "file_edit") {
+      const summary = parseSharedFileEditSummary(block.data);
+      const edit = summary?.edits?.at(-1);
+      const path = edit?.displayPath || edit?.path || "";
+      if (path) return basenameFromUri(path) ?? path;
+    }
+  }
+  return null;
 }
 
 function AcpContentBlockGroup({
@@ -2850,7 +2899,11 @@ function basenameFromUri(uri: string): string | null {
   if (!uri) return null;
   const decoded = uri.startsWith("file://") ? uri.slice("file://".length) : uri;
   const name = decoded.split(/[/\\]/).filter(Boolean).pop();
-  return name || null;
+  return name ? cleanDisplayToken(name) : null;
+}
+
+function cleanDisplayToken(value: string): string {
+  return value.trim().replace(/^['"]+|['"]+$/g, "").trim();
 }
 
 function AcpAttachmentPill({
@@ -3439,10 +3492,12 @@ function isLikelyImageUrl(src: string): boolean {
 }
 
 function canonicalizeAcpTool(tool: AcpToolCall): AcpToolCall {
+  const titleOverride = specialToolTitleDisplay(tool.title);
   const inlineTitle = splitInlineToolTitle(tool.title);
   const webActionDisplay = webActionToolDisplay(tool.rawInput);
   const display =
     webActionDisplay ??
+    titleOverride ??
     (inlineTitle
       ? {
           ...canonicalToolDisplay(inlineTitle.main, tool.rawInput ?? inlineTitle.detail, tool.kind),
@@ -3461,6 +3516,23 @@ function canonicalizeAcpTool(tool: AcpToolCall): AcpToolCall {
       hidden: hidden || meta.hidden === true,
     },
   };
+}
+
+function specialToolTitleDisplay(title: string): ToolTitleParts | null {
+  const normalized = title.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  if (/^editing files?$/i.test(normalized)) {
+    return { main: "Edit" };
+  }
+  const agentMatch = normalized.match(/^agent\s+(.+)$/i);
+  if (agentMatch) {
+    return { main: "Agent", detail: agentMatch[1]?.trim() || undefined };
+  }
+  const gitMatch = normalized.match(/^git\s+(.+)$/i);
+  if (gitMatch) {
+    return { main: "Git", detail: gitMatch[1]?.trim() || undefined };
+  }
+  return null;
 }
 
 function acpToolDisplayDetail(tool: AcpToolCall): { title: ToolTitleParts; command: string } {
@@ -4090,7 +4162,7 @@ function inlineToolDetail(detail: string): string | undefined {
     .filter((part) => part && !/^click(?:\s+to\s+copy)?$/i.test(part))
     .join(" ");
   if (!normalized) return undefined;
-  return basenameFromUri(normalized) ?? normalized;
+  return cleanDisplayToken(basenameFromUri(normalized) ?? normalized);
 }
 
 function toolInputCommand(body: unknown): string {
@@ -4139,12 +4211,27 @@ function shouldHideTool(name: string, body: unknown): boolean {
 
 function commandToolDisplay(command: string): ToolTitleParts {
   const first = firstShellCommandToken(command);
+  if (first === "git") {
+    return gitCommandToolDisplay(command);
+  }
   if (["cat", "sed", "tail", "head", "nl"].includes(first)) {
     return { main: "Read", detail: commandDisplayFile(command) ?? undefined };
   }
   if (first === "rg" || first === "grep") return { main: "Grep" };
   if (first === "ls" || first === "find") return { main: "LS" };
   return { main: "Bash" };
+}
+
+function gitCommandToolDisplay(command: string): ToolTitleParts {
+  const tokens = shellTokens(command).map(stripShellTokenQuotes);
+  const gitIndex = tokens.findIndex((token) => token === "git");
+  if (gitIndex < 0) return { main: "Git" };
+  const detail = tokens
+    .slice(gitIndex + 1)
+    .filter((token) => token && token !== "--")
+    .join(" ")
+    .trim();
+  return { main: "Git", detail: detail || undefined };
 }
 
 function canonicalKnownToolName(name: string): string | null {
@@ -4907,6 +4994,10 @@ function ToolTitleIcon({ name }: { name: string }) {
       return <MoveRight className={className} aria-label="Move" />;
     case "Bash":
       return <SquareTerminal className={className} aria-label="Terminal" />;
+    case "Agent":
+      return <Bot className={className} aria-label="Agent" />;
+    case "Git":
+      return <IconifyIcon iconClassName="icon-[mdi--git]" className={className} aria-label="Git" />;
     case "Search":
     case "Grep":
       return <Search className={className} aria-label="Search" />;
