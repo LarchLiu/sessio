@@ -64,7 +64,8 @@ pub struct McpInjectionCapabilities {
     /// Agent accepts an SSE MCP server (`McpServer::Sse`).
     pub sse: bool,
     /// Agent accepts an in-process / ACP MCP server (`McpServer::Acp`).
-    /// Only meaningful when the ACP `unstable_mcp_over_acp` capability is present.
+    /// Mapped from the ACP `mcp_capabilities.acp` capability, available because
+    /// the `unstable_mcp_over_acp` schema feature is enabled.
     pub acp: bool,
     /// Agent exposes a native, non-MCP extension path that Sessio can target
     /// (e.g. Pi's `pi.registerTool` extension system). When set, the agent is
