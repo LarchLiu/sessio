@@ -6,13 +6,14 @@
 //!
 //! - parses the `computerUse` session option,
 //! - gates it on the agent's `mcp_injection.http` capability + product support,
-//! - lazily starts one desktop-owned HTTP MCP server (loopback) on first use,
+//! - owns one desktop-started HTTP MCP server / attach broker (loopback),
 //! - issues a per-session bearer token and hands back a [`ComputerUseInjection`]
 //!   for `new_session_request` to attach,
 //! - revokes the token on session teardown.
 //!
-//! The server and host are only created when a session actually requests
-//! computer use, so ordinary sessions never bind a port.
+//! Sessio starts the broker at app startup so external `sessio cu` clients can
+//! discover it without first creating an in-app agent session. Ordinary sessions
+//! still do not receive a token unless they explicitly request computer use.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -83,7 +84,7 @@ impl ComputerUseRuntime {
     }
 
     /// Lazily start (once) and return the shared MCP server handle.
-    fn server(&self) -> Result<&McpServerHandle, String> {
+    pub fn server(&self) -> Result<&McpServerHandle, String> {
         // Fast path: already initialized.
         if let Some(result) = self.server.get() {
             return result.as_ref().map_err(|e| e.to_string());

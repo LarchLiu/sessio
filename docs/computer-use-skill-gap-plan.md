@@ -251,7 +251,7 @@ language should be treated as historical background only.
 | Action surface | Complete. The provider, host, MCP protocol, and CLI cover AX click, coordinate click, secondary action, double click, drag, set value, type text, press key, and scroll. AX refs are preferred where available, with screenshot-coordinate fallback. | [provider.rs](../src-tauri/src/computer_use/provider.rs), [host.rs](../src-tauri/src/computer_use/host.rs), [protocol.rs](../src-tauri/src/computer_use/mcp_http/protocol.rs), [cli.rs](../src-tauri/src/cli.rs) |
 | macOS implementation | Complete for the current in-process scope. Screenshots prefer ScreenCaptureKit and fall back to `screencapture -l`; physical events use pid-scoped `CGEventPostToPid`; AX actions include `AXPress`, `AXShowMenu`, scroll actions, `AXValue`, minimized-window restoration, and Electron AX flags. | [macos.rs](../src-tauri/src/computer_use/platform/macos.rs), [build.rs](../src-tauri/build.rs), [Cargo.toml](../src-tauri/Cargo.toml) |
 | Onboarding tools | Complete. `computer_permissions` and `computer_grant` expose permission status and supported OS settings flows through the computer-use MCP surface and `sessio cu`. | [onboarding.rs](../src-tauri/src/computer_use/onboarding.rs), [dispatch.rs](../src-tauri/src/computer_use/mcp_http/dispatch.rs), [cli.rs](../src-tauri/src/cli.rs) |
-| CLI parity | Complete for the in-process architecture. `sessio cu` attaches to an already-running desktop computer-use MCP host, supports `--json`, mirrors the MCP verbs, and fails explicitly instead of starting a separate helper/runtime. | [cli.rs](../src-tauri/src/cli.rs) |
+| CLI parity | Complete for the in-process architecture. `sessio cu` auto-discovers the running desktop app through a private local broker/discovery file, attaches an external session token on demand, supports `--json`, mirrors the MCP verbs, and fails explicitly instead of starting a separate helper/runtime. | [cli.rs](../src-tauri/src/cli.rs), [broker.rs](../src-tauri/src/computer_use/broker.rs), [server.rs](../src-tauri/src/computer_use/mcp_http/server.rs) |
 | Skill resources and playbooks | Complete. The canonical skill is bundled as `computer-use-skill/SKILL.md`, app playbooks are bundled next to it, and computer-use turns inject the resolved local skill path instead of expanding the full skill into every prompt. | [computer-use-skill.md](./computer-use-skill.md), [computer-use/playbooks](./computer-use/playbooks), [skill_resource.rs](../src-tauri/src/computer_use/skill_resource.rs), [tauri.conf.json](../src-tauri/tauri.conf.json) |
 
 ## Completed Implementation Phases
@@ -340,8 +340,11 @@ Evidence:
 - `sessio cu` exposes the core MCP verbs, supports stable `--json`, and accepts
   skill-compatible aliases such as `--bundle`, positional refs, and
   `coord_space`.
-- The CLI attaches to a running desktop MCP host through URL/token routing and
-  does not create a helper, daemon, or separate automation runtime.
+- The CLI auto-discovers a running Sessio desktop broker, requests an external
+  session token, and caches that token in Sessio's private app state directory.
+- Explicit `--url` / `--token` and `SESSIO_CU_URL` / `SESSIO_CU_TOKEN` remain
+  supported as advanced/debug overrides.
+- The CLI does not create a helper, daemon, or separate automation runtime.
 
 ### Phase 8: Add app playbooks
 

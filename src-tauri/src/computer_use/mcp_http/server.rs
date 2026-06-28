@@ -1,4 +1,4 @@
-//! `tiny_http`-backed lifecycle for the desktop-owned MCP server.
+//! `tiny_http`-backed lifecycle for the desktop-owned MCP server and attach broker.
 //!
 //! Binds `127.0.0.1:0` (ephemeral loopback port), serves MCP JSON-RPC over HTTP
 //! POST on a dedicated thread, and shuts down cleanly when the handle is
@@ -11,12 +11,16 @@
 //! state. This matches v3's "one shared server with per-session routing" option.
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::thread::JoinHandle;
 
 use crate::computer_use::host::ComputerUseHost;
 use crate::desktop_control::DesktopControlPermissionStatus;
 
+use super::super::broker::{self, ExternalAttachRequest, ExternalAttachResponse};
 use super::auth::{SessionToken, TokenRegistry};
 use super::dispatch::dispatch;
 use super::protocol::{McpRequest, McpResponse};
@@ -43,6 +47,11 @@ impl McpServerHandle {
     /// The MCP endpoint URL injected into `session/new`.
     pub fn mcp_url(&self) -> String {
         format!("{}/mcp", self.base_url())
+    }
+
+    /// The external attach broker URL published through the discovery file.
+    pub fn attach_url(&self) -> String {
+        format!("{}/attach", self.base_url())
     }
 
     /// Issue a bearer token for a session. Inject it as an `Authorization:
@@ -89,15 +98,27 @@ impl McpHttpServer {
             .to_ip()
             .ok_or_else(|| std::io::Error::other("server address is not IP"))?;
         let tokens = Arc::new(TokenRegistry::new());
+        let external_session_counter = Arc::new(AtomicU64::new(1));
 
         let worker_server = server.clone();
         let worker_tokens = tokens.clone();
+        let worker_external_session_counter = external_session_counter.clone();
+        let broker_base_url = format!("http://{}", addr);
+        let mcp_url = format!("{broker_base_url}/mcp");
+        let worker_mcp_url = mcp_url.clone();
+        if let Err(error) = broker::write_discovery(broker_base_url.clone(), mcp_url.clone()) {
+            log::warn!("[computer-use:broker] failed to publish discovery file: {error}");
+        } else {
+            log::info!("[computer-use:broker] published discovery at {broker_base_url}");
+        }
         let thread = std::thread::Builder::new()
-            .name("sessio-computer-use-mcp".into())
+            .name("sessio-computer-use-broker".into())
             .spawn(move || {
                 serve_loop(
                     worker_server,
                     worker_tokens,
+                    worker_external_session_counter,
+                    worker_mcp_url,
                     host_for_session,
                     permission_provider,
                 );
@@ -115,6 +136,8 @@ impl McpHttpServer {
 fn serve_loop(
     server: Arc<tiny_http::Server>,
     tokens: Arc<TokenRegistry>,
+    external_session_counter: Arc<AtomicU64>,
+    mcp_url: String,
     host_for_session: Arc<dyn Fn(&str) -> Option<ComputerUseHost> + Send + Sync>,
     permission_provider: PermissionProvider,
 ) {
@@ -124,16 +147,41 @@ fn serve_loop(
             // `unblock()` (on drop) or a fatal error breaks the loop.
             Err(_) => break,
         };
-        handle_request(request, &tokens, &host_for_session, &permission_provider);
+        handle_request(
+            request,
+            &tokens,
+            &external_session_counter,
+            &mcp_url,
+            &host_for_session,
+            &permission_provider,
+        );
     }
 }
 
 fn handle_request(
     mut request: tiny_http::Request,
     tokens: &TokenRegistry,
+    external_session_counter: &AtomicU64,
+    mcp_url: &str,
     host_for_session: &Arc<dyn Fn(&str) -> Option<ComputerUseHost> + Send + Sync>,
     permission_provider: &PermissionProvider,
 ) {
+    let path = request.url().split('?').next().unwrap_or("/");
+    if path == "/attach" {
+        handle_attach(
+            request,
+            tokens,
+            external_session_counter,
+            mcp_url,
+            host_for_session,
+        );
+        return;
+    }
+    if path != "/mcp" {
+        respond_not_found(request);
+        return;
+    }
+
     let is_loopback = request
         .remote_addr()
         .map(|addr| addr.ip().is_loopback())
@@ -184,6 +232,73 @@ fn handle_request(
     respond_json(request, &response.to_string());
 }
 
+fn handle_attach(
+    mut request: tiny_http::Request,
+    tokens: &TokenRegistry,
+    external_session_counter: &AtomicU64,
+    mcp_url: &str,
+    host_for_session: &Arc<dyn Fn(&str) -> Option<ComputerUseHost> + Send + Sync>,
+) {
+    let is_loopback = request
+        .remote_addr()
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false);
+    if !is_loopback {
+        respond_unauthorized(request, "attach is limited to loopback clients");
+        return;
+    }
+    let mut body = String::new();
+    if request.as_reader().read_to_string(&mut body).is_err() {
+        respond_json(
+            request,
+            &serde_json::json!({ "error": "could not read attach body" }).to_string(),
+        );
+        return;
+    }
+    let attach: ExternalAttachRequest = if body.trim().is_empty() {
+        ExternalAttachRequest::default()
+    } else {
+        match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(error) => {
+                respond_json(
+                    request,
+                    &serde_json::json!({ "error": format!("invalid attach request: {error}") })
+                        .to_string(),
+                );
+                return;
+            }
+        }
+    };
+    let sequence = external_session_counter.fetch_add(1, Ordering::Relaxed);
+    let label = attach
+        .client_name
+        .as_deref()
+        .map(sanitize_session_part)
+        .filter(|part| !part.is_empty())
+        .unwrap_or_else(|| "client".into());
+    let session_id = format!("external-{label}-{}-{sequence}", std::process::id());
+    let Some(host) = host_for_session(&session_id) else {
+        respond_json(
+            request,
+            &serde_json::json!({ "error": "computer-use host is unavailable" }).to_string(),
+        );
+        return;
+    };
+    host.approvals().approve_session(&session_id);
+    let token = tokens.issue(&session_id);
+    let response = ExternalAttachResponse {
+        schema_version: 1,
+        session_id,
+        mcp_url: mcp_url.to_string(),
+        token: token.0,
+    };
+    respond_json(
+        request,
+        &serde_json::to_string(&response).unwrap_or_else(|_| "{}".into()),
+    );
+}
+
 fn respond_json(request: tiny_http::Request, body: &str) {
     let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
         .expect("valid content-type header");
@@ -194,6 +309,26 @@ fn respond_json(request: tiny_http::Request, body: &str) {
 fn respond_unauthorized(request: tiny_http::Request, message: &str) {
     let response = tiny_http::Response::from_string(message).with_status_code(401);
     let _ = request.respond(response);
+}
+
+fn respond_not_found(request: tiny_http::Request) {
+    let response = tiny_http::Response::from_string("not found").with_status_code(404);
+    let _ = request.respond(response);
+}
+
+fn sanitize_session_part(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -245,6 +380,17 @@ mod tests {
         (status, text)
     }
 
+    fn attach(url: &str, body: &str) -> (u16, String) {
+        let resp = reqwest::blocking::Client::new()
+            .post(format!("{}/attach", url.trim_end_matches('/')))
+            .body(body.to_string())
+            .send()
+            .expect("attach request sends");
+        let status = resp.status().as_u16();
+        let text = resp.text().unwrap_or_default();
+        (status, text)
+    }
+
     #[test]
     fn binds_to_loopback() {
         let (handle, _host) = start_server();
@@ -276,6 +422,30 @@ mod tests {
         let (status, body) = post(
             &handle.mcp_url(),
             Some(&token.0),
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        );
+        assert_eq!(status, 200);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(json["result"]["tools"].as_array().unwrap().len() >= 9);
+    }
+
+    #[test]
+    fn attach_issues_external_session_token() {
+        let (handle, host) = start_server();
+        let (status, body) = attach(
+            &handle.base_url(),
+            r#"{"clientName":"External Agent","clientPid":42}"#,
+        );
+        assert_eq!(status, 200);
+        let attach: ExternalAttachResponse = serde_json::from_str(&body).unwrap();
+        assert!(attach.session_id.starts_with("external-external-agent-"));
+        assert_eq!(attach.mcp_url, handle.mcp_url());
+        assert!(!attach.token.is_empty());
+        assert!(host.approvals().session_approved(&attach.session_id));
+
+        let (status, body) = post(
+            &attach.mcp_url,
+            Some(&attach.token),
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
         );
         assert_eq!(status, 200);

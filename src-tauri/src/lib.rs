@@ -9023,6 +9023,9 @@ pub fn run() {
             }
             network::apply_network_proxy_env(&app_config.network.proxy);
             let runtime = RuntimeManager::new(app.handle().clone());
+            if let Err(error) = runtime.start_computer_use_broker() {
+                log::warn!("[computer-use:broker] failed to start at app startup: {error}");
+            }
             app.manage(runtime.clone());
             app.manage(TerminalService::new(app.handle().clone()));
             let preview_file_watcher =

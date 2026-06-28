@@ -12,6 +12,7 @@
 //! deterministic fake provider.
 
 pub mod approvals;
+pub mod broker;
 pub mod config;
 pub mod host;
 pub mod lease;

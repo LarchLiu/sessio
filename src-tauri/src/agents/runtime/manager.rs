@@ -45,9 +45,9 @@ struct RuntimeManagerInner {
     sessions: Mutex<HashMap<String, RuntimeSessionState>>,
     event_listeners: Mutex<Vec<RuntimeEventListener>>,
     snapshot_queue: Mutex<HashMap<String, PendingRuntimeSnapshot>>,
-    /// Lazily-built computer-use runtime (desktop MCP server + host). Only
-    /// constructed when a session first requests computer use, so ordinary
-    /// sessions never start the loopback server.
+    /// Lazily-built computer-use runtime (desktop MCP server + host). App
+    /// startup asks it to publish the local broker; sessions still need an
+    /// explicit token before they can use computer-use tools.
     computer_use:
         std::sync::OnceLock<std::sync::Arc<super::computer_use_runtime::ComputerUseRuntime>>,
 }
@@ -141,6 +141,16 @@ impl RuntimeManager {
         if let Some(runtime) = self.inner.computer_use.get() {
             runtime.update_settings(settings);
         }
+    }
+
+    /// Start the local computer-use broker so external `sessio cu` clients can
+    /// discover the desktop app and request a scoped token. This does not grant
+    /// any app approval by itself.
+    pub fn start_computer_use_broker(&self) -> Result<()> {
+        self.computer_use()
+            .server()
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!(error))
     }
 
     pub fn subscribe_events(&self) -> Result<mpsc::Receiver<AgentRuntimeEvent>> {

@@ -17,6 +17,7 @@ use serde_json::Value;
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug)]
 struct Cli {
@@ -298,21 +299,7 @@ fn call_computer_use_tool(
     name: &str,
     arguments: Value,
 ) -> Result<Value> {
-    let url = connection
-        .url
-        .clone()
-        .or_else(|| env::var("SESSIO_CU_URL").ok())
-        .map(|url| normalize_cu_url(&url))
-        .context(
-            "no computer-use host attached: pass --url or set SESSIO_CU_URL from an active desktop session",
-        )?;
-    let token = connection
-        .token
-        .clone()
-        .or_else(|| env::var("SESSIO_CU_TOKEN").ok())
-        .context(
-            "no computer-use session token: pass --token or set SESSIO_CU_TOKEN from an active desktop session",
-        )?;
+    let resolved = resolve_cu_connection(connection)?;
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -323,12 +310,12 @@ fn call_computer_use_tool(
         }
     });
     let response = reqwest::blocking::Client::new()
-        .post(&url)
-        .bearer_auth(token)
+        .post(&resolved.url)
+        .bearer_auth(&resolved.token)
         .json(&body)
         .send()
         .with_context(|| {
-            format!("computer-use host is not reachable at {url}; start/attach an eligible desktop session first")
+            format!("computer-use host is not reachable at {}; start Sessio desktop or pass --url/--token", resolved.url)
         })?;
     let status = response.status();
     let text = response.text().unwrap_or_default();
@@ -336,6 +323,110 @@ fn call_computer_use_tool(
         bail!("computer-use host rejected request ({status}): {text}");
     }
     serde_json::from_str(&text).with_context(|| "computer-use host returned invalid JSON")
+}
+
+struct ResolvedCuConnection {
+    url: String,
+    token: String,
+}
+
+fn resolve_cu_connection(connection: &CuConnection) -> Result<ResolvedCuConnection> {
+    match (connection.url.clone(), connection.token.clone()) {
+        (Some(url), Some(token)) => {
+            return Ok(ResolvedCuConnection {
+                url: normalize_cu_url(&url),
+                token,
+            });
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            bail!("--url and --token must be provided together");
+        }
+        (None, None) => {}
+    }
+
+    match (
+        env::var("SESSIO_CU_URL").ok(),
+        env::var("SESSIO_CU_TOKEN").ok(),
+    ) {
+        (Some(url), Some(token)) => {
+            return Ok(ResolvedCuConnection {
+                url: normalize_cu_url(&url),
+                token,
+            });
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            bail!("SESSIO_CU_URL and SESSIO_CU_TOKEN must be set together");
+        }
+        (None, None) => {}
+    }
+
+    if let Some(session) = crate::computer_use::broker::read_session()? {
+        if validate_cu_session(&session) {
+            return Ok(ResolvedCuConnection {
+                url: normalize_cu_url(&session.mcp_url),
+                token: session.token,
+            });
+        }
+        crate::computer_use::broker::remove_session();
+    }
+
+    let discovery = crate::computer_use::broker::read_discovery()?.context(
+        "no computer-use broker discovered: start Sessio desktop, or pass --url/--token",
+    )?;
+    let attach = attach_to_cu_broker(&discovery.broker_url)?;
+    let session = crate::computer_use::broker::session_from_attach(discovery.broker_url, attach);
+    crate::computer_use::broker::write_session(&session)?;
+    Ok(ResolvedCuConnection {
+        url: normalize_cu_url(&session.mcp_url),
+        token: session.token,
+    })
+}
+
+fn attach_to_cu_broker(
+    broker_url: &str,
+) -> Result<crate::computer_use::broker::ExternalAttachResponse> {
+    let url = format!("{}/attach", broker_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "clientName": "sessio-cu",
+        "clientPid": std::process::id(),
+    });
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("failed to build computer-use broker client")?
+        .post(&url)
+        .json(&body)
+        .send()
+        .with_context(|| format!("computer-use broker is not reachable at {url}"))?;
+    let status = response.status();
+    let text = response.text().unwrap_or_default();
+    if !status.is_success() {
+        bail!("computer-use broker rejected attach ({status}): {text}");
+    }
+    serde_json::from_str(&text).with_context(|| "computer-use broker returned invalid JSON")
+}
+
+fn validate_cu_session(session: &crate::computer_use::broker::ExternalSession) -> bool {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {}
+    });
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+    client
+        .post(normalize_cu_url(&session.mcp_url))
+        .bearer_auth(&session.token)
+        .json(&body)
+        .send()
+        .map(|response| response.status().is_success())
+        .unwrap_or(false)
 }
 
 fn normalize_cu_url(url: &str) -> String {
@@ -2711,7 +2802,7 @@ Usage:
 
 Notes:
   --json emits stable machine-readable output for skills and agents.
-  cu attaches to an already-running desktop computer-use MCP host; set SESSIO_CU_URL and SESSIO_CU_TOKEN (or pass --url/--token). It fails explicitly instead of starting a separate helper/runtime.
+  cu auto-discovers a running Sessio desktop computer-use broker and attaches a scoped external session token on demand. SESSIO_CU_URL/SESSIO_CU_TOKEN and --url/--token remain available as advanced overrides.
   cu raise is the reliable recovery path for hidden or Dock-minimized app windows. Do not substitute open -a or AppleScript activate/frontmost/window-menu clicks; those can exit 0 while leaving the window minimized.
   sessions list reads from the Sessio index DB by default and falls back to a filesystem scan when the index is empty/unreadable; a stderr warning is printed when the fallback fires.
   memory search omits qmd's raw payload by default; pass --include-raw for debugging.

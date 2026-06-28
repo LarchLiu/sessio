@@ -51,6 +51,11 @@ automation pipelines). Same verbs, same semantics, but output is text
 only — to see the screen after an action you have to call
 `get_app_state` separately and `Read` the resulting JPG path.
 
+When the Sessio desktop app is running, `sessio cu` auto-discovers the local
+computer-use broker from Sessio's private app state directory and attaches an
+external session token on demand. `--url` / `--token` are still supported for
+debugging, but external agents normally should not need them.
+
 ## Opening apps — DO NOT use `open -b`
 
 `open -b <bundle>` activates the app by default, which steals focus from
