@@ -31,7 +31,7 @@ pub use onboarding::{
 };
 pub use platform::default_provider;
 pub use provider::{
-    AllowedAction, AppLaunchResult, AppState, AppTarget, ComputerUseProvider, CoordinateSpace,
-    DisplayMetadata, ElementId, InstalledApp, Point, ScreenshotRef, UiElement,
+    AllowedAction, AppLaunchResult, AppListOptions, AppState, AppTarget, ComputerUseProvider,
+    CoordinateSpace, DisplayMetadata, ElementId, InstalledApp, Point, ScreenshotRef, UiElement,
 };
 pub use settings::ComputerUseSettings;

@@ -118,6 +118,9 @@ There is also one process-architecture constraint worth keeping explicit here:
   - `computer_raise_app` / `sessio cu raise` as the explicit foreground
     recovery path for hidden or minimized apps when `get_app_state` cannot find
     a visible window
+  - true recent-use ranking for `computer_list_apps` / `sessio cu list-apps
+    --days`, using macOS activity metadata when available and falling back
+    cleanly when the OS withholds it
   - macOS `CGEventPostToPid` dispatch for physical mouse/keyboard/scroll
     events, key chords, best-effort focus restoration, and Electron AX flags
     (`AXEnhancedUserInterface`, `AXManualAccessibility`)
@@ -125,7 +128,6 @@ There is also one process-architecture constraint worth keeping explicit here:
   work rather than hidden TODOs in this in-process phase:
   - replacing the current `screencapture`/CGWindow-based capture path with
     ScreenCaptureKit
-  - deriving true recently-used app frequency for `list_apps --days`
   - adding helper/daemon-only CLI affordances such as `shot`, `lens`, and
     `shutdown`
 

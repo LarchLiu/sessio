@@ -21,6 +21,28 @@ pub struct InstalledApp {
     /// OS process id when the app is running; `None` if only installed.
     pub pid: Option<i32>,
     pub running: bool,
+    /// Number of observed launches/activations in the requested recent window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_use_count: Option<u32>,
+    /// Unix timestamp for the latest observed use in the requested recent window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_last_used_at: Option<i64>,
+    /// Where the recent-use metadata came from, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_source: Option<String>,
+}
+
+/// Options for app discovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppListOptions {
+    /// Recent-use window in days. `None` means the provider default.
+    pub days: Option<u32>,
+}
+
+impl Default for AppListOptions {
+    fn default() -> Self {
+        Self { days: None }
+    }
 }
 
 /// Result of an app launch request.
@@ -262,7 +284,7 @@ pub trait ComputerUseProvider: Send + Sync {
     /// Whether this provider can inject input on the current platform/policy.
     fn supports_control(&self) -> bool;
 
-    fn list_apps(&self) -> ProviderResult<Vec<InstalledApp>>;
+    fn list_apps(&self, options: AppListOptions) -> ProviderResult<Vec<InstalledApp>>;
 
     fn is_app_running(&self, app_id: &AppId) -> ProviderResult<bool>;
 
@@ -335,6 +357,9 @@ mod fake {
                     name: "Example".into(),
                     pid: Some(1234),
                     running: true,
+                    recent_use_count: None,
+                    recent_last_used_at: None,
+                    recent_source: None,
                 }]),
                 elements: vec![UiElement {
                     id: "el-1".into(),
@@ -381,7 +406,10 @@ mod fake {
             self.supports_control
         }
 
-        fn list_apps(&self) -> ProviderResult<Vec<InstalledApp>> {
+        fn list_apps(&self, options: AppListOptions) -> ProviderResult<Vec<InstalledApp>> {
+            if let Some(days) = options.days {
+                self.record(format!("list_apps:{days}"));
+            }
             Ok(self.apps.lock().unwrap().clone())
         }
 

@@ -140,7 +140,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             "days": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Compatibility hint for recent-app windows; the current in-process provider returns running plus installed apps."
+                "description": "Recent-use ranking window in days. Providers use available OS activity metadata and fall back to running/name ordering when unavailable."
             }
         },
         "additionalProperties": false
@@ -241,7 +241,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "computer_list_apps",
-            description: "List applications that can be targeted for computer use. Accepts days for skill compatibility; current results include running plus installed apps.",
+            description: "List applications that can be targeted for computer use, ordered by recent usage when OS activity metadata is available. Results include running plus installed apps.",
             input_schema: list_apps_arg,
         },
         ToolDefinition {

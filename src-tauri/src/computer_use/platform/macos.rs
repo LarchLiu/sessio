@@ -15,7 +15,7 @@
 
 #![allow(unexpected_cfgs)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -36,9 +36,9 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
 
 use crate::computer_use::provider::{
-    AppId, AppLaunchResult, AppRaiseResult, AppTarget, ComputerUseProvider, CoordinateSpace,
-    DisplayMetadata, ElementId, InstalledApp, Point, ProviderError, ProviderResult, RawAppState,
-    Rect, ScreenshotRef, ScrollDirection, UiElement,
+    AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ComputerUseProvider,
+    CoordinateSpace, DisplayMetadata, ElementId, InstalledApp, Point, ProviderError,
+    ProviderResult, RawAppState, Rect, ScreenshotRef, ScrollDirection, UiElement,
 };
 
 #[derive(Clone)]
@@ -74,8 +74,8 @@ impl ComputerUseProvider for MacosProvider {
         true
     }
 
-    fn list_apps(&self) -> ProviderResult<Vec<InstalledApp>> {
-        list_available_apps()
+    fn list_apps(&self, options: AppListOptions) -> ProviderResult<Vec<InstalledApp>> {
+        list_available_apps(options)
     }
 
     fn is_app_running(&self, app_id: &AppId) -> ProviderResult<bool> {
@@ -189,7 +189,7 @@ impl ComputerUseProvider for MacosProvider {
 
 // --- App enumeration -----------------------------------------------------
 
-fn list_available_apps() -> ProviderResult<Vec<InstalledApp>> {
+fn list_available_apps(options: AppListOptions) -> ProviderResult<Vec<InstalledApp>> {
     let mut by_id: HashMap<AppId, InstalledApp> = HashMap::new();
     for app in list_installed_apps() {
         by_id.entry(app.id.clone()).or_insert(app);
@@ -198,9 +198,17 @@ fn list_available_apps() -> ProviderResult<Vec<InstalledApp>> {
         by_id.insert(app.id.clone(), app);
     }
     let mut apps: Vec<InstalledApp> = by_id.into_values().collect();
+    annotate_recent_usage(&mut apps, options.days.unwrap_or(14));
     apps.sort_by(|a, b| {
-        b.running
-            .cmp(&a.running)
+        b.recent_use_count
+            .unwrap_or(0)
+            .cmp(&a.recent_use_count.unwrap_or(0))
+            .then_with(|| {
+                b.recent_last_used_at
+                    .unwrap_or(0)
+                    .cmp(&a.recent_last_used_at.unwrap_or(0))
+            })
+            .then_with(|| b.running.cmp(&a.running))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(apps)
@@ -230,6 +238,9 @@ fn list_running_apps() -> ProviderResult<Vec<InstalledApp>> {
             name,
             pid: Some(pid),
             running: true,
+            recent_use_count: None,
+            recent_last_used_at: None,
+            recent_source: None,
         });
     }
     Ok(out)
@@ -300,7 +311,187 @@ fn installed_app_from_bundle(path: &Path) -> Option<InstalledApp> {
         name,
         pid: None,
         running: false,
+        recent_use_count: None,
+        recent_last_used_at: None,
+        recent_source: None,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecentUsage {
+    count: u32,
+    last_used_at: i64,
+    source: &'static str,
+}
+
+fn annotate_recent_usage(apps: &mut [InstalledApp], days: u32) {
+    let mut usage = recent_usage_from_knowledge(days).unwrap_or_default();
+    merge_recent_usage(&mut usage, recent_usage_from_spotlight(apps, days));
+    for app in apps {
+        if let Some(recent) = usage.get(&app.id) {
+            app.recent_use_count = Some(recent.count);
+            app.recent_last_used_at = Some(recent.last_used_at);
+            app.recent_source = Some(recent.source.to_string());
+        }
+    }
+}
+
+fn merge_recent_usage(
+    target: &mut HashMap<AppId, RecentUsage>,
+    fallback: HashMap<AppId, RecentUsage>,
+) {
+    for (app_id, incoming) in fallback {
+        target
+            .entry(app_id)
+            .and_modify(|current| {
+                if incoming.last_used_at > current.last_used_at {
+                    current.last_used_at = incoming.last_used_at;
+                }
+                if current.count == 0 {
+                    current.count = incoming.count;
+                }
+            })
+            .or_insert(incoming);
+    }
+}
+
+fn recent_usage_from_knowledge(days: u32) -> Option<HashMap<AppId, RecentUsage>> {
+    let path = knowledge_db_path()?;
+    if !path.exists() {
+        return None;
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let cutoff = unix_now().saturating_sub(i64::from(days) * 86_400);
+    let cutoff_cf = cutoff.saturating_sub(978_307_200);
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT ZVALUESTRING, COUNT(*), CAST(MAX(ZSTARTDATE) AS INTEGER)
+            FROM ZOBJECT
+            WHERE ZSTREAMNAME = '/app/inFocus'
+              AND ZSTARTDATE >= ?1
+              AND ZVALUESTRING IS NOT NULL
+            GROUP BY ZVALUESTRING
+            "#,
+        )
+        .ok()?;
+    let rows = stmt
+        .query_map([cutoff_cf], |row| {
+            let app_id: String = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            let last_cf: i64 = row.get(2)?;
+            Ok((app_id, count, last_cf))
+        })
+        .ok()?;
+    let mut out = HashMap::new();
+    for row in rows.flatten() {
+        let (app_id, count, last_cf) = row;
+        if app_id.is_empty() {
+            continue;
+        }
+        out.insert(
+            app_id,
+            RecentUsage {
+                count: u32::try_from(count.max(0)).unwrap_or(u32::MAX),
+                last_used_at: last_cf.saturating_add(978_307_200),
+                source: "knowledgeC",
+            },
+        );
+    }
+    Some(out)
+}
+
+fn knowledge_db_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join("Library/Application Support/Knowledge/knowledgeC.db"))
+}
+
+fn recent_usage_from_spotlight(apps: &[InstalledApp], days: u32) -> HashMap<AppId, RecentUsage> {
+    let cutoff = unix_now().saturating_sub(i64::from(days) * 86_400);
+    let known_ids: HashSet<&str> = apps.iter().map(|app| app.id.as_str()).collect();
+    let mut out = HashMap::new();
+    for path in spotlight_recent_app_paths(days) {
+        let Some(app) = installed_app_from_bundle(&path) else {
+            continue;
+        };
+        if !known_ids.contains(app.id.as_str()) {
+            continue;
+        }
+        let Some(last_used_at) = spotlight_last_used_at(&path) else {
+            continue;
+        };
+        if last_used_at < cutoff {
+            continue;
+        }
+        out.insert(
+            app.id,
+            RecentUsage {
+                count: 1,
+                last_used_at,
+                source: "spotlight",
+            },
+        );
+    }
+    out
+}
+
+fn spotlight_recent_app_paths(days: u32) -> Vec<PathBuf> {
+    let query = format!(
+        "kMDItemContentType == \"com.apple.application-bundle\" && kMDItemLastUsedDate >= $time.today(-{days})"
+    );
+    let output = std::process::Command::new("mdfind")
+        .arg("-0")
+        .arg(query)
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|bytes| !bytes.is_empty())
+        .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn spotlight_last_used_at(path: &Path) -> Option<i64> {
+    let output = std::process::Command::new("mdls")
+        .arg("-raw")
+        .arg("-name")
+        .arg("kMDItemLastUsedDate")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() || raw == "(null)" {
+        return None;
+    }
+    parse_mdls_utc_timestamp(&raw)
+}
+
+fn parse_mdls_utc_timestamp(raw: &str) -> Option<i64> {
+    chrono::NaiveDateTime::parse_from_str(raw.trim(), "%Y-%m-%d %H:%M:%S %z")
+        .ok()
+        .map(|dt| dt.and_utc().timestamp())
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 fn resolve_pid(app_id: &str) -> ProviderResult<i32> {
@@ -1342,5 +1533,42 @@ mod tests {
     #[test]
     fn provider_reports_control_supported() {
         assert!(MacosProvider::new().supports_control());
+    }
+
+    #[test]
+    fn mdls_utc_timestamp_parser_handles_raw_output() {
+        assert_eq!(
+            parse_mdls_utc_timestamp("2026-06-28 11:22:33 +0000"),
+            Some(1782645753)
+        );
+        assert_eq!(parse_mdls_utc_timestamp("(null)"), None);
+    }
+
+    #[test]
+    fn recent_usage_merge_keeps_knowledge_count_and_newer_spotlight_time() {
+        let mut usage = HashMap::from([(
+            "com.example.app".to_string(),
+            RecentUsage {
+                count: 3,
+                last_used_at: 100,
+                source: "knowledgeC",
+            },
+        )]);
+        merge_recent_usage(
+            &mut usage,
+            HashMap::from([(
+                "com.example.app".to_string(),
+                RecentUsage {
+                    count: 1,
+                    last_used_at: 200,
+                    source: "spotlight",
+                },
+            )]),
+        );
+
+        let app = usage.get("com.example.app").unwrap();
+        assert_eq!(app.count, 3);
+        assert_eq!(app.last_used_at, 200);
+        assert_eq!(app.source, "knowledgeC");
     }
 }

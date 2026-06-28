@@ -124,7 +124,7 @@ permission. Errors surface as structured codes
 |-------------------------------|-----------------------------------------|---------------------------------------------------------------|----------------------------------------------------------------|
 | Launch app (background)       | `computer_launch_app`                   | `sessio cu launch-app --bundle <bundle>`                        | No foreground activation; no-op if already running             |
 | Raise app (foreground)        | `computer_raise_app`                    | `sessio cu raise --bundle <bundle>`                             | Restore hidden/minimized targets when a visible window is required |
-| List apps w/ recency hint     | `computer_list_apps`                    | `sessio cu list-apps [--days 14]`                               | Running + installed apps; `days` is accepted as a compatibility hint |
+| List apps w/ recency ranking  | `computer_list_apps`                    | `sessio cu list-apps [--days 14]`                               | Running + installed apps; `days` controls the recent-use ranking window |
 | Snapshot (tree + screenshot)  | `computer_get_app_state`                | `sessio cu get-app-state --bundle <bundle>`                     | Call once per turn before acting                               |
 | Click by ref or pixel         | `computer_click`                        | `sessio cu click --snapshot-id <id> <ref>` / `sessio cu click --snapshot-id <id> --x <x> --y <y>` | MCP auto-returns post-action screenshot                        |
 | Right-click / context menu    | `computer_perform_secondary_action`     | `sessio cu perform-secondary-action --snapshot-id <id> <ref>`   | AXShowMenu first, CGEvent right-click as fallback              |
@@ -207,6 +207,12 @@ and extended for Chinese apps:
   ~10ms.
 - **Refs are scoped to the last snapshot.** Re-run `get_app_state` on
   `ref_stale` / `element_not_found`.
+- **App listing uses real OS recency when available.** On macOS,
+  `computer_list_apps` / `sessio cu list-apps --days <n>` ranks apps using
+  available activity metadata from KnowledgeC and Spotlight, and includes
+  `recentUseCount`, `recentLastUsedAt`, and `recentSource` when a source has
+  data. If macOS withholds that metadata, Sessio falls back to running apps
+  first, then name sorting.
 - **Electron / Chromium apps.** Sessio sets both
   `AXEnhancedUserInterface` and `AXManualAccessibility` on first
   snapshot — some apps respond only to one. First snap may look thin;

@@ -20,8 +20,9 @@ use super::approvals::{ApprovalDecision, ApprovalRegistry};
 use super::lease::{LeaseError, LeaseRegistry, SnapshotError, SnapshotId};
 use super::permissions::{self, PermissionDenied, RequiredCapability};
 use super::provider::{
-    AllowedAction, AppLaunchResult, AppRaiseResult, AppState, AppTarget, ComputerUseProvider,
-    CoordinateSpace, InstalledApp, Point, ProviderError, ScreenshotRef, ScrollDirection,
+    AllowedAction, AppLaunchResult, AppListOptions, AppRaiseResult, AppState, AppTarget,
+    ComputerUseProvider, CoordinateSpace, InstalledApp, Point, ProviderError, ScreenshotRef,
+    ScrollDirection,
 };
 use super::settings::ComputerUseSettings;
 
@@ -152,9 +153,19 @@ impl ComputerUseHost {
         &self,
         perm: &DesktopControlPermissionStatus,
     ) -> Result<Vec<InstalledApp>, ComputerUseError> {
+        self.list_apps_with_options(perm, AppListOptions::default())
+    }
+
+    /// `computer_list_apps` with provider-specific discovery options such as a
+    /// recent-use ranking window.
+    pub fn list_apps_with_options(
+        &self,
+        perm: &DesktopControlPermissionStatus,
+        options: AppListOptions,
+    ) -> Result<Vec<InstalledApp>, ComputerUseError> {
         self.require_enabled()?;
         self.require_permission(perm, RequiredCapability::Observe)?;
-        Ok(self.provider.list_apps()?)
+        Ok(self.provider.list_apps(options)?)
     }
 
     /// `computer_start` — open a lease on a target app. Requires the feature on,
@@ -705,6 +716,9 @@ mod tests {
             name: "Installed".into(),
             pid: running.then_some(4321),
             running,
+            recent_use_count: None,
+            recent_last_used_at: None,
+            recent_source: None,
         }
     }
 
@@ -748,6 +762,18 @@ mod tests {
         h.approvals().approve_session("s1");
         let lease = h.start("s1", target(), &p).unwrap();
         assert!(lease.starts_with("lease-s1-"));
+    }
+
+    #[test]
+    fn list_apps_forwards_recent_window_to_provider() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        let p = perm(true, true, false);
+
+        h.list_apps_with_options(&p, AppListOptions { days: Some(7) })
+            .unwrap();
+
+        assert_eq!(provider.actions(), vec!["list_apps:7".to_string()]);
     }
 
     #[test]

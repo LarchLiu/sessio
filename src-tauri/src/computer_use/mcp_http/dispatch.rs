@@ -12,7 +12,9 @@ use crate::computer_use::host::{ComputerUseError, ComputerUseHost};
 use crate::computer_use::lease::SnapshotId;
 use crate::computer_use::onboarding::{self, PermissionKind};
 use crate::computer_use::permissions::PermissionDenied;
-use crate::computer_use::provider::{AppTarget, CoordinateSpace, Point, ScrollDirection};
+use crate::computer_use::provider::{
+    AppListOptions, AppTarget, CoordinateSpace, Point, ScrollDirection,
+};
 use crate::desktop_control::DesktopControlPermissionStatus;
 
 use super::protocol::{
@@ -95,7 +97,9 @@ fn run_tool(
             ))
         }
         "computer_list_apps" => {
-            let apps = host.list_apps(perm).map_err(host_error_message)?;
+            let apps = host
+                .list_apps_with_options(perm, parse_list_options(args)?)
+                .map_err(host_error_message)?;
             Ok(tool_json_result(
                 serde_json::to_value(&apps).unwrap_or_default(),
             ))
@@ -288,6 +292,22 @@ fn parse_target(args: &Value) -> Result<AppTarget, String> {
     })
 }
 
+fn parse_list_options(args: &Value) -> Result<AppListOptions, String> {
+    let days = match args.get("days") {
+        Some(value) => {
+            let raw = value
+                .as_u64()
+                .ok_or_else(|| "days must be a positive integer".to_string())?;
+            if raw == 0 {
+                return Err("days must be at least 1".into());
+            }
+            Some(u32::try_from(raw).map_err(|_| "days is too large".to_string())?)
+        }
+        None => None,
+    };
+    Ok(AppListOptions { days })
+}
+
 fn parse_optional_target(args: &Value) -> Result<Option<AppTarget>, String> {
     if args.get("appId").is_none() && args.get("bundle").is_none() {
         return Ok(None);
@@ -397,6 +417,9 @@ mod tests {
             name: "Installed".into(),
             pid: None,
             running: false,
+            recent_use_count: None,
+            recent_last_used_at: None,
+            recent_source: None,
         }]));
         (
             ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled()),
@@ -460,6 +483,64 @@ mod tests {
                 assert_eq!(
                     result["structuredContent"]["requirements"][0]["code"],
                     "missing_screenshots"
+                );
+            }
+            _ => panic!("expected result"),
+        }
+    }
+
+    #[test]
+    fn list_apps_passes_days_to_provider() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        let p = perm();
+
+        let resp = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({ "name": "computer_list_apps", "arguments": { "days": 7 } }),
+            ),
+        );
+
+        match resp {
+            McpResponse::Result { result, .. } => {
+                assert!(
+                    result.get("isError").is_none(),
+                    "list-apps should succeed: {result}"
+                );
+            }
+            _ => panic!("expected result"),
+        }
+        assert_eq!(provider.actions(), vec!["list_apps:7".to_string()]);
+    }
+
+    #[test]
+    fn list_apps_rejects_invalid_days() {
+        let h = host();
+        let p = perm();
+
+        let resp = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({ "name": "computer_list_apps", "arguments": { "days": 0 } }),
+            ),
+        );
+
+        match resp {
+            McpResponse::Result { result, .. } => {
+                assert_eq!(result["isError"], true);
+                assert!(
+                    result["content"][0]["text"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("days must be at least 1"),
+                    "{result}"
                 );
             }
             _ => panic!("expected result"),
