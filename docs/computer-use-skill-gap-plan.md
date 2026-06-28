@@ -127,6 +127,9 @@ There is also one process-architecture constraint worth keeping explicit here:
     `computer-use-skill/SKILL.md` plus `playbooks/`, and computer-use turns tell
     agents the resolved local skill path so they can read the full workflow on
     demand instead of relying only on short prompt hints
+  - ScreenCaptureKit-first macOS window screenshots, targeting the selected
+    desktop-independent window and falling back to `screencapture -l` when SCK
+    fails or is unavailable
   - true recent-use ranking for `computer_list_apps` / `sessio cu list-apps
     --days`, using macOS activity metadata when available and falling back
     cleanly when the OS withholds it
@@ -135,8 +138,6 @@ There is also one process-architecture constraint worth keeping explicit here:
     (`AXEnhancedUserInterface`, `AXManualAccessibility`)
 - Remaining non-parity items are intentionally scoped as future architecture
   work rather than hidden TODOs in this in-process phase:
-  - replacing the current `screencapture`/CGWindow-based capture path with
-    ScreenCaptureKit
   - adding helper/daemon-only CLI affordances such as `shot`, `lens`, and
     `shutdown`
 
