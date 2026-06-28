@@ -933,7 +933,7 @@ impl RuntimeManager {
     pub fn send_input(
         &self,
         sessio_runtime_session_id: &str,
-        input: AgentInput,
+        mut input: AgentInput,
     ) -> Result<AgentTurnHandle> {
         if input.text.trim().is_empty() {
             bail!("input text is required");
@@ -988,6 +988,7 @@ impl RuntimeManager {
                 .turn_cancellations
                 .insert(turn_id.clone(), cancel_token.clone());
             state.handle.status = RuntimeSessionStatus::Active;
+            inherit_sticky_session_options(&mut input.options, &state.metadata);
             (
                 state.acp_controller.clone(),
                 state.pi_rpc_controller.clone(),
@@ -1920,6 +1921,36 @@ fn input_option_bool(options: &super::types::RuntimeMetadata, key: &str) -> bool
         .unwrap_or(false)
 }
 
+fn inherit_sticky_session_options(
+    turn_options: &mut super::types::RuntimeMetadata,
+    session_options: &super::types::RuntimeMetadata,
+) {
+    inherit_option_alias(
+        turn_options,
+        session_options,
+        &["computerUse", "computer_use"],
+        "computerUse",
+    );
+}
+
+fn inherit_option_alias(
+    turn_options: &mut super::types::RuntimeMetadata,
+    session_options: &super::types::RuntimeMetadata,
+    aliases: &[&str],
+    canonical_key: &str,
+) {
+    if aliases.iter().any(|key| turn_options.contains_key(*key)) {
+        return;
+    }
+    let Some((_, value)) = aliases
+        .iter()
+        .find_map(|key| session_options.get_key_value(*key))
+    else {
+        return;
+    };
+    turn_options.insert(canonical_key.to_string(), value.clone());
+}
+
 fn build_runtime_session_config_record(
     agent: Agent,
     adapter_version: &str,
@@ -2006,6 +2037,40 @@ mod tests {
             normalize_runtime_permission_mode(Agent::Codex, "auto"),
             "agent"
         );
+    }
+
+    #[test]
+    fn sticky_computer_use_option_is_inherited_by_turns() {
+        let mut turn = RuntimeMetadata::new();
+        let mut session = RuntimeMetadata::new();
+        session.insert("computerUse".into(), json!(true));
+
+        inherit_sticky_session_options(&mut turn, &session);
+
+        assert_eq!(turn.get("computerUse"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn sticky_computer_use_option_accepts_snake_case_session_alias() {
+        let mut turn = RuntimeMetadata::new();
+        let mut session = RuntimeMetadata::new();
+        session.insert("computer_use".into(), json!(true));
+
+        inherit_sticky_session_options(&mut turn, &session);
+
+        assert_eq!(turn.get("computerUse"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn explicit_turn_computer_use_option_wins_over_session() {
+        let mut turn = RuntimeMetadata::new();
+        turn.insert("computerUse".into(), json!(false));
+        let mut session = RuntimeMetadata::new();
+        session.insert("computerUse".into(), json!(true));
+
+        inherit_sticky_session_options(&mut turn, &session);
+
+        assert_eq!(turn.get("computerUse"), Some(&json!(false)));
     }
 
     #[test]
