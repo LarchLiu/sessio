@@ -1,10 +1,13 @@
 //! Real platform providers for [`ComputerUseProvider`].
 //!
 //! macOS is the primary target (Phase 3): app/window enumeration via
-//! `NSWorkspace` + the CGWindow list, screenshot via `screencapture`, AX
-//! element-tree inspection via the Accessibility (`AXUIElement`) API, and input
-//! injection via `CGEvent`. Other platforms get a stub that reports
-//! `Unsupported`, keeping the host portable.
+//! `NSWorkspace` + the CGWindow list, screenshot via ScreenCaptureKit /
+//! `screencapture`, AX element-tree inspection via the Accessibility
+//! (`AXUIElement`) API, and input injection via `CGEvent`.
+//!
+//! Windows uses the same host contract with a provider backed by Win32 window
+//! enumeration, GDI capture, UI Automation, and `SendInput`. Other platforms get
+//! a stub that reports `Unsupported`, keeping the host portable.
 //!
 //! ## Verification note
 //!
@@ -21,10 +24,16 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::MacosProvider;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[cfg(target_os = "windows")]
+pub use windows::WindowsProvider;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod unsupported;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub use unsupported::UnsupportedProvider;
 
 /// Construct the platform default provider for this build.
@@ -33,7 +42,11 @@ pub fn default_provider() -> std::sync::Arc<dyn super::provider::ComputerUseProv
     {
         std::sync::Arc::new(MacosProvider::new())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        std::sync::Arc::new(WindowsProvider::new())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         std::sync::Arc::new(UnsupportedProvider::new())
     }
