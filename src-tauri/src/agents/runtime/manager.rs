@@ -560,6 +560,52 @@ impl RuntimeManager {
         }
     }
 
+    fn prepare_pi_computer_use_extension(
+        &self,
+        sessio_runtime_session_id: &str,
+        options: &super::types::RuntimeMetadata,
+        capabilities: &RuntimeCapabilitySet,
+    ) -> Option<pi_rpc_transport::PiRpcComputerUseExtension> {
+        if !super::computer_use_runtime::should_inject_native_extension(options, Some(capabilities))
+        {
+            return None;
+        }
+        let extension_path = match crate::computer_use::pi_extension::ensure_extension_file() {
+            Ok(path) => path,
+            Err(error) => {
+                log::warn!(
+                    "[sessio-runtime:computer-use] failed to prepare Pi extension file for session={}: {}",
+                    sessio_runtime_session_id,
+                    error
+                );
+                return None;
+            }
+        };
+        let runtime = self.computer_use();
+        match runtime.prepare_injection(sessio_runtime_session_id) {
+            Ok(injection) => {
+                log::info!(
+                    "[sessio-runtime:computer-use] injecting Pi extension for session={} path={}",
+                    sessio_runtime_session_id,
+                    extension_path.display()
+                );
+                Some(pi_rpc_transport::PiRpcComputerUseExtension {
+                    injection,
+                    extension_path,
+                    sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+                })
+            }
+            Err(error) => {
+                log::warn!(
+                    "[sessio-runtime:computer-use] failed to prepare Pi extension for session={}: {}",
+                    sessio_runtime_session_id,
+                    error
+                );
+                None
+            }
+        }
+    }
+
     pub fn start_session(&self, req: StartAgentSession) -> Result<AgentSessionHandle> {
         if req.workspace_path.trim().is_empty() {
             bail!("workspace_path is required");
@@ -609,6 +655,8 @@ impl RuntimeManager {
                 ));
             }
             RuntimeTransportKind::PiRpc => {
+                let computer_use =
+                    self.prepare_pi_computer_use_extension(&id, &req.options, &capabilities);
                 let start = match (&req.source_session_id, req.source_agent) {
                     (Some(source_session_id), Some(source_agent)) if source_agent == req.agent => {
                         pi_rpc_transport::PiRpcSessionStart::Fork {
@@ -625,6 +673,7 @@ impl RuntimeManager {
                         workspace_path: req.workspace_path.clone(),
                         command: pi_rpc_transport::command_from_options(&req.options),
                         runtime_config: Some(runtime_config),
+                        computer_use,
                         start,
                     },
                 );
@@ -778,6 +827,11 @@ impl RuntimeManager {
                 ));
             }
             RuntimeTransportKind::PiRpc => {
+                let computer_use = self.prepare_pi_computer_use_extension(
+                    &req.sessio_runtime_session_id,
+                    &req.options,
+                    &capabilities,
+                );
                 let start = req
                     .agent_runtime_session_id
                     .as_ref()
@@ -802,6 +856,7 @@ impl RuntimeManager {
                         workspace_path: req.workspace_path.clone(),
                         command: pi_rpc_transport::command_from_options(&req.options),
                         runtime_config: Some(runtime_config),
+                        computer_use,
                         start,
                     },
                 );

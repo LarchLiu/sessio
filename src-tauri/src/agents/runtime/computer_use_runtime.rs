@@ -5,10 +5,11 @@
 //! ACP `session/new` injection. It:
 //!
 //! - parses the `computerUse` session option,
-//! - gates it on the agent's `mcp_injection.http` capability + product support,
+//! - gates ACP injection on `mcp_injection.http` and Pi injection on
+//!   `mcp_injection.native_extension`,
 //! - owns one desktop-started HTTP MCP server / attach broker (loopback),
 //! - issues a per-session bearer token and hands back a [`ComputerUseInjection`]
-//!   for `new_session_request` to attach,
+//!   for ACP `new_session_request` or Pi extension environment injection,
 //! - revokes the token on session teardown.
 //!
 //! Sessio starts the broker at app startup so external `sessio cu` clients can
@@ -46,6 +47,20 @@ pub fn should_inject(
     }
     capabilities
         .map(|caps| caps.mcp_injection.http)
+        .unwrap_or(false)
+}
+
+/// Whether a native agent extension (currently Pi) should be activated for this
+/// session.
+pub fn should_inject_native_extension(
+    options: &RuntimeMetadata,
+    capabilities: Option<&RuntimeCapabilitySet>,
+) -> bool {
+    if !computer_use_requested(options) {
+        return false;
+    }
+    capabilities
+        .map(|caps| caps.mcp_injection.native_extension)
         .unwrap_or(false)
 }
 
@@ -193,6 +208,26 @@ mod tests {
         assert!(should_inject(&options(json!(true)), Some(&caps(true))));
         // No capabilities probed.
         assert!(!should_inject(&options(json!(true)), None));
+    }
+
+    #[test]
+    fn native_extension_injection_requires_request_and_native_capability() {
+        let mut native = caps(false);
+        native.mcp_injection.native_extension = true;
+
+        assert!(should_inject_native_extension(
+            &options(json!(true)),
+            Some(&native)
+        ));
+        assert!(!should_inject_native_extension(
+            &RuntimeMetadata::new(),
+            Some(&native)
+        ));
+        assert!(!should_inject_native_extension(
+            &options(json!(true)),
+            Some(&caps(false))
+        ));
+        assert!(!should_inject_native_extension(&options(json!(true)), None));
     }
 
     fn runtime() -> ComputerUseRuntime {

@@ -19,6 +19,7 @@ pub mod lease;
 pub mod mcp_http;
 pub mod onboarding;
 pub mod permissions;
+pub mod pi_extension;
 pub mod platform;
 pub mod provider;
 pub mod settings;

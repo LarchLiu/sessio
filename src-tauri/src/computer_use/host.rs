@@ -678,7 +678,10 @@ impl ComputerUseHost {
     /// Clear the app-approval hint for a session once the user has responded or
     /// the session has moved on to a different target.
     pub fn clear_pending_app_approval(&self, session_id: &str) {
-        self.pending_app_approvals.lock().unwrap().remove(session_id);
+        self.pending_app_approvals
+            .lock()
+            .unwrap()
+            .remove(session_id);
     }
 
     fn note_pending_app_approval(&self, session_id: &str, app_id: &str) {
@@ -1234,7 +1237,10 @@ mod tests {
 
         let status = h.status("s1", &p);
         assert!(!status.has_lease);
-        assert_eq!(status.active_app_id.as_deref(), Some("com.example.installed"));
+        assert_eq!(
+            status.active_app_id.as_deref(),
+            Some("com.example.installed")
+        );
         assert!(!status.active_app_approved);
     }
 

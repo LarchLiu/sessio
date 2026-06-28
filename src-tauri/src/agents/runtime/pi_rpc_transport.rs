@@ -16,7 +16,8 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use super::manager::RuntimeManager;
 use super::types::{
     AgentAttachment, AgentAttachmentKind, AgentInput, AgentRuntimeEventPayload,
-    AgentRuntimeSessionConfig, RuntimeCapabilitySet, RuntimeError, RuntimeMetadata,
+    AgentRuntimeSessionConfig, ComputerUseInjection, RuntimeCapabilitySet, RuntimeError,
+    RuntimeMetadata,
 };
 use crate::app_paths;
 use crate::models::Agent;
@@ -70,7 +71,15 @@ pub struct PiRpcSessionSpec {
     pub workspace_path: String,
     pub command: String,
     pub runtime_config: Option<AgentRuntimeSessionConfig>,
+    pub computer_use: Option<PiRpcComputerUseExtension>,
     pub start: PiRpcSessionStart,
+}
+
+#[derive(Debug, Clone)]
+pub struct PiRpcComputerUseExtension {
+    pub injection: ComputerUseInjection,
+    pub extension_path: PathBuf,
+    pub sessio_runtime_session_id: String,
 }
 
 pub struct PiRpcSessionWorker {
@@ -190,9 +199,10 @@ async fn run_session(
         workspace_path,
         command,
         runtime_config,
+        computer_use,
         start,
     } = spec;
-    let spawned = spawn_pi_rpc_process(&command, &workspace_path)
+    let spawned = spawn_pi_rpc_process(&command, &workspace_path, computer_use.as_ref())
         .with_context(|| format!("failed to spawn Pi RPC command in workspace {workspace_path}"))?;
     let SpawnedPiRpcProcess {
         stdin,
@@ -1145,8 +1155,17 @@ fn kill_child_process_group(child: &mut TokioChild, group: &ChildProcessGroup) {
     let _ = child.start_kill();
 }
 
-fn spawn_pi_rpc_process(command: &str, workspace_path: &str) -> Result<SpawnedPiRpcProcess> {
+fn spawn_pi_rpc_process(
+    command: &str,
+    workspace_path: &str,
+    computer_use: Option<&PiRpcComputerUseExtension>,
+) -> Result<SpawnedPiRpcProcess> {
     let command = ensure_rpc_mode(command);
+    let command = if let Some(extension) = computer_use {
+        command_with_extension(&command, &extension.extension_path)
+    } else {
+        command
+    };
     let args = shell_words::split(&command)
         .with_context(|| format!("failed to parse Pi RPC command: {command}"))?;
     let (program, rest) = args
@@ -1161,6 +1180,18 @@ fn spawn_pi_rpc_process(command: &str, workspace_path: &str) -> Result<SpawnedPi
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    if let Some(extension) = computer_use {
+        child
+            .env("SESSIO_COMPUTER_USE_MCP_URL", &extension.injection.url)
+            .env(
+                "SESSIO_COMPUTER_USE_TOKEN",
+                &extension.injection.bearer_token,
+            )
+            .env(
+                "SESSIO_COMPUTER_USE_SESSION_ID",
+                &extension.sessio_runtime_session_id,
+            );
+    }
 
     let mut child = child
         .spawn()
@@ -1502,6 +1533,11 @@ fn ensure_rpc_mode(command: &str) -> String {
     } else {
         format!("{command} --mode rpc")
     }
+}
+
+fn command_with_extension(command: &str, extension_path: &Path) -> String {
+    let path = extension_path.to_string_lossy();
+    format!("{command} -e {}", shell_words::quote(&path))
 }
 
 fn response_id(value: &Value) -> Option<String> {
@@ -2031,6 +2067,35 @@ mod tests {
         assert!(text.contains("open -a"));
         assert!(text.contains("AppleScript"));
         assert!(text.ends_with("send the message"));
+    }
+
+    #[test]
+    fn command_with_extension_quotes_extension_path() {
+        let command = command_with_extension(
+            "pi --mode rpc",
+            Path::new("/tmp/Sessio Computer Use/sessio-computer-use.ts"),
+        );
+        let args = shell_words::split(&command).unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                "pi",
+                "--mode",
+                "rpc",
+                "-e",
+                "/tmp/Sessio Computer Use/sessio-computer-use.ts"
+            ]
+        );
+    }
+
+    #[test]
+    fn ensure_rpc_mode_then_extension_preserves_both_flags() {
+        let command = ensure_rpc_mode("pi");
+        let command = command_with_extension(&command, Path::new("/tmp/cu.ts"));
+        let args = shell_words::split(&command).unwrap();
+
+        assert_eq!(args, vec!["pi", "--mode", "rpc", "-e", "/tmp/cu.ts"]);
     }
 
     #[test]
