@@ -1306,28 +1306,42 @@ fn parse_computer_use(args: &[String]) -> Result<Cli> {
             )
         }
         "list-apps" => {
-            ensure_no_args(&args, "cu list-apps")?;
-            tool("computer_list_apps", serde_json::json!({}))
+            ensure_known_options(&args, &["--days"])?;
+            let mut value = serde_json::Map::new();
+            if let Some(days) = optional_i64_option(&args, "--days")? {
+                value.insert("days".into(), Value::Number(days.into()));
+            }
+            tool("computer_list_apps", Value::Object(value))
         }
         "start" => tool("computer_start", target_args(&args, true)?),
         "launch-app" => tool("computer_launch_app", target_args(&args, true)?),
         "get-app-state" => tool("computer_get_app_state", target_args(&args, false)?),
+        "click" => tool("computer_click", click_action_args(&args)?),
         "click-element" => tool("computer_click_element", {
-            ensure_known_options(&args, &["--snapshot-id", "--element-id"])?;
+            let args = normalize_ref_positional_args(&args)?;
+            ensure_known_options(&args, &["--snapshot-id", "--element-id", "--ref"])?;
             serde_json::json!({
                 "snapshotId": required_option(&args, "--snapshot-id")?,
-                "elementId": required_option(&args, "--element-id")?,
+                "elementId": required_option_any(&args, &["--element-id", "--ref"])?,
             })
         }),
         "click-at" => tool("computer_click_at", point_action_args(&args)?),
-        "secondary-click" => tool("computer_secondary_click", point_action_args(&args)?),
+        "secondary-click" => tool("computer_secondary_click", secondary_action_args(&args)?),
+        "perform-secondary-action" => tool(
+            "computer_perform_secondary_action",
+            secondary_action_args(&args)?,
+        ),
         "double-click" => tool("computer_double_click", point_action_args(&args)?),
         "drag" => tool("computer_drag", drag_action_args(&args)?),
         "set-value" => tool("computer_set_value", {
-            ensure_known_options(&args, &["--snapshot-id", "--element-id", "--value"])?;
+            let args = normalize_ref_positional_args(&args)?;
+            ensure_known_options(
+                &args,
+                &["--snapshot-id", "--element-id", "--ref", "--value"],
+            )?;
             serde_json::json!({
                 "snapshotId": required_option(&args, "--snapshot-id")?,
-                "elementId": required_option(&args, "--element-id")?,
+                "elementId": required_option_any(&args, &["--element-id", "--ref"])?,
                 "value": required_option(&args, "--value")?,
             })
         }),
@@ -1345,14 +1359,7 @@ fn parse_computer_use(args: &[String]) -> Result<Cli> {
                 "key": required_option(&args, "--key")?,
             })
         }),
-        "scroll" => tool("computer_scroll", {
-            ensure_known_options(&args, &["--snapshot-id", "--direction", "--amount"])?;
-            serde_json::json!({
-                "snapshotId": required_option(&args, "--snapshot-id")?,
-                "direction": required_option(&args, "--direction")?,
-                "amount": optional_i64_option(&args, "--amount")?.unwrap_or(0),
-            })
-        }),
+        "scroll" => tool("computer_scroll", scroll_action_args(&args)?),
         "stop" => {
             ensure_no_args(&args, "cu stop")?;
             tool("computer_stop", serde_json::json!({}))
@@ -1403,8 +1410,8 @@ fn parse_cu_connection(args: &[String]) -> Result<(CuConnection, Vec<String>)> {
 }
 
 fn target_args(args: &[String], app_required: bool) -> Result<Value> {
-    ensure_known_options(args, &["--app-id", "--window-id"])?;
-    let app_id = optional_option(args, "--app-id")?;
+    ensure_known_options(args, &["--app-id", "--bundle", "--window-id"])?;
+    let app_id = optional_option(args, "--app-id")?.or(optional_option(args, "--bundle")?);
     if app_required && app_id.is_none() {
         bail!("missing --app-id");
     }
@@ -1418,6 +1425,47 @@ fn target_args(args: &[String], app_required: bool) -> Result<Value> {
     Ok(Value::Object(value))
 }
 
+fn click_action_args(args: &[String]) -> Result<Value> {
+    let args = normalize_ref_positional_args(args)?;
+    ensure_known_options(
+        &args,
+        &[
+            "--snapshot-id",
+            "--element-id",
+            "--ref",
+            "--x",
+            "--y",
+            "--coord-space",
+        ],
+    )?;
+    let mut value = serde_json::json!({
+        "snapshotId": required_option(&args, "--snapshot-id")?,
+    });
+    let element_id = optional_option(&args, "--element-id")?.or(optional_option(&args, "--ref")?);
+    let x = optional_f64_option(&args, "--x")?;
+    let y = optional_f64_option(&args, "--y")?;
+    match (element_id, x, y) {
+        (Some(element_id), _, _) => {
+            value
+                .as_object_mut()
+                .expect("click args are an object")
+                .insert("elementId".into(), Value::String(element_id));
+        }
+        (None, Some(x), Some(y)) => {
+            let object = value.as_object_mut().expect("click args are an object");
+            object.insert("x".into(), value_from_f64(x, "--x")?);
+            object.insert("y".into(), value_from_f64(y, "--y")?);
+            insert_coord_space(&mut value, &args)?;
+        }
+        (None, _, _) => bail!("cu click requires --element-id or both --x and --y"),
+    }
+    Ok(value)
+}
+
+fn secondary_action_args(args: &[String]) -> Result<Value> {
+    click_action_args(args)
+}
+
 fn point_action_args(args: &[String]) -> Result<Value> {
     ensure_known_options(args, &["--snapshot-id", "--x", "--y", "--coord-space"])?;
     let mut value = serde_json::json!({
@@ -1427,6 +1475,62 @@ fn point_action_args(args: &[String]) -> Result<Value> {
     });
     insert_coord_space(&mut value, args)?;
     Ok(value)
+}
+
+fn scroll_action_args(args: &[String]) -> Result<Value> {
+    let args = normalize_ref_positional_args(args)?;
+    ensure_known_options(
+        &args,
+        &[
+            "--snapshot-id",
+            "--element-id",
+            "--ref",
+            "--direction",
+            "--amount",
+        ],
+    )?;
+    let mut value = serde_json::json!({
+        "snapshotId": required_option(&args, "--snapshot-id")?,
+        "direction": required_option(&args, "--direction")?,
+        "amount": optional_i64_option(&args, "--amount")?.unwrap_or(0),
+    });
+    if let Some(element_id) =
+        optional_option(&args, "--element-id")?.or(optional_option(&args, "--ref")?)
+    {
+        value
+            .as_object_mut()
+            .expect("scroll args are an object")
+            .insert("elementId".into(), Value::String(element_id));
+    }
+    Ok(value)
+}
+
+fn normalize_ref_positional_args(args: &[String]) -> Result<Vec<String>> {
+    let mut normalized = Vec::new();
+    let mut positional = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg.starts_with("--") {
+            normalized.push(arg.clone());
+            i += 1;
+            if i >= args.len() {
+                bail!("missing value for {arg}");
+            }
+            normalized.push(args[i].clone());
+        } else {
+            positional.push(arg.clone());
+        }
+        i += 1;
+    }
+    if positional.len() > 1 {
+        bail!("expected at most one element ref argument");
+    }
+    if let Some(element_ref) = positional.pop() {
+        normalized.push("--ref".into());
+        normalized.push(element_ref);
+    }
+    Ok(normalized)
 }
 
 fn drag_action_args(args: &[String]) -> Result<Value> {
@@ -1493,6 +1597,15 @@ fn required_option(args: &[String], flag: &str) -> Result<String> {
     optional_option(args, flag)?.with_context(|| format!("missing {flag}"))
 }
 
+fn required_option_any(args: &[String], flags: &[&str]) -> Result<String> {
+    for flag in flags {
+        if let Some(value) = optional_option(args, flag)? {
+            return Ok(value);
+        }
+    }
+    bail!("missing {}", flags.join("|"))
+}
+
 fn optional_option(args: &[String], flag: &str) -> Result<Option<String>> {
     let mut found = None;
     let mut i = 0;
@@ -1514,6 +1627,22 @@ fn required_f64_option(args: &[String], flag: &str) -> Result<f64> {
     let value = required_option(args, flag)?;
     value
         .parse::<f64>()
+        .with_context(|| format!("invalid number for {flag}: {value}"))
+}
+
+fn optional_f64_option(args: &[String], flag: &str) -> Result<Option<f64>> {
+    optional_option(args, flag)?
+        .map(|value| {
+            value
+                .parse::<f64>()
+                .with_context(|| format!("invalid number for {flag}: {value}"))
+        })
+        .transpose()
+}
+
+fn value_from_f64(value: f64, flag: &str) -> Result<Value> {
+    serde_json::Number::from_f64(value)
+        .map(Value::Number)
         .with_context(|| format!("invalid number for {flag}: {value}"))
 }
 
@@ -2550,19 +2679,21 @@ Usage:
   sessio cu status [--url <mcp-url>] [--token <token>] [--json]
   sessio cu permissions [--url <mcp-url>] [--token <token>] [--json]
   sessio cu grant --permission <screenshots|accessibility> [--url <mcp-url>] [--token <token>] [--json]
-  sessio cu list-apps [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu list-apps [--days <n>] [--url <mcp-url>] [--token <token>] [--json]
   sessio cu start --app-id <bundleId> [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
   sessio cu launch-app --app-id <bundleId> [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
   sessio cu get-app-state [--app-id <bundleId>] [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
-  sessio cu click-element --snapshot-id <id> --element-id <id> [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu click --snapshot-id <id> (<ref>|--element-id <id>|--x <px> --y <px>) [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu click-element --snapshot-id <id> (<ref>|--element-id <id>) [--url <mcp-url>] [--token <token>] [--json]
   sessio cu click-at --snapshot-id <id> --x <px> --y <px> [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
-  sessio cu secondary-click --snapshot-id <id> --x <px> --y <px> [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu secondary-click --snapshot-id <id> (<ref>|--element-id <id>|--x <px> --y <px>) [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu perform-secondary-action --snapshot-id <id> (<ref>|--element-id <id>|--x <px> --y <px>) [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
   sessio cu double-click --snapshot-id <id> --x <px> --y <px> [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
   sessio cu drag --snapshot-id <id> --from-x <px> --from-y <px> --to-x <px> --to-y <px> [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
-  sessio cu set-value --snapshot-id <id> --element-id <id> --value <text> [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu set-value --snapshot-id <id> (<ref>|--element-id <id>) --value <text> [--url <mcp-url>] [--token <token>] [--json]
   sessio cu type-text --snapshot-id <id> --text <text> [--url <mcp-url>] [--token <token>] [--json]
-  sessio cu press-key --snapshot-id <id> --key <key> [--url <mcp-url>] [--token <token>] [--json]
-  sessio cu scroll --snapshot-id <id> --direction <up|down|left|right> [--amount <n>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu press-key --snapshot-id <id> --key <key-or-chord> [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu scroll --snapshot-id <id> [<ref>|--element-id <id>] --direction <up|down|left|right> [--amount <n>] [--url <mcp-url>] [--token <token>] [--json]
   sessio cu stop [--url <mcp-url>] [--token <token>] [--json]
   sessio cu call --tool <computer_tool_name> [--args-json <json>] [--url <mcp-url>] [--token <token>] [--json]
   sessio config show [--json]
@@ -2633,6 +2764,163 @@ mod tests {
         assert_eq!(arguments["x"].as_f64(), Some(10.0));
         assert_eq!(arguments["y"].as_f64(), Some(20.0));
         assert_eq!(arguments["coordSpace"], "screen");
+    }
+
+    #[test]
+    fn parses_computer_use_unified_click_element_command() {
+        let cli = parse_args(args(&[
+            "cu",
+            "click",
+            "--snapshot-id",
+            "snap-1",
+            "--element-id",
+            "el-1",
+            "--x",
+            "10",
+            "--y",
+            "20",
+            "--url",
+            "http://127.0.0.1:9999/mcp",
+            "--token",
+            "token",
+            "--json",
+        ]))
+        .unwrap();
+
+        let Command::ComputerUse(ComputerUseCommand::Tool {
+            name, arguments, ..
+        }) = cli.command
+        else {
+            panic!("expected computer-use command");
+        };
+        assert_eq!(name, "computer_click");
+        assert_eq!(arguments["snapshotId"], "snap-1");
+        assert_eq!(arguments["elementId"], "el-1");
+        assert!(arguments.get("x").is_none());
+        assert!(arguments.get("y").is_none());
+    }
+
+    #[test]
+    fn parses_computer_use_unified_click_coordinate_command() {
+        let cli = parse_args(args(&[
+            "cu",
+            "click",
+            "--snapshot-id",
+            "snap-1",
+            "--x",
+            "10",
+            "--y",
+            "20",
+            "--coord-space",
+            "screen",
+        ]))
+        .unwrap();
+
+        let Command::ComputerUse(ComputerUseCommand::Tool {
+            name, arguments, ..
+        }) = cli.command
+        else {
+            panic!("expected computer-use command");
+        };
+        assert_eq!(name, "computer_click");
+        assert_eq!(arguments["snapshotId"], "snap-1");
+        assert_eq!(arguments["x"].as_f64(), Some(10.0));
+        assert_eq!(arguments["y"].as_f64(), Some(20.0));
+        assert_eq!(arguments["coordSpace"], "screen");
+    }
+
+    #[test]
+    fn parses_computer_use_click_positional_ref_command() {
+        let cli = parse_args(args(&["cu", "click", "--snapshot-id", "snap-1", "ax-7"])).unwrap();
+
+        let Command::ComputerUse(ComputerUseCommand::Tool {
+            name, arguments, ..
+        }) = cli.command
+        else {
+            panic!("expected computer-use command");
+        };
+        assert_eq!(name, "computer_click");
+        assert_eq!(arguments["snapshotId"], "snap-1");
+        assert_eq!(arguments["elementId"], "ax-7");
+    }
+
+    #[test]
+    fn parses_computer_use_perform_secondary_action_ref_command() {
+        let cli = parse_args(args(&[
+            "cu",
+            "perform-secondary-action",
+            "--snapshot-id",
+            "snap-1",
+            "--ref",
+            "ax-2",
+        ]))
+        .unwrap();
+
+        let Command::ComputerUse(ComputerUseCommand::Tool {
+            name, arguments, ..
+        }) = cli.command
+        else {
+            panic!("expected computer-use command");
+        };
+        assert_eq!(name, "computer_perform_secondary_action");
+        assert_eq!(arguments["snapshotId"], "snap-1");
+        assert_eq!(arguments["elementId"], "ax-2");
+    }
+
+    #[test]
+    fn parses_computer_use_scroll_ref_command() {
+        let cli = parse_args(args(&[
+            "cu",
+            "scroll",
+            "--snapshot-id",
+            "snap-1",
+            "ax-3",
+            "--direction",
+            "down",
+            "--amount",
+            "400",
+        ]))
+        .unwrap();
+
+        let Command::ComputerUse(ComputerUseCommand::Tool {
+            name, arguments, ..
+        }) = cli.command
+        else {
+            panic!("expected computer-use command");
+        };
+        assert_eq!(name, "computer_scroll");
+        assert_eq!(arguments["snapshotId"], "snap-1");
+        assert_eq!(arguments["elementId"], "ax-3");
+        assert_eq!(arguments["direction"], "down");
+        assert_eq!(arguments["amount"], 400);
+    }
+
+    #[test]
+    fn parses_computer_use_bundle_alias() {
+        let cli = parse_args(args(&["cu", "start", "--bundle", "com.example.app"])).unwrap();
+
+        let Command::ComputerUse(ComputerUseCommand::Tool {
+            name, arguments, ..
+        }) = cli.command
+        else {
+            panic!("expected computer-use command");
+        };
+        assert_eq!(name, "computer_start");
+        assert_eq!(arguments["appId"], "com.example.app");
+    }
+
+    #[test]
+    fn parses_computer_use_list_apps_days_hint() {
+        let cli = parse_args(args(&["cu", "list-apps", "--days", "14"])).unwrap();
+
+        let Command::ComputerUse(ComputerUseCommand::Tool {
+            name, arguments, ..
+        }) = cli.command
+        else {
+            panic!("expected computer-use command");
+        };
+        assert_eq!(name, "computer_list_apps");
+        assert_eq!(arguments["days"], 14);
     }
 
     #[test]

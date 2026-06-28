@@ -459,6 +459,22 @@ impl ComputerUseHost {
         self.capture_post_action_state(session_id, &target, perm)
     }
 
+    /// `computer_perform_secondary_action` / ref-targeted secondary click —
+    /// prefer AXShowMenu over coordinate right-click when the element is known.
+    pub fn secondary_click_element(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        element_id: &str,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<AppState, ComputerUseError> {
+        self.require_permission(perm, RequiredCapability::Inspect)?;
+        let target = self.require_control(session_id, snapshot, perm)?;
+        self.provider
+            .secondary_click_element(&target, &element_id.to_string())?;
+        self.capture_post_action_state(session_id, &target, perm)
+    }
+
     /// `computer_double_click` — double click a point in the latest snapshot's
     /// screenshot coordinate space by default.
     pub fn double_click(
@@ -554,6 +570,24 @@ impl ComputerUseHost {
     ) -> Result<AppState, ComputerUseError> {
         let target = self.require_control(session_id, snapshot, perm)?;
         self.provider.scroll(&target, direction, amount)?;
+        self.capture_post_action_state(session_id, &target, perm)
+    }
+
+    /// Ref-targeted scroll — uses AX scroll actions when available, with the
+    /// existing wheel path left as the coordinate-less fallback.
+    pub fn scroll_element(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        element_id: &str,
+        direction: ScrollDirection,
+        amount: i32,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<AppState, ComputerUseError> {
+        self.require_permission(perm, RequiredCapability::Inspect)?;
+        let target = self.require_control(session_id, snapshot, perm)?;
+        self.provider
+            .scroll_element(&target, &element_id.to_string(), direction, amount)?;
         self.capture_post_action_state(session_id, &target, perm)
     }
 
@@ -1000,6 +1034,38 @@ mod tests {
         assert_eq!(
             provider.actions(),
             vec!["set_value:com.example.app:el-1:42".to_string()]
+        );
+    }
+
+    #[test]
+    fn element_secondary_and_scroll_reach_provider() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app("s1", &target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let post_secondary = h
+            .secondary_click_element("s1", &SnapshotId(state.snapshot_id), "el-1", &p)
+            .unwrap();
+        h.scroll_element(
+            "s1",
+            &SnapshotId(post_secondary.snapshot_id),
+            "el-1",
+            ScrollDirection::Down,
+            300,
+            &p,
+        )
+        .unwrap();
+
+        assert_eq!(
+            provider.actions(),
+            vec![
+                "secondary_click_element:com.example.app:el-1".to_string(),
+                "scroll_element:com.example.app:el-1:Down:300".to_string(),
+            ]
         );
     }
 

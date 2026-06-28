@@ -90,7 +90,12 @@ pub struct UiElement {
     pub role: String,
     /// Human-visible label/title where available.
     pub label: Option<String>,
+    /// OS display-space bounds reported by Accessibility, when available.
     pub bounds: Option<Rect>,
+    /// Coordinate space for `bounds`. Element actions should pass `id` instead
+    /// of converting these bounds into screenshot pixels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounds_coordinate_space: Option<CoordinateSpace>,
     /// Whether the element is currently actionable (enabled + on-screen).
     pub actionable: bool,
 }
@@ -257,6 +262,12 @@ pub trait ComputerUseProvider: Send + Sync {
     fn click_point(&self, target: &AppTarget, point: Point) -> ProviderResult<()>;
     /// Secondary/right click a screen-space point.
     fn secondary_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()>;
+    /// Open an element's secondary/context action when AX exposes one.
+    fn secondary_click_element(
+        &self,
+        target: &AppTarget,
+        element: &ElementId,
+    ) -> ProviderResult<()>;
     /// Double click a screen-space point.
     fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()>;
     /// Drag between two screen-space points.
@@ -269,6 +280,14 @@ pub trait ComputerUseProvider: Send + Sync {
     fn scroll(
         &self,
         target: &AppTarget,
+        direction: ScrollDirection,
+        amount: i32,
+    ) -> ProviderResult<()>;
+    /// Scroll an accessibility element when AX exposes a scroll action.
+    fn scroll_element(
+        &self,
+        target: &AppTarget,
+        element: &ElementId,
         direction: ScrollDirection,
         amount: i32,
     ) -> ProviderResult<()>;
@@ -311,6 +330,7 @@ mod fake {
                         width: 80.0,
                         height: 24.0,
                     }),
+                    bounds_coordinate_space: Some(CoordinateSpace::Screen),
                     actionable: true,
                 }],
                 supports_control: true,
@@ -430,6 +450,20 @@ mod fake {
             ));
             Ok(())
         }
+        fn secondary_click_element(
+            &self,
+            target: &AppTarget,
+            element: &ElementId,
+        ) -> ProviderResult<()> {
+            if !self.elements.iter().any(|e| &e.id == element) {
+                return Err(ProviderError::ElementNotFound(element.clone()));
+            }
+            self.record(format!(
+                "secondary_click_element:{}:{}",
+                target.app_id, element
+            ));
+            Ok(())
+        }
         fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
             self.record(format!(
                 "double_click:{}:{}",
@@ -476,6 +510,22 @@ mod fake {
             self.record(format!(
                 "scroll:{}:{:?}:{}",
                 target.app_id, direction, amount
+            ));
+            Ok(())
+        }
+        fn scroll_element(
+            &self,
+            target: &AppTarget,
+            element: &ElementId,
+            direction: ScrollDirection,
+            amount: i32,
+        ) -> ProviderResult<()> {
+            if !self.elements.iter().any(|e| &e.id == element) {
+                return Err(ProviderError::ElementNotFound(element.clone()));
+            }
+            self.record(format!(
+                "scroll_element:{}:{}:{:?}:{}",
+                target.app_id, element, direction, amount
             ));
             Ok(())
         }

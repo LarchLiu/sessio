@@ -56,6 +56,14 @@ impl ComputerUseProvider for UnsupportedProvider {
         Err(ProviderError::Unsupported("secondary_click"))
     }
 
+    fn secondary_click_element(
+        &self,
+        _target: &AppTarget,
+        _element: &ElementId,
+    ) -> ProviderResult<()> {
+        Err(ProviderError::Unsupported("secondary_click_element"))
+    }
+
     fn double_click(&self, _target: &AppTarget, _point: Point) -> ProviderResult<()> {
         Err(ProviderError::Unsupported("double_click"))
     }
@@ -88,5 +96,15 @@ impl ComputerUseProvider for UnsupportedProvider {
         _amount: i32,
     ) -> ProviderResult<()> {
         Err(ProviderError::Unsupported("scroll"))
+    }
+
+    fn scroll_element(
+        &self,
+        _target: &AppTarget,
+        _element: &ElementId,
+        _direction: ScrollDirection,
+        _amount: i32,
+    ) -> ProviderResult<()> {
+        Err(ProviderError::Unsupported("scroll_element"))
     }
 }

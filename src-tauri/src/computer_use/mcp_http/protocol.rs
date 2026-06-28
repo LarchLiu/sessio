@@ -5,6 +5,7 @@
 //! `tools/call`. Parsing/serialization is pure so it is unit-testable without a
 //! socket; dispatch of `tools/call` into the host lives in [`super::dispatch`].
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -102,13 +103,24 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     let no_args = json!({ "type": "object", "properties": {}, "additionalProperties": false });
     let app_arg = json!({
         "type": "object",
-        "properties": { "appId": { "type": "string" }, "windowId": { "type": "string" } },
-        "required": ["appId"],
+        "properties": {
+            "appId": { "type": "string" },
+            "bundle": { "type": "string" },
+            "windowId": { "type": "string" }
+        },
+        "anyOf": [
+            { "required": ["appId"] },
+            { "required": ["bundle"] }
+        ],
         "additionalProperties": false
     });
     let optional_app_arg = json!({
         "type": "object",
-        "properties": { "appId": { "type": "string" }, "windowId": { "type": "string" } },
+        "properties": {
+            "appId": { "type": "string" },
+            "bundle": { "type": "string" },
+            "windowId": { "type": "string" }
+        },
         "additionalProperties": false
     });
     let grant_arg = json!({
@@ -120,6 +132,17 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             }
         },
         "required": ["permission"],
+        "additionalProperties": false
+    });
+    let list_apps_arg = json!({
+        "type": "object",
+        "properties": {
+            "days": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Compatibility hint for recent-app windows; the current in-process provider returns running plus installed apps."
+            }
+        },
         "additionalProperties": false
     });
     let snapshot_arg = |extra: Value| {
@@ -142,9 +165,29 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             "snapshotId": { "type": "string" },
             "x": { "type": "number" },
             "y": { "type": "number" },
-            "coordSpace": coord_space.clone()
+            "coordSpace": coord_space.clone(),
+            "coord_space": coord_space.clone()
         },
         "required": ["snapshotId", "x", "y"],
+        "additionalProperties": false
+    });
+    let click_arg = json!({
+        "type": "object",
+        "properties": {
+            "snapshotId": { "type": "string" },
+            "elementId": { "type": "string" },
+            "ref": { "type": "string" },
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "coordSpace": coord_space.clone(),
+            "coord_space": coord_space.clone()
+        },
+        "required": ["snapshotId"],
+        "anyOf": [
+            { "required": ["elementId"] },
+            { "required": ["ref"] },
+            { "required": ["x", "y"] }
+        ],
         "additionalProperties": false
     });
     let drag_arg = json!({
@@ -155,9 +198,29 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             "fromY": { "type": "number" },
             "toX": { "type": "number" },
             "toY": { "type": "number" },
-            "coordSpace": coord_space
+            "coordSpace": coord_space.clone(),
+            "coord_space": coord_space.clone()
         },
         "required": ["snapshotId", "fromX", "fromY", "toX", "toY"],
+        "additionalProperties": false
+    });
+    let secondary_arg = json!({
+        "type": "object",
+        "properties": {
+            "snapshotId": { "type": "string" },
+            "elementId": { "type": "string" },
+            "ref": { "type": "string" },
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "coordSpace": coord_space.clone(),
+            "coord_space": coord_space.clone()
+        },
+        "required": ["snapshotId"],
+        "anyOf": [
+            { "required": ["elementId"] },
+            { "required": ["ref"] },
+            { "required": ["x", "y"] }
+        ],
         "additionalProperties": false
     });
     vec![
@@ -178,8 +241,8 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "computer_list_apps",
-            description: "List applications that can be targeted for computer use.",
-            input_schema: no_args.clone(),
+            description: "List applications that can be targeted for computer use. Accepts days for skill compatibility; current results include running plus installed apps.",
+            input_schema: list_apps_arg,
         },
         ToolDefinition {
             name: "computer_start",
@@ -197,19 +260,29 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             input_schema: optional_app_arg,
         },
         ToolDefinition {
+            name: "computer_click",
+            description: "Click using the most reliable target from the latest snapshot. Prefer elementId from the AX element tree; use x/y screenshot pixels only when no suitable AX element exists.",
+            input_schema: click_arg.clone(),
+        },
+        ToolDefinition {
             name: "computer_click_element",
-            description: "Click an accessibility element from the latest snapshot.",
+            description: "Click an accessibility element from the latest snapshot. This is AX-first and avoids screenshot coordinate guessing.",
             input_schema: snapshot_arg(json!({ "elementId": { "type": "string" } })),
         },
         ToolDefinition {
             name: "computer_click_at",
-            description: "Click a point from the latest snapshot. Coordinates default to screenshot pixels and are mapped to screen points by the host.",
+            description: "Fallback click by screenshot pixel from the latest snapshot. Prefer computer_click with elementId when an AX element is available.",
             input_schema: point_action_arg.clone(),
         },
         ToolDefinition {
             name: "computer_secondary_click",
-            description: "Secondary/right click a point from the latest snapshot. Coordinates default to screenshot pixels.",
-            input_schema: point_action_arg.clone(),
+            description: "Secondary/right click or open a context menu. Prefer elementId/ref so AXShowMenu can be used; x/y screenshot pixels are the fallback.",
+            input_schema: secondary_arg,
+        },
+        ToolDefinition {
+            name: "computer_perform_secondary_action",
+            description: "Skill-compatible alias for computer_secondary_click. Prefer elementId/ref so AXShowMenu can be used; x/y screenshot pixels are the fallback.",
+            input_schema: click_arg.clone(),
         },
         ToolDefinition {
             name: "computer_double_click",
@@ -226,6 +299,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             description: "Set an accessibility element's value directly from the latest snapshot.",
             input_schema: snapshot_arg(json!({
                 "elementId": { "type": "string" },
+                "ref": { "type": "string" },
                 "value": { "type": "string" }
             })),
         },
@@ -243,6 +317,8 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             name: "computer_scroll",
             description: "Scroll the target in a direction by an amount against the latest snapshot.",
             input_schema: snapshot_arg(json!({
+                "elementId": { "type": "string" },
+                "ref": { "type": "string" },
                 "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
                 "amount": { "type": "integer" }
             })),
@@ -264,9 +340,11 @@ pub const TOOL_DEFINITIONS: &[&str] = &[
     "computer_start",
     "computer_launch_app",
     "computer_get_app_state",
+    "computer_click",
     "computer_click_element",
     "computer_click_at",
     "computer_secondary_click",
+    "computer_perform_secondary_action",
     "computer_double_click",
     "computer_drag",
     "computer_set_value",
@@ -312,6 +390,42 @@ pub fn tool_json_result(value: Value) -> Value {
         "content": [{ "type": "text", "text": value.to_string() }],
         "structuredContent": value,
     })
+}
+
+/// Wrap app-state JSON and append the screenshot as inline MCP image content
+/// when the screenshot handle points at a readable local file.
+pub fn tool_app_state_result(value: Value) -> Value {
+    let mut content = vec![json!({ "type": "text", "text": value.to_string() })];
+    if let Some(image) = screenshot_image_content(&value) {
+        content.push(image);
+    }
+    json!({
+        "content": content,
+        "structuredContent": value,
+    })
+}
+
+fn screenshot_image_content(value: &Value) -> Option<Value> {
+    let screenshot = value.get("screenshot")?;
+    let handle = screenshot.get("handle")?.as_str()?;
+    let format = screenshot
+        .get("format")
+        .and_then(|value| value.as_str())
+        .unwrap_or("png");
+    let mime_type = match format.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => return None,
+    };
+    let bytes = std::fs::read(handle).ok()?;
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Some(json!({
+        "type": "image",
+        "data": data,
+        "mimeType": mime_type,
+    }))
 }
 
 /// Wrap a tool error into the MCP `tools/call` error-content shape (isError).
@@ -383,6 +497,29 @@ mod tests {
             result["content"][0]["text"].as_str().unwrap(),
             r#"{"snapshotId":"s1"}"#
         );
+    }
+
+    #[test]
+    fn app_state_result_inlines_readable_screenshot_image() {
+        let path = std::env::temp_dir().join(format!(
+            "sessio-mcp-image-test-{}-{}.png",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, [1_u8, 2, 3]).unwrap();
+        let result = tool_app_state_result(json!({
+            "snapshotId": "snap-1",
+            "screenshot": {
+                "handle": path.to_string_lossy(),
+                "format": "png"
+            }
+        }));
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result["content"][0]["type"], "text");
+        assert_eq!(result["content"][1]["type"], "image");
+        assert_eq!(result["content"][1]["mimeType"], "image/png");
+        assert_eq!(result["content"][1]["data"], "AQID");
     }
 
     #[test]

@@ -23,12 +23,14 @@ use std::time::Duration;
 
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, TCFType};
+use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
-    CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField, ScrollEventUnit,
+    CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
+    ScrollEventUnit,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
@@ -38,6 +40,12 @@ use crate::computer_use::provider::{
     ElementId, InstalledApp, Point, ProviderError, ProviderResult, RawAppState, Rect,
     ScreenshotRef, ScrollDirection, UiElement,
 };
+
+#[derive(Clone)]
+struct FrontmostApp {
+    pid: i32,
+    app: objc2::rc::Retained<objc2_app_kit::NSRunningApplication>,
+}
 
 /// The macOS provider. Stateless: every call re-reads live system state.
 pub struct MacosProvider {
@@ -99,29 +107,36 @@ impl ComputerUseProvider for MacosProvider {
 
     fn click_element(&self, target: &AppTarget, element: &ElementId) -> ProviderResult<()> {
         let pid = resolve_pid(&target.app_id)?;
-        let center = ax_element_center(pid, element)?
-            .ok_or_else(|| ProviderError::ElementNotFound(element.clone()))?;
-        left_click_at(center)
+        click_ax_element(pid, element)
     }
 
     fn click_point(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
-        let _pid = resolve_pid(&target.app_id)?;
-        left_click_at(cg_point(point))
+        let pid = resolve_pid(&target.app_id)?;
+        left_click_at(Some(pid), cg_point(point))
     }
 
     fn secondary_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
-        let _pid = resolve_pid(&target.app_id)?;
-        secondary_click_at(cg_point(point))
+        let pid = resolve_pid(&target.app_id)?;
+        secondary_click_at(Some(pid), cg_point(point))
+    }
+
+    fn secondary_click_element(
+        &self,
+        target: &AppTarget,
+        element: &ElementId,
+    ) -> ProviderResult<()> {
+        let pid = resolve_pid(&target.app_id)?;
+        secondary_ax_element(pid, element)
     }
 
     fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
-        let _pid = resolve_pid(&target.app_id)?;
-        double_click_at(cg_point(point))
+        let pid = resolve_pid(&target.app_id)?;
+        double_click_at(Some(pid), cg_point(point))
     }
 
     fn drag(&self, target: &AppTarget, from: Point, to: Point) -> ProviderResult<()> {
-        let _pid = resolve_pid(&target.app_id)?;
-        drag_between(cg_point(from), cg_point(to))
+        let pid = resolve_pid(&target.app_id)?;
+        drag_between(Some(pid), cg_point(from), cg_point(to))
     }
 
     fn set_value(
@@ -134,23 +149,37 @@ impl ComputerUseProvider for MacosProvider {
         set_ax_value_for_id(pid, element, value)
     }
 
-    fn type_text(&self, _target: &AppTarget, text: &str) -> ProviderResult<()> {
-        type_unicode(text)
+    fn type_text(&self, target: &AppTarget, text: &str) -> ProviderResult<()> {
+        let pid = resolve_pid(&target.app_id)?;
+        type_unicode(Some(pid), text)
     }
 
-    fn press_key(&self, _target: &AppTarget, key: &str) -> ProviderResult<()> {
-        let keycode =
-            keycode_for(key).ok_or_else(|| ProviderError::Failed(format!("unknown key: {key}")))?;
-        press_keycode(keycode)
+    fn press_key(&self, target: &AppTarget, key: &str) -> ProviderResult<()> {
+        let pid = resolve_pid(&target.app_id)?;
+        let (keycode, flags) = keycode_and_flags_for(key)
+            .ok_or_else(|| ProviderError::Failed(format!("unknown key: {key}")))?;
+        press_keycode(Some(pid), keycode, flags)
     }
 
     fn scroll(
         &self,
-        _target: &AppTarget,
+        target: &AppTarget,
         direction: ScrollDirection,
         amount: i32,
     ) -> ProviderResult<()> {
-        scroll_wheel(direction, amount)
+        let pid = resolve_pid(&target.app_id)?;
+        scroll_wheel(Some(pid), direction, amount)
+    }
+
+    fn scroll_element(
+        &self,
+        target: &AppTarget,
+        element: &ElementId,
+        direction: ScrollDirection,
+        amount: i32,
+    ) -> ProviderResult<()> {
+        let pid = resolve_pid(&target.app_id)?;
+        scroll_ax_element(pid, element, direction, amount)
     }
 }
 
@@ -526,6 +555,20 @@ mod ax {
     pub const SIZE: &str = "AXSize";
     pub const ENABLED: &str = "AXEnabled";
     pub const VALUE: &str = "AXValue";
+    pub const ENHANCED_USER_INTERFACE: &str = "AXEnhancedUserInterface";
+    pub const MANUAL_ACCESSIBILITY: &str = "AXManualAccessibility";
+    pub const PRESS_ACTION: &str = "AXPress";
+    pub const SHOW_MENU_ACTION: &str = "AXShowMenu";
+    pub const SCROLL_TO_VISIBLE_ACTION: &str = "AXScrollToVisible";
+    pub const SCROLL_UP_ACTION: &str = "AXScrollUp";
+    pub const SCROLL_DOWN_ACTION: &str = "AXScrollDown";
+    pub const SCROLL_LEFT_ACTION: &str = "AXScrollLeft";
+    pub const SCROLL_RIGHT_ACTION: &str = "AXScrollRight";
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        pub fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
+    }
 }
 
 /// Walk the AX tree for an app and flatten a conservative set of actionable
@@ -537,6 +580,7 @@ fn ax_elements_for_pid(pid: i32) -> Option<Vec<UiElement>> {
     if root.is_null() {
         return None;
     }
+    enable_electron_accessibility_flags(root);
     let mut out = Vec::new();
     let mut next_id = 0u64;
     walk_ax(root, 0, &mut next_id, &mut out);
@@ -564,6 +608,7 @@ fn walk_ax(element: ax::AXUIElementRef, depth: usize, next_id: &mut u64, out: &m
             role: role.clone(),
             label,
             bounds,
+            bounds_coordinate_space: bounds.map(|_| CoordinateSpace::Screen),
             actionable: enabled,
         });
     }
@@ -745,31 +790,98 @@ fn ax_element_center(pid: i32, element_id: &ElementId) -> ProviderResult<Option<
     }
 }
 
+fn click_ax_element(pid: i32, element_id: &ElementId) -> ProviderResult<()> {
+    let action = perform_ax_action_for_id(pid, element_id, ax::PRESS_ACTION)?;
+    if action == ax::kAXErrorSuccess {
+        return Ok(());
+    }
+    match ax_element_center(pid, element_id)? {
+        Some(center) => left_click_at(Some(pid), center),
+        None => Err(ProviderError::ElementNotFound(element_id.clone())),
+    }
+}
+
+fn secondary_ax_element(pid: i32, element_id: &ElementId) -> ProviderResult<()> {
+    let action = perform_ax_action_for_id(pid, element_id, ax::SHOW_MENU_ACTION)?;
+    if action == ax::kAXErrorSuccess {
+        return Ok(());
+    }
+    match ax_element_center(pid, element_id)? {
+        Some(center) => secondary_click_at(Some(pid), center),
+        None => Err(ProviderError::ElementNotFound(element_id.clone())),
+    }
+}
+
+fn scroll_ax_element(
+    pid: i32,
+    element_id: &ElementId,
+    direction: ScrollDirection,
+    amount: i32,
+) -> ProviderResult<()> {
+    let action = match direction {
+        ScrollDirection::Up => ax::SCROLL_UP_ACTION,
+        ScrollDirection::Down => ax::SCROLL_DOWN_ACTION,
+        ScrollDirection::Left => ax::SCROLL_LEFT_ACTION,
+        ScrollDirection::Right => ax::SCROLL_RIGHT_ACTION,
+    };
+    let result = perform_ax_action_for_id(pid, element_id, action)?;
+    if result == ax::kAXErrorSuccess {
+        return Ok(());
+    }
+    let visible = perform_ax_action_for_id(pid, element_id, ax::SCROLL_TO_VISIBLE_ACTION)?;
+    if visible == ax::kAXErrorSuccess {
+        return Ok(());
+    }
+    scroll_wheel(Some(pid), direction, amount)
+}
+
 fn set_ax_value_for_id(pid: i32, element_id: &ElementId, value: &str) -> ProviderResult<()> {
+    let result = with_ax_element_by_id(pid, element_id, |element| {
+        Some(ax_set_string_value(element, value))
+    })?;
+    match result {
+        ax::kAXErrorSuccess => Ok(()),
+        err => Err(ProviderError::Failed(format!(
+            "set AXValue failed for {element_id}: AXError {err}"
+        ))),
+    }
+}
+
+fn perform_ax_action_for_id(
+    pid: i32,
+    element_id: &ElementId,
+    action: &str,
+) -> ProviderResult<ax::AXError> {
+    with_ax_element_by_id(pid, element_id, |element| {
+        let action = CFString::new(action);
+        Some(unsafe { ax::AXUIElementPerformAction(element, action.as_concrete_TypeRef()) })
+    })
+}
+
+fn with_ax_element_by_id<T>(
+    pid: i32,
+    element_id: &ElementId,
+    mut f: impl FnMut(ax::AXUIElementRef) -> Option<T>,
+) -> ProviderResult<T> {
     use core_foundation::base::CFTypeRef;
     let root = unsafe { ax::AXUIElementCreateApplication(pid) };
     if root.is_null() {
         return Err(ProviderError::ElementNotFound(element_id.clone()));
     }
+    enable_electron_accessibility_flags(root);
     let mut next_id = 0u64;
-    let result = set_ax_value_walk(root, 0, &mut next_id, element_id, value);
+    let result = with_ax_element_walk(root, 0, &mut next_id, element_id, &mut f);
     unsafe { cf_release(root as CFTypeRef) };
-    match result {
-        Some(ax::kAXErrorSuccess) => Ok(()),
-        Some(err) => Err(ProviderError::Failed(format!(
-            "set AXValue failed for {element_id}: AXError {err}"
-        ))),
-        None => Err(ProviderError::ElementNotFound(element_id.clone())),
-    }
+    result.ok_or_else(|| ProviderError::ElementNotFound(element_id.clone()))
 }
 
-fn set_ax_value_walk(
+fn with_ax_element_walk<T>(
     element: ax::AXUIElementRef,
     depth: usize,
     next_id: &mut u64,
     element_id: &ElementId,
-    value: &str,
-) -> Option<ax::AXError> {
+    f: &mut impl FnMut(ax::AXUIElementRef) -> Option<T>,
+) -> Option<T> {
     if depth > AX_MAX_DEPTH || *next_id as usize >= AX_MAX_ELEMENTS {
         return None;
     }
@@ -777,12 +889,12 @@ fn set_ax_value_walk(
     if is_actionable_role(&role) {
         *next_id += 1;
         if format!("ax-{}", *next_id) == *element_id {
-            return Some(ax_set_string_value(element, value));
+            return f(element);
         }
     }
     if let Some(children) = ax_children(element) {
         for child in children {
-            if let Some(result) = set_ax_value_walk(child, depth + 1, next_id, element_id, value) {
+            if let Some(result) = with_ax_element_walk(child, depth + 1, next_id, element_id, f) {
                 return Some(result);
             }
         }
@@ -795,6 +907,16 @@ fn ax_set_string_value(element: ax::AXUIElementRef, value: &str) -> ax::AXError 
     let value = CFString::new(value);
     unsafe {
         ax::AXUIElementSetAttributeValue(element, attr.as_concrete_TypeRef(), value.as_CFTypeRef())
+    }
+}
+
+fn enable_electron_accessibility_flags(root: ax::AXUIElementRef) {
+    let value = CFBoolean::true_value();
+    for attr in [ax::ENHANCED_USER_INTERFACE, ax::MANUAL_ACCESSIBILITY] {
+        let attr = CFString::new(attr);
+        let _ = unsafe {
+            ax::AXUIElementSetAttributeValue(root, attr.as_concrete_TypeRef(), value.as_CFTypeRef())
+        };
     }
 }
 
@@ -819,8 +941,9 @@ fn cg_point(point: Point) -> CGPoint {
     }
 }
 
-fn left_click_at(point: CGPoint) -> ProviderResult<()> {
+fn left_click_at(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
     mouse_click_at(
+        pid,
         point,
         CGMouseButton::Left,
         CGEventType::LeftMouseDown,
@@ -829,8 +952,9 @@ fn left_click_at(point: CGPoint) -> ProviderResult<()> {
     )
 }
 
-fn secondary_click_at(point: CGPoint) -> ProviderResult<()> {
+fn secondary_click_at(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
     mouse_click_at(
+        pid,
         point,
         CGMouseButton::Right,
         CGEventType::RightMouseDown,
@@ -840,6 +964,7 @@ fn secondary_click_at(point: CGPoint) -> ProviderResult<()> {
 }
 
 fn mouse_click_at(
+    pid: Option<i32>,
     point: CGPoint,
     button: CGMouseButton,
     down_type: CGEventType,
@@ -853,12 +978,11 @@ fn mouse_click_at(
         .map_err(|_| ProviderError::Failed("create mouse-up".into()))?;
     down.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
     up.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
-    down.post(CGEventTapLocation::HID);
-    up.post(CGEventTapLocation::HID);
+    post_event_sequence(pid, &[&down, &up]);
     Ok(())
 }
 
-fn double_click_at(point: CGPoint) -> ProviderResult<()> {
+fn double_click_at(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
     let source = event_source()?;
     for click_state in [1, 2] {
         let down = CGEvent::new_mouse_event(
@@ -877,14 +1001,13 @@ fn double_click_at(point: CGPoint) -> ProviderResult<()> {
         .map_err(|_| ProviderError::Failed("create double-click mouse-up".into()))?;
         down.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
         up.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
-        down.post(CGEventTapLocation::HID);
-        up.post(CGEventTapLocation::HID);
+        post_event_sequence(pid, &[&down, &up]);
         thread::sleep(Duration::from_millis(40));
     }
     Ok(())
 }
 
-fn drag_between(from: CGPoint, to: CGPoint) -> ProviderResult<()> {
+fn drag_between(pid: Option<i32>, from: CGPoint, to: CGPoint) -> ProviderResult<()> {
     let source = event_source()?;
     let down = CGEvent::new_mouse_event(
         source.clone(),
@@ -902,37 +1025,40 @@ fn drag_between(from: CGPoint, to: CGPoint) -> ProviderResult<()> {
     .map_err(|_| ProviderError::Failed("create mouse-dragged".into()))?;
     let up = CGEvent::new_mouse_event(source, CGEventType::LeftMouseUp, to, CGMouseButton::Left)
         .map_err(|_| ProviderError::Failed("create drag mouse-up".into()))?;
-    down.post(CGEventTapLocation::HID);
+    let original_frontmost = frontmost_app();
+    post_event(pid, &down);
     thread::sleep(Duration::from_millis(20));
-    drag.post(CGEventTapLocation::HID);
+    post_event(pid, &drag);
     thread::sleep(Duration::from_millis(20));
-    up.post(CGEventTapLocation::HID);
+    post_event(pid, &up);
+    restore_frontmost_if_changed(original_frontmost);
     Ok(())
 }
 
-fn type_unicode(text: &str) -> ProviderResult<()> {
+fn type_unicode(pid: Option<i32>, text: &str) -> ProviderResult<()> {
     let source = event_source()?;
     // A single keyboard event carrying the unicode string is the simplest
     // reliable path for arbitrary text (no per-char keycode mapping).
     let event = CGEvent::new_keyboard_event(source, 0, true)
         .map_err(|_| ProviderError::Failed("create keyboard event".into()))?;
     event.set_string(text);
-    event.post(CGEventTapLocation::HID);
+    post_event_sequence(pid, &[&event]);
     Ok(())
 }
 
-fn press_keycode(keycode: u16) -> ProviderResult<()> {
+fn press_keycode(pid: Option<i32>, keycode: u16, flags: CGEventFlags) -> ProviderResult<()> {
     let source = event_source()?;
     let down = CGEvent::new_keyboard_event(source.clone(), keycode, true)
         .map_err(|_| ProviderError::Failed("create key-down".into()))?;
     let up = CGEvent::new_keyboard_event(source, keycode, false)
         .map_err(|_| ProviderError::Failed("create key-up".into()))?;
-    down.post(CGEventTapLocation::HID);
-    up.post(CGEventTapLocation::HID);
+    down.set_flags(flags);
+    up.set_flags(flags);
+    post_event_sequence(pid, &[&down, &up]);
     Ok(())
 }
 
-fn scroll_wheel(direction: ScrollDirection, amount: i32) -> ProviderResult<()> {
+fn scroll_wheel(pid: Option<i32>, direction: ScrollDirection, amount: i32) -> ProviderResult<()> {
     let source = event_source()?;
     let (dy, dx) = match direction {
         ScrollDirection::Up => (amount, 0),
@@ -942,14 +1068,118 @@ fn scroll_wheel(direction: ScrollDirection, amount: i32) -> ProviderResult<()> {
     };
     let event = CGEvent::new_scroll_event(source, ScrollEventUnit::PIXEL, 2, dy, dx, 0)
         .map_err(|_| ProviderError::Failed("create scroll event".into()))?;
-    event.post(CGEventTapLocation::HID);
+    post_event_sequence(pid, &[&event]);
     Ok(())
 }
 
+fn post_event_sequence(pid: Option<i32>, events: &[&CGEvent]) {
+    let original_frontmost = frontmost_app();
+    for event in events {
+        post_event(pid, event);
+    }
+    restore_frontmost_if_changed(original_frontmost);
+}
+
+fn post_event(pid: Option<i32>, event: &CGEvent) {
+    if let Some(pid) = pid {
+        event.post_to_pid(pid);
+    } else {
+        event.post(CGEventTapLocation::HID);
+    }
+}
+
+fn frontmost_app() -> Option<FrontmostApp> {
+    use objc2_app_kit::NSWorkspace;
+    let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    Some(FrontmostApp {
+        pid: app.processIdentifier(),
+        app,
+    })
+}
+
+fn restore_frontmost_if_changed(original: Option<FrontmostApp>) {
+    let Some(original) = original else {
+        return;
+    };
+    thread::sleep(Duration::from_millis(10));
+    if frontmost_app()
+        .map(|current| current.pid == original.pid)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let _ = original
+        .app
+        .activateWithOptions(objc2_app_kit::NSApplicationActivationOptions(0));
+}
+
 /// Minimal keycode map for common named keys (US layout virtual keycodes).
+fn keycode_and_flags_for(key: &str) -> Option<(u16, CGEventFlags)> {
+    let mut flags = CGEventFlags::empty();
+    let parts: Vec<&str> = key
+        .split(['+', '-'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    let key_part = if parts.is_empty() {
+        key
+    } else {
+        let mut key_part = None;
+        for part in parts {
+            match part.to_ascii_lowercase().as_str() {
+                "cmd" | "command" | "meta" => flags |= CGEventFlags::CGEventFlagCommand,
+                "ctrl" | "control" => flags |= CGEventFlags::CGEventFlagControl,
+                "shift" => flags |= CGEventFlags::CGEventFlagShift,
+                "alt" | "option" => flags |= CGEventFlags::CGEventFlagAlternate,
+                _ => key_part = Some(part),
+            }
+        }
+        key_part?
+    };
+    keycode_for(key_part).map(|keycode| (keycode, flags))
+}
+
 fn keycode_for(key: &str) -> Option<u16> {
     let k = key.to_ascii_lowercase();
     Some(match k.as_str() {
+        "a" => 0x00,
+        "s" => 0x01,
+        "d" => 0x02,
+        "f" => 0x03,
+        "h" => 0x04,
+        "g" => 0x05,
+        "z" => 0x06,
+        "x" => 0x07,
+        "c" => 0x08,
+        "v" => 0x09,
+        "b" => 0x0B,
+        "q" => 0x0C,
+        "w" => 0x0D,
+        "e" => 0x0E,
+        "r" => 0x0F,
+        "y" => 0x10,
+        "t" => 0x11,
+        "1" => 0x12,
+        "2" => 0x13,
+        "3" => 0x14,
+        "4" => 0x15,
+        "6" => 0x16,
+        "5" => 0x17,
+        "=" => 0x18,
+        "9" => 0x19,
+        "7" => 0x1A,
+        "-" => 0x1B,
+        "8" => 0x1C,
+        "0" => 0x1D,
+        "o" => 0x1F,
+        "u" => 0x20,
+        "i" => 0x22,
+        "p" => 0x23,
+        "l" => 0x25,
+        "j" => 0x26,
+        "k" => 0x28,
+        "n" => 0x2D,
+        "m" => 0x2E,
         "return" | "enter" => 0x24,
         "tab" => 0x30,
         "space" => 0x31,
@@ -981,7 +1211,20 @@ mod tests {
         assert_eq!(keycode_for("Enter"), Some(0x24));
         assert_eq!(keycode_for("escape"), Some(0x35));
         assert_eq!(keycode_for("Up"), Some(0x7E));
+        assert_eq!(keycode_for("s"), Some(0x01));
         assert_eq!(keycode_for("unknown-key"), None);
+    }
+
+    #[test]
+    fn key_chord_parser_resolves_modifiers() {
+        let (keycode, flags) = keycode_and_flags_for("cmd+s").unwrap();
+        assert_eq!(keycode, 0x01);
+        assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
+
+        let (keycode, flags) = keycode_and_flags_for("ctrl+shift+t").unwrap();
+        assert_eq!(keycode, 0x11);
+        assert!(flags.contains(CGEventFlags::CGEventFlagControl));
+        assert!(flags.contains(CGEventFlags::CGEventFlagShift));
     }
 
     #[test]

@@ -16,8 +16,8 @@ use crate::computer_use::provider::{AppTarget, CoordinateSpace, Point, ScrollDir
 use crate::desktop_control::DesktopControlPermissionStatus;
 
 use super::protocol::{
-    initialize_result, tool_error_result, tool_json_result, tool_text_result, tools_list_result,
-    McpRequest, McpResponse,
+    initialize_result, tool_app_state_result, tool_error_result, tool_json_result,
+    tool_text_result, tools_list_result, McpRequest, McpResponse,
 };
 
 /// Route an MCP request for `session_id` to the host.
@@ -122,17 +122,31 @@ fn run_tool(
                 None => host.get_app_state(session_id, perm),
             }
             .map_err(host_error_message)?;
-            Ok(tool_json_result(
+            Ok(tool_app_state_result(
+                serde_json::to_value(&state).unwrap_or_default(),
+            ))
+        }
+        "computer_click" => {
+            let snapshot = parse_snapshot(args)?;
+            let state = if let Some(element) = optional_element_ref(args) {
+                host.click_element(session_id, &snapshot, &element, perm)
+            } else {
+                let point = parse_point(args, "x", "y")?;
+                let coord_space = parse_coordinate_space(args)?;
+                host.click_at(session_id, &snapshot, point, coord_space, perm)
+            }
+            .map_err(host_error_message)?;
+            Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
         }
         "computer_click_element" => {
             let snapshot = parse_snapshot(args)?;
-            let element = arg_str(args, "elementId")?;
+            let element = arg_element_ref(args)?;
             let state = host
                 .click_element(session_id, &snapshot, &element, perm)
                 .map_err(host_error_message)?;
-            Ok(tool_json_result(
+            Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
         }
@@ -143,18 +157,21 @@ fn run_tool(
             let state = host
                 .click_at(session_id, &snapshot, point, coord_space, perm)
                 .map_err(host_error_message)?;
-            Ok(tool_json_result(
+            Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
         }
-        "computer_secondary_click" => {
+        "computer_secondary_click" | "computer_perform_secondary_action" => {
             let snapshot = parse_snapshot(args)?;
-            let point = parse_point(args, "x", "y")?;
-            let coord_space = parse_coordinate_space(args)?;
-            let state = host
-                .secondary_click(session_id, &snapshot, point, coord_space, perm)
-                .map_err(host_error_message)?;
-            Ok(tool_json_result(
+            let state = if let Some(element) = optional_element_ref(args) {
+                host.secondary_click_element(session_id, &snapshot, &element, perm)
+            } else {
+                let point = parse_point(args, "x", "y")?;
+                let coord_space = parse_coordinate_space(args)?;
+                host.secondary_click(session_id, &snapshot, point, coord_space, perm)
+            }
+            .map_err(host_error_message)?;
+            Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
         }
@@ -165,7 +182,7 @@ fn run_tool(
             let state = host
                 .double_click(session_id, &snapshot, point, coord_space, perm)
                 .map_err(host_error_message)?;
-            Ok(tool_json_result(
+            Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
         }
@@ -177,18 +194,18 @@ fn run_tool(
             let state = host
                 .drag(session_id, &snapshot, from, to, coord_space, perm)
                 .map_err(host_error_message)?;
-            Ok(tool_json_result(
+            Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
         }
         "computer_set_value" => {
             let snapshot = parse_snapshot(args)?;
-            let element = arg_str(args, "elementId")?;
+            let element = arg_element_ref(args)?;
             let value = arg_str(args, "value")?;
             let state = host
                 .set_value(session_id, &snapshot, &element, &value, perm)
                 .map_err(host_error_message)?;
-            Ok(tool_json_result(
+            Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
         }
@@ -198,7 +215,7 @@ fn run_tool(
             let state = host
                 .type_text(session_id, &snapshot, &text, perm)
                 .map_err(host_error_message)?;
-            Ok(tool_json_result(
+            Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
         }
@@ -208,7 +225,7 @@ fn run_tool(
             let state = host
                 .press_key(session_id, &snapshot, &key, perm)
                 .map_err(host_error_message)?;
-            Ok(tool_json_result(
+            Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
         }
@@ -216,10 +233,13 @@ fn run_tool(
             let snapshot = parse_snapshot(args)?;
             let direction = parse_direction(args)?;
             let amount = args.get("amount").and_then(|a| a.as_i64()).unwrap_or(0) as i32;
-            let state = host
-                .scroll(session_id, &snapshot, direction, amount, perm)
-                .map_err(host_error_message)?;
-            Ok(tool_json_result(
+            let state = if let Some(element) = optional_element_ref(args) {
+                host.scroll_element(session_id, &snapshot, &element, direction, amount, perm)
+            } else {
+                host.scroll(session_id, &snapshot, direction, amount, perm)
+            }
+            .map_err(host_error_message)?;
+            Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
         }
@@ -251,7 +271,7 @@ fn host_error_message(error: ComputerUseError) -> String {
 
 fn parse_target(args: &Value) -> Result<AppTarget, String> {
     Ok(AppTarget {
-        app_id: arg_str(args, "appId")?,
+        app_id: arg_str_any(args, &["appId", "bundle"])?,
         window_id: args
             .get("windowId")
             .and_then(|w| w.as_str())
@@ -260,7 +280,7 @@ fn parse_target(args: &Value) -> Result<AppTarget, String> {
 }
 
 fn parse_optional_target(args: &Value) -> Result<Option<AppTarget>, String> {
-    if args.get("appId").is_none() {
+    if args.get("appId").is_none() && args.get("bundle").is_none() {
         return Ok(None);
     }
     parse_target(args).map(Some)
@@ -281,6 +301,7 @@ fn parse_coordinate_space(args: &Value) -> Result<CoordinateSpace, String> {
     match args
         .get("coordSpace")
         .or_else(|| args.get("coordinateSpace"))
+        .or_else(|| args.get("coord_space"))
         .and_then(|v| v.as_str())
         .unwrap_or("screenshot")
     {
@@ -306,6 +327,24 @@ fn arg_str(args: &Value, key: &str) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| format!("missing argument: {key}"))
+}
+
+fn arg_str_any(args: &Value, keys: &[&str]) -> Result<String, String> {
+    keys.iter()
+        .find_map(|key| args.get(*key).and_then(|v| v.as_str()))
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("missing argument: {}", keys.join("|")))
+}
+
+fn optional_element_ref(args: &Value) -> Option<String> {
+    args.get("elementId")
+        .or_else(|| args.get("ref"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn arg_element_ref(args: &Value) -> Result<String, String> {
+    optional_element_ref(args).ok_or_else(|| "missing argument: elementId|ref".into())
 }
 
 fn arg_f32(args: &Value, key: &str) -> Result<f32, String> {
@@ -496,6 +535,160 @@ mod tests {
     }
 
     #[test]
+    fn unified_click_prefers_ax_element_id() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        let p = perm();
+        h.approvals().approve_session("s1");
+        h.approvals()
+            .approve_app("s1", &"com.example.app".to_string());
+        h.start(
+            "s1",
+            AppTarget {
+                app_id: "com.example.app".into(),
+                window_id: None,
+            },
+            &p,
+        )
+        .unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let click = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({
+                    "name": "computer_click",
+                    "arguments": {
+                        "snapshotId": state.snapshot_id,
+                        "elementId": "el-1",
+                        "x": 360,
+                        "y": 225
+                    }
+                }),
+            ),
+        );
+
+        match click {
+            McpResponse::Result { result, .. } => {
+                assert!(
+                    result.get("isError").is_none(),
+                    "click should succeed: {result}"
+                );
+                assert_eq!(
+                    provider.actions(),
+                    vec!["click:com.example.app:el-1".to_string()]
+                );
+            }
+            _ => panic!("expected result"),
+        }
+    }
+
+    #[test]
+    fn unified_click_accepts_ref_alias() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        let p = perm();
+        h.approvals().approve_session("s1");
+        h.approvals()
+            .approve_app("s1", &"com.example.app".to_string());
+        h.start(
+            "s1",
+            AppTarget {
+                app_id: "com.example.app".into(),
+                window_id: None,
+            },
+            &p,
+        )
+        .unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let click = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({
+                    "name": "computer_click",
+                    "arguments": {
+                        "snapshotId": state.snapshot_id,
+                        "ref": "el-1"
+                    }
+                }),
+            ),
+        );
+
+        match click {
+            McpResponse::Result { result, .. } => {
+                assert!(
+                    result.get("isError").is_none(),
+                    "click should succeed: {result}"
+                );
+                assert_eq!(
+                    provider.actions(),
+                    vec!["click:com.example.app:el-1".to_string()]
+                );
+            }
+            _ => panic!("expected result"),
+        }
+    }
+
+    #[test]
+    fn perform_secondary_action_prefers_ax_ref() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        let p = perm();
+        h.approvals().approve_session("s1");
+        h.approvals()
+            .approve_app("s1", &"com.example.app".to_string());
+        h.start(
+            "s1",
+            AppTarget {
+                app_id: "com.example.app".into(),
+                window_id: None,
+            },
+            &p,
+        )
+        .unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let click = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({
+                    "name": "computer_perform_secondary_action",
+                    "arguments": {
+                        "snapshotId": state.snapshot_id,
+                        "ref": "el-1",
+                        "x": 360,
+                        "y": 225
+                    }
+                }),
+            ),
+        );
+
+        match click {
+            McpResponse::Result { result, .. } => {
+                assert!(
+                    result.get("isError").is_none(),
+                    "secondary action should succeed: {result}"
+                );
+                assert_eq!(
+                    provider.actions(),
+                    vec!["secondary_click_element:com.example.app:el-1".to_string()]
+                );
+            }
+            _ => panic!("expected result"),
+        }
+    }
+
+    #[test]
     fn coordinate_tool_defaults_to_screenshot_space() {
         let provider = Arc::new(FakeProvider::default());
         let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
@@ -541,6 +734,50 @@ mod tests {
     }
 
     #[test]
+    fn coordinate_tool_accepts_coord_space_alias() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        let p = perm();
+        h.approvals().approve_session("s1");
+        h.approvals()
+            .approve_app("s1", &"com.example.app".to_string());
+        h.start(
+            "s1",
+            AppTarget {
+                app_id: "com.example.app".into(),
+                window_id: None,
+            },
+            &p,
+        )
+        .unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let click = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({ "name": "computer_click_at", "arguments": { "snapshotId": state.snapshot_id, "x": 360, "y": 225, "coord_space": "screen" } }),
+            ),
+        );
+
+        match click {
+            McpResponse::Result { result, .. } => {
+                assert!(
+                    result.get("isError").is_none(),
+                    "click_at should succeed: {result}"
+                );
+                assert_eq!(
+                    provider.actions(),
+                    vec!["click_at:com.example.app:360.0,225.0".to_string()]
+                );
+            }
+            _ => panic!("expected result"),
+        }
+    }
+
+    #[test]
     fn get_app_state_with_target_launches_after_approval() {
         let (h, provider) = host_with_stopped_app();
         let p = perm();
@@ -574,6 +811,38 @@ mod tests {
             provider.actions(),
             vec!["launch:com.example.installed".to_string()]
         );
+    }
+
+    #[test]
+    fn get_app_state_accepts_bundle_alias() {
+        let (h, _provider) = host_with_stopped_app();
+        let p = perm();
+        h.approvals().approve_session("s1");
+        h.approvals()
+            .approve_app("s1", &"com.example.installed".to_string());
+
+        let state = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({ "name": "computer_get_app_state", "arguments": { "bundle": "com.example.installed" } }),
+            ),
+        );
+        match state {
+            McpResponse::Result { result, .. } => {
+                assert!(
+                    result.get("isError").is_none(),
+                    "state should succeed: {result}"
+                );
+                assert_eq!(
+                    result["structuredContent"]["target"]["appId"],
+                    "com.example.installed"
+                );
+            }
+            _ => panic!("expected result"),
+        }
     }
 
     #[test]
