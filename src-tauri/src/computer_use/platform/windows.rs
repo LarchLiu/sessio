@@ -47,6 +47,15 @@ use windows::Win32::UI::Accessibility::{
     UIA_WindowControlTypeId, UIA_CONTROLTYPE_ID,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL,
+    VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F10, VK_F11, VK_F12, VK_F2, VK_F3, VK_F4,
+    VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME, VK_INSERT, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN,
+    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
+};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AttachThreadInput, EnumWindows, GetAncestor, GetForegroundWindow, GetSystemMetrics,
@@ -125,12 +134,14 @@ impl ComputerUseProvider for WindowsProvider {
         invoke_uia_element(&entry.element)
     }
 
-    fn click_point(&self, _target: &AppTarget, _point: Point) -> ProviderResult<()> {
-        Err(ProviderError::Unsupported("click_point"))
+    fn click_point(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+        let _ = raise_app(target)?;
+        left_click_at(point)
     }
 
-    fn secondary_click(&self, _target: &AppTarget, _point: Point) -> ProviderResult<()> {
-        Err(ProviderError::Unsupported("secondary_click"))
+    fn secondary_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+        let _ = raise_app(target)?;
+        right_click_at(point)
     }
 
     fn secondary_click_element(
@@ -141,12 +152,14 @@ impl ComputerUseProvider for WindowsProvider {
         Err(ProviderError::Unsupported("secondary_click_element"))
     }
 
-    fn double_click(&self, _target: &AppTarget, _point: Point) -> ProviderResult<()> {
-        Err(ProviderError::Unsupported("double_click"))
+    fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+        let _ = raise_app(target)?;
+        double_click_at(point)
     }
 
-    fn drag(&self, _target: &AppTarget, _from: Point, _to: Point) -> ProviderResult<()> {
-        Err(ProviderError::Unsupported("drag"))
+    fn drag(&self, target: &AppTarget, from: Point, to: Point) -> ProviderResult<()> {
+        let _ = raise_app(target)?;
+        drag_between(from, to)
     }
 
     fn set_value(
@@ -160,21 +173,24 @@ impl ComputerUseProvider for WindowsProvider {
         set_uia_value(&entry.element, value)
     }
 
-    fn type_text(&self, _target: &AppTarget, _text: &str) -> ProviderResult<()> {
-        Err(ProviderError::Unsupported("type_text"))
+    fn type_text(&self, target: &AppTarget, text: &str) -> ProviderResult<()> {
+        let _ = raise_app(target)?;
+        type_unicode(text)
     }
 
-    fn press_key(&self, _target: &AppTarget, _key: &str) -> ProviderResult<()> {
-        Err(ProviderError::Unsupported("press_key"))
+    fn press_key(&self, target: &AppTarget, key: &str) -> ProviderResult<()> {
+        let _ = raise_app(target)?;
+        press_key_chord(key)
     }
 
     fn scroll(
         &self,
-        _target: &AppTarget,
-        _direction: ScrollDirection,
-        _amount: i32,
+        target: &AppTarget,
+        direction: ScrollDirection,
+        amount: i32,
     ) -> ProviderResult<()> {
-        Err(ProviderError::Unsupported("scroll"))
+        let _ = raise_app(target)?;
+        scroll_wheel(direction, amount)
     }
 
     fn scroll_element(
@@ -595,6 +611,234 @@ fn hwnd_from_id(raw: &str) -> Option<HWND> {
 
 fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+// --- Physical input fallback ---------------------------------------------
+
+fn left_click_at(point: Point) -> ProviderResult<()> {
+    let (x, y) = absolute_mouse_point(point);
+    send_inputs(&[
+        mouse_input(
+            x,
+            y,
+            0,
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+        ),
+        mouse_input(x, y, 0, MOUSEEVENTF_LEFTDOWN),
+        mouse_input(x, y, 0, MOUSEEVENTF_LEFTUP),
+    ])
+}
+
+fn right_click_at(point: Point) -> ProviderResult<()> {
+    let (x, y) = absolute_mouse_point(point);
+    send_inputs(&[
+        mouse_input(
+            x,
+            y,
+            0,
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+        ),
+        mouse_input(x, y, 0, MOUSEEVENTF_RIGHTDOWN),
+        mouse_input(x, y, 0, MOUSEEVENTF_RIGHTUP),
+    ])
+}
+
+fn double_click_at(point: Point) -> ProviderResult<()> {
+    left_click_at(point)?;
+    thread::sleep(Duration::from_millis(60));
+    left_click_at(point)
+}
+
+fn drag_between(from: Point, to: Point) -> ProviderResult<()> {
+    let (from_x, from_y) = absolute_mouse_point(from);
+    let (to_x, to_y) = absolute_mouse_point(to);
+    send_inputs(&[
+        mouse_input(
+            from_x,
+            from_y,
+            0,
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+        ),
+        mouse_input(from_x, from_y, 0, MOUSEEVENTF_LEFTDOWN),
+        mouse_input(
+            to_x,
+            to_y,
+            0,
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+        ),
+        mouse_input(to_x, to_y, 0, MOUSEEVENTF_LEFTUP),
+    ])
+}
+
+fn type_unicode(text: &str) -> ProviderResult<()> {
+    let mut inputs = Vec::new();
+    for unit in text.encode_utf16() {
+        inputs.push(keyboard_input(VIRTUAL_KEY(0), unit, KEYEVENTF_UNICODE));
+        inputs.push(keyboard_input(
+            VIRTUAL_KEY(0),
+            unit,
+            KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+        ));
+    }
+    send_inputs(&inputs)
+}
+
+fn press_key_chord(raw: &str) -> ProviderResult<()> {
+    let mut modifiers = Vec::new();
+    let mut main = None;
+    for part in raw
+        .split(|ch| ch == '+' || ch == '-')
+        .map(|part| part.trim().to_ascii_lowercase())
+        .filter(|part| !part.is_empty())
+    {
+        match part.as_str() {
+            "ctrl" | "control" => modifiers.push(VK_CONTROL),
+            "shift" => modifiers.push(VK_LSHIFT),
+            "alt" | "option" => modifiers.push(VK_LMENU),
+            "win" | "windows" | "cmd" | "command" | "meta" => modifiers.push(VK_LWIN),
+            _ => main = key_from_name(&part),
+        }
+    }
+    let Some(main) = main else {
+        return Err(ProviderError::Failed(format!("unknown key: {raw}")));
+    };
+
+    let mut inputs = Vec::new();
+    for modifier in &modifiers {
+        inputs.push(keyboard_input(*modifier, 0, Default::default()));
+    }
+    inputs.push(keyboard_input(main, 0, Default::default()));
+    inputs.push(keyboard_input(main, 0, KEYEVENTF_KEYUP));
+    for modifier in modifiers.iter().rev() {
+        inputs.push(keyboard_input(*modifier, 0, KEYEVENTF_KEYUP));
+    }
+    send_inputs(&inputs)
+}
+
+fn scroll_wheel(direction: ScrollDirection, amount: i32) -> ProviderResult<()> {
+    let amount = amount.max(1).min(20);
+    let delta = 120_i32.saturating_mul(amount);
+    let (flags, signed_delta) = match direction {
+        ScrollDirection::Up => (MOUSEEVENTF_WHEEL, delta),
+        ScrollDirection::Down => (MOUSEEVENTF_WHEEL, -delta),
+        ScrollDirection::Left => (MOUSEEVENTF_HWHEEL, -delta),
+        ScrollDirection::Right => (MOUSEEVENTF_HWHEEL, delta),
+    };
+    send_inputs(&[mouse_input(0, 0, signed_delta as u32, flags)])
+}
+
+fn absolute_mouse_point(point: Point) -> (i32, i32) {
+    let screen = virtual_screen_rect();
+    let width = (screen.width - 1).max(1) as f32;
+    let height = (screen.height - 1).max(1) as f32;
+    let x = (((point.x - screen.x as f32) / width) * 65_535.0)
+        .round()
+        .clamp(0.0, 65_535.0) as i32;
+    let y = (((point.y - screen.y as f32) / height) * 65_535.0)
+        .round()
+        .clamp(0.0, 65_535.0) as i32;
+    (x, y)
+}
+
+fn mouse_input(
+    dx: i32,
+    dy: i32,
+    mouse_data: u32,
+    flags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS,
+) -> INPUT {
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: mouse_data,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+fn keyboard_input(
+    key: VIRTUAL_KEY,
+    scan: u16,
+    flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
+) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: key,
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+fn send_inputs(inputs: &[INPUT]) -> ProviderResult<()> {
+    if inputs.is_empty() {
+        return Ok(());
+    }
+    let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent == inputs.len() as u32 {
+        Ok(())
+    } else {
+        Err(ProviderError::Failed(format!(
+            "SendInput delivered {sent}/{} events; the target may be elevated or blocked by UIPI",
+            inputs.len()
+        )))
+    }
+}
+
+fn key_from_name(name: &str) -> Option<VIRTUAL_KEY> {
+    match name {
+        "enter" | "return" => Some(VK_RETURN),
+        "esc" | "escape" => Some(VK_ESCAPE),
+        "tab" => Some(VK_TAB),
+        "space" => Some(VK_SPACE),
+        "backspace" => Some(VK_BACK),
+        "delete" | "del" => Some(VK_DELETE),
+        "insert" | "ins" => Some(VK_INSERT),
+        "home" => Some(VK_HOME),
+        "end" => Some(VK_END),
+        "pageup" | "page_up" => Some(VK_PRIOR),
+        "pagedown" | "page_down" => Some(VK_NEXT),
+        "left" => Some(VK_LEFT),
+        "right" => Some(VK_RIGHT),
+        "up" => Some(VK_UP),
+        "down" => Some(VK_DOWN),
+        "f1" => Some(VK_F1),
+        "f2" => Some(VK_F2),
+        "f3" => Some(VK_F3),
+        "f4" => Some(VK_F4),
+        "f5" => Some(VK_F5),
+        "f6" => Some(VK_F6),
+        "f7" => Some(VK_F7),
+        "f8" => Some(VK_F8),
+        "f9" => Some(VK_F9),
+        "f10" => Some(VK_F10),
+        "f11" => Some(VK_F11),
+        "f12" => Some(VK_F12),
+        _ => {
+            let mut chars = name.chars();
+            let ch = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            if ch.is_ascii_alphabetic() {
+                return Some(VIRTUAL_KEY(ch.to_ascii_uppercase() as u16));
+            }
+            if ch.is_ascii_digit() {
+                return Some(VIRTUAL_KEY(ch as u16));
+            }
+            None
+        }
+    }
 }
 
 // --- UI Automation --------------------------------------------------------
