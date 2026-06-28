@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ContentBlock, EmbeddedResource,
     EmbeddedResourceResource, ForkSessionRequest, ImageContent, InitializeRequest,
-    LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
+    LoadSessionRequest, McpServer, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest, SessionId,
     SessionNotification, SessionUpdate, StopReason, TextContent, TextResourceContents,
 };
@@ -502,11 +502,13 @@ async fn run_session(
                             )));
                         }
                         let acp_session_id = SessionId::new(agent_session_id);
+                        let request = load_session_request(
+                            acp_session_id.clone(),
+                            workspace_path,
+                            runtime_config.as_ref(),
+                        );
                         let session = connection
-                            .send_request(LoadSessionRequest::new(
-                                acp_session_id.clone(),
-                                workspace_path,
-                            ))
+                            .send_request(request)
                             .block_task()
                             .await?;
                         manager
@@ -538,11 +540,13 @@ async fn run_session(
                                 "[sessio-runtime:acp:resume-fallback-load] session={}",
                                 acp_session_id
                             );
+                            let request = load_session_request(
+                                acp_session_id.clone(),
+                                workspace_path,
+                                runtime_config.as_ref(),
+                            );
                             let session = connection
-                                .send_request(LoadSessionRequest::new(
-                                    acp_session_id.clone(),
-                                    workspace_path,
-                                ))
+                                .send_request(request)
                                 .block_task()
                                 .await?;
                             manager
@@ -570,11 +574,13 @@ async fn run_session(
                                     "ACP agent does not support session/resume or session/load for session {acp_session_id}"
                                 )));
                             }
+                            let request = resume_session_request(
+                                acp_session_id.clone(),
+                                workspace_path,
+                                runtime_config.as_ref(),
+                            );
                             let session = connection
-                                .send_request(ResumeSessionRequest::new(
-                                    acp_session_id.clone(),
-                                    workspace_path,
-                                ))
+                                .send_request(request)
                                 .block_task()
                                 .await?;
                             manager
@@ -605,11 +611,13 @@ async fn run_session(
                             )));
                         }
                         let source_acp_session_id = SessionId::new(source_session_id);
+                        let request = fork_session_request(
+                            source_acp_session_id,
+                            workspace_path,
+                            runtime_config.as_ref(),
+                        );
                         let session = connection
-                            .send_request(ForkSessionRequest::new(
-                                source_acp_session_id,
-                                workspace_path,
-                            ))
+                            .send_request(request)
                             .block_task()
                             .await?;
                         manager
@@ -844,17 +852,7 @@ fn new_session_request(
     // Inject the desktop-owned computer-use MCP server (agent-agnostic; gated by
     // eligibility before this point). Done first so it applies to every agent,
     // not just Claude's meta-options path below.
-    if let Some(injection) = config.and_then(|c| c.computer_use.as_ref()) {
-        use agent_client_protocol::schema::v1::{HttpHeader, McpServer, McpServerHttp};
-        let server =
-            McpServerHttp::new("sessio-computer-use", injection.url.clone()).headers(vec![
-                HttpHeader::new(
-                    "Authorization",
-                    format!("Bearer {}", injection.bearer_token),
-                ),
-            ]);
-        request.mcp_servers.push(McpServer::Http(server));
-    }
+    request.mcp_servers.extend(computer_use_mcp_servers(config));
 
     if agent != Agent::Claude {
         return request;
@@ -893,6 +891,51 @@ fn new_session_request(
     );
     request.meta = Some(meta);
     request
+}
+
+fn load_session_request(
+    session_id: SessionId,
+    workspace_path: String,
+    config: Option<&AgentRuntimeSessionConfig>,
+) -> LoadSessionRequest {
+    let mut request = LoadSessionRequest::new(session_id, workspace_path);
+    request.mcp_servers.extend(computer_use_mcp_servers(config));
+    request
+}
+
+fn resume_session_request(
+    session_id: SessionId,
+    workspace_path: String,
+    config: Option<&AgentRuntimeSessionConfig>,
+) -> ResumeSessionRequest {
+    let mut request = ResumeSessionRequest::new(session_id, workspace_path);
+    request.mcp_servers.extend(computer_use_mcp_servers(config));
+    request
+}
+
+fn fork_session_request(
+    session_id: SessionId,
+    workspace_path: String,
+    config: Option<&AgentRuntimeSessionConfig>,
+) -> ForkSessionRequest {
+    let mut request = ForkSessionRequest::new(session_id, workspace_path);
+    request.mcp_servers.extend(computer_use_mcp_servers(config));
+    request
+}
+
+fn computer_use_mcp_servers(config: Option<&AgentRuntimeSessionConfig>) -> Vec<McpServer> {
+    let Some(injection) = config.and_then(|c| c.computer_use.as_ref()) else {
+        return Vec::new();
+    };
+    use agent_client_protocol::schema::v1::{HttpHeader, McpServerHttp};
+    vec![McpServer::Http(
+        McpServerHttp::new("sessio-computer-use", injection.url.clone()).headers(vec![
+            HttpHeader::new(
+                "Authorization",
+                format!("Bearer {}", injection.bearer_token),
+            ),
+        ]),
+    )]
 }
 
 async fn apply_initial_session_config(
@@ -2047,6 +2090,56 @@ mod tests {
                 assert_eq!(auth.value, "Bearer tok-abc");
             }
             other => panic!("expected Http MCP server, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restored_session_requests_inject_http_mcp_server_with_bearer() {
+        use agent_client_protocol::schema::v1::McpServer;
+        let config = AgentRuntimeSessionConfig {
+            computer_use: Some(super::super::types::ComputerUseInjection {
+                url: "http://127.0.0.1:54321/mcp".into(),
+                bearer_token: "tok-restore".into(),
+            }),
+            ..Default::default()
+        };
+
+        let requests = [
+            load_session_request(
+                SessionId::new("s-load"),
+                "/tmp/ws".to_string(),
+                Some(&config),
+            )
+            .mcp_servers,
+            resume_session_request(
+                SessionId::new("s-resume"),
+                "/tmp/ws".to_string(),
+                Some(&config),
+            )
+            .mcp_servers,
+            fork_session_request(
+                SessionId::new("s-fork"),
+                "/tmp/ws".to_string(),
+                Some(&config),
+            )
+            .mcp_servers,
+        ];
+
+        for mcp_servers in requests {
+            assert_eq!(mcp_servers.len(), 1);
+            match &mcp_servers[0] {
+                McpServer::Http(http) => {
+                    assert_eq!(http.name, "sessio-computer-use");
+                    assert_eq!(http.url, "http://127.0.0.1:54321/mcp");
+                    let auth = http
+                        .headers
+                        .iter()
+                        .find(|h| h.name == "Authorization")
+                        .expect("authorization header");
+                    assert_eq!(auth.value, "Bearer tok-restore");
+                }
+                other => panic!("expected Http MCP server, got {other:?}"),
+            }
         }
     }
 

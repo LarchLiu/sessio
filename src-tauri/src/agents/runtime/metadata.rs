@@ -60,9 +60,8 @@ pub fn runtime_metadata_from_agent_info(
 /// Whether an agent is eligible for the session-scoped `computer use` feature.
 ///
 /// Two layers, per the implementation plan:
-/// 1. **Transport injectability** — the runtime can accept a Sessio-provided
-///    tool server (`mcp_injection.is_injectable()`): an ACP MCP server
-///    (`http`/`sse`/`acp`) or a native extension path (Pi).
+/// 1. **Supported injection path** — ACP agents currently require HTTP MCP
+///    because Sessio injects `McpServer::Http`; Pi uses its native extension.
 /// 2. **Product support** — Sessio actually supports the computer-use contract
 ///    for this agent. Phase 0's per-agent spike narrows this set; until an agent
 ///    is confirmed it stays out of [`COMPUTER_USE_SUPPORTED_AGENTS`].
@@ -73,26 +72,20 @@ pub fn derive_computer_use_eligible(
     agent: Agent,
     capabilities: Option<&RuntimeCapabilitySet>,
 ) -> bool {
-    let injectable = capabilities
-        .map(|caps| caps.mcp_injection.is_injectable())
-        .unwrap_or(false);
-    injectable && computer_use_product_supported(agent)
-}
-
-/// Product-level allowlist of agents Sessio supports the computer-use contract
-/// for. As of the v3 implementation plan, the supported MVP set is the ACP
-/// agents verified against the computer-use contract: Codex and Claude via
-/// desktop-owned HTTP MCP injection, and Pi via its native extension path.
-/// OpenCode has not yet been verified end-to-end.
-fn computer_use_product_supported(agent: Agent) -> bool {
-    matches!(agent, Agent::Pi | Agent::Codex | Agent::Claude)
+    let Some(capabilities) = capabilities else {
+        return false;
+    };
+    match agent {
+        Agent::Codex | Agent::Claude | Agent::Opencode => capabilities.mcp_injection.http,
+        Agent::Pi => capabilities.mcp_injection.native_extension,
+    }
 }
 
 pub fn runtime_agents_from_db(
     store: Arc<dyn SessionStore>,
     cache: &[RuntimeAgentMetadata],
 ) -> Result<Vec<RuntimeAgentMetadata>> {
-    let agents: Vec<RuntimeAgentMetadata> = store
+    let agents = store
         .list_agents()?
         .into_iter()
         .filter(|agent| agent.agent_type == AgentType::Builtin)
@@ -101,10 +94,66 @@ pub fn runtime_agents_from_db(
             let cached = cache
                 .iter()
                 .find(|metadata| metadata.agent == runtime_agent);
-            runtime_metadata_from_agent_info(agent, cached)
+            let has_cached_capabilities = cached
+                .and_then(|metadata| metadata.capabilities.as_ref())
+                .is_some();
+            if has_cached_capabilities {
+                return runtime_metadata_from_agent_info(agent, cached);
+            }
+            let capability_record = match store.get_runtime_agent_capability(runtime_agent) {
+                Ok(record) => record,
+                Err(error) => {
+                    log::warn!(
+                        "[sessio-runtime:metadata:cached-capability-read-failed] agent={} error={error}",
+                        runtime_agent.as_str()
+                    );
+                    None
+                }
+            };
+            runtime_metadata_from_agent_info_and_capability(agent, cached, capability_record.as_ref())
         })
         .collect();
     Ok(agents)
+}
+
+fn runtime_metadata_from_agent_info_and_capability(
+    agent: AgentInfo,
+    cached: Option<&RuntimeAgentMetadata>,
+    capability_record: Option<&RuntimeAgentCapabilityRecord>,
+) -> Option<RuntimeAgentMetadata> {
+    let runtime_agent = Agent::from_db_str(&agent.id)?;
+    let capabilities = capability_record
+        .and_then(|record| {
+            derive_runtime_capabilities_for_agent(
+                runtime_agent,
+                record.transport,
+                &record.raw_capabilities_json,
+            )
+            .ok()
+        })
+        .or_else(|| cached.and_then(|metadata| metadata.capabilities.clone()));
+    let computer_use_eligible = derive_computer_use_eligible(runtime_agent, capabilities.as_ref());
+    Some(RuntimeAgentMetadata {
+        agent: runtime_agent,
+        enabled: agent.enabled,
+        configured: agent.enabled,
+        order: agent.order,
+        transport: agent.transport,
+        model: agent.model,
+        models: agent.models,
+        effort: agent.effort,
+        efforts: agent.efforts,
+        permission_mode: agent.permission_mode,
+        permission_modes: agent.permission_modes,
+        session_command: agent.commands.session.first().cloned(),
+        version_command: agent.commands.version.first().cloned(),
+        detected_version: capability_record
+            .and_then(|record| record.version.clone())
+            .or_else(|| cached.and_then(|metadata| metadata.detected_version.clone())),
+        capabilities,
+        computer_use_eligible,
+        updated_at: Some(agent.updated_at),
+    })
 }
 
 pub fn startup_probe_runtime_agents(
@@ -361,6 +410,41 @@ mod tests {
     }
 
     #[test]
+    fn runtime_agents_from_db_hydrates_cached_capabilities_from_store() {
+        let db_path = unique_runtime_metadata_db();
+        let store = Arc::new(SqliteStore::open(&db_path).expect("open sqlite"));
+        store.init().expect("init sqlite");
+
+        store
+            .upsert_runtime_agent_capability(&RuntimeAgentCapabilityRecord {
+                agent: Agent::Codex,
+                transport: RuntimeTransportKind::Acp,
+                version: Some("codex-acp@1.0.1".to_string()),
+                protocol_version: Some("1".to_string()),
+                raw_initialize_response_json:
+                    r#"{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"http":true}}}"#
+                        .to_string(),
+                raw_capabilities_json: r#"{"loadSession":true,"promptCapabilities":{"image":true,"audio":false,"embeddedContext":true},"mcpCapabilities":{"http":true,"sse":false},"sessionCapabilities":{"resume":{}}}"#
+                    .to_string(),
+                updated_at: now_ms(),
+            })
+            .expect("upsert runtime capability");
+
+        let agents = runtime_agents_from_db(store.clone(), &[]).expect("runtime agents");
+        let codex = agents
+            .iter()
+            .find(|metadata| metadata.agent == Agent::Codex)
+            .expect("codex metadata");
+
+        let capabilities = codex.capabilities.as_ref().expect("codex capabilities");
+        assert!(capabilities.mcp_injection.http);
+        assert!(codex.computer_use_eligible);
+        assert_eq!(codex.detected_version.as_deref(), Some("codex-acp@1.0.1"));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
     fn initialize_only_probe_requires_workspace_and_uses_acp_transport() {
         let result = detect_capabilities_with_initialize_only(
             Agent::Codex,
@@ -401,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn computer_use_eligibility_requires_injectable_and_product_support() {
+    fn computer_use_eligibility_requires_supported_injection_path() {
         // No capabilities probed yet → not eligible.
         assert!(!derive_computer_use_eligible(Agent::Pi, None));
 
@@ -425,9 +509,25 @@ mod tests {
         acp_http.mcp_injection.http = true;
         assert!(derive_computer_use_eligible(Agent::Codex, Some(&acp_http)));
         assert!(derive_computer_use_eligible(Agent::Claude, Some(&acp_http)));
-        assert!(!derive_computer_use_eligible(
+        assert!(derive_computer_use_eligible(
             Agent::Opencode,
             Some(&acp_http)
+        ));
+
+        let mut acp_without_http = RuntimeCapabilitySet::fake();
+        acp_without_http.mcp_injection.sse = true;
+        acp_without_http.mcp_injection.acp = true;
+        assert!(!derive_computer_use_eligible(
+            Agent::Codex,
+            Some(&acp_without_http)
+        ));
+        assert!(!derive_computer_use_eligible(
+            Agent::Claude,
+            Some(&acp_without_http)
+        ));
+        assert!(!derive_computer_use_eligible(
+            Agent::Opencode,
+            Some(&acp_without_http)
         ));
     }
 
