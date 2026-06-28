@@ -13,6 +13,7 @@ use crate::store::sqlite::SqliteStore;
 use crate::store::SessionStore;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
+use serde_json::Value;
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +30,24 @@ enum Command {
     Config(ConfigCommand),
     Thread(ThreadCommand),
     Stage(StageCommand),
+    ComputerUse(ComputerUseCommand),
     Help,
+}
+
+#[derive(Debug, Clone)]
+struct CuConnection {
+    url: Option<String>,
+    token: Option<String>,
+    json: bool,
+}
+
+#[derive(Debug)]
+enum ComputerUseCommand {
+    Tool {
+        connection: CuConnection,
+        name: String,
+        arguments: Value,
+    },
 }
 
 #[derive(Debug)]
@@ -254,11 +272,115 @@ fn run() -> Result<()> {
         Command::Config(cmd) => run_config(cmd),
         Command::Thread(cmd) => run_thread(cmd),
         Command::Stage(cmd) => run_stage(cmd),
+        Command::ComputerUse(cmd) => run_computer_use(cmd),
         Command::Help => {
             print_help();
             Ok(())
         }
     }
+}
+
+fn run_computer_use(cmd: ComputerUseCommand) -> Result<()> {
+    match cmd {
+        ComputerUseCommand::Tool {
+            connection,
+            name,
+            arguments,
+        } => {
+            let response = call_computer_use_tool(&connection, &name, arguments)?;
+            print_computer_use_response(&response, connection.json)
+        }
+    }
+}
+
+fn call_computer_use_tool(
+    connection: &CuConnection,
+    name: &str,
+    arguments: Value,
+) -> Result<Value> {
+    let url = connection
+        .url
+        .clone()
+        .or_else(|| env::var("SESSIO_CU_URL").ok())
+        .map(|url| normalize_cu_url(&url))
+        .context(
+            "no computer-use host attached: pass --url or set SESSIO_CU_URL from an active desktop session",
+        )?;
+    let token = connection
+        .token
+        .clone()
+        .or_else(|| env::var("SESSIO_CU_TOKEN").ok())
+        .context(
+            "no computer-use session token: pass --token or set SESSIO_CU_TOKEN from an active desktop session",
+        )?;
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": name,
+            "arguments": arguments,
+        }
+    });
+    let response = reqwest::blocking::Client::new()
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .with_context(|| {
+            format!("computer-use host is not reachable at {url}; start/attach an eligible desktop session first")
+        })?;
+    let status = response.status();
+    let text = response.text().unwrap_or_default();
+    if !status.is_success() {
+        bail!("computer-use host rejected request ({status}): {text}");
+    }
+    serde_json::from_str(&text).with_context(|| "computer-use host returned invalid JSON")
+}
+
+fn normalize_cu_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.ends_with("/mcp") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/mcp")
+    }
+}
+
+fn print_computer_use_response(response: &Value, json: bool) -> Result<()> {
+    if let Some(error) = response.get("error") {
+        bail!("computer-use JSON-RPC error: {error}");
+    }
+    let result = response.get("result").context("missing MCP result")?;
+    if result
+        .get("isError")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        bail!(
+            "{}",
+            tool_text(result).unwrap_or_else(|| result.to_string())
+        );
+    }
+    if json {
+        let payload = result.get("structuredContent").unwrap_or(result);
+        println!("{}", serde_json::to_string_pretty(payload)?);
+    } else if let Some(text) = tool_text(result) {
+        println!("{text}");
+    } else {
+        println!("{}", serde_json::to_string_pretty(result)?);
+    }
+    Ok(())
+}
+
+fn tool_text(result: &Value) -> Option<String> {
+    result
+        .get("content")
+        .and_then(|content| content.as_array())
+        .and_then(|content| content.first())
+        .and_then(|block| block.get("text"))
+        .and_then(|text| text.as_str())
+        .map(|text| text.to_string())
 }
 
 fn run_config(cmd: ConfigCommand) -> Result<()> {
@@ -1148,8 +1270,261 @@ fn parse_args(args: Vec<String>) -> Result<Cli> {
         "config" => parse_config(&args[1..]),
         "thread" => parse_thread(&args[1..]),
         "stage" => parse_stage(&args[1..]),
+        "cu" | "computer-use" => parse_computer_use(&args[1..]),
         other => bail!("unknown command '{other}'"),
     }
+}
+
+fn parse_computer_use(args: &[String]) -> Result<Cli> {
+    let Some(subcommand) = args.first() else {
+        bail!("missing cu subcommand");
+    };
+    let (connection, args) = parse_cu_connection(&args[1..])?;
+    let tool = |name: &'static str, arguments: Value| {
+        Ok(Cli {
+            command: Command::ComputerUse(ComputerUseCommand::Tool {
+                connection: connection.clone(),
+                name: name.to_string(),
+                arguments,
+            }),
+        })
+    };
+    match subcommand.as_str() {
+        "status" => {
+            ensure_no_args(&args, "cu status")?;
+            tool("computer_status", serde_json::json!({}))
+        }
+        "permissions" => {
+            ensure_no_args(&args, "cu permissions")?;
+            tool("computer_permissions", serde_json::json!({}))
+        }
+        "grant" => {
+            ensure_known_options(&args, &["--permission"])?;
+            tool(
+                "computer_grant",
+                serde_json::json!({ "permission": required_option(&args, "--permission")? }),
+            )
+        }
+        "list-apps" => {
+            ensure_no_args(&args, "cu list-apps")?;
+            tool("computer_list_apps", serde_json::json!({}))
+        }
+        "start" => tool("computer_start", target_args(&args, true)?),
+        "launch-app" => tool("computer_launch_app", target_args(&args, true)?),
+        "get-app-state" => tool("computer_get_app_state", target_args(&args, false)?),
+        "click-element" => tool("computer_click_element", {
+            ensure_known_options(&args, &["--snapshot-id", "--element-id"])?;
+            serde_json::json!({
+                "snapshotId": required_option(&args, "--snapshot-id")?,
+                "elementId": required_option(&args, "--element-id")?,
+            })
+        }),
+        "click-at" => tool("computer_click_at", point_action_args(&args)?),
+        "secondary-click" => tool("computer_secondary_click", point_action_args(&args)?),
+        "double-click" => tool("computer_double_click", point_action_args(&args)?),
+        "drag" => tool("computer_drag", drag_action_args(&args)?),
+        "set-value" => tool("computer_set_value", {
+            ensure_known_options(&args, &["--snapshot-id", "--element-id", "--value"])?;
+            serde_json::json!({
+                "snapshotId": required_option(&args, "--snapshot-id")?,
+                "elementId": required_option(&args, "--element-id")?,
+                "value": required_option(&args, "--value")?,
+            })
+        }),
+        "type-text" => tool("computer_type_text", {
+            ensure_known_options(&args, &["--snapshot-id", "--text"])?;
+            serde_json::json!({
+                "snapshotId": required_option(&args, "--snapshot-id")?,
+                "text": required_option(&args, "--text")?,
+            })
+        }),
+        "press-key" => tool("computer_press_key", {
+            ensure_known_options(&args, &["--snapshot-id", "--key"])?;
+            serde_json::json!({
+                "snapshotId": required_option(&args, "--snapshot-id")?,
+                "key": required_option(&args, "--key")?,
+            })
+        }),
+        "scroll" => tool("computer_scroll", {
+            ensure_known_options(&args, &["--snapshot-id", "--direction", "--amount"])?;
+            serde_json::json!({
+                "snapshotId": required_option(&args, "--snapshot-id")?,
+                "direction": required_option(&args, "--direction")?,
+                "amount": optional_i64_option(&args, "--amount")?.unwrap_or(0),
+            })
+        }),
+        "stop" => {
+            ensure_no_args(&args, "cu stop")?;
+            tool("computer_stop", serde_json::json!({}))
+        }
+        "call" => {
+            ensure_known_options(&args, &["--tool", "--args-json"])?;
+            let name = required_option(&args, "--tool")?;
+            let args_json =
+                optional_option(&args, "--args-json")?.unwrap_or_else(|| "{}".to_string());
+            let arguments: Value =
+                serde_json::from_str(&args_json).context("invalid --args-json")?;
+            Ok(Cli {
+                command: Command::ComputerUse(ComputerUseCommand::Tool {
+                    connection,
+                    name,
+                    arguments,
+                }),
+            })
+        }
+        other => bail!("unknown cu subcommand '{other}'"),
+    }
+}
+
+fn parse_cu_connection(args: &[String]) -> Result<(CuConnection, Vec<String>)> {
+    let mut connection = CuConnection {
+        url: None,
+        token: None,
+        json: false,
+    };
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--url" => {
+                i += 1;
+                connection.url = Some(args.get(i).context("missing value for --url")?.clone());
+            }
+            "--token" => {
+                i += 1;
+                connection.token = Some(args.get(i).context("missing value for --token")?.clone());
+            }
+            "--json" => connection.json = true,
+            other => rest.push(other.to_string()),
+        }
+        i += 1;
+    }
+    Ok((connection, rest))
+}
+
+fn target_args(args: &[String], app_required: bool) -> Result<Value> {
+    ensure_known_options(args, &["--app-id", "--window-id"])?;
+    let app_id = optional_option(args, "--app-id")?;
+    if app_required && app_id.is_none() {
+        bail!("missing --app-id");
+    }
+    let mut value = serde_json::Map::new();
+    if let Some(app_id) = app_id {
+        value.insert("appId".into(), Value::String(app_id));
+    }
+    if let Some(window_id) = optional_option(args, "--window-id")? {
+        value.insert("windowId".into(), Value::String(window_id));
+    }
+    Ok(Value::Object(value))
+}
+
+fn point_action_args(args: &[String]) -> Result<Value> {
+    ensure_known_options(args, &["--snapshot-id", "--x", "--y", "--coord-space"])?;
+    let mut value = serde_json::json!({
+        "snapshotId": required_option(args, "--snapshot-id")?,
+        "x": required_f64_option(args, "--x")?,
+        "y": required_f64_option(args, "--y")?,
+    });
+    insert_coord_space(&mut value, args)?;
+    Ok(value)
+}
+
+fn drag_action_args(args: &[String]) -> Result<Value> {
+    ensure_known_options(
+        args,
+        &[
+            "--snapshot-id",
+            "--from-x",
+            "--from-y",
+            "--to-x",
+            "--to-y",
+            "--coord-space",
+        ],
+    )?;
+    let mut value = serde_json::json!({
+        "snapshotId": required_option(args, "--snapshot-id")?,
+        "fromX": required_f64_option(args, "--from-x")?,
+        "fromY": required_f64_option(args, "--from-y")?,
+        "toX": required_f64_option(args, "--to-x")?,
+        "toY": required_f64_option(args, "--to-y")?,
+    });
+    insert_coord_space(&mut value, args)?;
+    Ok(value)
+}
+
+fn insert_coord_space(value: &mut Value, args: &[String]) -> Result<()> {
+    if let Some(coord_space) = optional_option(args, "--coord-space")? {
+        value
+            .as_object_mut()
+            .expect("coordinate args are an object")
+            .insert("coordSpace".into(), Value::String(coord_space));
+    }
+    Ok(())
+}
+
+fn ensure_no_args(args: &[String], label: &str) -> Result<()> {
+    if args.is_empty() {
+        Ok(())
+    } else {
+        bail!("{label} does not accept arguments: {}", args.join(" "))
+    }
+}
+
+fn ensure_known_options(args: &[String], allowed: &[&str]) -> Result<()> {
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        if !flag.starts_with("--") {
+            bail!("unexpected argument '{flag}'");
+        }
+        if !allowed.contains(&flag) {
+            bail!("unknown cu option '{flag}'");
+        }
+        i += 1;
+        if i >= args.len() {
+            bail!("missing value for {flag}");
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+fn required_option(args: &[String], flag: &str) -> Result<String> {
+    optional_option(args, flag)?.with_context(|| format!("missing {flag}"))
+}
+
+fn optional_option(args: &[String], flag: &str) -> Result<Option<String>> {
+    let mut found = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag {
+            i += 1;
+            found = Some(
+                args.get(i)
+                    .with_context(|| format!("missing value for {flag}"))?
+                    .clone(),
+            );
+        }
+        i += 1;
+    }
+    Ok(found)
+}
+
+fn required_f64_option(args: &[String], flag: &str) -> Result<f64> {
+    let value = required_option(args, flag)?;
+    value
+        .parse::<f64>()
+        .with_context(|| format!("invalid number for {flag}: {value}"))
+}
+
+fn optional_i64_option(args: &[String], flag: &str) -> Result<Option<i64>> {
+    optional_option(args, flag)?
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .with_context(|| format!("invalid integer for {flag}: {value}"))
+        })
+        .transpose()
 }
 
 fn parse_config(args: &[String]) -> Result<Cli> {
@@ -2172,6 +2547,24 @@ Usage:
   sessio stage issue add --stage-id <threadStageId> --title <text> --severity <low|medium|high|critical> [--description <text>] [--db-path <path>] [--json]
   sessio stage issue list --stage-id <threadStageId> [--db-path <path>] [--json]
   sessio stage issue set --id <issueId> [--status <open|resolved|dismissed>] [--severity <low|medium|high|critical>] [--title <text>] [--description <text>] [--db-path <path>] [--json]
+  sessio cu status [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu permissions [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu grant --permission <screenshots|accessibility> [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu list-apps [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu start --app-id <bundleId> [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu launch-app --app-id <bundleId> [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu get-app-state [--app-id <bundleId>] [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu click-element --snapshot-id <id> --element-id <id> [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu click-at --snapshot-id <id> --x <px> --y <px> [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu secondary-click --snapshot-id <id> --x <px> --y <px> [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu double-click --snapshot-id <id> --x <px> --y <px> [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu drag --snapshot-id <id> --from-x <px> --from-y <px> --to-x <px> --to-y <px> [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu set-value --snapshot-id <id> --element-id <id> --value <text> [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu type-text --snapshot-id <id> --text <text> [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu press-key --snapshot-id <id> --key <key> [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu scroll --snapshot-id <id> --direction <up|down|left|right> [--amount <n>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu stop [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu call --tool <computer_tool_name> [--args-json <json>] [--url <mcp-url>] [--token <token>] [--json]
   sessio config show [--json]
   sessio config memory set [--binary <path>] [--index <name>] [--artifacts-root <path>] [--auto-embed <bool>] [--install-command <cmd>] [--json]
   sessio memory build --project <path> [--artifacts-root <path>] [--db-path <path>] [--json]
@@ -2185,6 +2578,7 @@ Usage:
 
 Notes:
   --json emits stable machine-readable output for skills and agents.
+  cu attaches to an already-running desktop computer-use MCP host; set SESSIO_CU_URL and SESSIO_CU_TOKEN (or pass --url/--token). It fails explicitly instead of starting a separate helper/runtime.
   sessions list reads from the Sessio index DB by default and falls back to a filesystem scan when the index is empty/unreadable; a stderr warning is printed when the fallback fires.
   memory search omits qmd's raw payload by default; pass --include-raw for debugging.
   memory resolve omits raw JSONL excerpts by default; pass --include-source-excerpt to attach the byte/line range each source points at.
@@ -2192,6 +2586,74 @@ Notes:
   memory base lists records covered by a given base record via record_continuations.
 "#
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_computer_use_coordinate_command() {
+        let cli = parse_args(args(&[
+            "cu",
+            "click-at",
+            "--snapshot-id",
+            "snap-1",
+            "--x",
+            "10",
+            "--y",
+            "20",
+            "--coord-space",
+            "screen",
+            "--url",
+            "http://127.0.0.1:9999/mcp",
+            "--token",
+            "token",
+            "--json",
+        ]))
+        .unwrap();
+
+        let Command::ComputerUse(ComputerUseCommand::Tool {
+            connection,
+            name,
+            arguments,
+        }) = cli.command
+        else {
+            panic!("expected computer-use command");
+        };
+        assert_eq!(connection.url.as_deref(), Some("http://127.0.0.1:9999/mcp"));
+        assert_eq!(connection.token.as_deref(), Some("token"));
+        assert!(connection.json);
+        assert_eq!(name, "computer_click_at");
+        assert_eq!(arguments["snapshotId"], "snap-1");
+        assert_eq!(arguments["x"].as_f64(), Some(10.0));
+        assert_eq!(arguments["y"].as_f64(), Some(20.0));
+        assert_eq!(arguments["coordSpace"], "screen");
+    }
+
+    #[test]
+    fn computer_use_parser_rejects_unknown_options() {
+        let err = parse_args(args(&["cu", "start", "--app-id", "com.example", "--oops"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown cu option '--oops'"), "{err}");
+    }
+
+    #[test]
+    fn normalizes_computer_use_url_to_mcp_endpoint() {
+        assert_eq!(
+            normalize_cu_url("http://127.0.0.1:1234"),
+            "http://127.0.0.1:1234/mcp"
+        );
+        assert_eq!(
+            normalize_cu_url("http://127.0.0.1:1234/mcp"),
+            "http://127.0.0.1:1234/mcp"
+        );
+    }
 }
 
 fn serialize_app_config(config: &config::AppConfig) -> String {
