@@ -15,8 +15,11 @@
 
 #![allow(unexpected_cfgs)]
 
+use std::collections::HashMap;
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, TCFType};
@@ -31,8 +34,9 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
 
 use crate::computer_use::provider::{
-    AppTarget, ComputerUseProvider, DisplayMetadata, ElementId, InstalledApp, ProviderError,
-    ProviderResult, RawAppState, Rect, ScreenshotRef, ScrollDirection, UiElement,
+    AppId, AppLaunchResult, AppTarget, ComputerUseProvider, DisplayMetadata, ElementId,
+    InstalledApp, ProviderError, ProviderResult, RawAppState, Rect, ScreenshotRef, ScrollDirection,
+    UiElement,
 };
 
 /// The macOS provider. Stateless: every call re-reads live system state.
@@ -63,7 +67,19 @@ impl ComputerUseProvider for MacosProvider {
     }
 
     fn list_apps(&self) -> ProviderResult<Vec<InstalledApp>> {
-        list_running_apps()
+        list_available_apps()
+    }
+
+    fn is_app_running(&self, app_id: &AppId) -> ProviderResult<bool> {
+        match resolve_pid(app_id) {
+            Ok(_) => Ok(true),
+            Err(ProviderError::AppNotFound(_)) if installed_app_url(app_id).is_some() => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn launch_app(&self, target: &AppTarget) -> ProviderResult<AppLaunchResult> {
+        launch_app_background(target)
     }
 
     fn capture_app_state(&self, target: &AppTarget) -> ProviderResult<RawAppState> {
@@ -109,6 +125,23 @@ impl ComputerUseProvider for MacosProvider {
 
 // --- App enumeration -----------------------------------------------------
 
+fn list_available_apps() -> ProviderResult<Vec<InstalledApp>> {
+    let mut by_id: HashMap<AppId, InstalledApp> = HashMap::new();
+    for app in list_installed_apps() {
+        by_id.entry(app.id.clone()).or_insert(app);
+    }
+    for app in list_running_apps()? {
+        by_id.insert(app.id.clone(), app);
+    }
+    let mut apps: Vec<InstalledApp> = by_id.into_values().collect();
+    apps.sort_by(|a, b| {
+        b.running
+            .cmp(&a.running)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(apps)
+}
+
 fn list_running_apps() -> ProviderResult<Vec<InstalledApp>> {
     use objc2_app_kit::NSWorkspace;
     let mut out = Vec::new();
@@ -138,12 +171,144 @@ fn list_running_apps() -> ProviderResult<Vec<InstalledApp>> {
     Ok(out)
 }
 
+fn list_installed_apps() -> Vec<InstalledApp> {
+    let mut out = Vec::new();
+    for root in app_search_roots() {
+        scan_app_bundles(&root, 0, &mut out);
+    }
+    out
+}
+
+fn app_search_roots() -> Vec<PathBuf> {
+    let mut roots = vec![
+        PathBuf::from("/Applications"),
+        PathBuf::from("/System/Applications"),
+        PathBuf::from("/System/Applications/Utilities"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join("Applications"));
+    }
+    roots
+}
+
+fn scan_app_bundles(dir: &Path, depth: usize, out: &mut Vec<InstalledApp>) {
+    const MAX_DEPTH: usize = 3;
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if is_app_bundle_path(&path) {
+            if let Some(app) = installed_app_from_bundle(&path) {
+                out.push(app);
+            }
+            continue;
+        }
+        if path.is_dir() {
+            scan_app_bundles(&path, depth + 1, out);
+        }
+    }
+}
+
+fn is_app_bundle_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("app"))
+        .unwrap_or(false)
+}
+
+fn installed_app_from_bundle(path: &Path) -> Option<InstalledApp> {
+    use objc2_foundation::{NSBundle, NSString, NSURL};
+    let path_str = path.to_string_lossy();
+    let ns_path = NSString::from_str(&path_str);
+    let url = NSURL::fileURLWithPath_isDirectory(&ns_path, true);
+    let bundle = NSBundle::bundleWithURL(&url)?;
+    let id = bundle.bundleIdentifier()?.to_string();
+    let name = path
+        .file_stem()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| id.clone());
+    Some(InstalledApp {
+        id,
+        name,
+        pid: None,
+        running: false,
+    })
+}
+
 fn resolve_pid(app_id: &str) -> ProviderResult<i32> {
     list_running_apps()?
         .into_iter()
         .find(|app| app.id == app_id)
         .and_then(|app| app.pid)
         .ok_or_else(|| ProviderError::AppNotFound(app_id.to_string()))
+}
+
+fn installed_app_url(app_id: &str) -> Option<objc2::rc::Retained<objc2_foundation::NSURL>> {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::NSString;
+    let workspace = NSWorkspace::sharedWorkspace();
+    workspace.URLForApplicationWithBundleIdentifier(&NSString::from_str(app_id))
+}
+
+#[allow(deprecated)]
+fn launch_app_background(target: &AppTarget) -> ProviderResult<AppLaunchResult> {
+    use objc2_app_kit::{NSWorkspace, NSWorkspaceLaunchOptions};
+    use objc2_foundation::NSString;
+
+    if resolve_pid(&target.app_id).is_ok() {
+        return Ok(AppLaunchResult {
+            target: target.clone(),
+            launched: false,
+            running: true,
+        });
+    }
+    if installed_app_url(&target.app_id).is_none() {
+        return Err(ProviderError::AppNotFound(target.app_id.clone()));
+    }
+
+    let workspace = NSWorkspace::sharedWorkspace();
+    let bundle_id = NSString::from_str(&target.app_id);
+    let options = NSWorkspaceLaunchOptions::Async
+        | NSWorkspaceLaunchOptions::WithoutActivation
+        | NSWorkspaceLaunchOptions::WithoutAddingToRecents;
+    let launched = workspace
+        .launchAppWithBundleIdentifier_options_additionalEventParamDescriptor_launchIdentifier(
+            &bundle_id, options, None, None,
+        );
+    if !launched {
+        return Err(ProviderError::Failed(format!(
+            "failed to launch {}",
+            target.app_id
+        )));
+    }
+
+    let running = wait_for_running(&target.app_id, Duration::from_secs(3));
+    if !running {
+        return Err(ProviderError::Failed(format!(
+            "launched {} but it did not report as running",
+            target.app_id
+        )));
+    }
+    Ok(AppLaunchResult {
+        target: target.clone(),
+        launched: true,
+        running: true,
+    })
+}
+
+fn wait_for_running(app_id: &str, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if resolve_pid(app_id).is_ok() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
 }
 
 // --- Window discovery + capture ------------------------------------------

@@ -20,8 +20,8 @@ use super::approvals::{ApprovalDecision, ApprovalRegistry};
 use super::lease::{LeaseError, LeaseRegistry, SnapshotError, SnapshotId};
 use super::permissions::{self, PermissionDenied, RequiredCapability};
 use super::provider::{
-    AllowedAction, AppState, AppTarget, ComputerUseProvider, InstalledApp, ProviderError,
-    ScrollDirection,
+    AllowedAction, AppLaunchResult, AppState, AppTarget, ComputerUseProvider, InstalledApp,
+    ProviderError, ScrollDirection,
 };
 use super::settings::ComputerUseSettings;
 
@@ -171,6 +171,26 @@ impl ComputerUseHost {
         Ok(self.leases.open(session_id, target)?)
     }
 
+    /// `computer_launch_app` — launch a target app without activating it,
+    /// opening a lease if the session does not already have one for that app.
+    pub fn launch_app(
+        &self,
+        session_id: &str,
+        target: AppTarget,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<AppLaunchResult, ComputerUseError> {
+        self.require_enabled()?;
+        self.require_permission(perm, RequiredCapability::Observe)?;
+        self.require_session_approval(session_id)?;
+        self.require_approval(session_id, &target.app_id)?;
+        let needs_lease = self.require_compatible_lease(session_id, &target)?;
+        let result = self.provider.launch_app(&target)?;
+        if needs_lease {
+            self.leases.open(session_id, target)?;
+        }
+        Ok(result)
+    }
+
     /// `computer_get_app_state` — capture screenshot + elements, stamp a fresh
     /// snapshot id, and report the allowed actions. Requires observe; inspection
     /// elements are only included when inspect permission is present.
@@ -179,9 +199,46 @@ impl ComputerUseHost {
         session_id: &str,
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
+        self.get_app_state_inner(session_id, None, perm)
+    }
+
+    /// `computer_get_app_state` with an explicit target. If the app is not
+    /// running, the host launches it only after the same app approval required
+    /// by the explicit launch/control paths.
+    pub fn get_app_state_for_target(
+        &self,
+        session_id: &str,
+        target: AppTarget,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<AppState, ComputerUseError> {
+        self.get_app_state_inner(session_id, Some(target), perm)
+    }
+
+    fn get_app_state_inner(
+        &self,
+        session_id: &str,
+        target: Option<AppTarget>,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<AppState, ComputerUseError> {
         self.require_enabled()?;
         self.require_permission(perm, RequiredCapability::Observe)?;
-        let target = self.leases.target(session_id)?;
+        let (target, needs_lease) = match target {
+            Some(target) => {
+                self.require_session_approval(session_id)?;
+                let needs_lease = self.require_compatible_lease(session_id, &target)?;
+                (target, needs_lease)
+            }
+            None => (self.leases.target(session_id)?, false),
+        };
+        let launched = if self.provider.is_app_running(&target.app_id)? {
+            false
+        } else {
+            self.require_approval(session_id, &target.app_id)?;
+            self.provider.launch_app(&target)?.launched
+        };
+        if needs_lease {
+            self.leases.open(session_id, target.clone())?;
+        }
         let mut raw = self.provider.capture_app_state(&target)?;
 
         // Inspection is a separate tier: without it, do not expose the AX tree
@@ -199,6 +256,7 @@ impl ComputerUseHost {
         Ok(AppState {
             snapshot_id: snapshot.0,
             target: raw.target,
+            launched,
             display: raw.display,
             screenshot: raw.screenshot,
             elements: raw.elements,
@@ -223,6 +281,19 @@ impl ComputerUseHost {
                 _ => true,
             })
             .collect()
+    }
+
+    fn require_compatible_lease(
+        &self,
+        session_id: &str,
+        target: &AppTarget,
+    ) -> Result<bool, ComputerUseError> {
+        match self.leases.target(session_id) {
+            Ok(existing) if existing == *target => Ok(false),
+            Ok(_) => Err(ComputerUseError::Lease(LeaseError::AlreadyLeased)),
+            Err(LeaseError::NoLease) => Ok(true),
+            Err(err) => Err(ComputerUseError::Lease(err)),
+        }
     }
 
     fn require_control(
@@ -382,6 +453,30 @@ mod tests {
         ComputerUseHost::new(Arc::new(FakeProvider::default()), settings)
     }
 
+    fn host_with_apps(apps: Vec<InstalledApp>) -> (ComputerUseHost, Arc<FakeProvider>) {
+        let provider = Arc::new(FakeProvider::with_apps(apps));
+        (
+            ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled()),
+            provider,
+        )
+    }
+
+    fn installed_app(running: bool) -> InstalledApp {
+        InstalledApp {
+            id: "com.example.installed".into(),
+            name: "Installed".into(),
+            pid: running.then_some(4321),
+            running,
+        }
+    }
+
+    fn installed_target() -> AppTarget {
+        AppTarget {
+            app_id: "com.example.installed".into(),
+            window_id: None,
+        }
+    }
+
     #[test]
     fn disabled_host_refuses_everything() {
         let h = host(ComputerUseSettings::default());
@@ -430,6 +525,69 @@ mod tests {
             h.type_text("s1", &snap, "hi", &p),
             Err(ComputerUseError::Approval(ApprovalDecision::AppNotApproved))
         ));
+    }
+
+    #[test]
+    fn launch_app_requires_app_approval_and_opens_lease() {
+        let (h, provider) = host_with_apps(vec![installed_app(false)]);
+        h.approvals().approve_session("s1");
+        let p = perm(true, true, true);
+
+        assert!(matches!(
+            h.launch_app("s1", installed_target(), &p),
+            Err(ComputerUseError::Approval(ApprovalDecision::AppNotApproved))
+        ));
+        assert!(provider.actions().is_empty());
+        assert!(!h.leases.has_lease("s1"));
+
+        h.approvals().approve_app("s1", &installed_target().app_id);
+        let result = h.launch_app("s1", installed_target(), &p).unwrap();
+        assert!(result.launched);
+        assert!(result.running);
+        assert!(h.leases.has_lease("s1"));
+        assert_eq!(
+            provider.actions(),
+            vec!["launch:com.example.installed".to_string()]
+        );
+    }
+
+    #[test]
+    fn get_app_state_launches_stopped_target_only_after_app_approval() {
+        let (h, provider) = host_with_apps(vec![installed_app(false)]);
+        h.approvals().approve_session("s1");
+        let p = perm(true, true, true);
+
+        assert!(matches!(
+            h.get_app_state_for_target("s1", installed_target(), &p),
+            Err(ComputerUseError::Approval(ApprovalDecision::AppNotApproved))
+        ));
+        assert!(provider.actions().is_empty());
+        assert!(!h.leases.has_lease("s1"));
+
+        h.approvals().approve_app("s1", &installed_target().app_id);
+        let state = h
+            .get_app_state_for_target("s1", installed_target(), &p)
+            .unwrap();
+        assert!(state.launched);
+        assert!(h.leases.has_lease("s1"));
+        assert_eq!(
+            provider.actions(),
+            vec!["launch:com.example.installed".to_string()]
+        );
+    }
+
+    #[test]
+    fn get_app_state_for_running_target_does_not_require_app_approval() {
+        let (h, provider) = host_with_apps(vec![installed_app(true)]);
+        h.approvals().approve_session("s1");
+        let p = perm(true, true, true);
+
+        let state = h
+            .get_app_state_for_target("s1", installed_target(), &p)
+            .unwrap();
+        assert!(!state.launched);
+        assert!(h.leases.has_lease("s1"));
+        assert!(provider.actions().is_empty());
     }
 
     #[test]

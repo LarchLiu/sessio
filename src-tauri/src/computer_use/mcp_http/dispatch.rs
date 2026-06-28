@@ -95,10 +95,21 @@ fn run_tool(
                 .map_err(|e| e.to_string())?;
             Ok(tool_text_result(json!({ "lease": lease }).to_string()))
         }
-        "computer_get_app_state" => {
-            let state = host
-                .get_app_state(session_id, perm)
+        "computer_launch_app" => {
+            let target = parse_target(args)?;
+            let result = host
+                .launch_app(session_id, target, perm)
                 .map_err(|e| e.to_string())?;
+            Ok(tool_text_result(
+                serde_json::to_string(&result).unwrap_or_default(),
+            ))
+        }
+        "computer_get_app_state" => {
+            let state = match parse_optional_target(args)? {
+                Some(target) => host.get_app_state_for_target(session_id, target, perm),
+                None => host.get_app_state(session_id, perm),
+            }
+            .map_err(|e| e.to_string())?;
             Ok(tool_text_result(
                 serde_json::to_string(&state).unwrap_or_default(),
             ))
@@ -150,6 +161,13 @@ fn parse_target(args: &Value) -> Result<AppTarget, String> {
     })
 }
 
+fn parse_optional_target(args: &Value) -> Result<Option<AppTarget>, String> {
+    if args.get("appId").is_none() {
+        return Ok(None);
+    }
+    parse_target(args).map(Some)
+}
+
 fn parse_snapshot(args: &Value) -> Result<SnapshotId, String> {
     Ok(SnapshotId(arg_str(args, "snapshotId")?))
 }
@@ -176,7 +194,7 @@ fn arg_str(args: &Value, key: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::computer_use::host::ComputerUseHost;
-    use crate::computer_use::provider::FakeProvider;
+    use crate::computer_use::provider::{FakeProvider, InstalledApp};
     use crate::computer_use::settings::ComputerUseSettings;
     use crate::desktop_control::{
         DesktopControlInputs, DesktopControlPermissionStatus, DesktopPlatform, PermissionTier,
@@ -197,6 +215,19 @@ mod tests {
         ComputerUseHost::new(
             Arc::new(FakeProvider::default()),
             ComputerUseSettings::enabled(),
+        )
+    }
+
+    fn host_with_stopped_app() -> (ComputerUseHost, Arc<FakeProvider>) {
+        let provider = Arc::new(FakeProvider::with_apps(vec![InstalledApp {
+            id: "com.example.installed".into(),
+            name: "Installed".into(),
+            pid: None,
+            running: false,
+        }]));
+        (
+            ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled()),
+            provider,
         )
     }
 
@@ -296,6 +327,64 @@ mod tests {
             }
             _ => panic!("expected result"),
         }
+    }
+
+    #[test]
+    fn get_app_state_with_target_launches_after_approval() {
+        let (h, provider) = host_with_stopped_app();
+        let p = perm();
+        h.approvals().approve_session("s1");
+        h.approvals()
+            .approve_app("s1", &"com.example.installed".to_string());
+
+        let state = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({ "name": "computer_get_app_state", "arguments": { "appId": "com.example.installed" } }),
+            ),
+        );
+        match state {
+            McpResponse::Result { result, .. } => {
+                assert!(
+                    result.get("isError").is_none(),
+                    "state should succeed: {result}"
+                );
+                let text = result["content"][0]["text"].as_str().unwrap();
+                let parsed: Value = serde_json::from_str(text).unwrap();
+                assert_eq!(parsed["launched"], true);
+                assert_eq!(parsed["target"]["appId"], "com.example.installed");
+            }
+            _ => panic!("expected result"),
+        }
+        assert_eq!(
+            provider.actions(),
+            vec!["launch:com.example.installed".to_string()]
+        );
+    }
+
+    #[test]
+    fn launch_app_without_app_approval_is_tool_error() {
+        let (h, provider) = host_with_stopped_app();
+        let p = perm();
+        h.approvals().approve_session("s1");
+
+        let resp = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({ "name": "computer_launch_app", "arguments": { "appId": "com.example.installed" } }),
+            ),
+        );
+        match resp {
+            McpResponse::Result { result, .. } => assert_eq!(result["isError"], true),
+            _ => panic!("expected isError result"),
+        }
+        assert!(provider.actions().is_empty());
     }
 
     #[test]

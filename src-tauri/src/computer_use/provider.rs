@@ -2,8 +2,7 @@
 //!
 //! All privileged OS access is funneled through [`ComputerUseProvider`]. The
 //! host orchestrates leases, snapshots, and approvals against this trait without
-//! knowing the platform. The macOS implementation (Phase 3) plugs in here; tests
-//! use [`FakeProvider`].
+//! knowing the platform. Tests use [`FakeProvider`].
 
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +20,16 @@ pub struct InstalledApp {
     pub name: String,
     /// OS process id when the app is running; `None` if only installed.
     pub pid: Option<i32>,
+    pub running: bool,
+}
+
+/// Result of an app launch request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLaunchResult {
+    pub target: AppTarget,
+    /// True when this call started the app. False means it was already running.
+    pub launched: bool,
     pub running: bool,
 }
 
@@ -118,6 +127,8 @@ pub struct RawAppState {
 pub struct AppState {
     pub snapshot_id: String,
     pub target: AppTarget,
+    /// True when this state capture first had to launch the target app.
+    pub launched: bool,
     pub display: DisplayMetadata,
     pub screenshot: ScreenshotRef,
     pub elements: Vec<UiElement>,
@@ -157,6 +168,10 @@ pub trait ComputerUseProvider: Send + Sync {
 
     fn list_apps(&self) -> ProviderResult<Vec<InstalledApp>>;
 
+    fn is_app_running(&self, app_id: &AppId) -> ProviderResult<bool>;
+
+    fn launch_app(&self, target: &AppTarget) -> ProviderResult<AppLaunchResult>;
+
     /// Capture a fresh screenshot + AX element tree for the target.
     fn capture_app_state(&self, target: &AppTarget) -> ProviderResult<RawAppState>;
 
@@ -182,7 +197,7 @@ mod fake {
     /// Deterministic in-memory provider for host tests. Records actions so tests
     /// can assert orchestration without touching the OS.
     pub struct FakeProvider {
-        pub apps: Vec<InstalledApp>,
+        pub apps: Mutex<Vec<InstalledApp>>,
         pub elements: Vec<UiElement>,
         pub supports_control: bool,
         pub recorded: Mutex<Vec<String>>,
@@ -192,12 +207,12 @@ mod fake {
     impl Default for FakeProvider {
         fn default() -> Self {
             Self {
-                apps: vec![InstalledApp {
+                apps: Mutex::new(vec![InstalledApp {
                     id: "com.example.app".into(),
                     name: "Example".into(),
                     pid: Some(1234),
                     running: true,
-                }],
+                }]),
                 elements: vec![UiElement {
                     id: "el-1".into(),
                     role: "AXButton".into(),
@@ -218,6 +233,13 @@ mod fake {
     }
 
     impl FakeProvider {
+        pub fn with_apps(apps: Vec<InstalledApp>) -> Self {
+            Self {
+                apps: Mutex::new(apps),
+                ..Self::default()
+            }
+        }
+
         pub fn record(&self, action: impl Into<String>) {
             self.recorded.lock().unwrap().push(action.into());
         }
@@ -232,13 +254,44 @@ mod fake {
         }
 
         fn list_apps(&self) -> ProviderResult<Vec<InstalledApp>> {
-            Ok(self.apps.clone())
+            Ok(self.apps.lock().unwrap().clone())
+        }
+
+        fn is_app_running(&self, app_id: &AppId) -> ProviderResult<bool> {
+            self.apps
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|a| &a.id == app_id)
+                .map(|a| a.running)
+                .ok_or_else(|| ProviderError::AppNotFound(app_id.clone()))
+        }
+
+        fn launch_app(&self, target: &AppTarget) -> ProviderResult<AppLaunchResult> {
+            let mut apps = self.apps.lock().unwrap();
+            let app = apps
+                .iter_mut()
+                .find(|a| a.id == target.app_id)
+                .ok_or_else(|| ProviderError::AppNotFound(target.app_id.clone()))?;
+            let launched = !app.running;
+            if launched {
+                app.running = true;
+                app.pid = app.pid.or(Some(1234));
+                self.record(format!("launch:{}", target.app_id));
+            }
+            Ok(AppLaunchResult {
+                target: target.clone(),
+                launched,
+                running: true,
+            })
         }
 
         fn capture_app_state(&self, target: &AppTarget) -> ProviderResult<RawAppState> {
-            if !self.apps.iter().any(|a| a.id == target.app_id) {
+            let apps = self.apps.lock().unwrap();
+            if !apps.iter().any(|a| a.id == target.app_id && a.running) {
                 return Err(ProviderError::AppNotFound(target.app_id.clone()));
             }
+            drop(apps);
             let mut counter = self.capture_counter.lock().unwrap();
             *counter += 1;
             Ok(RawAppState {

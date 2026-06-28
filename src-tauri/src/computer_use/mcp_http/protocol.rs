@@ -106,6 +106,11 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         "required": ["appId"],
         "additionalProperties": false
     });
+    let optional_app_arg = json!({
+        "type": "object",
+        "properties": { "appId": { "type": "string" }, "windowId": { "type": "string" } },
+        "additionalProperties": false
+    });
     let snapshot_arg = |extra: Value| {
         let mut props = json!({ "snapshotId": { "type": "string" } });
         if let (Some(obj), Some(extra_obj)) = (props.as_object_mut(), extra.as_object()) {
@@ -129,12 +134,17 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "computer_start",
             description: "Open a control lease on a chosen application/window.",
+            input_schema: app_arg.clone(),
+        },
+        ToolDefinition {
+            name: "computer_launch_app",
+            description: "Launch a chosen application without activating it. Requires target-app approval and opens a lease for the app.",
             input_schema: app_arg,
         },
         ToolDefinition {
             name: "computer_get_app_state",
-            description: "Capture the target's screenshot, display metadata, accessibility elements, a fresh snapshot id, and the actions currently allowed.",
-            input_schema: no_args.clone(),
+            description: "Capture the target's screenshot, display metadata, accessibility elements, a fresh snapshot id, and the actions currently allowed. If appId is provided and the app is not running, launch it after target-app approval.",
+            input_schema: optional_app_arg,
         },
         ToolDefinition {
             name: "computer_click_element",
@@ -172,6 +182,7 @@ pub const TOOL_DEFINITIONS: &[&str] = &[
     "computer_status",
     "computer_list_apps",
     "computer_start",
+    "computer_launch_app",
     "computer_get_app_state",
     "computer_click_element",
     "computer_type_text",
