@@ -16,17 +16,35 @@ use std::time::Duration;
 use crate::computer_use::provider::{
     AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ComputerUseProvider,
     CoordinateSpace, DisplayMetadata, ElementId, InstalledApp, Point, ProviderError,
-    ProviderResult, RawAppState, Rect, ScreenshotRef, ScrollDirection,
+    ProviderResult, RawAppState, Rect, ScreenshotRef, ScrollDirection, UiElement,
 };
 
-use windows::core::{w, BOOL, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, MAX_PATH, RECT};
+use windows::core::{w, BOOL, BSTR, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, MAX_PATH, RECT, RPC_E_CHANGED_MODE};
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+    COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
 use windows::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+};
+use windows::Win32::UI::Accessibility::{
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
+    IUIAutomationScrollItemPattern, IUIAutomationSelectionItemPattern, IUIAutomationValuePattern,
+    TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId,
+    UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId, UIA_DataGridControlTypeId,
+    UIA_DataItemControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    UIA_GroupControlTypeId, UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId,
+    UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId, UIA_MenuControlTypeId,
+    UIA_MenuItemControlTypeId, UIA_PaneControlTypeId, UIA_RadioButtonControlTypeId,
+    UIA_ScrollItemPatternId, UIA_SelectionItemPatternId, UIA_SliderControlTypeId,
+    UIA_TabControlTypeId, UIA_TabItemControlTypeId, UIA_TextControlTypeId,
+    UIA_ToolBarControlTypeId, UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId,
+    UIA_WindowControlTypeId, UIA_CONTROLTYPE_ID,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -97,12 +115,14 @@ impl ComputerUseProvider for WindowsProvider {
             },
             display: display_metadata_for_window(window.hwnd),
             screenshot,
-            elements: Vec::new(),
+            elements: uia_elements_for_window(window.hwnd).unwrap_or_default(),
         })
     }
 
-    fn click_element(&self, _target: &AppTarget, _element: &ElementId) -> ProviderResult<()> {
-        Err(ProviderError::Unsupported("click_element"))
+    fn click_element(&self, target: &AppTarget, element: &ElementId) -> ProviderResult<()> {
+        let window = resolve_window(target)?;
+        let entry = uia_entry_for_id(window.hwnd, element)?;
+        invoke_uia_element(&entry.element)
     }
 
     fn click_point(&self, _target: &AppTarget, _point: Point) -> ProviderResult<()> {
@@ -131,11 +151,13 @@ impl ComputerUseProvider for WindowsProvider {
 
     fn set_value(
         &self,
-        _target: &AppTarget,
-        _element: &ElementId,
-        _value: &str,
+        target: &AppTarget,
+        element: &ElementId,
+        value: &str,
     ) -> ProviderResult<()> {
-        Err(ProviderError::Unsupported("set_value"))
+        let window = resolve_window(target)?;
+        let entry = uia_entry_for_id(window.hwnd, element)?;
+        set_uia_value(&entry.element, value)
     }
 
     fn type_text(&self, _target: &AppTarget, _text: &str) -> ProviderResult<()> {
@@ -157,12 +179,14 @@ impl ComputerUseProvider for WindowsProvider {
 
     fn scroll_element(
         &self,
-        _target: &AppTarget,
-        _element: &ElementId,
+        target: &AppTarget,
+        element: &ElementId,
         _direction: ScrollDirection,
         _amount: i32,
     ) -> ProviderResult<()> {
-        Err(ProviderError::Unsupported("scroll_element"))
+        let window = resolve_window(target)?;
+        let entry = uia_entry_for_id(window.hwnd, element)?;
+        scroll_uia_element_into_view(&entry.element)
     }
 }
 
@@ -571,4 +595,276 @@ fn hwnd_from_id(raw: &str) -> Option<HWND> {
 
 fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+// --- UI Automation --------------------------------------------------------
+
+const MAX_UIA_ELEMENTS: i32 = 500;
+
+struct ComApartment {
+    should_uninitialize: bool,
+}
+
+impl ComApartment {
+    fn init() -> ProviderResult<Self> {
+        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if hr == RPC_E_CHANGED_MODE {
+            // The thread already has COM initialized with a different apartment
+            // model. UIA can still work; we just must not uninitialize it.
+            return Ok(Self {
+                should_uninitialize: false,
+            });
+        }
+        hr.ok()
+            .map_err(|e| ProviderError::Failed(format!("initialize COM for UIA: {e}")))?;
+        Ok(Self {
+            should_uninitialize: true,
+        })
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if self.should_uninitialize {
+            unsafe {
+                CoUninitialize();
+            }
+        }
+    }
+}
+
+struct UiaElementEntry {
+    ui: UiElement,
+    element: IUIAutomationElement,
+}
+
+fn with_uia<T>(f: impl FnOnce(&IUIAutomation) -> ProviderResult<T>) -> ProviderResult<T> {
+    let _apartment = ComApartment::init()?;
+    let automation: IUIAutomation =
+        unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
+            .map_err(|e| ProviderError::Failed(format!("create UI Automation client: {e}")))?;
+    f(&automation)
+}
+
+fn uia_elements_for_window(hwnd: HWND) -> ProviderResult<Vec<UiElement>> {
+    Ok(uia_entries_for_window(hwnd)?
+        .into_iter()
+        .map(|entry| entry.ui)
+        .collect())
+}
+
+fn uia_entry_for_id(hwnd: HWND, element_id: &ElementId) -> ProviderResult<UiaElementEntry> {
+    uia_entries_for_window(hwnd)?
+        .into_iter()
+        .find(|entry| &entry.ui.id == element_id)
+        .ok_or_else(|| ProviderError::ElementNotFound(element_id.clone()))
+}
+
+fn uia_entries_for_window(hwnd: HWND) -> ProviderResult<Vec<UiaElementEntry>> {
+    with_uia(|automation| unsafe {
+        let root = automation
+            .ElementFromHandle(hwnd)
+            .map_err(|e| ProviderError::Failed(format!("get UIA root for window: {e}")))?;
+        let condition = automation
+            .CreateTrueCondition()
+            .map_err(|e| ProviderError::Failed(format!("create UIA condition: {e}")))?;
+        let descendants = root
+            .FindAll(TreeScope_Descendants, &condition)
+            .map_err(|e| ProviderError::Failed(format!("enumerate UIA descendants: {e}")))?;
+        let count = descendants.Length().unwrap_or(0).clamp(0, MAX_UIA_ELEMENTS);
+        let mut out = Vec::with_capacity(count as usize + 1);
+        if let Some(entry) = uia_entry_from_element(hwnd, 0, root) {
+            out.push(entry);
+        }
+        for index in 0..count {
+            if let Ok(element) = descendants.GetElement(index) {
+                if let Some(entry) = uia_entry_from_element(hwnd, index + 1, element) {
+                    out.push(entry);
+                }
+            }
+        }
+        Ok(out)
+    })
+}
+
+fn uia_entry_from_element(
+    hwnd: HWND,
+    index: i32,
+    element: IUIAutomationElement,
+) -> Option<UiaElementEntry> {
+    let control_type = unsafe { element.CurrentControlType().ok()? };
+    let role = uia_role(control_type);
+    let label = unsafe { element.CurrentName().ok() }
+        .and_then(non_empty_bstr)
+        .or_else(|| unsafe { element.CurrentAutomationId().ok() }.and_then(non_empty_bstr));
+    let bounds = unsafe { element.CurrentBoundingRectangle().ok() }.and_then(rect_from_win32);
+    let enabled = unsafe { element.CurrentIsEnabled().ok() }
+        .map(|value| value.as_bool())
+        .unwrap_or(true);
+    let actionable = enabled && uia_element_actionable(&element, control_type);
+    Some(UiaElementEntry {
+        ui: UiElement {
+            id: format!("win:{}:uia:{index}", hwnd_id(hwnd)),
+            role,
+            label,
+            bounds,
+            bounds_coordinate_space: bounds.map(|_| CoordinateSpace::Screen),
+            actionable,
+        },
+        element,
+    })
+}
+
+fn rect_from_win32(rect: RECT) -> Option<Rect> {
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    Some(Rect {
+        x: rect.left as f32,
+        y: rect.top as f32,
+        width: width as f32,
+        height: height as f32,
+    })
+}
+
+fn non_empty_bstr(value: BSTR) -> Option<String> {
+    let text = value.to_string();
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+fn uia_role(control_type: UIA_CONTROLTYPE_ID) -> String {
+    let name = if control_type == UIA_ButtonControlTypeId {
+        "UIAButton"
+    } else if control_type == UIA_CheckBoxControlTypeId {
+        "UIACheckBox"
+    } else if control_type == UIA_ComboBoxControlTypeId {
+        "UIAComboBox"
+    } else if control_type == UIA_CustomControlTypeId {
+        "UIACustom"
+    } else if control_type == UIA_DataGridControlTypeId {
+        "UIADataGrid"
+    } else if control_type == UIA_DataItemControlTypeId {
+        "UIADataItem"
+    } else if control_type == UIA_DocumentControlTypeId {
+        "UIADocument"
+    } else if control_type == UIA_EditControlTypeId {
+        "UIAEdit"
+    } else if control_type == UIA_GroupControlTypeId {
+        "UIAGroup"
+    } else if control_type == UIA_HyperlinkControlTypeId {
+        "UIAHyperlink"
+    } else if control_type == UIA_ImageControlTypeId {
+        "UIAImage"
+    } else if control_type == UIA_ListControlTypeId {
+        "UIAList"
+    } else if control_type == UIA_ListItemControlTypeId {
+        "UIAListItem"
+    } else if control_type == UIA_MenuControlTypeId {
+        "UIAMenu"
+    } else if control_type == UIA_MenuItemControlTypeId {
+        "UIAMenuItem"
+    } else if control_type == UIA_PaneControlTypeId {
+        "UIAPane"
+    } else if control_type == UIA_RadioButtonControlTypeId {
+        "UIARadioButton"
+    } else if control_type == UIA_SliderControlTypeId {
+        "UIASlider"
+    } else if control_type == UIA_TabControlTypeId {
+        "UIATab"
+    } else if control_type == UIA_TabItemControlTypeId {
+        "UIATabItem"
+    } else if control_type == UIA_TextControlTypeId {
+        "UIAText"
+    } else if control_type == UIA_ToolBarControlTypeId {
+        "UIAToolBar"
+    } else if control_type == UIA_TreeControlTypeId {
+        "UIATree"
+    } else if control_type == UIA_TreeItemControlTypeId {
+        "UIATreeItem"
+    } else if control_type == UIA_WindowControlTypeId {
+        "UIAWindow"
+    } else {
+        return format!("UIAControlType({})", control_type.0);
+    };
+    name.to_string()
+}
+
+fn uia_element_actionable(
+    element: &IUIAutomationElement,
+    control_type: UIA_CONTROLTYPE_ID,
+) -> bool {
+    has_pattern::<IUIAutomationInvokePattern>(element, UIA_InvokePatternId)
+        || has_pattern::<IUIAutomationSelectionItemPattern>(element, UIA_SelectionItemPatternId)
+        || has_pattern::<IUIAutomationValuePattern>(element, UIA_ValuePatternId)
+        || has_pattern::<IUIAutomationScrollItemPattern>(element, UIA_ScrollItemPatternId)
+        || control_type == UIA_ButtonControlTypeId
+        || control_type == UIA_CheckBoxControlTypeId
+        || control_type == UIA_ComboBoxControlTypeId
+        || control_type == UIA_EditControlTypeId
+        || control_type == UIA_HyperlinkControlTypeId
+        || control_type == UIA_ListItemControlTypeId
+        || control_type == UIA_MenuItemControlTypeId
+        || control_type == UIA_RadioButtonControlTypeId
+        || control_type == UIA_TabItemControlTypeId
+        || control_type == UIA_TreeItemControlTypeId
+}
+
+fn has_pattern<T>(
+    element: &IUIAutomationElement,
+    pattern: windows::Win32::UI::Accessibility::UIA_PATTERN_ID,
+) -> bool
+where
+    T: windows::core::Interface,
+{
+    unsafe { element.GetCurrentPatternAs::<T>(pattern).is_ok() }
+}
+
+fn invoke_uia_element(element: &IUIAutomationElement) -> ProviderResult<()> {
+    unsafe {
+        let _ = element.SetFocus();
+        if let Ok(pattern) =
+            element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+        {
+            return pattern
+                .Invoke()
+                .map_err(|e| ProviderError::Failed(format!("UIA InvokePattern failed: {e}")));
+        }
+        if let Ok(pattern) = element
+            .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
+        {
+            return pattern.Select().map_err(|e| {
+                ProviderError::Failed(format!("UIA SelectionItemPattern failed: {e}"))
+            });
+        }
+    }
+    Err(ProviderError::Unsupported("click_element"))
+}
+
+fn set_uia_value(element: &IUIAutomationElement, value: &str) -> ProviderResult<()> {
+    unsafe {
+        let pattern = element
+            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            .map_err(|_| ProviderError::Unsupported("set_value"))?;
+        pattern
+            .SetValue(&BSTR::from(value))
+            .map_err(|e| ProviderError::Failed(format!("UIA ValuePattern failed: {e}")))
+    }
+}
+
+fn scroll_uia_element_into_view(element: &IUIAutomationElement) -> ProviderResult<()> {
+    unsafe {
+        let pattern = element
+            .GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId)
+            .map_err(|_| ProviderError::Unsupported("scroll_element"))?;
+        pattern
+            .ScrollIntoView()
+            .map_err(|e| ProviderError::Failed(format!("UIA ScrollItemPattern failed: {e}")))
+    }
 }
