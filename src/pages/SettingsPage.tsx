@@ -490,7 +490,7 @@ function GeneralSettings({
           <ThemeSelector mode={themeMode} onChange={onThemeModeChange} />
         </SettingsRow>
       </SettingsGroup>
-      <SettingsGroup title={t("settings.appshot")} flush>
+      <SettingsGroup title={t("settings.desktop_control")} flush>
         <SettingsRow
           icon={<Monitor className="h-4 w-4" />}
           label={t("settings.appshot_shortcut")}
@@ -514,8 +514,6 @@ function GeneralSettings({
             </button>
           </div>
         </SettingsRow>
-      </SettingsGroup>
-      <SettingsGroup title={t("settings.desktop_control")} flush>
         <SettingsStackedRow
           icon={<Shield className="h-4 w-4" />}
           label={t("settings.desktop_control")}
