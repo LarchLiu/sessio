@@ -100,6 +100,32 @@ There is also one process-architecture constraint worth keeping explicit here:
 
 ## Current Verified Notes
 
+- 2026-06-28 status update: the in-process Sessio implementation now aligns
+  with the core [computer-use-skill.md](./computer-use-skill.md) operating
+  contract while preserving Sessio naming (`sessio cu`, not `alma cu`).
+  Completed parity includes:
+  - AX-first unified click via `computer_click`, with `elementId` / `ref`
+    preferred over coordinates
+  - ref-targeted secondary actions through `computer_perform_secondary_action`
+    / `computer_secondary_click`, using AXShowMenu before CGEvent right-click
+  - ref-targeted scroll through AX scroll actions, with wheel fallback
+  - post-action app state with inline MCP image content when the screenshot
+    handle is readable
+  - `bundle`, `ref`, and `coord_space` compatibility aliases alongside
+    Sessio's existing `appId`, `elementId`, and `coordSpace`
+  - `sessio cu` ref-first command forms plus `--bundle` and `--days`
+    compatibility
+  - macOS `CGEventPostToPid` dispatch for physical mouse/keyboard/scroll
+    events, key chords, best-effort focus restoration, and Electron AX flags
+    (`AXEnhancedUserInterface`, `AXManualAccessibility`)
+- Remaining non-parity items are intentionally scoped as future architecture
+  work rather than hidden TODOs in this in-process phase:
+  - replacing the current `screencapture`/CGWindow-based capture path with
+    ScreenCaptureKit
+  - deriving true recently-used app frequency for `list_apps --days`
+  - adding helper/daemon-only CLI affordances such as `raise`, `shot`, `lens`,
+    and `shutdown`
+
 - The shared desktop-control truth source no longer hardcodes
   `input_injection_supported: false` on macOS. In
   [src-tauri/src/lib.rs](../src-tauri/src/lib.rs), `desktop_control_inputs()`
@@ -380,15 +406,16 @@ The immediate direction for Sessio should be:
 - only keep `foreground takeover` as a future concept if actions are explicitly
   modeled by whether they actually require foreground takeover
 
-### L. No CLI parity layer
+### L. No CLI parity layer (historical gap)
 
 The skill provides two interfaces:
 
 - MCP tools
 - CLI commands
 
-Sessio currently has the MCP path only. There is no `sessio cu ...` CLI surface
-equivalent to the skill's `alma cu ...` contract.
+At the time this plan was written, Sessio had the MCP path only. The current
+implementation now exposes a `sessio cu ...` CLI surface aligned with the
+in-repo skill contract.
 
 That means Sessio still lacks:
 
