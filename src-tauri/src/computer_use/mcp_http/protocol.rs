@@ -252,6 +252,11 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "computer_launch_app",
             description: "Launch a chosen application without activating it. Requires target-app approval and opens a lease for the app.",
+            input_schema: app_arg.clone(),
+        },
+        ToolDefinition {
+            name: "computer_raise_app",
+            description: "Bring a chosen application/window to the foreground and restore minimized or hidden windows when possible. Use after get_app_state reports no visible window.",
             input_schema: app_arg,
         },
         ToolDefinition {
@@ -339,6 +344,7 @@ pub const TOOL_DEFINITIONS: &[&str] = &[
     "computer_list_apps",
     "computer_start",
     "computer_launch_app",
+    "computer_raise_app",
     "computer_get_app_state",
     "computer_click",
     "computer_click_element",

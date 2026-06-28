@@ -1315,6 +1315,7 @@ fn parse_computer_use(args: &[String]) -> Result<Cli> {
         }
         "start" => tool("computer_start", target_args(&args, true)?),
         "launch-app" => tool("computer_launch_app", target_args(&args, true)?),
+        "raise" => tool("computer_raise_app", target_args(&args, true)?),
         "get-app-state" => tool("computer_get_app_state", target_args(&args, false)?),
         "click" => tool("computer_click", click_action_args(&args)?),
         "click-element" => tool("computer_click_element", {
@@ -2682,6 +2683,7 @@ Usage:
   sessio cu list-apps [--days <n>] [--url <mcp-url>] [--token <token>] [--json]
   sessio cu start --app-id <bundleId> [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
   sessio cu launch-app --app-id <bundleId> [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu raise --app-id <bundleId> [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
   sessio cu get-app-state [--app-id <bundleId>] [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
   sessio cu click --snapshot-id <id> (<ref>|--element-id <id>|--x <px> --y <px>) [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
   sessio cu click-element --snapshot-id <id> (<ref>|--element-id <id>) [--url <mcp-url>] [--token <token>] [--json]
@@ -2906,6 +2908,20 @@ mod tests {
             panic!("expected computer-use command");
         };
         assert_eq!(name, "computer_start");
+        assert_eq!(arguments["appId"], "com.example.app");
+    }
+
+    #[test]
+    fn parses_computer_use_raise_command() {
+        let cli = parse_args(args(&["cu", "raise", "--bundle", "com.example.app"])).unwrap();
+
+        let Command::ComputerUse(ComputerUseCommand::Tool {
+            name, arguments, ..
+        }) = cli.command
+        else {
+            panic!("expected computer-use command");
+        };
+        assert_eq!(name, "computer_raise_app");
         assert_eq!(arguments["appId"], "com.example.app");
     }
 

@@ -20,8 +20,8 @@ use super::approvals::{ApprovalDecision, ApprovalRegistry};
 use super::lease::{LeaseError, LeaseRegistry, SnapshotError, SnapshotId};
 use super::permissions::{self, PermissionDenied, RequiredCapability};
 use super::provider::{
-    AllowedAction, AppLaunchResult, AppState, AppTarget, ComputerUseProvider, CoordinateSpace,
-    InstalledApp, Point, ProviderError, ScreenshotRef, ScrollDirection,
+    AllowedAction, AppLaunchResult, AppRaiseResult, AppState, AppTarget, ComputerUseProvider,
+    CoordinateSpace, InstalledApp, Point, ProviderError, ScreenshotRef, ScrollDirection,
 };
 use super::settings::ComputerUseSettings;
 
@@ -190,6 +190,27 @@ impl ComputerUseHost {
         if needs_lease {
             self.leases.open(session_id, target)?;
         }
+        Ok(result)
+    }
+
+    /// `computer_raise_app` — bring a target app/window to the foreground,
+    /// restoring minimized or hidden windows when the platform can.
+    pub fn raise_app(
+        &self,
+        session_id: &str,
+        target: AppTarget,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<AppRaiseResult, ComputerUseError> {
+        self.require_enabled()?;
+        self.require_permission(perm, RequiredCapability::Observe)?;
+        self.require_session_approval(session_id)?;
+        self.require_approval(session_id, &target.app_id)?;
+        let needs_lease = self.require_compatible_lease(session_id, &target)?;
+        let result = self.provider.raise_app(&target)?;
+        if needs_lease {
+            self.leases.open(session_id, target)?;
+        }
+        self.begin_foreground(session_id);
         Ok(result)
     }
 
@@ -765,6 +786,34 @@ mod tests {
         assert_eq!(
             provider.actions(),
             vec!["launch:com.example.installed".to_string()]
+        );
+    }
+
+    #[test]
+    fn raise_app_requires_app_approval_opens_lease_and_marks_foreground() {
+        let (h, provider) = host_with_apps(vec![installed_app(true)]);
+        h.approvals().approve_session("s1");
+        let p = perm(true, true, true);
+
+        assert!(matches!(
+            h.raise_app("s1", installed_target(), &p),
+            Err(ComputerUseError::Approval(ApprovalDecision::AppNotApproved))
+        ));
+        assert!(provider.actions().is_empty());
+        assert!(!h.leases.has_lease("s1"));
+        assert!(!h.foreground_active("s1"));
+
+        h.approvals().approve_app("s1", &installed_target().app_id);
+        let result = h.raise_app("s1", installed_target(), &p).unwrap();
+        assert!(!result.launched);
+        assert!(result.running);
+        assert!(result.activated);
+        assert!(result.visible);
+        assert!(h.leases.has_lease("s1"));
+        assert!(h.foreground_active("s1"));
+        assert_eq!(
+            provider.actions(),
+            vec!["raise:com.example.installed".to_string()]
         );
     }
 

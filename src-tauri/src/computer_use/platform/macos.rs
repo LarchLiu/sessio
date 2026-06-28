@@ -36,9 +36,9 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
 
 use crate::computer_use::provider::{
-    AppId, AppLaunchResult, AppTarget, ComputerUseProvider, CoordinateSpace, DisplayMetadata,
-    ElementId, InstalledApp, Point, ProviderError, ProviderResult, RawAppState, Rect,
-    ScreenshotRef, ScrollDirection, UiElement,
+    AppId, AppLaunchResult, AppRaiseResult, AppTarget, ComputerUseProvider, CoordinateSpace,
+    DisplayMetadata, ElementId, InstalledApp, Point, ProviderError, ProviderResult, RawAppState,
+    Rect, ScreenshotRef, ScrollDirection, UiElement,
 };
 
 #[derive(Clone)]
@@ -88,6 +88,10 @@ impl ComputerUseProvider for MacosProvider {
 
     fn launch_app(&self, target: &AppTarget) -> ProviderResult<AppLaunchResult> {
         launch_app_background(target)
+    }
+
+    fn raise_app(&self, target: &AppTarget) -> ProviderResult<AppRaiseResult> {
+        raise_app_foreground(target)
     }
 
     fn capture_app_state(&self, target: &AppTarget) -> ProviderResult<RawAppState> {
@@ -371,6 +375,63 @@ fn wait_for_running(app_id: &str, timeout: Duration) -> bool {
     false
 }
 
+fn running_application(
+    app_id: &str,
+) -> Option<objc2::rc::Retained<objc2_app_kit::NSRunningApplication>> {
+    use objc2_app_kit::NSRunningApplication;
+    use objc2_foundation::NSString;
+    let apps =
+        NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(app_id));
+    apps.iter().next()
+}
+
+fn raise_app_foreground(target: &AppTarget) -> ProviderResult<AppRaiseResult> {
+    use objc2_app_kit::NSApplicationActivationOptions;
+
+    let mut launched = false;
+    if !self_is_app_running(&target.app_id)? {
+        launched = launch_app_background(target)?.launched;
+    }
+    let pid = resolve_pid(&target.app_id)?;
+    restore_minimized_ax_windows(pid);
+    let app = running_application(&target.app_id)
+        .ok_or_else(|| ProviderError::AppNotFound(target.app_id.clone()))?;
+    let _ = app.unhide();
+    #[allow(deprecated)]
+    let activated = app.activateWithOptions(
+        NSApplicationActivationOptions::ActivateAllWindows
+            | NSApplicationActivationOptions::ActivateIgnoringOtherApps,
+    );
+    restore_minimized_ax_windows(pid);
+    let visible = wait_for_visible_window(pid, Duration::from_secs(2));
+    Ok(AppRaiseResult {
+        target: target.clone(),
+        launched,
+        running: true,
+        activated,
+        visible,
+    })
+}
+
+fn self_is_app_running(app_id: &AppId) -> ProviderResult<bool> {
+    match resolve_pid(app_id) {
+        Ok(_) => Ok(true),
+        Err(ProviderError::AppNotFound(_)) if installed_app_url(app_id).is_some() => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+fn wait_for_visible_window(pid: i32, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if frontmost_window_for_pid(pid).is_ok() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 // --- Window discovery + capture ------------------------------------------
 
 fn frontmost_window_for_pid(pid: i32) -> ProviderResult<(u32, Option<Rect>)> {
@@ -555,9 +616,12 @@ mod ax {
     pub const SIZE: &str = "AXSize";
     pub const ENABLED: &str = "AXEnabled";
     pub const VALUE: &str = "AXValue";
+    pub const WINDOWS: &str = "AXWindows";
+    pub const MINIMIZED: &str = "AXMinimized";
     pub const ENHANCED_USER_INTERFACE: &str = "AXEnhancedUserInterface";
     pub const MANUAL_ACCESSIBILITY: &str = "AXManualAccessibility";
     pub const PRESS_ACTION: &str = "AXPress";
+    pub const RAISE_ACTION: &str = "AXRaise";
     pub const SHOW_MENU_ACTION: &str = "AXShowMenu";
     pub const SCROLL_TO_VISIBLE_ACTION: &str = "AXScrollToVisible";
     pub const SCROLL_UP_ACTION: &str = "AXScrollUp";
@@ -917,6 +981,44 @@ fn enable_electron_accessibility_flags(root: ax::AXUIElementRef) {
         let _ = unsafe {
             ax::AXUIElementSetAttributeValue(root, attr.as_concrete_TypeRef(), value.as_CFTypeRef())
         };
+    }
+}
+
+fn restore_minimized_ax_windows(pid: i32) {
+    use core_foundation::base::CFTypeRef;
+    let root = unsafe { ax::AXUIElementCreateApplication(pid) };
+    if root.is_null() {
+        return;
+    }
+    enable_electron_accessibility_flags(root);
+    restore_minimized_ax_windows_for_root(root, ax::WINDOWS);
+    restore_minimized_ax_windows_for_root(root, "AXAllWindows");
+    unsafe { cf_release(root as CFTypeRef) };
+}
+
+fn restore_minimized_ax_windows_for_root(root: ax::AXUIElementRef, windows_attr: &str) {
+    use core_foundation::base::CFTypeRef;
+    let attr = CFString::new(windows_attr);
+    let mut value: CFTypeRef = std::ptr::null();
+    let err =
+        unsafe { ax::AXUIElementCopyAttributeValue(root, attr.as_concrete_TypeRef(), &mut value) };
+    if err != ax::kAXErrorSuccess || value.is_null() {
+        return;
+    }
+    let array: CFArray<*const c_void> = unsafe { CFArray::wrap_under_create_rule(value as _) };
+    let minimized = CFString::new(ax::MINIMIZED);
+    let false_value = CFBoolean::false_value();
+    let raise = CFString::new(ax::RAISE_ACTION);
+    for item in array.iter() {
+        let window = *item as ax::AXUIElementRef;
+        let _ = unsafe {
+            ax::AXUIElementSetAttributeValue(
+                window,
+                minimized.as_concrete_TypeRef(),
+                false_value.as_CFTypeRef(),
+            )
+        };
+        let _ = unsafe { ax::AXUIElementPerformAction(window, raise.as_concrete_TypeRef()) };
     }
 }
 

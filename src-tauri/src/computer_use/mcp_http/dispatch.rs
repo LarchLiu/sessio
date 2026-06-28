@@ -116,6 +116,15 @@ fn run_tool(
                 serde_json::to_value(&result).unwrap_or_default(),
             ))
         }
+        "computer_raise_app" => {
+            let target = parse_target(args)?;
+            let result = host
+                .raise_app(session_id, target, perm)
+                .map_err(host_error_message)?;
+            Ok(tool_json_result(
+                serde_json::to_value(&result).unwrap_or_default(),
+            ))
+        }
         "computer_get_app_state" => {
             let state = match parse_optional_target(args)? {
                 Some(target) => host.get_app_state_for_target(session_id, target, perm),
@@ -865,6 +874,45 @@ mod tests {
             _ => panic!("expected isError result"),
         }
         assert!(provider.actions().is_empty());
+    }
+
+    #[test]
+    fn raise_app_restores_target_after_approval() {
+        let (h, provider) = host_with_stopped_app();
+        let p = perm();
+        h.approvals().approve_session("s1");
+        h.approvals()
+            .approve_app("s1", &"com.example.installed".to_string());
+
+        let resp = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({ "name": "computer_raise_app", "arguments": { "bundle": "com.example.installed" } }),
+            ),
+        );
+        match resp {
+            McpResponse::Result { result, .. } => {
+                assert!(
+                    result.get("isError").is_none(),
+                    "raise should succeed: {result}"
+                );
+                assert_eq!(
+                    result["structuredContent"]["target"]["appId"],
+                    "com.example.installed"
+                );
+                assert_eq!(result["structuredContent"]["launched"], true);
+                assert_eq!(result["structuredContent"]["activated"], true);
+                assert_eq!(result["structuredContent"]["visible"], true);
+            }
+            _ => panic!("expected result"),
+        }
+        assert_eq!(
+            provider.actions(),
+            vec!["raise:com.example.installed".to_string()]
+        );
     }
 
     #[test]

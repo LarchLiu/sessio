@@ -33,6 +33,20 @@ pub struct AppLaunchResult {
     pub running: bool,
 }
 
+/// Result of bringing an app back to the foreground.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppRaiseResult {
+    pub target: AppTarget,
+    /// True when this call had to start the app before raising it.
+    pub launched: bool,
+    pub running: bool,
+    /// True when the platform accepted the foreground activation request.
+    pub activated: bool,
+    /// Best-effort check that the app now has a visible on-screen window.
+    pub visible: bool,
+}
+
 /// The concrete target a lease is opened against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,6 +268,8 @@ pub trait ComputerUseProvider: Send + Sync {
 
     fn launch_app(&self, target: &AppTarget) -> ProviderResult<AppLaunchResult>;
 
+    fn raise_app(&self, target: &AppTarget) -> ProviderResult<AppRaiseResult>;
+
     /// Capture a fresh screenshot + AX element tree for the target.
     fn capture_app_state(&self, target: &AppTarget) -> ProviderResult<RawAppState>;
 
@@ -395,6 +411,27 @@ mod fake {
                 target: target.clone(),
                 launched,
                 running: true,
+            })
+        }
+
+        fn raise_app(&self, target: &AppTarget) -> ProviderResult<AppRaiseResult> {
+            let mut apps = self.apps.lock().unwrap();
+            let app = apps
+                .iter_mut()
+                .find(|a| a.id == target.app_id)
+                .ok_or_else(|| ProviderError::AppNotFound(target.app_id.clone()))?;
+            let launched = !app.running;
+            if launched {
+                app.running = true;
+                app.pid = app.pid.or(Some(1234));
+            }
+            self.record(format!("raise:{}", target.app_id));
+            Ok(AppRaiseResult {
+                target: target.clone(),
+                launched,
+                running: true,
+                activated: true,
+                visible: true,
             })
         }
 

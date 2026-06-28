@@ -27,11 +27,11 @@ There are **two equivalent interfaces** — pick based on context:
 
 Sessio auto-registers an MCP server (`sessio-computer-use`) that exposes the
 Codex-compatible action verbs plus `launch_app` (Sessio extension) and
-two onboarding helpers. Every action tool call automatically returns a
+`raise_app` (Sessio extension) plus two onboarding helpers. Every action tool call automatically returns a
 fresh post-action screenshot as an image content block — you don't need
 to re-call `get_app_state` to see the result.
 
-Tools: `computer_launch_app`, `computer_list_apps`,
+Tools: `computer_launch_app`, `computer_raise_app`, `computer_list_apps`,
 `computer_get_app_state`, `computer_click`,
 `computer_perform_secondary_action`, `computer_scroll`,
 `computer_drag`, `computer_type_text`,
@@ -58,9 +58,20 @@ whatever the user is doing. **Never use it.** Instead:
 - For explicit control, use `computer_launch_app` / `sessio cu launch-app --bundle <bundle>` —
   it wraps `NSWorkspace.openApplication` with `activates: false` (matches
   Codex's behaviour).
+- If the app is already running but hidden or minimized, use
+  `computer_raise_app` / `sessio cu raise --bundle <bundle>`. This is the
+  explicit foreground recovery path: it may activate the target app, tries to
+  clear `AXMinimized` on its windows, and then returns whether a visible window
+  was found.
+- Do not rely on AppleScript recovery snippets such as
+  `tell application "<App>" to activate`, `set frontmost to true`, or clicking a
+  Window-menu item. Those commands can report exit code 0 while leaving a
+  Dock-minimized window minimized. Use `computer_raise_app` / `sessio cu raise`
+  so Sessio can operate on the app/window through AppKit and AX.
 
-The goal: the user's frontmost app and current Space are never disturbed,
-even when Sessio is launching an app from cold.
+The goal: launching from cold should not disturb the user's frontmost app or
+current Space. Foreground activation is only expected when the agent explicitly
+uses the recovery-only `raise` path.
 
 ## Core workflow
 
@@ -75,6 +86,7 @@ Via MCP (image returns inline):
 ```
 computer_list_apps                          # pick an app
 computer_get_app_state { bundle: "com.apple.Music" }
+computer_raise_app { bundle: "com.apple.Music" }      # only if snapshot says no visible window
 computer_click { ref: "e7" }                # returns a post-action screenshot
 computer_click { x: 820, y: 420, pid: 4521 }   # pixel fallback
 computer_press_key { key: "cmd+shift+n", pid: 4521 }
@@ -85,6 +97,7 @@ Via Bash (two-step for images):
 ```bash
 sessio cu list-apps
 sessio cu get-app-state --bundle com.apple.Music
+sessio cu raise --bundle com.apple.Music    # only if no visible window was found
 sessio cu click --snapshot-id <id> e7
 sessio cu get-app-state --bundle com.apple.Music      # re-fetch to see the change
 ```
@@ -110,6 +123,7 @@ permission. Errors surface as structured codes
 | Verb                          | MCP name                                | Bash form                                                     | Notes                                                          |
 |-------------------------------|-----------------------------------------|---------------------------------------------------------------|----------------------------------------------------------------|
 | Launch app (background)       | `computer_launch_app`                   | `sessio cu launch-app --bundle <bundle>`                        | No foreground activation; no-op if already running             |
+| Raise app (foreground)        | `computer_raise_app`                    | `sessio cu raise --bundle <bundle>`                             | Restore hidden/minimized targets when a visible window is required |
 | List apps w/ recency hint     | `computer_list_apps`                    | `sessio cu list-apps [--days 14]`                               | Running + installed apps; `days` is accepted as a compatibility hint |
 | Snapshot (tree + screenshot)  | `computer_get_app_state`                | `sessio cu get-app-state --bundle <bundle>`                     | Call once per turn before acting                               |
 | Click by ref or pixel         | `computer_click`                        | `sessio cu click --snapshot-id <id> <ref>` / `sessio cu click --snapshot-id <id> --x <x> --y <y>` | MCP auto-returns post-action screenshot                        |
@@ -122,8 +136,8 @@ permission. Errors surface as structured codes
 | Check permissions             | `computer_permissions`                  | `sessio cu permissions`                                        | MCP returns AX + screen recording status                       |
 | Trigger AX dialog/settings    | `computer_grant`                        | `sessio cu grant --permission <screenshots\|accessibility>`     | Caller should poll permissions after                           |
 
-Additional Bash-only commands such as `raise`, `shot`, `lens`, and
-`shutdown` are intentionally out of scope for the current in-process Sessio
+Additional helper/daemon-only commands such as `shot`, `lens`, and `shutdown`
+are intentionally out of scope for the current in-process Sessio
 implementation; there is no separate always-on computer-use daemon in this
 phase.
 
@@ -217,6 +231,7 @@ and extended for Chinese apps:
 | `ax_not_granted`                           | `sessio cu grant --permission accessibility`, then enable Sessio in Accessibility. |
 | `sc_not_granted` (on `get_app_state`)      | Enable Sessio in Screen & System Audio Recording.                      |
 | `app_not_found`                            | App isn't running. `get_app_state` auto-launches in the background; for explicit control use `sessio cu launch-app --bundle <bundle>` / `computer_launch_app`. **Never** use `open -b` — it activates the app and steals focus. |
+| `no visible window found for application`  | The app is running but hidden/minimized or has no on-screen window. Use `computer_raise_app` / `sessio cu raise --bundle <bundle>`, then re-run `get_app_state`. |
 | `ref_stale` / `element_not_found`          | Re-run `get_app_state`.                                                |
 | `action_unsupported`                       | Element has no AXPress. `strategy: "physical"` routes via CGEvent.     |
 | Element snap looks empty on Slack / VS Code / Electron | Re-run `get_app_state` once; `AXEnhancedUserInterface` takes a snap to take effect. |

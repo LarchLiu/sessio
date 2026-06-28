@@ -5,8 +5,8 @@
 //! cleanly (observation-only or fully disabled) rather than failing to build.
 
 use crate::computer_use::provider::{
-    AppId, AppLaunchResult, AppTarget, ComputerUseProvider, ElementId, InstalledApp, Point,
-    ProviderError, ProviderResult, RawAppState, ScrollDirection,
+    AppId, AppLaunchResult, AppRaiseResult, AppTarget, ComputerUseProvider, ElementId,
+    InstalledApp, Point, ProviderError, ProviderResult, RawAppState, ScrollDirection,
 };
 
 pub struct UnsupportedProvider;
@@ -38,6 +38,10 @@ impl ComputerUseProvider for UnsupportedProvider {
 
     fn launch_app(&self, _target: &AppTarget) -> ProviderResult<AppLaunchResult> {
         Err(ProviderError::Unsupported("launch_app"))
+    }
+
+    fn raise_app(&self, _target: &AppTarget) -> ProviderResult<AppRaiseResult> {
+        Err(ProviderError::Unsupported("raise_app"))
     }
 
     fn capture_app_state(&self, _target: &AppTarget) -> ProviderResult<RawAppState> {
