@@ -212,6 +212,7 @@ export default function sessioComputerUse(pi: any) {
       promptGuidelines: [
         `${name} is a Sessio computer-use tool; call computer_status first if availability or approval is unclear.`,
         `${name} uses Sessio's AX-first desktop broker. Prefer elementId/ref over screenshot coordinates whenever available.`,
+        "Do not write raw Swift/CoreGraphics/CGEvent, cliclick, AppleScript mouse, or other direct input scripts; they bypass Sessio approvals, snapshot mapping, and pointer overlay.",
       ],
       parameters: TOOL_PARAMETERS[name],
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal) {

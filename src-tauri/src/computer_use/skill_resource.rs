@@ -35,6 +35,7 @@ pub fn computer_use_prompt_block() -> String {
 {}
 When driving native macOS apps, prefer the injected `computer_*` tools over shell scripts.
 Start with `computer_get_app_state`; use AX refs (`ref`/`elementId`) before screenshot coordinates.
+Never write or run raw Swift/CoreGraphics/CGEvent, cliclick, AppleScript mouse, or other direct input scripts. They bypass Sessio approvals, snapshot coordinate mapping, post-action screenshots, and the pointer overlay. If `computer_*` tools are unavailable, use `sessio cu` only.
 If the target has no visible window or is Dock-minimized, call `computer_raise_app` for that bundle, then retry `computer_get_app_state`. Do not use `open -a`, AppleScript `activate`/`frontmost`, or Window-menu clicks for this recovery path; those can report success without restoring the window.
 </sessio-computer-use>"#,
         computer_use_skill_prompt_note()
@@ -128,6 +129,8 @@ mod tests {
         assert!(block.contains("Full Sessio computer-use skill"));
         assert!(block.contains("computer_get_app_state"));
         assert!(block.contains("computer_raise_app"));
+        assert!(block.contains("raw Swift/CoreGraphics/CGEvent"));
+        assert!(block.contains("sessio cu"));
         assert!(block.contains("open -a"));
     }
 

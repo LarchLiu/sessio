@@ -26,6 +26,13 @@ Drives native macOS apps through two complementary paths:
 
 There are **two equivalent interfaces** — pick based on context:
 
+Hard rule: **do not write or run raw desktop-control scripts** such as
+Swift/CoreGraphics/CGEvent snippets, `cliclick`, AppleScript mouse clicks, or
+ad-hoc cursor movement helpers. Those bypass Sessio's app approval, snapshot
+staleness checks, coordinate mapping, post-action screenshots, and pointer
+overlay. Use `computer_*` tools first; if they are not listed, use `sessio cu`
+only.
+
 ### Preferred: Sessio `computer_*` MCP tools (direct)
 
 Sessio auto-registers an MCP server (`sessio-computer-use`) that exposes the
@@ -50,6 +57,8 @@ Use this when scripting or when you need deterministic stdout (CI,
 automation pipelines). Same verbs, same semantics, but output is text
 only — to see the screen after an action you have to call
 `get_app_state` separately and `Read` the resulting JPG path.
+This is the only Bash-based fallback. Do not replace it with handwritten
+CoreGraphics / CGEvent / `cliclick` commands.
 
 When the Sessio desktop app is running, `sessio cu` auto-discovers the local
 computer-use broker from Sessio's private app state directory and attaches an
