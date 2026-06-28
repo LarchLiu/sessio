@@ -123,6 +123,10 @@ There is also one process-architecture constraint worth keeping explicit here:
     now point agents to `computer_raise_app` / `sessio cu raise` and explicitly
     warn against `open -a` / AppleScript `activate` / Window-menu fallbacks that
     can report success without restoring a Dock-minimized window
+  - bundled computer-use skill resources: release builds include
+    `computer-use-skill/SKILL.md` plus `playbooks/`, and computer-use turns tell
+    agents the resolved local skill path so they can read the full workflow on
+    demand instead of relying only on short prompt hints
   - true recent-use ranking for `computer_list_apps` / `sessio cu list-apps
     --days`, using macOS activity metadata when available and falling back
     cleanly when the OS withholds it

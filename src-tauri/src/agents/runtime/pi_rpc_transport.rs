@@ -1225,12 +1225,8 @@ fn runtime_option_bool(options: &RuntimeMetadata, key: &str) -> bool {
     options.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
-fn computer_use_prompt_block() -> &'static str {
-    r#"<sessio-computer-use>
-When driving native macOS apps, prefer the injected `computer_*` tools over shell scripts.
-Start with `computer_get_app_state`; use AX refs (`ref`/`elementId`) before screenshot coordinates.
-If the target has no visible window or is Dock-minimized, call `computer_raise_app` for that bundle, then retry `computer_get_app_state`. Do not use `open -a`, AppleScript `activate`/`frontmost`, or Window-menu clicks for this recovery path; those can report success without restoring the window.
-</sessio-computer-use>"#
+fn computer_use_prompt_block() -> String {
+    crate::computer_use::skill_resource::computer_use_prompt_block()
 }
 
 fn normalize_canvas_prompt_text(text: &str, options: &RuntimeMetadata) -> String {

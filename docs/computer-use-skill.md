@@ -8,6 +8,9 @@ allowed-tools:
 
 # Computer Use Skill (macOS)
 
+Sessio bundles this file into the desktop app as `computer-use-skill/SKILL.md`;
+app-specific playbooks are bundled next to it under `playbooks/`.
+
 Drives native macOS apps through two complementary paths:
 
 1. **Accessibility API** (`AXUIElementPerformAction`) — when the app exposes a

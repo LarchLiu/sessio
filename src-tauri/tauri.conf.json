@@ -39,6 +39,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "../docs/computer-use-skill.md": "computer-use-skill/SKILL.md",
+      "../docs/computer-use/playbooks": "computer-use-skill/playbooks"
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }

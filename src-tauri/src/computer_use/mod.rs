@@ -21,6 +21,7 @@ pub mod permissions;
 pub mod platform;
 pub mod provider;
 pub mod settings;
+pub mod skill_resource;
 
 pub use approvals::{AppApproval, ApprovalDecision, ApprovalRegistry, SessionApproval};
 pub use host::{ComputerUseError, ComputerUseHost};
