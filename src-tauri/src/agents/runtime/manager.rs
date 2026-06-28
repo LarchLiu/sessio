@@ -475,6 +475,9 @@ impl RuntimeManager {
         let app_id = app_id.to_string();
         if approved {
             approvals.approve_app(&app_id);
+            runtime
+                .host()
+                .clear_pending_app_approval(sessio_runtime_session_id);
         } else {
             approvals.revoke_app(&app_id);
         }

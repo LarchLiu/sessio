@@ -11,7 +11,7 @@
 //! then dispatches to the [`ComputerUseProvider`]. The provider performs the
 //! privileged work (Phase 3); the host owns the policy.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::desktop_control::DesktopControlPermissionStatus;
@@ -20,7 +20,7 @@ use super::approvals::{ApprovalDecision, ApprovalRegistry};
 use super::lease::{LeaseError, LeaseRegistry, SnapshotError, SnapshotId};
 use super::permissions::{self, PermissionDenied, RequiredCapability};
 use super::provider::{
-    AllowedAction, AppLaunchResult, AppListOptions, AppRaiseResult, AppState, AppTarget,
+    AllowedAction, AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppState, AppTarget,
     ComputerUseProvider, CoordinateSpace, InstalledApp, Point, ProviderError, ScreenshotRef,
     ScrollDirection,
 };
@@ -53,6 +53,10 @@ pub struct ComputerUseHost {
     leases: Arc<LeaseRegistry>,
     approvals: Arc<ApprovalRegistry>,
     settings: Arc<RwLock<ComputerUseSettings>>,
+    /// Sessions whose most recent computer-use action was blocked on app
+    /// approval before a lease could be established. This lets the chat overlay
+    /// still tell the user which app needs approval.
+    pending_app_approvals: Arc<Mutex<HashMap<String, AppId>>>,
     /// Sessions currently performing a foreground takeover (an agent is actively
     /// driving input). Drives the takeover warning overlay + abort affordance.
     foreground: Arc<Mutex<HashSet<String>>>,
@@ -65,6 +69,7 @@ impl ComputerUseHost {
             leases: Arc::new(LeaseRegistry::new()),
             approvals: Arc::new(ApprovalRegistry::new()),
             settings: Arc::new(RwLock::new(settings)),
+            pending_app_approvals: Arc::new(Mutex::new(HashMap::new())),
             foreground: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -105,7 +110,14 @@ impl ComputerUseHost {
 
     fn require_approval(&self, session_id: &str, app_id: &str) -> Result<(), ComputerUseError> {
         match self.approvals.decide(session_id, &app_id.to_string()) {
-            ApprovalDecision::Allowed => Ok(()),
+            ApprovalDecision::Allowed => {
+                self.clear_pending_app_approval(session_id);
+                Ok(())
+            }
+            ApprovalDecision::AppNotApproved => {
+                self.note_pending_app_approval(session_id, app_id);
+                Err(ComputerUseError::Approval(ApprovalDecision::AppNotApproved))
+            }
             other => Err(ComputerUseError::Approval(other)),
         }
     }
@@ -133,7 +145,8 @@ impl ComputerUseHost {
             .leases
             .target(session_id)
             .ok()
-            .map(|target| target.app_id);
+            .map(|target| target.app_id)
+            .or_else(|| self.pending_app_approval(session_id));
         let active_app_approved = active_app_id
             .as_ref()
             .map(|app_id| self.approvals.app_approved(app_id))
@@ -632,6 +645,7 @@ impl ComputerUseHost {
     pub fn stop(&self, session_id: &str) {
         self.leases.close(session_id);
         self.end_foreground(session_id);
+        self.clear_pending_app_approval(session_id);
     }
 
     // --- Foreground takeover + abort ------------------------------------
@@ -658,6 +672,28 @@ impl ComputerUseHost {
     pub fn abort(&self, session_id: &str) {
         self.end_foreground(session_id);
         self.leases.close(session_id);
+        self.clear_pending_app_approval(session_id);
+    }
+
+    /// Clear the app-approval hint for a session once the user has responded or
+    /// the session has moved on to a different target.
+    pub fn clear_pending_app_approval(&self, session_id: &str) {
+        self.pending_app_approvals.lock().unwrap().remove(session_id);
+    }
+
+    fn note_pending_app_approval(&self, session_id: &str, app_id: &str) {
+        self.pending_app_approvals
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), app_id.to_string());
+    }
+
+    fn pending_app_approval(&self, session_id: &str) -> Option<AppId> {
+        self.pending_app_approvals
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
     }
 }
 
@@ -674,7 +710,9 @@ pub struct ComputerUseStatus {
     /// True while the session is actively driving input (foreground takeover).
     pub foreground_active: bool,
     /// The app currently leased for control, when the session has an active
-    /// target. Surfaced so the foreground overlay can say what is being driven.
+    /// target. When a launch/raise/state request is blocked on app approval
+    /// before a lease exists, this falls back to that pending target so chat
+    /// can still show the approval affordance.
     pub active_app_id: Option<String>,
     /// Whether the currently leased app has been approved for this session.
     pub active_app_approved: bool,
@@ -1180,6 +1218,40 @@ mod tests {
 
         let status = h.status("s1", &p);
         assert_eq!(status.active_app_id.as_deref(), Some("com.example.app"));
+    }
+
+    #[test]
+    fn status_surfaces_pending_app_when_launch_is_blocked_on_approval() {
+        let (h, provider) = host_with_apps(vec![installed_app(false)]);
+        h.approvals().approve_session("s1");
+        let p = perm(true, true, true);
+
+        assert!(matches!(
+            h.launch_app("s1", installed_target(), &p),
+            Err(ComputerUseError::Approval(ApprovalDecision::AppNotApproved))
+        ));
+        assert!(provider.actions().is_empty());
+
+        let status = h.status("s1", &p);
+        assert!(!status.has_lease);
+        assert_eq!(status.active_app_id.as_deref(), Some("com.example.installed"));
+        assert!(!status.active_app_approved);
+    }
+
+    #[test]
+    fn stop_clears_pending_app_approval_hint() {
+        let (h, _provider) = host_with_apps(vec![installed_app(false)]);
+        h.approvals().approve_session("s1");
+        let p = perm(true, true, true);
+
+        let _ = h.launch_app("s1", installed_target(), &p);
+        assert_eq!(
+            h.status("s1", &p).active_app_id.as_deref(),
+            Some("com.example.installed")
+        );
+
+        h.stop("s1");
+        assert_eq!(h.status("s1", &p).active_app_id, None);
     }
 
     #[test]
