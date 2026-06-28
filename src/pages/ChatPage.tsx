@@ -41,6 +41,7 @@ import {
   SubagentInfo,
   getComputerUseStatus,
   disposeAgentRuntimeSession,
+  setComputerUseAppApproval,
   setComputerUseSessionApproval,
   ensureAgentRuntimeSession,
   getSessionHistory,
@@ -1553,6 +1554,21 @@ export function AcpTranscriptPanel({
     }
   }, [activeTurnId, runtimeSessionId]);
 
+  const handleComputerUseAppApproval = useCallback(async (approved: boolean) => {
+    const appId = computerUseStatus?.activeAppId;
+    if (!appId) return;
+    try {
+      await setComputerUseAppApproval(runtimeSessionId, appId, approved);
+      setComputerUseStatus((current) =>
+        current && current.activeAppId === appId
+          ? { ...current, activeAppApproved: approved }
+          : current,
+      );
+    } catch (err) {
+      setComposerError(String(err));
+    }
+  }, [computerUseStatus?.activeAppId, runtimeSessionId]);
+
   const handleComputerUseToggle = useCallback(async () => {
     if (!composerComputerUseEligible || sending || activeTurnId || computerUseBusy) return;
     if (!workspacePath) {
@@ -1789,6 +1805,7 @@ export function AcpTranscriptPanel({
       <div className="relative flex flex-1 min-h-0 flex-col">
         <ComputerUseTakeoverOverlay
           status={computerUseStatus}
+          onApproveApp={(approved) => void handleComputerUseAppApproval(approved)}
           onAbort={() => void handleComputerUseAbort()}
         />
         {isFilesView ? (

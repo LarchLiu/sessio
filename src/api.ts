@@ -210,6 +210,7 @@ export interface ComputerUseStatus {
   canControl: boolean;
   foregroundActive: boolean;
   activeAppId: string | null;
+  activeAppApproved: boolean;
 }
 
 export interface ImBridgeConfig {

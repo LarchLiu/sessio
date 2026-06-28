@@ -134,6 +134,10 @@ impl ComputerUseHost {
             .target(session_id)
             .ok()
             .map(|target| target.app_id);
+        let active_app_approved = active_app_id
+            .as_ref()
+            .map(|app_id| self.approvals.app_approved(session_id, app_id))
+            .unwrap_or(false);
         let settings = self.settings();
         ComputerUseStatus {
             enabled: settings.enabled,
@@ -144,6 +148,7 @@ impl ComputerUseHost {
             can_control: settings.enabled && perm.can_control && self.provider.supports_control(),
             foreground_active: self.foreground_active(session_id),
             active_app_id,
+            active_app_approved,
         }
     }
 
@@ -671,6 +676,8 @@ pub struct ComputerUseStatus {
     /// The app currently leased for control, when the session has an active
     /// target. Surfaced so the foreground overlay can say what is being driven.
     pub active_app_id: Option<String>,
+    /// Whether the currently leased app has been approved for this session.
+    pub active_app_approved: bool,
 }
 
 #[cfg(test)]
@@ -784,11 +791,17 @@ mod tests {
         h.start("s1", target(), &p).unwrap();
         let state = h.get_app_state("s1", &p).unwrap();
         let snap = SnapshotId(state.snapshot_id);
+        let status = h.status("s1", &p);
+        assert_eq!(status.active_app_id.as_deref(), Some("com.example.app"));
+        assert!(!status.active_app_approved);
 
         assert!(matches!(
             h.type_text("s1", &snap, "hi", &p),
             Err(ComputerUseError::Approval(ApprovalDecision::AppNotApproved))
         ));
+
+        h.approvals().approve_app("s1", &target().app_id);
+        assert!(h.status("s1", &p).active_app_approved);
     }
 
     #[test]
