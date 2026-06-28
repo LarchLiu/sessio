@@ -206,4 +206,27 @@ mod tests {
         assert!(!s.can_control);
         assert_eq!(s.platform, "linux");
     }
+
+    #[test]
+    fn windows_uses_provider_support_without_macos_style_permission_prompt() {
+        let inputs = DesktopControlInputs {
+            platform: DesktopPlatform::Windows,
+            requires_permission: false,
+            screenshots: PermissionTier::new(true, false),
+            accessibility: PermissionTier::new(true, false),
+            input_injection_supported: true,
+        };
+        let s = DesktopControlPermissionStatus::derive(inputs);
+        assert_eq!(s.platform, "windows");
+        assert!(!s.requires_permission);
+        assert!(s.can_observe);
+        assert!(s.can_inspect);
+        assert!(s.can_control);
+
+        let s = DesktopControlPermissionStatus::derive(DesktopControlInputs {
+            input_injection_supported: false,
+            ..inputs
+        });
+        assert!(!s.can_control);
+    }
 }
