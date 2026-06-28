@@ -6,6 +6,8 @@ fn main() {
     // not cover on its own).
     #[cfg(target_os = "macos")]
     println!("cargo:rustc-link-lib=framework=ApplicationServices");
+    #[cfg(target_os = "macos")]
+    println!("cargo:rustc-link-lib=framework=ScreenCaptureKit");
 
     tauri_build::build()
 }

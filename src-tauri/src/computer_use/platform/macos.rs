@@ -1,8 +1,9 @@
 //! macOS implementation of [`ComputerUseProvider`].
 //!
 //! - **App enumeration**: `NSWorkspace.runningApplications`.
-//! - **Screenshot**: the `screencapture` CLI targeting the app's frontmost
-//!   on-screen window (same approach as Appshot's capture in `lib.rs`).
+//! - **Screenshot**: ScreenCaptureKit targeting the app's frontmost
+//!   desktop-independent window, with `screencapture -l` as a compatibility
+//!   fallback.
 //! - **Element tree**: the Accessibility API (`AXUIElement*`).
 //! - **Input injection**: `CGEvent` keyboard / mouse / scroll synthesis.
 //!
@@ -18,9 +19,11 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use block2::RcBlock;
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::boolean::CFBoolean;
@@ -34,6 +37,12 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
+use foreign_types::ForeignType;
+use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
+use objc2::{AnyThread, Message};
+use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
+use objc2_core_graphics::CGImage;
+use objc2_foundation::{NSArray, NSDictionary, NSError};
 
 use crate::computer_use::provider::{
     AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ComputerUseProvider,
@@ -700,6 +709,23 @@ fn capture_window(
 ) -> ProviderResult<ScreenshotRef> {
     std::fs::create_dir_all(dir)
         .map_err(|e| ProviderError::Failed(format!("create capture dir: {e}")))?;
+
+    match capture_window_with_sck(dir, window_id, screen_bounds) {
+        Ok(screenshot) => Ok(screenshot),
+        Err(err) => {
+            log::debug!(
+                "ScreenCaptureKit window capture failed for {window_id}; falling back to screencapture: {err}"
+            );
+            capture_window_with_screencapture(dir, window_id, screen_bounds)
+        }
+    }
+}
+
+fn capture_window_with_screencapture(
+    dir: &Path,
+    window_id: u32,
+    screen_bounds: Rect,
+) -> ProviderResult<ScreenshotRef> {
     let path = dir.join(format!("snapshot-{window_id}.png"));
     let status = std::process::Command::new("screencapture")
         .arg("-x") // no sound
@@ -733,6 +759,219 @@ fn capture_window(
         default_coordinate_space: CoordinateSpace::Screenshot,
         screen_bounds,
     })
+}
+
+fn capture_window_with_sck(
+    dir: &Path,
+    window_id: u32,
+    screen_bounds: Rect,
+) -> ProviderResult<ScreenshotRef> {
+    let path = dir.join(format!("snapshot-{window_id}-sck.png"));
+    let image = sck_capture_window_image(window_id, screen_bounds)?;
+    write_cg_image_png(&image, &path)?;
+    screenshot_ref_from_path(&path, screen_bounds)
+}
+
+fn screenshot_ref_from_path(path: &Path, screen_bounds: Rect) -> ProviderResult<ScreenshotRef> {
+    let meta =
+        std::fs::metadata(path).map_err(|e| ProviderError::Failed(format!("stat capture: {e}")))?;
+    if meta.len() == 0 {
+        let _ = std::fs::remove_file(path);
+        return Err(ProviderError::Failed("empty capture".into()));
+    }
+    let (width, height) = image::image_dimensions(path)
+        .map_err(|e| ProviderError::Failed(format!("decode capture dimensions: {e}")))?;
+    Ok(ScreenshotRef {
+        handle: path.to_string_lossy().to_string(),
+        format: "png".into(),
+        byte_len: meta.len(),
+        width,
+        height,
+        default_coordinate_space: CoordinateSpace::Screenshot,
+        screen_bounds,
+    })
+}
+
+fn write_cg_image_png(image: &core_graphics::image::CGImage, path: &Path) -> ProviderResult<()> {
+    let cg_image = unsafe { &*(image.as_ptr() as *const CGImage) };
+    let bitmap = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), cg_image);
+    let properties = NSDictionary::<objc2_app_kit::NSBitmapImageRepPropertyKey, AnyObject>::new();
+    let png = unsafe {
+        bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
+    }
+    .ok_or_else(|| ProviderError::Failed("ScreenCaptureKit PNG encoding failed".into()))?;
+    let path_string = objc2_foundation::NSString::from_str(&path.to_string_lossy());
+    if png.writeToFile_atomically(&path_string, true) {
+        Ok(())
+    } else {
+        Err(ProviderError::Failed(
+            "ScreenCaptureKit PNG write failed".into(),
+        ))
+    }
+}
+
+fn sck_capture_window_image(
+    window_id: u32,
+    screen_bounds: Rect,
+) -> ProviderResult<core_graphics::image::CGImage> {
+    let window = sck_window_for_window_id(window_id)?;
+    let filter = sck_content_filter_for_window(&window)?;
+    let config = sck_stream_configuration(screen_bounds)?;
+    let (tx, rx) =
+        std::sync::mpsc::sync_channel::<Result<core_graphics::image::CGImage, String>>(1);
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    let block = RcBlock::new({
+        let tx = Arc::clone(&tx);
+        move |image: *mut CGImage, error: *mut NSError| {
+            let result = if !error.is_null() {
+                Err(unsafe { ns_error_description(&*error) })
+            } else if image.is_null() {
+                Err("ScreenCaptureKit returned no image".to_string())
+            } else {
+                let image = unsafe {
+                    // The completion image is valid for the callback; retain it
+                    // for the Rust value that crosses back to the waiting thread.
+                    core_graphics::image::CGImage::from_ptr(CGImageRetain(
+                        image as core_graphics::sys::CGImageRef,
+                    ))
+                };
+                Ok(image)
+            };
+            if let Ok(mut sender) = tx.lock() {
+                if let Some(sender) = sender.take() {
+                    let _ = sender.send(result);
+                }
+            }
+        }
+    });
+
+    unsafe {
+        let _: () = msg_send![
+            class!(SCScreenshotManager),
+            captureImageWithFilter: &*filter,
+            configuration: &*config,
+            completionHandler: &*block
+        ];
+    }
+
+    match rx.recv_timeout(Duration::from_secs(4)) {
+        Ok(Ok(image)) => Ok(image),
+        Ok(Err(error)) => Err(ProviderError::Failed(error)),
+        Err(error) => Err(ProviderError::Failed(format!(
+            "ScreenCaptureKit capture timed out or disconnected: {error}"
+        ))),
+    }
+}
+
+fn sck_window_for_window_id(window_id: u32) -> ProviderResult<Retained<AnyObject>> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Retained<AnyObject>, String>>(1);
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    let block = RcBlock::new({
+        let tx = Arc::clone(&tx);
+        move |content: *mut AnyObject, error: *mut NSError| {
+            let result = if !error.is_null() {
+                Err(unsafe { ns_error_description(&*error) })
+            } else if content.is_null() {
+                Err("ScreenCaptureKit returned no shareable content".to_string())
+            } else {
+                unsafe { sck_window_from_shareable_content(&*content, window_id) }
+            };
+            if let Ok(mut sender) = tx.lock() {
+                if let Some(sender) = sender.take() {
+                    let _ = sender.send(result);
+                }
+            }
+        }
+    });
+
+    unsafe {
+        let _: () = msg_send![
+            class!(SCShareableContent),
+            getShareableContentExcludingDesktopWindows: true,
+            onScreenWindowsOnly: true,
+            completionHandler: &*block
+        ];
+    }
+
+    match rx.recv_timeout(Duration::from_secs(4)) {
+        Ok(Ok(window)) => Ok(window),
+        Ok(Err(error)) => Err(ProviderError::Failed(error)),
+        Err(error) => Err(ProviderError::Failed(format!(
+            "ScreenCaptureKit shareable-content lookup timed out or disconnected: {error}"
+        ))),
+    }
+}
+
+unsafe fn sck_window_from_shareable_content(
+    content: &AnyObject,
+    window_id: u32,
+) -> Result<Retained<AnyObject>, String> {
+    let windows: Retained<NSArray<AnyObject>> = unsafe { msg_send![content, windows] };
+    for window in windows.iter() {
+        let candidate_id: u32 = unsafe { msg_send![&*window, windowID] };
+        if candidate_id == window_id {
+            return Ok(window.retain());
+        }
+    }
+    Err(format!(
+        "ScreenCaptureKit could not find shareable window {window_id}"
+    ))
+}
+
+fn sck_content_filter_for_window(window: &AnyObject) -> ProviderResult<Retained<AnyObject>> {
+    let filter: Retained<AnyObject> = unsafe {
+        msg_send![
+            msg_send![class!(SCContentFilter), alloc],
+            initWithDesktopIndependentWindow: window
+        ]
+    };
+    Ok(filter)
+}
+
+fn sck_stream_configuration(screen_bounds: Rect) -> ProviderResult<Retained<AnyObject>> {
+    let config: Retained<AnyObject> = unsafe { msg_send![class!(SCStreamConfiguration), new] };
+    let scale = display_scale_from_capture_bounds(screen_bounds);
+    let (width, height) = capture_pixel_size_for_bounds(screen_bounds, scale);
+    unsafe {
+        let _: () = msg_send![&*config, setWidth: width];
+        let _: () = msg_send![&*config, setHeight: height];
+        let _: () = msg_send![&*config, setShowsCursor: false];
+        let _: () = msg_send![&*config, setScalesToFit: false];
+        let _: () = msg_send![&*config, setQueueDepth: 1isize];
+    }
+    Ok(config)
+}
+
+fn display_scale_from_capture_bounds(screen_bounds: Rect) -> f32 {
+    let display = display_metadata();
+    if screen_bounds.width > 0.0 {
+        (display.width as f32 / screen_bounds.width)
+            .clamp(1.0, 4.0)
+            .round()
+    } else {
+        display.scale.max(1.0)
+    }
+}
+
+fn capture_pixel_size_for_bounds(screen_bounds: Rect, scale: f32) -> (usize, usize) {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    (
+        ((screen_bounds.width * scale).round() as usize).max(1),
+        ((screen_bounds.height * scale).round() as usize).max(1),
+    )
+}
+
+unsafe fn ns_error_description(error: &NSError) -> String {
+    error.localizedDescription().to_string()
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGImageRetain(image: core_graphics::sys::CGImageRef) -> core_graphics::sys::CGImageRef;
 }
 
 fn display_metadata() -> DisplayMetadata {
@@ -1531,6 +1770,19 @@ mod tests {
     #[test]
     fn provider_reports_control_supported() {
         assert!(MacosProvider::new().supports_control());
+    }
+
+    #[test]
+    fn capture_pixel_size_uses_window_points_and_scale() {
+        let bounds = Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 320.0,
+            height: 180.0,
+        };
+
+        assert_eq!(capture_pixel_size_for_bounds(bounds, 2.0), (640, 360));
+        assert_eq!(capture_pixel_size_for_bounds(bounds, 0.0), (320, 180));
     }
 
     #[test]
