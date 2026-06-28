@@ -19,10 +19,11 @@ use crate::desktop_control::DesktopControlPermissionStatus;
 use super::approvals::{ApprovalDecision, ApprovalRegistry};
 use super::lease::{LeaseError, LeaseRegistry, SnapshotError, SnapshotId};
 use super::permissions::{self, PermissionDenied, RequiredCapability};
+use super::pointer_overlay::{ComputerUsePointerAction, ComputerUsePointerEvent, PointerEventSink};
 use super::provider::{
     AllowedAction, AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppState, AppTarget,
-    ComputerUseProvider, CoordinateSpace, InstalledApp, Point, ProviderError, ScreenshotRef,
-    ScrollDirection,
+    ComputerUseProvider, CoordinateSpace, InstalledApp, Point, ProviderError, RawAppState,
+    ScreenshotRef, ScrollDirection, UiElement,
 };
 use super::settings::ComputerUseSettings;
 
@@ -60,6 +61,9 @@ pub struct ComputerUseHost {
     /// Sessions currently performing a foreground takeover (an agent is actively
     /// driving input). Drives the takeover warning overlay + abort affordance.
     foreground: Arc<Mutex<HashSet<String>>>,
+    /// Optional UI observer used by the desktop shell to mirror actions with a
+    /// click-through pointer overlay. Tests and headless clients leave this off.
+    pointer_events: Option<PointerEventSink>,
 }
 
 impl ComputerUseHost {
@@ -71,6 +75,7 @@ impl ComputerUseHost {
             settings: Arc::new(RwLock::new(settings)),
             pending_app_approvals: Arc::new(Mutex::new(HashMap::new())),
             foreground: Arc::new(Mutex::new(HashSet::new())),
+            pointer_events: None,
         }
     }
 
@@ -78,6 +83,11 @@ impl ComputerUseHost {
     /// an unsupported stub elsewhere). Used by the runtime/injection layer.
     pub fn with_platform_provider(settings: ComputerUseSettings) -> Self {
         Self::new(super::platform::default_provider(), settings)
+    }
+
+    pub fn with_pointer_event_sink(mut self, sink: PointerEventSink) -> Self {
+        self.pointer_events = Some(sink);
+        self
     }
 
     pub fn approvals(&self) -> &ApprovalRegistry {
@@ -291,8 +301,10 @@ impl ComputerUseHost {
         if needs_lease {
             self.leases.open(session_id, target.clone())?;
         }
-        let raw = self.provider.capture_app_state(&target)?;
-        let snapshot = self.next_snapshot(session_id, raw.screenshot.clone())?;
+        let mut raw = self.provider.capture_app_state(&target)?;
+        self.filter_elements_for_permissions(&mut raw, perm);
+        let snapshot =
+            self.next_snapshot(session_id, raw.screenshot.clone(), raw.elements.clone())?;
 
         Ok(self.app_state_from_raw(snapshot, raw, perm, launched))
     }
@@ -301,10 +313,11 @@ impl ComputerUseHost {
         &self,
         session_id: &str,
         screenshot: ScreenshotRef,
+        elements: Vec<UiElement>,
     ) -> Result<SnapshotId, ComputerUseError> {
-        Ok(self
-            .leases
-            .with_lease(session_id, |lease| lease.next_snapshot(screenshot))?)
+        Ok(self.leases.with_lease(session_id, |lease| {
+            lease.next_snapshot(screenshot, elements)
+        })?)
     }
 
     fn capture_post_action_state(
@@ -313,25 +326,33 @@ impl ComputerUseHost {
         target: &AppTarget,
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
-        let raw = self.provider.capture_app_state(target)?;
-        let snapshot = self.next_snapshot(session_id, raw.screenshot.clone())?;
+        let mut raw = self.provider.capture_app_state(target)?;
+        self.filter_elements_for_permissions(&mut raw, perm);
+        let snapshot =
+            self.next_snapshot(session_id, raw.screenshot.clone(), raw.elements.clone())?;
         Ok(self.app_state_from_raw(snapshot, raw, perm, false))
+    }
+
+    fn filter_elements_for_permissions(
+        &self,
+        raw: &mut RawAppState,
+        perm: &DesktopControlPermissionStatus,
+    ) {
+        // Inspection is a separate tier: without it, do not expose or cache the
+        // AX/UIA tree, and do not allow element-targeted actions.
+        if !perm.can_inspect {
+            raw.elements.clear();
+        }
     }
 
     fn app_state_from_raw(
         &self,
         snapshot: SnapshotId,
-        mut raw: super::provider::RawAppState,
+        raw: RawAppState,
         perm: &DesktopControlPermissionStatus,
         launched: bool,
     ) -> AppState {
-        // Inspection is a separate tier: without it, do not expose the AX tree
-        // and do not allow element-targeted actions.
         let can_inspect = perm.can_inspect;
-        if !can_inspect {
-            raw.elements.clear();
-        }
-
         let allowed_actions = self.allowed_actions(perm, can_inspect);
 
         AppState {
@@ -422,6 +443,63 @@ impl ComputerUseHost {
             .map_err(ComputerUseError::Coordinate)
     }
 
+    fn element_center_for_snapshot(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        element_id: &str,
+    ) -> Result<Option<Point>, ComputerUseError> {
+        let element = self.leases.with_lease(session_id, |lease| {
+            lease.element_for_snapshot(snapshot, element_id)
+        })??;
+        let Some(element) = element else {
+            return Ok(None);
+        };
+        let Some(bounds) = element.bounds else {
+            return Ok(None);
+        };
+        if !bounds.x.is_finite()
+            || !bounds.y.is_finite()
+            || !bounds.width.is_finite()
+            || !bounds.height.is_finite()
+        {
+            return Ok(None);
+        }
+
+        let center = Point {
+            x: bounds.x + bounds.width / 2.0,
+            y: bounds.y + bounds.height / 2.0,
+        };
+        match element.bounds_coordinate_space {
+            Some(CoordinateSpace::Screen) => Ok(Some(center)),
+            Some(CoordinateSpace::Screenshot) => Ok(self
+                .resolve_point_for_snapshot(
+                    session_id,
+                    snapshot,
+                    center,
+                    CoordinateSpace::Screenshot,
+                )
+                .ok()),
+            None => Ok(None),
+        }
+    }
+
+    fn emit_element_pointer_event(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        element_id: &str,
+        action: ComputerUsePointerAction,
+        label: &'static str,
+    ) -> Result<(), ComputerUseError> {
+        if let Some(point) = self.element_center_for_snapshot(session_id, snapshot, element_id)? {
+            self.emit_pointer_event(ComputerUsePointerEvent::point_with_label(
+                session_id, action, point, label,
+            ));
+        }
+        Ok(())
+    }
+
     fn require_control(
         &self,
         session_id: &str,
@@ -462,6 +540,13 @@ impl ComputerUseHost {
     ) -> Result<AppState, ComputerUseError> {
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
+        self.emit_element_pointer_event(
+            session_id,
+            snapshot,
+            element_id,
+            ComputerUsePointerAction::Click,
+            "click element",
+        )?;
         self.provider
             .click_element(&target, &element_id.to_string())?;
         self.capture_post_action_state(session_id, &target, perm)
@@ -484,6 +569,11 @@ impl ComputerUseHost {
             coordinate_space,
             perm,
         )?;
+        self.emit_pointer_event(ComputerUsePointerEvent::point(
+            session_id,
+            ComputerUsePointerAction::Click,
+            screen_point,
+        ));
         self.provider.click_point(&target, screen_point)?;
         self.capture_post_action_state(session_id, &target, perm)
     }
@@ -505,6 +595,11 @@ impl ComputerUseHost {
             coordinate_space,
             perm,
         )?;
+        self.emit_pointer_event(ComputerUsePointerEvent::point(
+            session_id,
+            ComputerUsePointerAction::SecondaryClick,
+            screen_point,
+        ));
         self.provider.secondary_click(&target, screen_point)?;
         self.capture_post_action_state(session_id, &target, perm)
     }
@@ -520,6 +615,13 @@ impl ComputerUseHost {
     ) -> Result<AppState, ComputerUseError> {
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
+        self.emit_element_pointer_event(
+            session_id,
+            snapshot,
+            element_id,
+            ComputerUsePointerAction::SecondaryClick,
+            "secondary action",
+        )?;
         self.provider
             .secondary_click_element(&target, &element_id.to_string())?;
         self.capture_post_action_state(session_id, &target, perm)
@@ -542,6 +644,11 @@ impl ComputerUseHost {
             coordinate_space,
             perm,
         )?;
+        self.emit_pointer_event(ComputerUsePointerEvent::point(
+            session_id,
+            ComputerUsePointerAction::DoubleClick,
+            screen_point,
+        ));
         self.provider.double_click(&target, screen_point)?;
         self.capture_post_action_state(session_id, &target, perm)
     }
@@ -563,6 +670,11 @@ impl ComputerUseHost {
         let screen_to =
             self.resolve_point_for_snapshot(session_id, snapshot, to, coordinate_space)?;
         self.begin_foreground(session_id);
+        self.emit_pointer_event(ComputerUsePointerEvent::drag(
+            session_id,
+            screen_from,
+            screen_to,
+        ));
         self.provider.drag(&target, screen_from, screen_to)?;
         self.capture_post_action_state(session_id, &target, perm)
     }
@@ -578,6 +690,13 @@ impl ComputerUseHost {
     ) -> Result<AppState, ComputerUseError> {
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
+        self.emit_element_pointer_event(
+            session_id,
+            snapshot,
+            element_id,
+            ComputerUsePointerAction::Semantic,
+            "set value",
+        )?;
         self.provider
             .set_value(&target, &element_id.to_string(), value)?;
         self.capture_post_action_state(session_id, &target, perm)
@@ -636,6 +755,13 @@ impl ComputerUseHost {
     ) -> Result<AppState, ComputerUseError> {
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
+        self.emit_element_pointer_event(
+            session_id,
+            snapshot,
+            element_id,
+            ComputerUsePointerAction::Semantic,
+            "scroll element",
+        )?;
         self.provider
             .scroll_element(&target, &element_id.to_string(), direction, amount)?;
         self.capture_post_action_state(session_id, &target, perm)
@@ -655,6 +781,12 @@ impl ComputerUseHost {
             .lock()
             .unwrap()
             .insert(session_id.to_string());
+    }
+
+    fn emit_pointer_event(&self, event: ComputerUsePointerEvent) {
+        if let Some(sink) = &self.pointer_events {
+            sink(event);
+        }
     }
 
     fn end_foreground(&self, session_id: &str) {
@@ -1048,6 +1180,96 @@ mod tests {
         assert_eq!(resolved_target, target());
         assert_eq!(screen_point, Point { x: 190.0, y: 132.5 });
         assert!(h.foreground_active("s1"));
+    }
+
+    #[test]
+    fn coordinate_click_emits_pointer_overlay_event() {
+        let provider = Arc::new(FakeProvider::default());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink_events = Arc::clone(&events);
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled())
+            .with_pointer_event_sink(Arc::new(move |event| {
+                sink_events.lock().unwrap().push(event);
+            }));
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        h.click_at(
+            "s1",
+            &SnapshotId(state.snapshot_id),
+            Point { x: 360.0, y: 225.0 },
+            CoordinateSpace::Screenshot,
+            &p,
+        )
+        .unwrap();
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, ComputerUsePointerAction::Click);
+        assert_eq!(events[0].x, Some(190.0));
+        assert_eq!(events[0].y, Some(132.5));
+    }
+
+    #[test]
+    fn element_click_emits_pointer_overlay_event_from_cached_bounds() {
+        let provider = Arc::new(FakeProvider::default());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink_events = Arc::clone(&events);
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled())
+            .with_pointer_event_sink(Arc::new(move |event| {
+                sink_events.lock().unwrap().push(event);
+            }));
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        h.click_element("s1", &SnapshotId(state.snapshot_id), "el-1", &p)
+            .unwrap();
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, ComputerUsePointerAction::Click);
+        assert_eq!(events[0].x, Some(40.0));
+        assert_eq!(events[0].y, Some(12.0));
+        assert_eq!(events[0].label.as_deref(), Some("click element"));
+    }
+
+    #[test]
+    fn coordinate_less_actions_do_not_emit_pointer_overlay_events() {
+        let provider = Arc::new(FakeProvider::default());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink_events = Arc::clone(&events);
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled())
+            .with_pointer_event_sink(Arc::new(move |event| {
+                sink_events.lock().unwrap().push(event);
+            }));
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let post_type = h
+            .type_text("s1", &SnapshotId(state.snapshot_id), "hi", &p)
+            .unwrap();
+        let post_key = h
+            .press_key("s1", &SnapshotId(post_type.snapshot_id), "Enter", &p)
+            .unwrap();
+        h.scroll(
+            "s1",
+            &SnapshotId(post_key.snapshot_id),
+            ScrollDirection::Down,
+            300,
+            &p,
+        )
+        .unwrap();
+
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[test]

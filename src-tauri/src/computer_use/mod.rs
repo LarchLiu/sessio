@@ -21,6 +21,7 @@ pub mod onboarding;
 pub mod permissions;
 pub mod pi_extension;
 pub mod platform;
+pub mod pointer_overlay;
 pub mod provider;
 pub mod settings;
 pub mod skill_resource;

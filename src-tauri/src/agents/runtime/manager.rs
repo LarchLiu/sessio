@@ -127,6 +127,7 @@ impl RuntimeManager {
                 let settings = crate::computer_use::config::load_settings()
                     .unwrap_or_else(|_| ComputerUseSettings::recommended());
                 std::sync::Arc::new(super::computer_use_runtime::ComputerUseRuntime::new(
+                    self.inner.app.clone(),
                     settings,
                     std::sync::Arc::new(crate::desktop_control_permission_status),
                 ))

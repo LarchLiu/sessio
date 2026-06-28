@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import ComputerUsePointerOverlayWindow from "./components/ComputerUsePointerOverlayWindow";
 import ScreenshotOverlayWindow from "./components/ScreenshotOverlayWindow";
 import { I18nProvider } from "./i18n";
 import { RuntimeAgentsProvider } from "./runtimeAgents";
@@ -8,11 +9,16 @@ import { RuntimeAgentsProvider } from "./runtimeAgents";
 import "./styles.css";
 
 const isScreenshotOverlay = new URLSearchParams(window.location.search).has("screenshotOverlay");
+const isComputerUsePointerOverlay = new URLSearchParams(window.location.search).has(
+  "computerUsePointerOverlay",
+);
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <I18nProvider>
-      {isScreenshotOverlay ? (
+      {isComputerUsePointerOverlay ? (
+        <ComputerUsePointerOverlayWindow />
+      ) : isScreenshotOverlay ? (
         <ScreenshotOverlayWindow />
       ) : (
         <RuntimeAgentsProvider>

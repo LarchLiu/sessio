@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use super::provider::{AppTarget, ScreenshotRef};
+use super::provider::{AppTarget, ScreenshotRef, UiElement};
 
 /// A per-lease snapshot identifier. Encodes the lease and a monotonic counter so
 /// staleness is checkable by string comparison and never collides across leases.
@@ -44,6 +44,7 @@ pub struct Lease {
     snapshot_counter: u64,
     latest_snapshot: Option<SnapshotId>,
     latest_screenshot: Option<ScreenshotRef>,
+    latest_elements: Vec<UiElement>,
 }
 
 impl Lease {
@@ -55,15 +56,21 @@ impl Lease {
             snapshot_counter: 0,
             latest_snapshot: None,
             latest_screenshot: None,
+            latest_elements: Vec::new(),
         }
     }
 
     /// Stamp a new snapshot, making it the only currently-valid one.
-    pub fn next_snapshot(&mut self, screenshot: ScreenshotRef) -> SnapshotId {
+    pub fn next_snapshot(
+        &mut self,
+        screenshot: ScreenshotRef,
+        elements: Vec<UiElement>,
+    ) -> SnapshotId {
         self.snapshot_counter += 1;
         let id = SnapshotId::new(&self.id, self.snapshot_counter);
         self.latest_snapshot = Some(id.clone());
         self.latest_screenshot = Some(screenshot);
+        self.latest_elements = elements;
         id
     }
 
@@ -95,6 +102,21 @@ impl Lease {
         self.latest_screenshot
             .clone()
             .ok_or(SnapshotError::NoSnapshot)
+    }
+
+    /// Return an inspected element from the exact snapshot the agent is acting
+    /// against. The host stores only elements that were exposed to the agent.
+    pub fn element_for_snapshot(
+        &self,
+        candidate: &SnapshotId,
+        element_id: &str,
+    ) -> Result<Option<UiElement>, SnapshotError> {
+        self.check_snapshot(candidate)?;
+        Ok(self
+            .latest_elements
+            .iter()
+            .find(|element| element.id == element_id)
+            .cloned())
     }
 }
 
@@ -224,7 +246,7 @@ mod tests {
         assert!(latest.is_none());
 
         let first = reg
-            .with_lease("s1", |l| l.next_snapshot(screenshot()))
+            .with_lease("s1", |l| l.next_snapshot(screenshot(), Vec::new()))
             .unwrap();
         reg.with_lease("s1", |l| l.check_snapshot(&first))
             .unwrap()
@@ -232,7 +254,7 @@ mod tests {
 
         // Capture again → first becomes stale.
         let second = reg
-            .with_lease("s1", |l| l.next_snapshot(screenshot()))
+            .with_lease("s1", |l| l.next_snapshot(screenshot(), Vec::new()))
             .unwrap();
         assert_eq!(
             reg.with_lease("s1", |l| l.check_snapshot(&first)).unwrap(),
@@ -249,9 +271,9 @@ mod tests {
         reg.open("s1", target()).unwrap();
         reg.open("s2", target()).unwrap();
         let s1_snap = reg
-            .with_lease("s1", |l| l.next_snapshot(screenshot()))
+            .with_lease("s1", |l| l.next_snapshot(screenshot(), Vec::new()))
             .unwrap();
-        reg.with_lease("s2", |l| l.next_snapshot(screenshot()))
+        reg.with_lease("s2", |l| l.next_snapshot(screenshot(), Vec::new()))
             .unwrap();
         // s1's snapshot id must not validate against s2's lease.
         assert_eq!(
@@ -287,8 +309,18 @@ mod tests {
         let reg = LeaseRegistry::new();
         reg.open("s1", target()).unwrap();
         let screenshot = screenshot();
+        let elements = vec![UiElement {
+            id: "el-1".into(),
+            role: "AXButton".into(),
+            label: Some("OK".into()),
+            bounds: None,
+            bounds_coordinate_space: None,
+            actionable: true,
+        }];
         let snap = reg
-            .with_lease("s1", |l| l.next_snapshot(screenshot.clone()))
+            .with_lease("s1", |l| {
+                l.next_snapshot(screenshot.clone(), elements.clone())
+            })
             .unwrap();
 
         let stored = reg
@@ -296,5 +328,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored, screenshot);
+
+        let stored_element = reg
+            .with_lease("s1", |l| l.element_for_snapshot(&snap, "el-1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_element, elements.first().cloned());
     }
 }

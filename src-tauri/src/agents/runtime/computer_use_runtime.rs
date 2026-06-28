@@ -20,8 +20,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::computer_use::host::ComputerUseHost;
 use crate::computer_use::mcp_http::{McpHttpServer, McpServerHandle};
+use crate::computer_use::pointer_overlay;
 use crate::computer_use::settings::ComputerUseSettings;
 use crate::desktop_control::DesktopControlPermissionStatus;
+use tauri::AppHandle;
 
 use super::types::{ComputerUseInjection, RuntimeCapabilitySet, RuntimeMetadata};
 
@@ -79,10 +81,29 @@ impl ComputerUseRuntime {
     /// Build the runtime with a permission provider (live OS status callback).
     /// `settings` is the host enable policy.
     pub fn new(
+        app: AppHandle,
+        settings: ComputerUseSettings,
+        permission_provider: Arc<dyn Fn() -> DesktopControlPermissionStatus + Send + Sync>,
+    ) -> Self {
+        let host = ComputerUseHost::with_platform_provider(settings.clone())
+            .with_pointer_event_sink(pointer_overlay::tauri_pointer_event_sink(app));
+        Self::from_host(host, settings, permission_provider)
+    }
+
+    #[cfg(test)]
+    fn new_for_tests(
         settings: ComputerUseSettings,
         permission_provider: Arc<dyn Fn() -> DesktopControlPermissionStatus + Send + Sync>,
     ) -> Self {
         let host = ComputerUseHost::with_platform_provider(settings.clone());
+        Self::from_host(host, settings, permission_provider)
+    }
+
+    fn from_host(
+        host: ComputerUseHost,
+        settings: ComputerUseSettings,
+        permission_provider: Arc<dyn Fn() -> DesktopControlPermissionStatus + Send + Sync>,
+    ) -> Self {
         host.approvals()
             .set_approved_apps(settings.approved_apps.clone());
         Self {
@@ -231,7 +252,7 @@ mod tests {
     }
 
     fn runtime() -> ComputerUseRuntime {
-        ComputerUseRuntime::new(ComputerUseSettings::enabled(), Arc::new(perm))
+        ComputerUseRuntime::new_for_tests(ComputerUseSettings::enabled(), Arc::new(perm))
     }
 
     #[test]
