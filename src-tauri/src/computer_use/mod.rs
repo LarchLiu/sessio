@@ -16,6 +16,7 @@ pub mod config;
 pub mod host;
 pub mod lease;
 pub mod mcp_http;
+pub mod onboarding;
 pub mod permissions;
 pub mod platform;
 pub mod provider;
@@ -25,6 +26,9 @@ pub use approvals::{AppApproval, ApprovalDecision, ApprovalRegistry, SessionAppr
 pub use host::{ComputerUseError, ComputerUseHost};
 pub use lease::{Lease, LeaseRegistry, SnapshotId};
 pub use mcp_http::{McpHttpServer, McpServerHandle};
+pub use onboarding::{
+    ComputerUsePermissions, GrantPermissionResult, PermissionKind, PermissionRequirement,
+};
 pub use platform::default_provider;
 pub use provider::{
     AllowedAction, AppLaunchResult, AppState, AppTarget, ComputerUseProvider, CoordinateSpace,

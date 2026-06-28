@@ -111,6 +111,17 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         "properties": { "appId": { "type": "string" }, "windowId": { "type": "string" } },
         "additionalProperties": false
     });
+    let grant_arg = json!({
+        "type": "object",
+        "properties": {
+            "permission": {
+                "type": "string",
+                "enum": ["screenshots", "accessibility"]
+            }
+        },
+        "required": ["permission"],
+        "additionalProperties": false
+    });
     let snapshot_arg = |extra: Value| {
         let mut props = json!({ "snapshotId": { "type": "string" } });
         if let (Some(obj), Some(extra_obj)) = (props.as_object_mut(), extra.as_object()) {
@@ -154,6 +165,16 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             name: "computer_status",
             description: "Report whether computer use is available for this session and which capabilities (observe/inspect/control) are currently permitted.",
             input_schema: no_args.clone(),
+        },
+        ToolDefinition {
+            name: "computer_permissions",
+            description: "Report computer-use OS permission status, missing grants, and onboarding guidance.",
+            input_schema: no_args.clone(),
+        },
+        ToolDefinition {
+            name: "computer_grant",
+            description: "Open the relevant OS settings page for a missing computer-use permission when supported.",
+            input_schema: grant_arg,
         },
         ToolDefinition {
             name: "computer_list_apps",
@@ -237,6 +258,8 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 /// Tool names, for quick membership checks.
 pub const TOOL_DEFINITIONS: &[&str] = &[
     "computer_status",
+    "computer_permissions",
+    "computer_grant",
     "computer_list_apps",
     "computer_start",
     "computer_launch_app",

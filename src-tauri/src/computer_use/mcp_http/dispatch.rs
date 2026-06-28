@@ -8,8 +8,10 @@
 
 use serde_json::{json, Value};
 
-use crate::computer_use::host::ComputerUseHost;
+use crate::computer_use::host::{ComputerUseError, ComputerUseHost};
 use crate::computer_use::lease::SnapshotId;
+use crate::computer_use::onboarding::{self, PermissionKind};
+use crate::computer_use::permissions::PermissionDenied;
 use crate::computer_use::provider::{AppTarget, CoordinateSpace, Point, ScrollDirection};
 use crate::desktop_control::DesktopControlPermissionStatus;
 
@@ -82,8 +84,18 @@ fn run_tool(
                 serde_json::to_value(&status).unwrap_or_default(),
             ))
         }
+        "computer_permissions" => Ok(tool_json_result(
+            serde_json::to_value(onboarding::permissions_status(perm)).unwrap_or_default(),
+        )),
+        "computer_grant" => {
+            let permission = PermissionKind::parse(&arg_str(args, "permission")?)?;
+            let result = onboarding::grant_permission(permission, perm)?;
+            Ok(tool_json_result(
+                serde_json::to_value(&result).unwrap_or_default(),
+            ))
+        }
         "computer_list_apps" => {
-            let apps = host.list_apps(perm).map_err(|e| e.to_string())?;
+            let apps = host.list_apps(perm).map_err(host_error_message)?;
             Ok(tool_json_result(
                 serde_json::to_value(&apps).unwrap_or_default(),
             ))
@@ -92,14 +104,14 @@ fn run_tool(
             let target = parse_target(args)?;
             let lease = host
                 .start(session_id, target, perm)
-                .map_err(|e| e.to_string())?;
+                .map_err(host_error_message)?;
             Ok(tool_json_result(json!({ "lease": lease })))
         }
         "computer_launch_app" => {
             let target = parse_target(args)?;
             let result = host
                 .launch_app(session_id, target, perm)
-                .map_err(|e| e.to_string())?;
+                .map_err(host_error_message)?;
             Ok(tool_json_result(
                 serde_json::to_value(&result).unwrap_or_default(),
             ))
@@ -109,7 +121,7 @@ fn run_tool(
                 Some(target) => host.get_app_state_for_target(session_id, target, perm),
                 None => host.get_app_state(session_id, perm),
             }
-            .map_err(|e| e.to_string())?;
+            .map_err(host_error_message)?;
             Ok(tool_json_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -119,7 +131,7 @@ fn run_tool(
             let element = arg_str(args, "elementId")?;
             let state = host
                 .click_element(session_id, &snapshot, &element, perm)
-                .map_err(|e| e.to_string())?;
+                .map_err(host_error_message)?;
             Ok(tool_json_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -130,7 +142,7 @@ fn run_tool(
             let coord_space = parse_coordinate_space(args)?;
             let state = host
                 .click_at(session_id, &snapshot, point, coord_space, perm)
-                .map_err(|e| e.to_string())?;
+                .map_err(host_error_message)?;
             Ok(tool_json_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -141,7 +153,7 @@ fn run_tool(
             let coord_space = parse_coordinate_space(args)?;
             let state = host
                 .secondary_click(session_id, &snapshot, point, coord_space, perm)
-                .map_err(|e| e.to_string())?;
+                .map_err(host_error_message)?;
             Ok(tool_json_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -152,7 +164,7 @@ fn run_tool(
             let coord_space = parse_coordinate_space(args)?;
             let state = host
                 .double_click(session_id, &snapshot, point, coord_space, perm)
-                .map_err(|e| e.to_string())?;
+                .map_err(host_error_message)?;
             Ok(tool_json_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -164,7 +176,7 @@ fn run_tool(
             let coord_space = parse_coordinate_space(args)?;
             let state = host
                 .drag(session_id, &snapshot, from, to, coord_space, perm)
-                .map_err(|e| e.to_string())?;
+                .map_err(host_error_message)?;
             Ok(tool_json_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -175,7 +187,7 @@ fn run_tool(
             let value = arg_str(args, "value")?;
             let state = host
                 .set_value(session_id, &snapshot, &element, &value, perm)
-                .map_err(|e| e.to_string())?;
+                .map_err(host_error_message)?;
             Ok(tool_json_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -185,7 +197,7 @@ fn run_tool(
             let text = arg_str(args, "text")?;
             let state = host
                 .type_text(session_id, &snapshot, &text, perm)
-                .map_err(|e| e.to_string())?;
+                .map_err(host_error_message)?;
             Ok(tool_json_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -195,7 +207,7 @@ fn run_tool(
             let key = arg_str(args, "key")?;
             let state = host
                 .press_key(session_id, &snapshot, &key, perm)
-                .map_err(|e| e.to_string())?;
+                .map_err(host_error_message)?;
             Ok(tool_json_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -206,7 +218,7 @@ fn run_tool(
             let amount = args.get("amount").and_then(|a| a.as_i64()).unwrap_or(0) as i32;
             let state = host
                 .scroll(session_id, &snapshot, direction, amount, perm)
-                .map_err(|e| e.to_string())?;
+                .map_err(host_error_message)?;
             Ok(tool_json_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -216,6 +228,24 @@ fn run_tool(
             Ok(tool_text_result("ok"))
         }
         other => Err(format!("unknown tool: {other}")),
+    }
+}
+
+fn host_error_message(error: ComputerUseError) -> String {
+    match error {
+        ComputerUseError::Permission(PermissionDenied::Observe) => {
+            "permission_missing:screenshots: screen capture permission is required. Call computer_permissions for status, then computer_grant with permission=\"screenshots\"."
+                .into()
+        }
+        ComputerUseError::Permission(PermissionDenied::Inspect) => {
+            "permission_missing:accessibility: accessibility permission is required. Call computer_permissions for status, then computer_grant with permission=\"accessibility\"."
+                .into()
+        }
+        ComputerUseError::Permission(PermissionDenied::Control) => {
+            "permission_missing:control: input control is unavailable. Call computer_permissions; on macOS this usually requires Accessibility."
+                .into()
+        }
+        other => other.to_string(),
     }
 }
 
@@ -349,6 +379,40 @@ mod tests {
         match list {
             McpResponse::Result { result, .. } => {
                 assert!(result["tools"].as_array().unwrap().len() >= 9)
+            }
+            _ => panic!("expected result"),
+        }
+    }
+
+    #[test]
+    fn permissions_tool_returns_onboarding_status() {
+        let h = host();
+        let p = DesktopControlPermissionStatus::derive(DesktopControlInputs {
+            platform: DesktopPlatform::Macos,
+            requires_permission: true,
+            screenshots: PermissionTier::new(false, true),
+            accessibility: PermissionTier::new(true, true),
+            input_injection_supported: true,
+        });
+
+        let resp = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({ "name": "computer_permissions", "arguments": {} }),
+            ),
+        );
+
+        match resp {
+            McpResponse::Result { result, .. } => {
+                assert_eq!(result["structuredContent"]["ready"], false);
+                assert_eq!(result["structuredContent"]["missing"][0], "screenshots");
+                assert_eq!(
+                    result["structuredContent"]["requirements"][0]["code"],
+                    "missing_screenshots"
+                );
             }
             _ => panic!("expected result"),
         }
