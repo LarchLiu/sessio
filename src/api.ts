@@ -161,8 +161,6 @@ export interface AppshotConfig {
 
 export interface ComputerUseSettings {
   enabled: boolean;
-  allowInputInjection: boolean;
-  allowForegroundTakeover: boolean;
 }
 
 export type AppshotPermissionKind = "screenshots" | "accessibility";

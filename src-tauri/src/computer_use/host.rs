@@ -3,7 +3,7 @@
 //! The host is the agent-agnostic entry point the injected tools call into. It
 //! enforces the full gating chain for every operation:
 //!
-//! 1. **settings** — global enable + control/foreground policy,
+//! 1. **settings** — global enable policy,
 //! 2. **OS permission** — observe / inspect / control tiers,
 //! 3. **approval** — session approval + per-app approval,
 //! 4. **lease + snapshot** — one app at a time, act only on the latest snapshot,
@@ -40,8 +40,6 @@ pub enum ComputerUseError {
     Snapshot(#[from] SnapshotError),
     #[error("provider error: {0}")]
     Provider(#[from] ProviderError),
-    #[error("input control is disabled by settings")]
-    ControlDisabled,
 }
 
 /// The host. Cheap to clone (`Arc` internals) so it can be shared across the
@@ -58,10 +56,7 @@ pub struct ComputerUseHost {
 }
 
 impl ComputerUseHost {
-    pub fn new(
-        provider: Arc<dyn ComputerUseProvider>,
-        settings: ComputerUseSettings,
-    ) -> Self {
+    pub fn new(provider: Arc<dyn ComputerUseProvider>, settings: ComputerUseSettings) -> Self {
         Self {
             provider,
             leases: Arc::new(LeaseRegistry::new()),
@@ -89,10 +84,6 @@ impl ComputerUseHost {
         *self.settings.write().unwrap() = settings;
     }
 
-    fn control_enabled(&self, settings: &ComputerUseSettings) -> bool {
-        settings.allow_input_injection && settings.allow_foreground_takeover
-    }
-
     fn require_enabled(&self) -> Result<(), ComputerUseError> {
         if self.settings().enabled {
             Ok(())
@@ -109,11 +100,7 @@ impl ComputerUseHost {
         permissions::check(status, cap).map_err(ComputerUseError::from)
     }
 
-    fn require_approval(
-        &self,
-        session_id: &str,
-        app_id: &str,
-    ) -> Result<(), ComputerUseError> {
+    fn require_approval(&self, session_id: &str, app_id: &str) -> Result<(), ComputerUseError> {
         match self.approvals.decide(session_id, &app_id.to_string()) {
             ApprovalDecision::Allowed => Ok(()),
             other => Err(ComputerUseError::Approval(other)),
@@ -139,15 +126,19 @@ impl ComputerUseHost {
         session_id: &str,
         perm: &DesktopControlPermissionStatus,
     ) -> ComputerUseStatus {
-        let active_app_id = self.leases.target(session_id).ok().map(|target| target.app_id);
+        let active_app_id = self
+            .leases
+            .target(session_id)
+            .ok()
+            .map(|target| target.app_id);
         let settings = self.settings();
         ComputerUseStatus {
             enabled: settings.enabled,
             session_approved: self.approvals.session_approved(session_id),
             has_lease: self.leases.has_lease(session_id),
-            can_observe: perm.can_observe,
-            can_inspect: perm.can_inspect,
-            can_control: perm.can_control && self.control_enabled(&settings),
+            can_observe: settings.enabled && perm.can_observe,
+            can_inspect: settings.enabled && perm.can_inspect,
+            can_control: settings.enabled && perm.can_control && self.provider.supports_control(),
             foreground_active: self.foreground_active(session_id),
             active_app_id,
         }
@@ -220,10 +211,7 @@ impl ComputerUseHost {
         perm: &DesktopControlPermissionStatus,
         can_inspect: bool,
     ) -> Vec<AllowedAction> {
-        let settings = self.settings();
-        let control_ready = perm.can_control
-            && self.control_enabled(&settings)
-            && self.provider.supports_control();
+        let control_ready = perm.can_control && self.provider.supports_control();
         if !control_ready {
             return Vec::new();
         }
@@ -244,10 +232,6 @@ impl ComputerUseHost {
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppTarget, ComputerUseError> {
         self.require_enabled()?;
-        let settings = self.settings();
-        if !self.control_enabled(&settings) {
-            return Err(ComputerUseError::ControlDisabled);
-        }
         self.require_permission(perm, RequiredCapability::Control)?;
         let target = self.leases.target(session_id)?;
         self.require_approval(session_id, &target.app_id)?;
@@ -277,7 +261,9 @@ impl ComputerUseHost {
     ) -> Result<(), ComputerUseError> {
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
-        Ok(self.provider.click_element(&target, &element_id.to_string())?)
+        Ok(self
+            .provider
+            .click_element(&target, &element_id.to_string())?)
     }
 
     /// `computer_type_text` — type text into the focused element.
@@ -400,10 +386,12 @@ mod tests {
     fn disabled_host_refuses_everything() {
         let h = host(ComputerUseSettings::default());
         let p = perm(true, true, true);
-        assert!(matches!(
-            h.list_apps(&p),
-            Err(ComputerUseError::Disabled)
-        ));
+        let status = h.status("s1", &p);
+        assert!(!status.enabled);
+        assert!(!status.can_observe);
+        assert!(!status.can_inspect);
+        assert!(!status.can_control);
+        assert!(matches!(h.list_apps(&p), Err(ComputerUseError::Disabled)));
         assert!(matches!(
             h.start("s1", target(), &p),
             Err(ComputerUseError::Disabled)
@@ -412,13 +400,15 @@ mod tests {
 
     #[test]
     fn start_requires_session_approval_only() {
-        let h = host(ComputerUseSettings::observe_only());
+        let h = host(ComputerUseSettings::enabled());
         let p = perm(true, true, false);
 
         // No approval at all.
         assert!(matches!(
             h.start("s1", target(), &p),
-            Err(ComputerUseError::Approval(ApprovalDecision::SessionNotApproved))
+            Err(ComputerUseError::Approval(
+                ApprovalDecision::SessionNotApproved
+            ))
         ));
 
         // Session approval is enough to begin observe/inspect.
@@ -429,11 +419,7 @@ mod tests {
 
     #[test]
     fn control_still_requires_app_approval_after_start() {
-        let h = host(ComputerUseSettings {
-            enabled: true,
-            allow_input_injection: true,
-            allow_foreground_takeover: true,
-        });
+        let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
         let p = perm(true, true, true);
         h.start("s1", target(), &p).unwrap();
@@ -448,11 +434,7 @@ mod tests {
 
     #[test]
     fn get_app_state_without_inspect_hides_elements_and_click() {
-        let h = host(ComputerUseSettings {
-            enabled: true,
-            allow_input_injection: true,
-            allow_foreground_takeover: true,
-        });
+        let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
         // observe but NOT inspect. On macOS accessibility gates both inspect and
@@ -485,11 +467,7 @@ mod tests {
 
     #[test]
     fn get_app_state_with_full_permission_allows_all_actions() {
-        let h = host(ComputerUseSettings {
-            enabled: true,
-            allow_input_injection: true,
-            allow_foreground_takeover: true,
-        });
+        let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
         let p = perm(true, true, true);
@@ -501,11 +479,7 @@ mod tests {
 
     #[test]
     fn control_action_rejects_stale_snapshot() {
-        let h = host(ComputerUseSettings {
-            enabled: true,
-            allow_input_injection: true,
-            allow_foreground_takeover: true,
-        });
+        let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
         let p = perm(true, true, true);
@@ -526,27 +500,20 @@ mod tests {
     }
 
     #[test]
-    fn control_blocked_when_injection_disabled_in_settings() {
-        let h = host(ComputerUseSettings::observe_only()); // injection off
+    fn enabled_computer_use_allows_control_when_permissions_are_ready() {
+        let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
         let p = perm(true, true, true);
         h.start("s1", target(), &p).unwrap();
         let state = h.get_app_state("s1", &p).unwrap();
         let snap = SnapshotId(state.snapshot_id);
-        assert!(matches!(
-            h.type_text("s1", &snap, "hi", &p),
-            Err(ComputerUseError::ControlDisabled)
-        ));
+        h.type_text("s1", &snap, "hi", &p).unwrap();
     }
 
     #[test]
     fn control_blocked_without_control_permission() {
-        let h = host(ComputerUseSettings {
-            enabled: true,
-            allow_input_injection: true,
-            allow_foreground_takeover: true,
-        });
+        let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
         // inject=false → no control permission.
@@ -562,7 +529,7 @@ mod tests {
 
     #[test]
     fn stop_releases_lease_and_is_idempotent() {
-        let h = host(ComputerUseSettings::observe_only());
+        let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
         let p = perm(true, true, false);
@@ -576,14 +543,7 @@ mod tests {
     #[test]
     fn successful_click_reaches_provider() {
         let provider = Arc::new(FakeProvider::default());
-        let h = ComputerUseHost::new(
-            provider.clone(),
-            ComputerUseSettings {
-                enabled: true,
-                allow_input_injection: true,
-                allow_foreground_takeover: true,
-            },
-        );
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
         let p = perm(true, true, true);
@@ -599,7 +559,7 @@ mod tests {
 
     #[test]
     fn status_reports_capabilities_without_failing() {
-        let h = host(ComputerUseSettings::observe_only());
+        let h = host(ComputerUseSettings::enabled());
         let p = perm(true, false, false);
         let s = h.status("s1", &p);
         assert!(s.enabled);
@@ -612,7 +572,7 @@ mod tests {
 
     #[test]
     fn status_includes_active_app_when_session_holds_lease() {
-        let h = host(ComputerUseSettings::observe_only());
+        let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
         let p = perm(true, true, false);
@@ -624,11 +584,7 @@ mod tests {
 
     #[test]
     fn control_action_marks_foreground_and_abort_clears_it() {
-        let h = host(ComputerUseSettings {
-            enabled: true,
-            allow_input_injection: true,
-            allow_foreground_takeover: true,
-        });
+        let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
         let p = perm(true, true, true);
@@ -638,7 +594,10 @@ mod tests {
 
         assert!(!h.foreground_active("s1"));
         h.type_text("s1", &snap, "hi", &p).unwrap();
-        assert!(h.foreground_active("s1"), "control action enters foreground");
+        assert!(
+            h.foreground_active("s1"),
+            "control action enters foreground"
+        );
         assert!(h.status("s1", &p).foreground_active);
 
         // Abort clears foreground and releases the lease; idempotent.
@@ -650,11 +609,7 @@ mod tests {
 
     #[test]
     fn stop_also_clears_foreground() {
-        let h = host(ComputerUseSettings {
-            enabled: true,
-            allow_input_injection: true,
-            allow_foreground_takeover: true,
-        });
+        let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
         h.approvals().approve_app("s1", &target().app_id);
         let p = perm(true, true, true);

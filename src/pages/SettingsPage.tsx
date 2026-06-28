@@ -326,8 +326,6 @@ function GeneralSettings({
   const [noProxy, setNoProxy] = useState("");
   const [appshotShortcut, setAppshotShortcut] = useState("");
   const [desktopControlEnabled, setDesktopControlEnabled] = useState(false);
-  const [inputControlEnabled, setInputControlEnabled] = useState(true);
-  const [foregroundTakeoverEnabled, setForegroundTakeoverEnabled] = useState(true);
   const [savingProxy, setSavingProxy] = useState(false);
   const [savingAppshot, setSavingAppshot] = useState(false);
   const [savingDesktopControl, setSavingDesktopControl] = useState(false);
@@ -350,8 +348,6 @@ function GeneralSettings({
         setAppshotShortcut(nextAppshot.shortcut);
         setComputerUseSettings(nextComputerUse);
         setDesktopControlEnabled(nextComputerUse.enabled);
-        setInputControlEnabled(nextComputerUse.allowInputInjection);
-        setForegroundTakeoverEnabled(nextComputerUse.allowForegroundTakeover);
         setDesktopControlPermissionStatus(desktopStatus);
       })
       .catch((err) => onError(String(err)));
@@ -443,13 +439,9 @@ function GeneralSettings({
     try {
       const next = await updateComputerUseSettings({
         enabled: desktopControlEnabled,
-        allowInputInjection: inputControlEnabled,
-        allowForegroundTakeover: foregroundTakeoverEnabled,
       });
       setComputerUseSettings(next);
       setDesktopControlEnabled(next.enabled);
-      setInputControlEnabled(next.allowInputInjection);
-      setForegroundTakeoverEnabled(next.allowForegroundTakeover);
       emitComputerUseSettingsChanged(next);
       onError(null);
     } catch (err) {
@@ -479,8 +471,6 @@ function GeneralSettings({
     : false;
   const desktopControlChanged = computerUseSettings
     ? desktopControlEnabled !== computerUseSettings.enabled
-      || inputControlEnabled !== computerUseSettings.allowInputInjection
-      || foregroundTakeoverEnabled !== computerUseSettings.allowForegroundTakeover
     : false;
   const desktopControlPermission = desktopControlPermissionPresentation(desktopControlPermissionStatus);
   return (
@@ -578,42 +568,6 @@ function GeneralSettings({
             </div>
           </div>
         </SettingsStackedRow>
-        <SettingsRow
-          icon={<Bot className="h-4 w-4" />}
-          label={t("settings.desktop_control_input_control")}
-          description={t("settings.desktop_control_input_control_description")}
-          disabled={!desktopControlEnabled}
-        >
-          <div className="flex items-center justify-end gap-3">
-            <span className={"text-caption " + (desktopControlEnabled ? "text-ink/45" : "text-ink/30")}>
-              {inputControlEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}
-            </span>
-            <SwitchControl
-              checked={inputControlEnabled}
-              tooltip={t("settings.desktop_control_input_control")}
-              disabled={!desktopControlEnabled}
-              onToggle={() => setInputControlEnabled((value) => !value)}
-            />
-          </div>
-        </SettingsRow>
-        <SettingsRow
-          icon={<SquareKanban className="h-4 w-4" />}
-          label={t("settings.desktop_control_foreground_takeover")}
-          description={t("settings.desktop_control_foreground_takeover_description")}
-          disabled={!desktopControlEnabled}
-        >
-          <div className="flex items-center justify-end gap-3">
-            <span className={"text-caption " + (desktopControlEnabled ? "text-ink/45" : "text-ink/30")}>
-              {foregroundTakeoverEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}
-            </span>
-            <SwitchControl
-              checked={foregroundTakeoverEnabled}
-              tooltip={t("settings.desktop_control_foreground_takeover")}
-              disabled={!desktopControlEnabled}
-              onToggle={() => setForegroundTakeoverEnabled((value) => !value)}
-            />
-          </div>
-        </SettingsRow>
       </SettingsGroup>
       <SettingsGroup title={t("settings.network")} flush>
         <SettingsRow icon={<Globe2 className="h-4 w-4" />} label={t("settings.proxy")} description={t("settings.proxy_description")}>

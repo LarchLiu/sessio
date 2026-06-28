@@ -34,13 +34,13 @@ describe("desktop control permission presentation", () => {
     expect(p.showManageButton).toBe(true);
   });
 
-  it("is ready only when both observe and inspect are granted", () => {
+  it("is ready only when observe, inspect, and control are available", () => {
     const p = desktopControlPermissionPresentation(status({
       screenshots: { granted: true, supported: true },
       accessibility: { granted: true, supported: true },
       canObserve: true,
       canInspect: true,
-      canControl: false,
+      canControl: true,
     }));
     expect(p.ready).toBe(true);
     expect(p.descriptionKey).toBe("settings.desktop_control_ready");
@@ -49,7 +49,7 @@ describe("desktop control permission presentation", () => {
     );
   });
 
-  it("keeps readiness based on observe and inspect even when control differs", () => {
+  it("requires input control support for readiness", () => {
     const granted = desktopControlPermissionPresentation(status({
       screenshots: { granted: true, supported: true },
       accessibility: { granted: true, supported: true },
@@ -65,8 +65,8 @@ describe("desktop control permission presentation", () => {
       canInspect: true,
       canControl: false,
     }));
-    expect(noControl.ready).toBe(true);
-    expect(noControl.descriptionKey).toBe("settings.desktop_control_ready");
+    expect(noControl.ready).toBe(false);
+    expect(noControl.descriptionKey).toBe("settings.desktop_control_needed");
   });
 
   it("reports unsupported platforms without permission management", () => {
@@ -80,6 +80,7 @@ describe("desktop control permission presentation", () => {
       canControl: false,
     }));
     expect(p.requiresPermission).toBe(false);
+    expect(p.ready).toBe(false);
     expect(p.showManageButton).toBe(false);
     expect(p.descriptionKey).toBe("settings.desktop_control_not_supported");
   });

@@ -90,11 +90,15 @@ fn run_tool(
         }
         "computer_start" => {
             let target = parse_target(args)?;
-            let lease = host.start(session_id, target, perm).map_err(|e| e.to_string())?;
+            let lease = host
+                .start(session_id, target, perm)
+                .map_err(|e| e.to_string())?;
             Ok(tool_text_result(json!({ "lease": lease }).to_string()))
         }
         "computer_get_app_state" => {
-            let state = host.get_app_state(session_id, perm).map_err(|e| e.to_string())?;
+            let state = host
+                .get_app_state(session_id, perm)
+                .map_err(|e| e.to_string())?;
             Ok(tool_text_result(
                 serde_json::to_string(&state).unwrap_or_default(),
             ))
@@ -123,10 +127,7 @@ fn run_tool(
         "computer_scroll" => {
             let snapshot = parse_snapshot(args)?;
             let direction = parse_direction(args)?;
-            let amount = args
-                .get("amount")
-                .and_then(|a| a.as_i64())
-                .unwrap_or(0) as i32;
+            let amount = args.get("amount").and_then(|a| a.as_i64()).unwrap_or(0) as i32;
             host.scroll(session_id, &snapshot, direction, amount, perm)
                 .map_err(|e| e.to_string())?;
             Ok(tool_text_result("ok"))
@@ -195,11 +196,7 @@ mod tests {
     fn host() -> ComputerUseHost {
         ComputerUseHost::new(
             Arc::new(FakeProvider::default()),
-            ComputerUseSettings {
-                enabled: true,
-                allow_input_injection: true,
-                allow_foreground_takeover: true,
-            },
+            ComputerUseSettings::enabled(),
         )
     }
 
@@ -246,7 +243,8 @@ mod tests {
         let h = host();
         let p = perm();
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &"com.example.app".to_string());
+        h.approvals()
+            .approve_app("s1", &"com.example.app".to_string());
 
         // start
         let start = dispatch(
@@ -265,7 +263,10 @@ mod tests {
             &h,
             "s1",
             &p,
-            &call("tools/call", json!({ "name": "computer_get_app_state", "arguments": {} })),
+            &call(
+                "tools/call",
+                json!({ "name": "computer_get_app_state", "arguments": {} }),
+            ),
         );
         let snapshot_id = match state {
             McpResponse::Result { result, .. } => {
@@ -288,7 +289,10 @@ mod tests {
         );
         match click {
             McpResponse::Result { result, .. } => {
-                assert!(result.get("isError").is_none(), "click should succeed: {result}")
+                assert!(
+                    result.get("isError").is_none(),
+                    "click should succeed: {result}"
+                )
             }
             _ => panic!("expected result"),
         }
@@ -322,23 +326,54 @@ mod tests {
         let h = host();
         let p = perm();
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &"com.example.app".to_string());
-        dispatch(&h, "s1", &p, &call("tools/call", json!({ "name": "computer_start", "arguments": { "appId": "com.example.app" } })));
-        let first = dispatch(&h, "s1", &p, &call("tools/call", json!({ "name": "computer_get_app_state", "arguments": {} })));
+        h.approvals()
+            .approve_app("s1", &"com.example.app".to_string());
+        dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({ "name": "computer_start", "arguments": { "appId": "com.example.app" } }),
+            ),
+        );
+        let first = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({ "name": "computer_get_app_state", "arguments": {} }),
+            ),
+        );
         let stale_id = match first {
             McpResponse::Result { result, .. } => {
                 let text = result["content"][0]["text"].as_str().unwrap();
-                serde_json::from_str::<Value>(text).unwrap()["snapshotId"].as_str().unwrap().to_string()
+                serde_json::from_str::<Value>(text).unwrap()["snapshotId"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
             }
             _ => panic!(),
         };
         // capture again to invalidate
-        dispatch(&h, "s1", &p, &call("tools/call", json!({ "name": "computer_get_app_state", "arguments": {} })));
+        dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({ "name": "computer_get_app_state", "arguments": {} }),
+            ),
+        );
         let resp = dispatch(
             &h,
             "s1",
             &p,
-            &call("tools/call", json!({ "name": "computer_type_text", "arguments": { "snapshotId": stale_id, "text": "hi" } })),
+            &call(
+                "tools/call",
+                json!({ "name": "computer_type_text", "arguments": { "snapshotId": stale_id, "text": "hi" } }),
+            ),
         );
         match resp {
             McpResponse::Result { result, .. } => assert_eq!(result["isError"], true),

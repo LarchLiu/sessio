@@ -276,8 +276,7 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
             Section::ComputerUse => match key {
                 "enabled" => raw.computer_use.enabled = value.map(parse_bool).transpose()?,
                 "allow_input_injection" => {
-                    raw.computer_use.allow_input_injection =
-                        value.map(parse_bool).transpose()?
+                    raw.computer_use.allow_input_injection = value.map(parse_bool).transpose()?
                 }
                 "allow_foreground_takeover" => {
                     raw.computer_use.allow_foreground_takeover =
@@ -448,16 +447,12 @@ fn resolve_appshot_config(raw: RawConfig) -> AppshotConfig {
 
 fn resolve_computer_use_config(raw: RawConfig) -> ComputerUseSettings {
     let defaults = ComputerUseSettings::recommended();
+    let _legacy_control_settings = (
+        raw.computer_use.allow_input_injection,
+        raw.computer_use.allow_foreground_takeover,
+    );
     ComputerUseSettings {
         enabled: raw.computer_use.enabled.unwrap_or(defaults.enabled),
-        allow_input_injection: raw
-            .computer_use
-            .allow_input_injection
-            .unwrap_or(defaults.allow_input_injection),
-        allow_foreground_takeover: raw
-            .computer_use
-            .allow_foreground_takeover
-            .unwrap_or(defaults.allow_foreground_takeover),
     }
 }
 
@@ -546,16 +541,6 @@ fn raw_config_with_defaults(mut raw: RawConfig) -> Result<(RawConfig, bool)> {
     merge_option(
         &mut raw.computer_use.enabled,
         defaults.computer_use.enabled,
-        &mut changed,
-    );
-    merge_option(
-        &mut raw.computer_use.allow_input_injection,
-        defaults.computer_use.allow_input_injection,
-        &mut changed,
-    );
-    merge_option(
-        &mut raw.computer_use.allow_foreground_takeover,
-        defaults.computer_use.allow_foreground_takeover,
         &mut changed,
     );
     merge_option(
@@ -702,20 +687,6 @@ fn serialize_computer_use_config(config: &ComputerUseSettings) -> String {
     out.push_str("[computer_use]\n");
     out.push_str("enabled = ");
     out.push_str(if config.enabled { "true" } else { "false" });
-    out.push('\n');
-    out.push_str("allow_input_injection = ");
-    out.push_str(if config.allow_input_injection {
-        "true"
-    } else {
-        "false"
-    });
-    out.push('\n');
-    out.push_str("allow_foreground_takeover = ");
-    out.push_str(if config.allow_foreground_takeover {
-        "true"
-    } else {
-        "false"
-    });
     out.push('\n');
     out
 }
@@ -977,8 +948,6 @@ mod tests {
         assert!(config.memory.is_none());
         assert_eq!(config.index.poll_interval_seconds, 60);
         assert!(config.computer_use.enabled);
-        assert!(config.computer_use.allow_input_injection);
-        assert!(config.computer_use.allow_foreground_takeover);
         assert!(!config.debug.acp_config);
         assert!(!config.debug.update_preview);
     }
@@ -997,8 +966,9 @@ mod tests {
         let config = super::resolve_app_config(raw, false).unwrap();
 
         assert!(!config.computer_use.enabled);
-        assert!(config.computer_use.allow_input_injection);
-        assert!(!config.computer_use.allow_foreground_takeover);
+        let serialized = serialize_app_config(&config);
+        assert!(!serialized.contains("allow_input_injection"));
+        assert!(!serialized.contains("allow_foreground_takeover"));
     }
 
     #[test]

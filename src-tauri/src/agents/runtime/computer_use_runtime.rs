@@ -61,7 +61,7 @@ pub struct ComputerUseRuntime {
 
 impl ComputerUseRuntime {
     /// Build the runtime with a permission provider (live OS status callback).
-    /// `settings` is the host policy (enable/control/foreground).
+    /// `settings` is the host enable policy.
     pub fn new(
         settings: ComputerUseSettings,
         permission_provider: Arc<dyn Fn() -> DesktopControlPermissionStatus + Send + Sync>,
@@ -135,9 +135,7 @@ impl ComputerUseRuntime {
 mod tests {
     use super::*;
     use crate::agents::runtime::types::McpInjectionCapabilities;
-    use crate::desktop_control::{
-        DesktopControlInputs, DesktopPlatform, PermissionTier,
-    };
+    use crate::desktop_control::{DesktopControlInputs, DesktopPlatform, PermissionTier};
     use serde_json::json;
 
     fn options(value: serde_json::Value) -> RuntimeMetadata {
@@ -191,7 +189,7 @@ mod tests {
     }
 
     fn runtime() -> ComputerUseRuntime {
-        ComputerUseRuntime::new(ComputerUseSettings::observe_only(), Arc::new(perm))
+        ComputerUseRuntime::new(ComputerUseSettings::enabled(), Arc::new(perm))
     }
 
     #[test]
@@ -202,8 +200,7 @@ mod tests {
         assert!(injection.url.ends_with("/mcp"));
         assert!(!injection.bearer_token.is_empty());
         // Injection alone does not grant session approval; the UI does that
-        // explicitly after session start. This test keeps the runtime in an
-        // observe/inspect-only permission shape on purpose.
+        // explicitly after session start.
         assert!(!rt.host().approvals().session_approved("s1"));
     }
 

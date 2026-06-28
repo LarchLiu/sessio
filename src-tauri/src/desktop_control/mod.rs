@@ -9,8 +9,8 @@
 //!   dependency (element-tree inspection / `click_element`).
 //!
 //! The module deliberately separates *OS permission state* (screen-capture
-//! grant, accessibility trust, platform support) from *product policy* (session
-//! approval, app approval, provider readiness, foreground takeover). Only the OS
+//! grant, accessibility trust, platform support) from *runtime policy* (session
+//! approval, app approval, provider readiness, lease ownership). Only the OS
 //! layer lives here. The actual privileged FFI checks
 //! (`ScreenCaptureAccess.preflight()`, `AXIsProcessTrustedWithOptions`) stay in
 //! `lib.rs`; this module turns their raw booleans into the tiered status both
@@ -92,8 +92,7 @@ pub struct DesktopControlInputs {
     pub accessibility: PermissionTier,
     /// Whether the current platform + provider can perform input injection
     /// (`canControl`). This is an OS/provider-support fact, not a product
-    /// policy decision — input injection is net-new (Phase 3) and stays `false`
-    /// until a provider implements it for the platform.
+    /// policy decision.
     pub input_injection_supported: bool,
 }
 

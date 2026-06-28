@@ -35,7 +35,7 @@ export function desktopControlPermissionPresentation(
   if (!requiresPermission) {
     return {
       requiresPermission: false,
-      ready: Boolean(status?.canObserve && status?.canInspect),
+      ready: Boolean(status?.canObserve && status?.canInspect && status?.canControl),
       descriptionKey: "settings.desktop_control_not_supported",
       showManageButton: false,
       screenshotKey: status?.screenshots.granted
@@ -46,9 +46,7 @@ export function desktopControlPermissionPresentation(
         : "settings.desktop_control_accessibility_required",
     };
   }
-  // Computer use needs both observe and inspect; control is reported separately
-  // because it is net-new and may be unavailable even when observe/inspect are.
-  const ready = Boolean(status?.canObserve && status?.canInspect);
+  const ready = Boolean(status?.canObserve && status?.canInspect && status?.canControl);
   return {
     requiresPermission: true,
     ready,

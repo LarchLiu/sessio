@@ -4,13 +4,12 @@
 //! lifecycle, snapshot staleness, provider abstraction, permission gating, and
 //! session/app approvals. It is deliberately independent of *how* the tool is
 //! injected into an agent (ACP MCP server vs Pi extension) so it can be built
-//! and tested before the injection plumbing (Phase 4) exists.
+//! and tested independently from the injection plumbing.
 //!
 //! Privileged OS operations live behind the [`provider::ComputerUseProvider`]
-//! trait. The real macOS provider (screen capture via the CGWindow path already
-//! in `lib.rs`, AX element inspection, and `CGEvent` input injection) is the
-//! net-new, highest-risk work of Phase 3; this module is exercised in tests with
-//! a deterministic fake provider.
+//! trait. The real macOS provider handles screen capture, AX element inspection,
+//! and `CGEvent` input injection; this module is exercised in tests with a
+//! deterministic fake provider.
 
 pub mod approvals;
 pub mod config;
