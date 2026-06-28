@@ -29,15 +29,13 @@ changes referenced here, see
 
 The main conclusion is:
 
-- Sessio already has a good MVP core: HTTP MCP injection, approvals, lease and
+- Sessio started with a good MVP core: HTTP MCP injection, approvals, lease and
   snapshot discipline, foreground abort, AX tree capture, screenshot capture,
-  basic CGEvent control, and a shared desktop-control truth source that now
-  reflects provider support correctly.
-- The `SKILL.md` implementation is materially broader. It supports a richer
-  action model, explicit onboarding tools, app launch behavior, pixel fallback,
-  more robust background targeting semantics, a stronger post-action
-  state/snapshot contract, and a CLI/skill contract that does not yet exist in
-  Sessio.
+  basic CGEvent control, and a shared desktop-control truth source.
+- The in-process implementation now covers the broader `SKILL.md` contract:
+  richer actions, explicit onboarding tools, app launch behavior, pixel
+  fallback, background-targeted event routing, post-action state/snapshot
+  turnover, CLI parity, and bundled skill/playbook resources.
 
 ## Relationship To The Prompt Refactor Plan
 
@@ -146,14 +144,12 @@ There is also one process-architecture constraint worth keeping explicit here:
   [src-tauri/src/lib.rs](../src-tauri/src/lib.rs), `desktop_control_inputs()`
   now derives that value from the current provider's `supports_control()`
   result.
-- The remaining policy problem is therefore not the desktop-control truth
-  source itself. It is the host-side control model in
-  [src-tauri/src/computer_use/host.rs](../src-tauri/src/computer_use/host.rs),
-  where `control_enabled()` currently requires both
-  `allow_input_injection` and `allow_foreground_takeover`, even though enabling
-  computer use should already imply that control is allowed.
+- Host policy is now re-baselined around a single product switch:
+  [ComputerUseSettings](../src-tauri/src/computer_use/settings.rs) exposes
+  `enabled`, while OS permissions, approvals, leases, and provider support
+  decide whether observe/inspect/control are available at runtime.
 
-## What Sessio Already Has
+## What Sessio Has
 
 ### 1. Session-scoped MCP injection
 
@@ -172,47 +168,55 @@ The host already owns:
 - foreground takeover state
 - abort path
 
-This is a strong ownership boundary and should be preserved, even though the
-current control/takeover semantics still need to be re-baselined.
+This is a strong ownership boundary and is preserved by the completed
+implementation.
 
-### 3. Basic tool catalog
+### 3. Skill-aligned tool catalog
 
-Sessio already exposes:
+Sessio exposes:
 
 - `computer_status`
+- `computer_permissions`
+- `computer_grant`
 - `computer_list_apps`
 - `computer_start`
+- `computer_launch_app`
+- `computer_raise_app`
 - `computer_get_app_state`
+- `computer_click`
 - `computer_click_element`
+- `computer_click_at`
+- `computer_secondary_click`
+- `computer_perform_secondary_action`
+- `computer_double_click`
+- `computer_drag`
+- `computer_set_value`
 - `computer_type_text`
 - `computer_press_key`
 - `computer_scroll`
 - `computer_stop`
 
-### 4. macOS MVP provider
+### 4. macOS provider
 
-The macOS provider already supports:
+The macOS provider supports:
 
-- running app enumeration
-- frontmost window screenshot capture
+- installed and running app enumeration with recent-use ranking
+- background launch and explicit foreground raise/recovery
+- ScreenCaptureKit-first window screenshots with `screencapture -l` fallback
 - AX tree extraction
-- AX element click via bounds center
-- basic `CGEvent` typing
-- basic `CGEvent` key press
-- basic `CGEvent` scroll
+- AX element click, context menu, scroll, and value setting
+- pid-scoped `CGEventPostToPid` click, right-click, double-click, drag, typing,
+  key chords, and wheel scroll
 
-### 5. Frontend toggles and takeover overlay
+### 5. Frontend switch and takeover overlay
 
 Sessio already has:
 
 - computer-use master enable
-- input-control toggle
-- foreground-takeover toggle
 - takeover warning overlay with abort
 
-These are useful product affordances, even though the current host policy still
-does not give `input control` and `foreground takeover` independent runtime
-meaning.
+The settings UI now maps to host policy with a single computer-use switch;
+foreground takeover remains a runtime state surfaced by the overlay.
 
 ## What The In-Repo Skill Spec Adds
 
