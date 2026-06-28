@@ -8,6 +8,7 @@ import {
   sanitizeSessioAttachmentText,
   stripInjectedContext,
   stripSessioAssistantPromptBlocks,
+  stripSessioComputerUsePromptBlocks,
   sessioThreadPromptBlockMetas,
   stripSessioThreadPromptBlocks,
 } from "../src/historyMerge";
@@ -376,6 +377,25 @@ describe("assistant prompt blocks", () => {
     });
     expect(stripSessioAssistantPromptBlocks(`visible\n${block}\nrest`)).toBe("visible\n\nrest");
     expect(stripInjectedContext(`${block}\n\n---\n\nhello`)).toBe("hello");
+  });
+});
+
+describe("computer use prompt blocks", () => {
+  it("strips hidden computer use prompt blocks from visible user text", () => {
+    const block = [
+      '<!-- sessio-computer-use:start nonce="abc" kind="computer_use" -->',
+      "Use injected computer tools.",
+      '<!-- sessio-computer-use:end nonce="abc" -->',
+    ].join("\n");
+
+    expect(stripSessioComputerUsePromptBlocks(`${block}\n\nhello`)).toBe("hello");
+    expect(stripInjectedContext(`${block}\n\nhello`)).toBe("hello");
+  });
+
+  it("keeps unmatched computer use markers as user text", () => {
+    const input = 'show <!-- sessio-computer-use:start nonce="abc" --> literally';
+
+    expect(stripSessioComputerUsePromptBlocks(input)).toBe(input);
   });
 });
 

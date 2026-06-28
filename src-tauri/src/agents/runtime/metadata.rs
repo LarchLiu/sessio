@@ -81,11 +81,11 @@ pub fn derive_computer_use_eligible(
 
 /// Product-level allowlist of agents Sessio supports the computer-use contract
 /// for. As of the v3 implementation plan, the supported MVP set is the ACP
-/// agents verified to accept desktop-owned HTTP MCP injection: Codex and Claude.
-/// Pi remains a separate extension path and OpenCode has not yet been verified
-/// against the computer-use contract end-to-end.
+/// agents verified against the computer-use contract: Codex and Claude via
+/// desktop-owned HTTP MCP injection, and Pi via its native extension path.
+/// OpenCode has not yet been verified end-to-end.
 fn computer_use_product_supported(agent: Agent) -> bool {
-    matches!(agent, Agent::Codex | Agent::Claude)
+    matches!(agent, Agent::Pi | Agent::Codex | Agent::Claude)
 }
 
 pub fn runtime_agents_from_db(
@@ -176,9 +176,14 @@ pub fn startup_probe_runtime_agents(
             cached
         };
 
-        let capabilities = capability_record
-            .as_ref()
-            .and_then(|record| derive_runtime_capabilities(&record.raw_capabilities_json).ok());
+        let capabilities = capability_record.as_ref().and_then(|record| {
+            derive_runtime_capabilities_for_agent(
+                runtime_agent,
+                record.transport,
+                &record.raw_capabilities_json,
+            )
+            .ok()
+        });
         let computer_use_eligible =
             derive_computer_use_eligible(runtime_agent, capabilities.as_ref());
         out.push(RuntimeAgentMetadata {
@@ -289,6 +294,17 @@ fn derive_runtime_capabilities(raw_capabilities_json: &str) -> Result<RuntimeCap
     Ok(acp_transport::runtime_capabilities_from_acp(&capabilities))
 }
 
+fn derive_runtime_capabilities_for_agent(
+    agent: Agent,
+    transport: RuntimeTransportKind,
+    raw_capabilities_json: &str,
+) -> Result<RuntimeCapabilitySet> {
+    if agent == Agent::Pi && transport == RuntimeTransportKind::PiRpc {
+        return Ok(pi_rpc_transport::runtime_capabilities());
+    }
+    derive_runtime_capabilities(raw_capabilities_json)
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -389,10 +405,11 @@ mod tests {
         // No capabilities probed yet → not eligible.
         assert!(!derive_computer_use_eligible(Agent::Pi, None));
 
-        // Injectable transport but no product support yet → still not eligible.
+        // Pi is injectable through its native extension path and is now covered
+        // by the product-level computer-use contract.
         let injectable = pi_rpc_transport::runtime_capabilities();
         assert!(injectable.mcp_injection.is_injectable());
-        assert!(!derive_computer_use_eligible(Agent::Pi, Some(&injectable)));
+        assert!(derive_computer_use_eligible(Agent::Pi, Some(&injectable)));
 
         // A non-injectable capability set is never eligible regardless of product
         // support.
@@ -412,6 +429,29 @@ mod tests {
             Agent::Opencode,
             Some(&acp_http)
         ));
+    }
+
+    #[test]
+    fn pi_rpc_uses_current_static_capabilities_over_legacy_cached_json() {
+        let legacy = r#"{
+            "supportsCancel": true,
+            "supportsPermissions": false,
+            "supportsToolDeltas": true,
+            "supportsLoadSession": true,
+            "supportsResume": true,
+            "supportsFork": false,
+            "supportsImageAttachments": true,
+            "supportsAudioAttachments": false,
+            "supportsEmbeddedContext": true,
+            "supportsAttachments": true,
+            "supportsModes": false
+        }"#;
+        let caps =
+            derive_runtime_capabilities_for_agent(Agent::Pi, RuntimeTransportKind::PiRpc, legacy)
+                .expect("pi rpc caps");
+
+        assert!(caps.mcp_injection.native_extension);
+        assert!(derive_computer_use_eligible(Agent::Pi, Some(&caps)));
     }
 
     #[test]

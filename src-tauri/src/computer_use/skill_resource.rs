@@ -30,15 +30,17 @@ pub fn computer_use_skill_prompt_note() -> String {
 
 /// Short per-turn operating contract plus a pointer to the full bundled skill.
 pub fn computer_use_prompt_block() -> String {
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let note = computer_use_skill_prompt_note();
     format!(
-        r#"<sessio-computer-use>
-{}
+        r#"<!-- sessio-computer-use:start nonce="{nonce}" kind="computer_use" -->
+
+{note}
 When driving native macOS apps, prefer the injected `computer_*` tools over shell scripts.
 Start with `computer_get_app_state`; use AX refs (`ref`/`elementId`) before screenshot coordinates.
 Never write or run raw Swift/CoreGraphics/CGEvent, cliclick, AppleScript mouse, or other direct input scripts. They bypass Sessio approvals, snapshot coordinate mapping, post-action screenshots, and the pointer overlay. If `computer_*` tools are unavailable, use `sessio cu` only.
 If the target has no visible window or is Dock-minimized, call `computer_raise_app` for that bundle, then retry `computer_get_app_state`. Do not use `open -a`, AppleScript `activate`/`frontmost`, or Window-menu clicks for this recovery path; those can report success without restoring the window.
-</sessio-computer-use>"#,
-        computer_use_skill_prompt_note()
+<!-- sessio-computer-use:end nonce="{nonce}" -->"#
     )
 }
 
@@ -125,7 +127,9 @@ mod tests {
     fn prompt_block_includes_skill_path_and_recovery_rules() {
         let block = computer_use_prompt_block();
 
-        assert!(block.contains("<sessio-computer-use>"));
+        assert!(block.contains("<!-- sessio-computer-use:start"));
+        assert!(block.contains("kind=\"computer_use\""));
+        assert!(block.contains("<!-- sessio-computer-use:end"));
         assert!(block.contains("Full Sessio computer-use skill"));
         assert!(block.contains("computer_get_app_state"));
         assert!(block.contains("computer_raise_app"));

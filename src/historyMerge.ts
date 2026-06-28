@@ -9,6 +9,8 @@ const SESSIO_THREAD_PROMPT_START = "<!-- sessio-thread-prompt:start";
 const SESSIO_THREAD_PROMPT_END = "<!-- sessio-thread-prompt:end";
 const SESSIO_ASSISTANT_PROMPT_START = "<!-- sessio-assistant-prompt:start";
 const SESSIO_ASSISTANT_PROMPT_END = "<!-- sessio-assistant-prompt:end";
+const SESSIO_COMPUTER_USE_PROMPT_START = "<!-- sessio-computer-use:start";
+const SESSIO_COMPUTER_USE_PROMPT_END = "<!-- sessio-computer-use:end";
 
 export interface SessioThreadPromptBlockMeta {
   kind: string | null;
@@ -218,6 +220,45 @@ export function stripSessioAssistantPromptBlocks(input: string): string {
     .trim();
 }
 
+export function stripSessioComputerUsePromptBlocks(input: string): string {
+  let out = "";
+  let cursor = 0;
+  let changed = false;
+  for (;;) {
+    const start = input.indexOf(SESSIO_COMPUTER_USE_PROMPT_START, cursor);
+    if (start < 0) {
+      out += input.slice(cursor);
+      break;
+    }
+    const startCommentEnd = input.indexOf("-->", start);
+    if (startCommentEnd < 0) {
+      out += input.slice(cursor);
+      break;
+    }
+    const startComment = input.slice(start, startCommentEnd + "-->".length);
+    const nonce = commentAttr(startComment, "nonce");
+    if (!nonce) {
+      out += input.slice(cursor, startCommentEnd + "-->".length);
+      cursor = startCommentEnd + "-->".length;
+      continue;
+    }
+    const endMarker = `${SESSIO_COMPUTER_USE_PROMPT_END} nonce="${nonce}" -->`;
+    const end = input.indexOf(endMarker, startCommentEnd + "-->".length);
+    if (end < 0) {
+      out += input.slice(cursor, startCommentEnd + "-->".length);
+      cursor = startCommentEnd + "-->".length;
+      continue;
+    }
+    changed = true;
+    out += input.slice(cursor, start);
+    cursor = end + endMarker.length;
+  }
+  if (!changed) return input;
+  return out
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function commentAttr(comment: string, key: string): string | null {
   const match = new RegExp(`\\s${key}="([^"]*)"`).exec(comment);
   return match?.[1] ?? null;
@@ -267,8 +308,10 @@ export function stripInjectedContext(s: string): string {
   const MARKER = "## My request for Codex:";
   const idx = text.indexOf(MARKER);
   if (idx >= 0) text = text.slice(idx + MARKER.length);
-  return stripSessioAssistantPromptBlocks(
-    stripSessioThreadPromptBlocks(stripImagePlaceholders(text)),
+  return stripSessioComputerUsePromptBlocks(
+    stripSessioAssistantPromptBlocks(
+      stripSessioThreadPromptBlocks(stripImagePlaceholders(text)),
+    ),
   ).trim();
 }
 

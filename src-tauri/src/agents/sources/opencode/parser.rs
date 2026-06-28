@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::agents::sources::shared::attachment_text::clean_history_user_preview_text;
 use crate::agents::sources::types::{HistoryAcpMessage, SourceLocation};
 use crate::models::{normalize_preview, Agent, SessionInfo};
 use crate::turns::{
@@ -228,8 +229,8 @@ fn first_user_summary(conn: &Connection, session_id: &str) -> Result<Option<Stri
             })
             .collect();
         let combined = texts.join("\n");
-        if !combined.trim().is_empty() {
-            return Ok(Some(normalize_preview(&combined)));
+        if let Some(cleaned) = clean_history_user_preview_text(&combined) {
+            return Ok(Some(normalize_preview(&cleaned)));
         }
     }
     Ok(None)
@@ -726,6 +727,37 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].parts[0].text.as_deref(), Some("hello opencode"));
+
+        let _ = fs::remove_file(&db);
+        let _ = fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn sqlite_session_first_user_message_strips_computer_use_prompt_block() {
+        let db = unique_db();
+        let conn = create_test_db(&db);
+        conn.execute(
+            "INSERT INTO session VALUES ('ses_1', 'Title 1', '/tmp/proj', 1000, 2000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message VALUES ('msg_1', 'ses_1', 1000, ?)",
+            [r#"{"role":"user"}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES ('part_1', 'ses_1', 'msg_1', 1000, ?)",
+            [r#"{"type":"text","text":"<!-- sessio-computer-use:start nonce=\"abc\" kind=\"computer_use\" -->\nUse injected computer tools.\n<!-- sessio-computer-use:end nonce=\"abc\" -->\n\nopen settings"}"#],
+        )
+        .unwrap();
+        drop(conn);
+
+        let session = parse_sqlite_session(&db, "ses_1")
+            .unwrap()
+            .expect("session");
+
+        assert_eq!(session.first_user_message.as_deref(), Some("open settings"));
 
         let _ = fs::remove_file(&db);
         let _ = fs::remove_dir_all(db.parent().unwrap());

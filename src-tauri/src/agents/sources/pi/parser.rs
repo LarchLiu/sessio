@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::agents::runtime::types::AcpProtocolMessage;
 use crate::agents::sources::pi::text_message_event;
+use crate::agents::sources::shared::attachment_text::clean_history_user_preview_text;
 use crate::agents::sources::shared::convert::project_key_for_path_or_name;
 use crate::agents::sources::system_time_to_millis;
 use crate::agents::sources::types::{
@@ -160,8 +161,10 @@ pub fn parse_session_file(path: &Path) -> Result<Option<SessionInfo>> {
     let first_user_message = message_entries
         .iter()
         .filter_map(|entry| entry.message.as_ref())
-        .find(|message| message.role == "user")
-        .and_then(|message| text_from_content(&message.content))
+        .filter(|message| message.role == "user")
+        .filter_map(|message| text_from_content(&message.content))
+        .filter_map(|text| clean_history_user_preview_text(&text))
+        .next()
         .map(|text| normalize_preview(&text));
     let file_size = fs::metadata(path)
         .map(|metadata| metadata.len())
@@ -874,6 +877,28 @@ mod tests {
             data["edits"][0]["patch"].as_str(),
             Some("--- world-cup.md\n+++ world-cup.md\n@@ -1 +1 @@\n-old\n+new\n")
         );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pi_session_first_user_message_strips_computer_use_prompt_block() {
+        let path = unique_temp_jsonl_path("pi-computer-use-preview");
+        let content = concat!(
+            "{\"type\":\"session\",\"id\":\"session-1\",\"timestamp\":\"2026-06-25T18:48:15.425Z\",\"cwd\":\"/tmp/project\"}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<!-- sessio-computer-use:start nonce=\\\"abc\\\" kind=\\\"computer_use\\\" -->\\nUse injected computer tools.\\n<!-- sessio-computer-use:end nonce=\\\"abc\\\" -->\\n\\nclick the button\"}],\"timestamp\":1000}}\n",
+        );
+        std::fs::write(&path, content).expect("write temp pi jsonl");
+
+        let session = parse_session_file(&path)
+            .expect("parse pi session")
+            .expect("session");
+
+        assert_eq!(
+            session.first_user_message.as_deref(),
+            Some("click the button")
+        );
+        assert_eq!(session.title.as_deref(), Some("click the button"));
 
         let _ = std::fs::remove_file(path);
     }

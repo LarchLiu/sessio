@@ -6,6 +6,8 @@ use crate::agents::runtime::types::{RuntimeCapabilitySet, RuntimeTransportKind};
 const SESSIO_ATTACHMENT_MARKER: &str = "__sessio_attachment__:";
 const SESSIO_THREAD_PROMPT_START: &str = "<!-- sessio-thread-prompt:start";
 const SESSIO_THREAD_PROMPT_END: &str = "<!-- sessio-thread-prompt:end";
+const SESSIO_COMPUTER_USE_PROMPT_START: &str = "<!-- sessio-computer-use:start";
+const SESSIO_COMPUTER_USE_PROMPT_END: &str = "<!-- sessio-computer-use:end";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -1833,7 +1835,9 @@ pub fn strip_injected_context(s: &str) -> String {
         text = &text[i + MARKER.len()..];
     }
 
-    strip_sessio_thread_prompt_blocks(text).trim().to_string()
+    strip_sessio_computer_use_prompt_blocks(&strip_sessio_thread_prompt_blocks(text))
+        .trim()
+        .to_string()
 }
 
 pub fn strip_sessio_thread_prompt_blocks(input: &str) -> String {
@@ -1877,6 +1881,51 @@ pub fn strip_sessio_thread_prompt_blocks(input: &str) -> String {
         .map(str::trim_start)
         .unwrap_or(cleaned);
     cleaned.trim().to_string()
+}
+
+pub fn strip_sessio_computer_use_prompt_blocks(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+    let mut changed = false;
+    loop {
+        let Some(start_rel) = input[cursor..].find(SESSIO_COMPUTER_USE_PROMPT_START) else {
+            out.push_str(&input[cursor..]);
+            break;
+        };
+        let start = cursor + start_rel;
+        let Some(start_comment_end_rel) = input[start..].find("-->") else {
+            out.push_str(&input[cursor..]);
+            break;
+        };
+        let start_comment_end = start + start_comment_end_rel + "-->".len();
+        let start_comment = &input[start..start_comment_end];
+        let Some(nonce) = comment_attr(start_comment, "nonce") else {
+            out.push_str(&input[cursor..start_comment_end]);
+            cursor = start_comment_end;
+            continue;
+        };
+        let end_marker = format!("{SESSIO_COMPUTER_USE_PROMPT_END} nonce=\"{nonce}\" -->");
+        let Some(end_rel) = input[start_comment_end..].find(&end_marker) else {
+            out.push_str(&input[cursor..start_comment_end]);
+            cursor = start_comment_end;
+            continue;
+        };
+        changed = true;
+        out.push_str(&input[cursor..start]);
+        cursor = start_comment_end + end_rel + end_marker.len();
+    }
+    if !changed {
+        return input.to_string();
+    }
+    collapse_blank_lines(&out).trim().to_string()
+}
+
+fn collapse_blank_lines(text: &str) -> String {
+    let mut out = text.to_string();
+    while out.contains("\n\n\n") {
+        out = out.replace("\n\n\n", "\n\n");
+    }
+    out
 }
 
 pub fn sessio_thread_prompt_block_kinds(input: &str) -> Vec<String> {
@@ -1987,7 +2036,8 @@ fn html_unattr(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_preview, sessio_attachment_marker_name, strip_sessio_thread_prompt_blocks,
+        normalize_preview, sessio_attachment_marker_name, strip_injected_context,
+        strip_sessio_computer_use_prompt_blocks, strip_sessio_thread_prompt_blocks,
         text_content_blocks,
     };
 
@@ -2096,5 +2146,28 @@ mod tests {
         let input = "user says <!-- sessio-thread-prompt:start nonce=\"abc\" --> literally";
 
         assert_eq!(strip_sessio_thread_prompt_blocks(input), input);
+    }
+
+    #[test]
+    fn strip_sessio_computer_use_prompt_blocks_removes_complete_block() {
+        let input = concat!(
+            "<!-- sessio-computer-use:start nonce=\"abc\" kind=\"computer_use\" -->\n",
+            "Use injected computer tools.\n",
+            "<!-- sessio-computer-use:end nonce=\"abc\" -->\n\n",
+            "click the button"
+        );
+
+        assert_eq!(
+            strip_sessio_computer_use_prompt_blocks(input),
+            "click the button"
+        );
+        assert_eq!(strip_injected_context(input), "click the button");
+    }
+
+    #[test]
+    fn strip_sessio_computer_use_prompt_blocks_keeps_unmatched_user_marker() {
+        let input = "show <!-- sessio-computer-use:start nonce=\"abc\" --> literally";
+
+        assert_eq!(strip_sessio_computer_use_prompt_blocks(input), input);
     }
 }

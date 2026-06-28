@@ -1306,7 +1306,7 @@ fn normalize_runtime_prompt_text(text: &str, options: &RuntimeMetadata) -> Strin
     {
         return text;
     }
-    format!("{}\n\n---\n\n{}", computer_use_prompt_block(), text)
+    format!("{}\n\n\n\n{}", computer_use_prompt_block(), text)
 }
 
 fn runtime_option_bool(options: &RuntimeMetadata, key: &str) -> bool {
@@ -2007,7 +2007,8 @@ mod tests {
 
         let text = normalize_runtime_prompt_text("send the message", &options);
 
-        assert!(text.contains("<sessio-computer-use>"));
+        assert!(text.contains("<!-- sessio-computer-use:start"));
+        assert!(text.contains("<!-- sessio-computer-use:end"));
         assert!(text.contains("computer_get_app_state"));
         assert!(text.contains("computer_raise_app"));
         assert!(text.contains("open -a"));
