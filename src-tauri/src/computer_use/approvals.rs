@@ -1,16 +1,17 @@
-//! Session-level and app-level approvals.
+//! Session-level and global app-level approvals.
 //!
 //! Computer use is gated by two approval layers, independent of OS permission:
 //!
 //! - **Session approval** — the user enabled computer use for this session.
-//! - **App approval** — the user allowed control of a specific target app
-//!   (so enabling the feature does not implicitly grant control of every app).
+//! - **App approval** — the user globally allowed control of a specific target
+//!   app (so enabling the feature does not implicitly grant control of every
+//!   app).
 //!
-//! This module is the in-memory policy store. Persistence (which approvals
-//! survive restart) is layered on top in Phase 5; the rules themselves live
-//! here so they are unit-testable now.
+//! This module is the in-memory policy store. Persistent app approvals are
+//! synced through computer-use settings/config; the rules themselves live here
+//! so they are unit-testable.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -25,11 +26,10 @@ pub struct SessionApproval {
     pub approved: bool,
 }
 
-/// A per-app approval record within a session.
+/// A global per-app approval record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppApproval {
-    pub session_id: String,
     pub app_id: AppId,
     pub approved: bool,
 }
@@ -56,7 +56,7 @@ impl ApprovalDecision {
 #[derive(Default)]
 pub struct ApprovalRegistry {
     sessions: Mutex<HashSet<String>>,
-    apps: Mutex<HashMap<String, HashSet<AppId>>>,
+    apps: Mutex<HashSet<AppId>>,
 }
 
 impl ApprovalRegistry {
@@ -70,35 +70,43 @@ impl ApprovalRegistry {
 
     pub fn revoke_session(&self, session_id: &str) {
         self.sessions.lock().unwrap().remove(session_id);
-        self.apps.lock().unwrap().remove(session_id);
     }
 
     pub fn session_approved(&self, session_id: &str) -> bool {
         self.sessions.lock().unwrap().contains(session_id)
     }
 
-    pub fn approve_app(&self, session_id: &str, app_id: &AppId) {
-        self.apps
-            .lock()
-            .unwrap()
-            .entry(session_id.to_string())
-            .or_default()
-            .insert(app_id.clone());
+    pub fn approve_app(&self, app_id: &AppId) {
+        self.apps.lock().unwrap().insert(app_id.clone());
     }
 
-    pub fn revoke_app(&self, session_id: &str, app_id: &AppId) {
-        if let Some(apps) = self.apps.lock().unwrap().get_mut(session_id) {
-            apps.remove(app_id);
-        }
+    pub fn revoke_app(&self, app_id: &AppId) {
+        self.apps.lock().unwrap().remove(app_id);
     }
 
-    pub fn app_approved(&self, session_id: &str, app_id: &AppId) -> bool {
-        self.apps
+    pub fn app_approved(&self, app_id: &AppId) -> bool {
+        self.apps.lock().unwrap().contains(app_id)
+    }
+
+    pub fn set_approved_apps(&self, app_ids: impl IntoIterator<Item = AppId>) {
+        let mut next = app_ids
+            .into_iter()
+            .map(|app_id| app_id.trim().to_string())
+            .filter(|app_id| !app_id.is_empty())
+            .collect::<HashSet<_>>();
+        std::mem::swap(&mut *self.apps.lock().unwrap(), &mut next);
+    }
+
+    pub fn approved_apps(&self) -> Vec<AppId> {
+        let mut apps = self
+            .apps
             .lock()
             .unwrap()
-            .get(session_id)
-            .map(|apps| apps.contains(app_id))
-            .unwrap_or(false)
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        apps.sort();
+        apps
     }
 
     /// Decide whether a session may control a given app. Session approval is a
@@ -107,7 +115,7 @@ impl ApprovalRegistry {
         if !self.session_approved(session_id) {
             return ApprovalDecision::SessionNotApproved;
         }
-        if !self.app_approved(session_id, app_id) {
+        if !self.app_approved(app_id) {
             return ApprovalDecision::AppNotApproved;
         }
         ApprovalDecision::Allowed
@@ -127,41 +135,61 @@ mod tests {
         assert_eq!(reg.decide("s1", &app), ApprovalDecision::SessionNotApproved);
 
         // App approved but session not → still session-blocked.
-        reg.approve_app("s1", &app);
+        reg.approve_app(&app);
         assert_eq!(reg.decide("s1", &app), ApprovalDecision::SessionNotApproved);
 
         // Session approved, app not → app-blocked.
-        reg.revoke_app("s1", &app);
+        reg.revoke_app(&app);
         reg.approve_session("s1");
         assert_eq!(reg.decide("s1", &app), ApprovalDecision::AppNotApproved);
 
         // Both approved → allowed.
-        reg.approve_app("s1", &app);
+        reg.approve_app(&app);
         assert_eq!(reg.decide("s1", &app), ApprovalDecision::Allowed);
         assert!(reg.decide("s1", &app).is_allowed());
     }
 
     #[test]
-    fn revoking_session_clears_app_approvals() {
+    fn revoking_session_keeps_global_app_approvals() {
         let reg = ApprovalRegistry::new();
         let app = "com.example.app".to_string();
         reg.approve_session("s1");
-        reg.approve_app("s1", &app);
+        reg.approve_app(&app);
         assert!(reg.decide("s1", &app).is_allowed());
 
         reg.revoke_session("s1");
         assert!(!reg.session_approved("s1"));
-        assert!(!reg.app_approved("s1", &app));
+        assert!(reg.app_approved(&app));
         assert_eq!(reg.decide("s1", &app), ApprovalDecision::SessionNotApproved);
     }
 
     #[test]
-    fn approvals_are_scoped_per_session() {
+    fn app_approvals_are_global_but_session_gate_remains_per_session() {
         let reg = ApprovalRegistry::new();
         let app = "com.example.app".to_string();
         reg.approve_session("s1");
-        reg.approve_app("s1", &app);
-        // s2 inherits nothing.
+        reg.approve_app(&app);
+        assert!(reg.decide("s1", &app).is_allowed());
+
+        // App approval is global, but s2 still needs its own session approval.
         assert_eq!(reg.decide("s2", &app), ApprovalDecision::SessionNotApproved);
+        reg.approve_session("s2");
+        assert!(reg.decide("s2", &app).is_allowed());
+    }
+
+    #[test]
+    fn approved_apps_round_trip_sorted_and_trimmed() {
+        let reg = ApprovalRegistry::new();
+        reg.set_approved_apps(vec![
+            " com.example.two ".to_string(),
+            "com.example.one".to_string(),
+            "com.example.two".to_string(),
+            "".to_string(),
+        ]);
+
+        assert_eq!(
+            reg.approved_apps(),
+            vec!["com.example.one".to_string(), "com.example.two".to_string()]
+        );
     }
 }

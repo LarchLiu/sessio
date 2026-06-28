@@ -464,14 +464,25 @@ impl RuntimeManager {
         sessio_runtime_session_id: &str,
         app_id: &str,
         approved: bool,
-    ) {
+    ) -> Result<crate::computer_use::settings::ComputerUseSettings> {
+        let _ = sessio_runtime_session_id;
         let runtime = self.computer_use();
         let approvals = runtime.host().approvals();
-        if approved {
-            approvals.approve_app(sessio_runtime_session_id, &app_id.to_string());
-        } else {
-            approvals.revoke_app(sessio_runtime_session_id, &app_id.to_string());
+        let app_id = app_id.trim();
+        if app_id.is_empty() {
+            bail!("app_id cannot be empty");
         }
+        let app_id = app_id.to_string();
+        if approved {
+            approvals.approve_app(&app_id);
+        } else {
+            approvals.revoke_app(&app_id);
+        }
+        let mut settings = runtime.host().settings();
+        settings.approved_apps = approvals.approved_apps();
+        let settings = crate::computer_use::config::save_settings(settings)?;
+        runtime.update_settings(settings.clone());
+        Ok(settings)
     }
 
     /// Approve or revoke computer use for a session (the session-level gate that

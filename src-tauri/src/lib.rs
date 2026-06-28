@@ -8543,8 +8543,10 @@ fn set_computer_use_app_approval(
     app_id: String,
     approved: bool,
     runtime: State<'_, RuntimeManager>,
-) {
-    runtime.set_computer_use_app_approval(&sessio_runtime_session_id, &app_id, approved);
+) -> Result<computer_use::settings::ComputerUseSettings, String> {
+    runtime
+        .set_computer_use_app_approval(&sessio_runtime_session_id, &app_id, approved)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

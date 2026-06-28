@@ -55,6 +55,7 @@ import {
   testTelegramBotConnection,
   testWechatBotConnection,
   pollWechatQrcodeStatus,
+  setComputerUseAppApproval,
   updateAgentPreferences,
   updateAppshotConfig,
   updateComputerUseSettings,
@@ -439,6 +440,7 @@ function GeneralSettings({
     try {
       const next = await updateComputerUseSettings({
         enabled: desktopControlEnabled,
+        approvedApps: computerUseSettings?.approvedApps ?? [],
       });
       setComputerUseSettings(next);
       setDesktopControlEnabled(next.enabled);
@@ -461,6 +463,22 @@ function GeneralSettings({
     }
   };
 
+  const revokeComputerUseAppApproval = async (appId: string) => {
+    if (savingDesktopControl) return;
+    setSavingDesktopControl(true);
+    try {
+      const next = await setComputerUseAppApproval("settings", appId, false);
+      setComputerUseSettings(next);
+      setDesktopControlEnabled(next.enabled);
+      emitComputerUseSettingsChanged(next);
+      onError(null);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setSavingDesktopControl(false);
+    }
+  };
+
   const proxyChanged = networkConfig
     ? proxyEnabled !== networkConfig.proxy.enabled
       || proxyUrl.trim() !== (networkConfig.proxy.url ?? "")
@@ -472,6 +490,7 @@ function GeneralSettings({
   const desktopControlChanged = computerUseSettings
     ? desktopControlEnabled !== computerUseSettings.enabled
     : false;
+  const approvedComputerUseApps = computerUseSettings?.approvedApps ?? [];
   const desktopControlPermission = desktopControlPermissionPresentation(desktopControlPermissionStatus);
   return (
     <section className="min-w-0 max-w-full">
@@ -563,6 +582,45 @@ function GeneralSettings({
                 {savingDesktopControl ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
                 {t("project.save")}
               </button>
+            </div>
+            <div className="rounded-lg border border-card-border/[0.12] bg-card-chip/[0.04]">
+              <div className="flex items-center justify-between gap-3 border-b border-card-border/[0.08] px-3 py-2.5">
+                <div>
+                  <div className="text-body-sm font-medium text-ink">
+                    {t("settings.desktop_control_approved_apps")}
+                  </div>
+                  <div className="mt-0.5 text-caption text-ink/45">
+                    {t("settings.desktop_control_approved_apps_description")}
+                  </div>
+                </div>
+                <span className="rounded-full bg-card-chip/[0.08] px-2 py-1 text-caption text-ink/45">
+                  {approvedComputerUseApps.length}
+                </span>
+              </div>
+              {approvedComputerUseApps.length === 0 ? (
+                <div className="px-3 py-3 text-caption text-ink/45">
+                  {t("settings.desktop_control_approved_apps_empty")}
+                </div>
+              ) : (
+                <div className="divide-y divide-card-border/[0.08]">
+                  {approvedComputerUseApps.map((appId) => (
+                    <div key={appId} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                      <code className="min-w-0 truncate rounded bg-card-chip/[0.08] px-2 py-1 text-caption text-ink/70">
+                        {appId}
+                      </code>
+                      <button
+                        type="button"
+                        disabled={savingDesktopControl}
+                        onClick={() => void revokeComputerUseAppApproval(appId)}
+                        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-status-error/20 bg-status-error/[0.08] px-2.5 text-caption font-medium text-status-error transition hover:bg-status-error/[0.12] disabled:opacity-35"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                        {t("settings.desktop_control_revoke_app")}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </SettingsStackedRow>

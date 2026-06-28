@@ -136,7 +136,7 @@ impl ComputerUseHost {
             .map(|target| target.app_id);
         let active_app_approved = active_app_id
             .as_ref()
-            .map(|app_id| self.approvals.app_approved(session_id, app_id))
+            .map(|app_id| self.approvals.app_approved(app_id))
             .unwrap_or(false);
         let settings = self.settings();
         ComputerUseStatus {
@@ -800,7 +800,7 @@ mod tests {
             Err(ComputerUseError::Approval(ApprovalDecision::AppNotApproved))
         ));
 
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         assert!(h.status("s1", &p).active_app_approved);
     }
 
@@ -817,7 +817,7 @@ mod tests {
         assert!(provider.actions().is_empty());
         assert!(!h.leases.has_lease("s1"));
 
-        h.approvals().approve_app("s1", &installed_target().app_id);
+        h.approvals().approve_app(&installed_target().app_id);
         let result = h.launch_app("s1", installed_target(), &p).unwrap();
         assert!(result.launched);
         assert!(result.running);
@@ -842,7 +842,7 @@ mod tests {
         assert!(!h.leases.has_lease("s1"));
         assert!(!h.foreground_active("s1"));
 
-        h.approvals().approve_app("s1", &installed_target().app_id);
+        h.approvals().approve_app(&installed_target().app_id);
         let result = h.raise_app("s1", installed_target(), &p).unwrap();
         assert!(!result.launched);
         assert!(result.running);
@@ -869,7 +869,7 @@ mod tests {
         assert!(provider.actions().is_empty());
         assert!(!h.leases.has_lease("s1"));
 
-        h.approvals().approve_app("s1", &installed_target().app_id);
+        h.approvals().approve_app(&installed_target().app_id);
         let state = h
             .get_app_state_for_target("s1", installed_target(), &p)
             .unwrap();
@@ -899,7 +899,7 @@ mod tests {
     fn get_app_state_without_inspect_hides_elements_and_click() {
         let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         // observe but NOT inspect. On macOS accessibility gates both inspect and
         // control, so with accessibility off there is neither element data nor
         // any allowed action.
@@ -932,7 +932,7 @@ mod tests {
     fn get_app_state_with_full_permission_allows_all_actions() {
         let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, true);
         h.start("s1", target(), &p).unwrap();
         let state = h.get_app_state("s1", &p).unwrap();
@@ -944,7 +944,7 @@ mod tests {
     fn control_action_rejects_stale_snapshot() {
         let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, true);
         h.start("s1", target(), &p).unwrap();
 
@@ -975,7 +975,7 @@ mod tests {
     fn coordinate_action_resolution_uses_latest_snapshot_mapping() {
         let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, true);
         h.start("s1", target(), &p).unwrap();
 
@@ -1013,7 +1013,7 @@ mod tests {
     fn enabled_computer_use_allows_control_when_permissions_are_ready() {
         let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, true);
         h.start("s1", target(), &p).unwrap();
         let state = h.get_app_state("s1", &p).unwrap();
@@ -1025,7 +1025,7 @@ mod tests {
     fn control_blocked_without_control_permission() {
         let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         // inject=false → no control permission.
         let p = perm(true, true, false);
         h.start("s1", target(), &p).unwrap();
@@ -1041,7 +1041,7 @@ mod tests {
     fn stop_releases_lease_and_is_idempotent() {
         let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, false);
         h.start("s1", target(), &p).unwrap();
         assert!(h.leases.has_lease("s1"));
@@ -1055,7 +1055,7 @@ mod tests {
         let provider = Arc::new(FakeProvider::default());
         let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, true);
         h.start("s1", target(), &p).unwrap();
         let state = h.get_app_state("s1", &p).unwrap();
@@ -1072,7 +1072,7 @@ mod tests {
         let provider = Arc::new(FakeProvider::default());
         let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, true);
         h.start("s1", target(), &p).unwrap();
 
@@ -1111,7 +1111,7 @@ mod tests {
         let provider = Arc::new(FakeProvider::default());
         let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, true);
         h.start("s1", target(), &p).unwrap();
         let state = h.get_app_state("s1", &p).unwrap();
@@ -1130,7 +1130,7 @@ mod tests {
         let provider = Arc::new(FakeProvider::default());
         let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, true);
         h.start("s1", target(), &p).unwrap();
         let state = h.get_app_state("s1", &p).unwrap();
@@ -1174,7 +1174,7 @@ mod tests {
     fn status_includes_active_app_when_session_holds_lease() {
         let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, false);
         h.start("s1", target(), &p).unwrap();
 
@@ -1186,7 +1186,7 @@ mod tests {
     fn control_action_marks_foreground_and_abort_clears_it() {
         let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, true);
         h.start("s1", target(), &p).unwrap();
         let state = h.get_app_state("s1", &p).unwrap();
@@ -1211,7 +1211,7 @@ mod tests {
     fn stop_also_clears_foreground() {
         let h = host(ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
-        h.approvals().approve_app("s1", &target().app_id);
+        h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, true);
         h.start("s1", target(), &p).unwrap();
         let state = h.get_app_state("s1", &p).unwrap();

@@ -11,11 +11,18 @@ pub struct ComputerUseSettings {
     /// Master switch. When false, the host refuses all leases regardless of
     /// per-session approval (a global kill-switch).
     pub enabled: bool,
+    /// Global allowlist of app bundle identifiers approved for computer-use
+    /// control. Session approval is still required separately.
+    #[serde(default)]
+    pub approved_apps: Vec<String>,
 }
 
 impl Default for ComputerUseSettings {
     fn default() -> Self {
-        Self { enabled: false }
+        Self {
+            enabled: false,
+            approved_apps: Vec::new(),
+        }
     }
 }
 
@@ -23,7 +30,10 @@ impl ComputerUseSettings {
     /// Enabled preset: observation, inspection, and control are product-allowed
     /// whenever OS capability, approvals, and session state allow them.
     pub fn enabled() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            approved_apps: Vec::new(),
+        }
     }
 
     /// Recommended desktop default.
@@ -56,7 +66,10 @@ mod tests {
 
     #[test]
     fn settings_round_trip_json() {
-        let s = ComputerUseSettings { enabled: true };
+        let s = ComputerUseSettings {
+            enabled: true,
+            approved_apps: vec!["com.example.app".into()],
+        };
         let json = serde_json::to_string(&s).unwrap();
         let back: ComputerUseSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);

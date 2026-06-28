@@ -109,6 +109,7 @@ struct RawAppshotConfig {
 #[derive(Debug, Clone, Default)]
 struct RawComputerUseConfig {
     enabled: Option<bool>,
+    approved_apps: Option<Vec<String>>,
     allow_input_injection: Option<bool>,
     allow_foreground_takeover: Option<bool>,
 }
@@ -275,6 +276,10 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
             },
             Section::ComputerUse => match key {
                 "enabled" => raw.computer_use.enabled = value.map(parse_bool).transpose()?,
+                "approved_apps" => {
+                    raw.computer_use.approved_apps =
+                        value.map(|value| parse_string_array(&value)).transpose()?
+                }
                 "allow_input_injection" => {
                     raw.computer_use.allow_input_injection = value.map(parse_bool).transpose()?
                 }
@@ -362,6 +367,56 @@ fn parse_u64(value: String) -> Result<u64> {
     value
         .parse::<u64>()
         .with_context(|| format!("invalid unsigned integer value: {value}"))
+}
+
+fn parse_string_array(value: &str) -> Result<Vec<String>> {
+    let value = value.trim();
+    let Some(inner) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) else {
+        bail!("invalid string array value: {value}");
+    };
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in inner.chars() {
+        if escaped {
+            current.push('\\');
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => escaped = true,
+            '"' => {
+                current.push(ch);
+                in_string = !in_string;
+            }
+            ',' if !in_string => {
+                push_string_array_item(&mut items, &current)?;
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if in_string {
+        bail!("unterminated string in array");
+    }
+    if !current.trim().is_empty() {
+        push_string_array_item(&mut items, &current)?;
+    }
+    Ok(items)
+}
+
+fn push_string_array_item(items: &mut Vec<String>, raw: &str) -> Result<()> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(());
+    }
+    let Some(stripped) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) else {
+        bail!("string array item must be quoted: {value}");
+    };
+    items.push(unescape_string(stripped)?);
+    Ok(())
 }
 
 fn unescape_string(value: &str) -> Result<String> {
@@ -453,7 +508,19 @@ fn resolve_computer_use_config(raw: RawConfig) -> ComputerUseSettings {
     );
     ComputerUseSettings {
         enabled: raw.computer_use.enabled.unwrap_or(defaults.enabled),
+        approved_apps: normalized_string_list(raw.computer_use.approved_apps.unwrap_or_default()),
     }
+}
+
+fn normalized_string_list(values: Vec<String>) -> Vec<String> {
+    let mut values = values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
 }
 
 fn resolve_debug_config(raw: RawConfig) -> DebugConfig {
@@ -688,7 +755,28 @@ fn serialize_computer_use_config(config: &ComputerUseSettings) -> String {
     out.push_str("enabled = ");
     out.push_str(if config.enabled { "true" } else { "false" });
     out.push('\n');
+    if !config.approved_apps.is_empty() {
+        out.push_str("approved_apps = ");
+        out.push_str(&toml_string_array(&config.approved_apps));
+        out.push('\n');
+    }
     out
+}
+
+fn toml_string_array(values: &[String]) -> String {
+    let mut values = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    let items = values
+        .into_iter()
+        .map(toml_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{items}]")
 }
 
 fn trimmed_string(value: Option<&str>) -> Option<String> {
@@ -958,6 +1046,7 @@ mod tests {
             r#"
             [computer_use]
             enabled = false
+            approved_apps = ["com.example.two", "com.example.one", "com.example.two", ""]
             allow_input_injection = true
             allow_foreground_takeover = false
             "#,
@@ -966,7 +1055,12 @@ mod tests {
         let config = super::resolve_app_config(raw, false).unwrap();
 
         assert!(!config.computer_use.enabled);
+        assert_eq!(
+            config.computer_use.approved_apps,
+            vec!["com.example.one".to_string(), "com.example.two".to_string()]
+        );
         let serialized = serialize_app_config(&config);
+        assert!(serialized.contains(r#"approved_apps = ["com.example.one", "com.example.two"]"#));
         assert!(!serialized.contains("allow_input_injection"));
         assert!(!serialized.contains("allow_foreground_takeover"));
     }

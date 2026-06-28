@@ -111,6 +111,7 @@ import {
   type LiveTurn,
 } from "../runtimeChat";
 import { buildCrossPromptFromTurns } from "../cross";
+import { emitComputerUseSettingsChanged } from "../computerUseSettingsEvents";
 import {
   formatChatSlashCommandText,
   parseSelectedSlashCommandName,
@@ -1558,7 +1559,8 @@ export function AcpTranscriptPanel({
     const appId = computerUseStatus?.activeAppId;
     if (!appId) return;
     try {
-      await setComputerUseAppApproval(runtimeSessionId, appId, approved);
+      const settings = await setComputerUseAppApproval(runtimeSessionId, appId, approved);
+      emitComputerUseSettingsChanged(settings);
       setComputerUseStatus((current) =>
         current && current.activeAppId === appId
           ? { ...current, activeAppApproved: approved }

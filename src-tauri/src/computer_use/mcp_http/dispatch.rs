@@ -566,8 +566,7 @@ mod tests {
         let h = host();
         let p = perm();
         h.approvals().approve_session("s1");
-        h.approvals()
-            .approve_app("s1", &"com.example.app".to_string());
+        h.approvals().approve_app(&"com.example.app".to_string());
 
         // start
         let start = dispatch(
@@ -634,8 +633,7 @@ mod tests {
         let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
         let p = perm();
         h.approvals().approve_session("s1");
-        h.approvals()
-            .approve_app("s1", &"com.example.app".to_string());
+        h.approvals().approve_app(&"com.example.app".to_string());
         h.start(
             "s1",
             AppTarget {
@@ -686,8 +684,7 @@ mod tests {
         let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
         let p = perm();
         h.approvals().approve_session("s1");
-        h.approvals()
-            .approve_app("s1", &"com.example.app".to_string());
+        h.approvals().approve_app(&"com.example.app".to_string());
         h.start(
             "s1",
             AppTarget {
@@ -736,8 +733,7 @@ mod tests {
         let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
         let p = perm();
         h.approvals().approve_session("s1");
-        h.approvals()
-            .approve_app("s1", &"com.example.app".to_string());
+        h.approvals().approve_app(&"com.example.app".to_string());
         h.start(
             "s1",
             AppTarget {
@@ -788,8 +784,7 @@ mod tests {
         let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
         let p = perm();
         h.approvals().approve_session("s1");
-        h.approvals()
-            .approve_app("s1", &"com.example.app".to_string());
+        h.approvals().approve_app(&"com.example.app".to_string());
         h.start(
             "s1",
             AppTarget {
@@ -833,8 +828,7 @@ mod tests {
         let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
         let p = perm();
         h.approvals().approve_session("s1");
-        h.approvals()
-            .approve_app("s1", &"com.example.app".to_string());
+        h.approvals().approve_app(&"com.example.app".to_string());
         h.start(
             "s1",
             AppTarget {
@@ -877,7 +871,7 @@ mod tests {
         let p = perm();
         h.approvals().approve_session("s1");
         h.approvals()
-            .approve_app("s1", &"com.example.installed".to_string());
+            .approve_app(&"com.example.installed".to_string());
 
         let state = dispatch(
             &h,
@@ -913,7 +907,7 @@ mod tests {
         let p = perm();
         h.approvals().approve_session("s1");
         h.approvals()
-            .approve_app("s1", &"com.example.installed".to_string());
+            .approve_app(&"com.example.installed".to_string());
 
         let state = dispatch(
             &h,
@@ -967,7 +961,7 @@ mod tests {
         let p = perm();
         h.approvals().approve_session("s1");
         h.approvals()
-            .approve_app("s1", &"com.example.installed".to_string());
+            .approve_app(&"com.example.installed".to_string());
 
         let resp = dispatch(
             &h,
@@ -1040,8 +1034,7 @@ mod tests {
         let h = host();
         let p = perm();
         h.approvals().approve_session("s1");
-        h.approvals()
-            .approve_app("s1", &"com.example.app".to_string());
+        h.approvals().approve_app(&"com.example.app".to_string());
         dispatch(
             &h,
             "s1",

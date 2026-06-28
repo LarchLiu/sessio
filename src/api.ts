@@ -161,6 +161,7 @@ export interface AppshotConfig {
 
 export interface ComputerUseSettings {
   enabled: boolean;
+  approvedApps: string[];
 }
 
 export type AppshotPermissionKind = "screenshots" | "accessibility";
@@ -2615,8 +2616,8 @@ export async function setComputerUseAppApproval(
   sessioRuntimeSessionId: string,
   appId: string,
   approved: boolean,
-): Promise<void> {
-  return invoke<void>("set_computer_use_app_approval", {
+): Promise<ComputerUseSettings> {
+  return invoke<ComputerUseSettings>("set_computer_use_app_approval", {
     sessioRuntimeSessionId,
     appId,
     approved,

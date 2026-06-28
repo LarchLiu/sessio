@@ -67,8 +67,11 @@ impl ComputerUseRuntime {
         settings: ComputerUseSettings,
         permission_provider: Arc<dyn Fn() -> DesktopControlPermissionStatus + Send + Sync>,
     ) -> Self {
+        let host = ComputerUseHost::with_platform_provider(settings.clone());
+        host.approvals()
+            .set_approved_apps(settings.approved_apps.clone());
         Self {
-            host: ComputerUseHost::with_platform_provider(settings),
+            host,
             permission_provider,
             server: OnceLock::new(),
             init_lock: Mutex::new(()),
@@ -80,6 +83,9 @@ impl ComputerUseRuntime {
     }
 
     pub fn update_settings(&self, settings: ComputerUseSettings) {
+        self.host
+            .approvals()
+            .set_approved_apps(settings.approved_apps.clone());
         self.host.update_settings(settings);
     }
 
