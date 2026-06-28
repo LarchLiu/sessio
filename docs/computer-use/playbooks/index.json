@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "inventoryVersion": "2026-06-28",
+  "source": "../../computer-use-skill.md",
+  "promptInjectionOwner": "../../computer-use-prompt-refactor-plan.md",
+  "defaultCoordinateSpace": "screenshot",
+  "sharedConventions": [
+    "Call computer_get_app_state before acting.",
+    "Treat refs as scoped to the latest authoritative snapshot.",
+    "Treat pixel coordinates as screenshot-space unless explicitly overridden.",
+    "Use AX refs first when available and pixel fallback for sparse or empty AX trees.",
+    "Do not launch apps with open -b.",
+    "Use computer_permissions and computer_grant for onboarding."
+  ],
+  "playbooks": [
+    {
+      "id": "apple-music",
+      "displayName": "Apple Music",
+      "path": "AppleMusic.md",
+      "bundleIds": ["com.apple.Music"],
+      "primaryStrategy": "ax-first",
+      "fallbackStrategy": "screenshot-coordinates",
+      "reviewStatus": "seeded"
+    },
+    {
+      "id": "spotify",
+      "displayName": "Spotify",
+      "path": "Spotify.md",
+      "bundleIds": ["com.spotify.client"],
+      "primaryStrategy": "ax-first",
+      "fallbackStrategy": "screenshot-coordinates",
+      "reviewStatus": "seeded"
+    },
+    {
+      "id": "notion",
+      "displayName": "Notion",
+      "path": "Notion.md",
+      "bundleIds": ["notion.id"],
+      "primaryStrategy": "ax-first",
+      "fallbackStrategy": "screenshot-coordinates",
+      "reviewStatus": "seeded"
+    },
+    {
+      "id": "clock",
+      "displayName": "Clock",
+      "path": "Clock.md",
+      "bundleIds": ["com.apple.clock"],
+      "primaryStrategy": "ax-first",
+      "fallbackStrategy": "screenshot-coordinates",
+      "reviewStatus": "seeded"
+    },
+    {
+      "id": "numbers",
+      "displayName": "Numbers",
+      "path": "Numbers.md",
+      "bundleIds": ["com.apple.iWork.Numbers"],
+      "primaryStrategy": "hybrid",
+      "fallbackStrategy": "screenshot-coordinates",
+      "reviewStatus": "seeded"
+    },
+    {
+      "id": "netease-music",
+      "displayName": "NetEase Music",
+      "path": "NetEaseMusic.md",
+      "bundleIds": ["com.netease.163music"],
+      "primaryStrategy": "pixel-first",
+      "fallbackStrategy": "keyboard-shortcuts",
+      "reviewStatus": "seeded"
+    }
+  ]
+}
+
