@@ -2,8 +2,8 @@ pub mod agents;
 pub mod app_paths;
 pub mod astra;
 pub mod cli;
-pub mod config;
 pub mod computer_use;
+pub mod config;
 pub mod desktop_control;
 pub mod file_preview_watch;
 pub mod im_bridge;
@@ -8557,10 +8557,7 @@ fn set_computer_use_session_approval(
 }
 
 #[tauri::command]
-fn computer_use_abort(
-    sessio_runtime_session_id: String,
-    runtime: State<'_, RuntimeManager>,
-) {
+fn computer_use_abort(sessio_runtime_session_id: String, runtime: State<'_, RuntimeManager>) {
     runtime.computer_use_abort(&sessio_runtime_session_id);
 }
 

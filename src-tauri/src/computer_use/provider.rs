@@ -278,7 +278,10 @@ mod fake {
             direction: ScrollDirection,
             amount: i32,
         ) -> ProviderResult<()> {
-            self.record(format!("scroll:{}:{:?}:{}", target.app_id, direction, amount));
+            self.record(format!(
+                "scroll:{}:{:?}:{}",
+                target.app_id, direction, amount
+            ));
             Ok(())
         }
     }

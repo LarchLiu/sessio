@@ -157,8 +157,7 @@ fn handle_request(
     if request.as_reader().read_to_string(&mut body).is_err() {
         respond_json(
             request,
-            &McpResponse::error(serde_json::Value::Null, -32700, "could not read body")
-                .to_string(),
+            &McpResponse::error(serde_json::Value::Null, -32700, "could not read body").to_string(),
         );
         return;
     }

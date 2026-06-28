@@ -846,12 +846,13 @@ fn new_session_request(
     // not just Claude's meta-options path below.
     if let Some(injection) = config.and_then(|c| c.computer_use.as_ref()) {
         use agent_client_protocol::schema::v1::{HttpHeader, McpServer, McpServerHttp};
-        let server = McpServerHttp::new("sessio-computer-use", injection.url.clone()).headers(
-            vec![HttpHeader::new(
-                "Authorization",
-                format!("Bearer {}", injection.bearer_token),
-            )],
-        );
+        let server =
+            McpServerHttp::new("sessio-computer-use", injection.url.clone()).headers(vec![
+                HttpHeader::new(
+                    "Authorization",
+                    format!("Bearer {}", injection.bearer_token),
+                ),
+            ]);
         request.mcp_servers.push(McpServer::Http(server));
     }
 
@@ -1989,8 +1990,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let request =
-            new_session_request(Agent::Codex, "/tmp/ws".to_string(), Some(&config));
+        let request = new_session_request(Agent::Codex, "/tmp/ws".to_string(), Some(&config));
         assert_eq!(request.mcp_servers.len(), 1);
         match &request.mcp_servers[0] {
             McpServer::Http(http) => {
@@ -2018,8 +2018,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let request =
-            new_session_request(Agent::Claude, "/tmp/ws".to_string(), Some(&config));
+        let request = new_session_request(Agent::Claude, "/tmp/ws".to_string(), Some(&config));
         // Both the injected MCP server and Claude's meta options are present.
         assert_eq!(request.mcp_servers.len(), 1);
         assert!(matches!(request.mcp_servers[0], McpServer::Http(_)));

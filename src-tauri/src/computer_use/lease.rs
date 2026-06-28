@@ -70,7 +70,10 @@ impl Lease {
 
     /// Validate that `candidate` is the lease's current snapshot.
     pub fn check_snapshot(&self, candidate: &SnapshotId) -> Result<(), SnapshotError> {
-        let latest = self.latest_snapshot.as_ref().ok_or(SnapshotError::NoSnapshot)?;
+        let latest = self
+            .latest_snapshot
+            .as_ref()
+            .ok_or(SnapshotError::NoSnapshot)?;
         if !candidate.0.starts_with(&format!("{}#", self.id)) {
             return Err(SnapshotError::WrongLease);
         }
@@ -183,11 +186,15 @@ mod tests {
         reg.open("s1", target()).unwrap();
 
         // No snapshot yet.
-        let latest = reg.with_lease("s1", |l| l.latest_snapshot().cloned()).unwrap();
+        let latest = reg
+            .with_lease("s1", |l| l.latest_snapshot().cloned())
+            .unwrap();
         assert!(latest.is_none());
 
         let first = reg.with_lease("s1", |l| l.next_snapshot()).unwrap();
-        reg.with_lease("s1", |l| l.check_snapshot(&first)).unwrap().unwrap();
+        reg.with_lease("s1", |l| l.check_snapshot(&first))
+            .unwrap()
+            .unwrap();
 
         // Capture again → first becomes stale.
         let second = reg.with_lease("s1", |l| l.next_snapshot()).unwrap();
@@ -195,7 +202,9 @@ mod tests {
             reg.with_lease("s1", |l| l.check_snapshot(&first)).unwrap(),
             Err(SnapshotError::Stale)
         );
-        reg.with_lease("s1", |l| l.check_snapshot(&second)).unwrap().unwrap();
+        reg.with_lease("s1", |l| l.check_snapshot(&second))
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
@@ -207,7 +216,8 @@ mod tests {
         reg.with_lease("s2", |l| l.next_snapshot()).unwrap();
         // s1's snapshot id must not validate against s2's lease.
         assert_eq!(
-            reg.with_lease("s2", |l| l.check_snapshot(&s1_snap)).unwrap(),
+            reg.with_lease("s2", |l| l.check_snapshot(&s1_snap))
+                .unwrap(),
             Err(SnapshotError::WrongLease)
         );
     }

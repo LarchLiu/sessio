@@ -128,8 +128,14 @@ mod tests {
     fn missing_or_malformed_header_is_rejected() {
         let reg = TokenRegistry::new();
         assert_eq!(reg.resolve(None, true), Err(AuthError::MissingToken));
-        assert_eq!(reg.resolve(Some("Basic abc"), true), Err(AuthError::MissingToken));
-        assert_eq!(reg.resolve(Some("Bearer "), true), Err(AuthError::MissingToken));
+        assert_eq!(
+            reg.resolve(Some("Basic abc"), true),
+            Err(AuthError::MissingToken)
+        );
+        assert_eq!(
+            reg.resolve(Some("Bearer "), true),
+            Err(AuthError::MissingToken)
+        );
     }
 
     #[test]
@@ -151,7 +157,9 @@ mod tests {
         let _t2 = reg.issue("s2");
         // Revoking s1 must not affect s2's token, and t1 must stop working.
         reg.revoke_session("s1");
-        assert!(reg.resolve(Some(&format!("Bearer {}", t1.0)), true).is_err());
+        assert!(reg
+            .resolve(Some(&format!("Bearer {}", t1.0)), true)
+            .is_err());
         assert_eq!(reg.len(), 1);
     }
 

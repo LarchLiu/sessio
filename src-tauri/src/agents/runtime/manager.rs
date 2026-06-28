@@ -48,7 +48,8 @@ struct RuntimeManagerInner {
     /// Lazily-built computer-use runtime (desktop MCP server + host). Only
     /// constructed when a session first requests computer use, so ordinary
     /// sessions never start the loopback server.
-    computer_use: std::sync::OnceLock<std::sync::Arc<super::computer_use_runtime::ComputerUseRuntime>>,
+    computer_use:
+        std::sync::OnceLock<std::sync::Arc<super::computer_use_runtime::ComputerUseRuntime>>,
 }
 
 #[derive(Debug, Clone)]
@@ -535,7 +536,8 @@ impl RuntimeManager {
         }
     }
 
-    pub fn start_session(&self, req: StartAgentSession) -> Result<AgentSessionHandle> {        if req.workspace_path.trim().is_empty() {
+    pub fn start_session(&self, req: StartAgentSession) -> Result<AgentSessionHandle> {
+        if req.workspace_path.trim().is_empty() {
             bail!("workspace_path is required");
         }
         let workspace = Path::new(&req.workspace_path);

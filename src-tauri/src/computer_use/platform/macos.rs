@@ -92,8 +92,8 @@ impl ComputerUseProvider for MacosProvider {
     }
 
     fn press_key(&self, _target: &AppTarget, key: &str) -> ProviderResult<()> {
-        let keycode = keycode_for(key)
-            .ok_or_else(|| ProviderError::Failed(format!("unknown key: {key}")))?;
+        let keycode =
+            keycode_for(key).ok_or_else(|| ProviderError::Failed(format!("unknown key: {key}")))?;
         press_keycode(keycode)
     }
 
@@ -209,9 +209,7 @@ fn frontmost_window_for_pid(pid: i32) -> ProviderResult<(u32, Option<Rect>)> {
                 continue;
             }
         }
-        if let Some(window_id) =
-            dict_i64(&dict, key_number).and_then(|v| u32::try_from(v).ok())
-        {
+        if let Some(window_id) = dict_i64(&dict, key_number).and_then(|v| u32::try_from(v).ok()) {
             return Ok((window_id, bounds));
         }
     }
@@ -325,18 +323,12 @@ fn ax_elements_for_pid(pid: i32) -> Option<Vec<UiElement>> {
 const AX_MAX_DEPTH: usize = 12;
 const AX_MAX_ELEMENTS: usize = 500;
 
-fn walk_ax(
-    element: ax::AXUIElementRef,
-    depth: usize,
-    next_id: &mut u64,
-    out: &mut Vec<UiElement>,
-) {
+fn walk_ax(element: ax::AXUIElementRef, depth: usize, next_id: &mut u64, out: &mut Vec<UiElement>) {
     if depth > AX_MAX_DEPTH || out.len() >= AX_MAX_ELEMENTS {
         return;
     }
     let role = ax_string_attr(element, ax::ROLE).unwrap_or_default();
-    let label = ax_string_attr(element, ax::TITLE)
-        .or_else(|| ax_string_attr(element, ax::VALUE));
+    let label = ax_string_attr(element, ax::TITLE).or_else(|| ax_string_attr(element, ax::VALUE));
     let bounds = ax_bounds(element);
     let enabled = ax_bool_attr(element, ax::ENABLED).unwrap_or(true);
 
@@ -417,8 +409,7 @@ fn ax_children(element: ax::AXUIElementRef) -> Option<Vec<ax::AXUIElementRef>> {
     }
     // value is a CFArray of AXUIElementRef. Take create-rule ownership of the
     // array; the elements are owned by the array.
-    let array: CFArray<*const c_void> =
-        unsafe { CFArray::wrap_under_create_rule(value as _) };
+    let array: CFArray<*const c_void> = unsafe { CFArray::wrap_under_create_rule(value as _) };
     let mut out = Vec::with_capacity(array.len() as usize);
     for item in array.iter() {
         out.push(*item as ax::AXUIElementRef);
@@ -451,11 +442,7 @@ mod axvalue {
 
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
-        pub fn AXValueGetValue(
-            value: AXValueRef,
-            the_type: u32,
-            value_ptr: *mut c_void,
-        ) -> bool;
+        pub fn AXValueGetValue(value: AXValueRef, the_type: u32, value_ptr: *mut c_void) -> bool;
     }
 
     pub unsafe fn as_axvalue(cf: CFTypeRef) -> AXValueRef {
@@ -463,10 +450,7 @@ mod axvalue {
     }
 }
 
-fn ax_value_point(
-    element: ax::AXUIElementRef,
-    attr: &str,
-) -> Option<(f32, f32)> {
+fn ax_value_point(element: ax::AXUIElementRef, attr: &str) -> Option<(f32, f32)> {
     use core_foundation::base::CFTypeRef;
     let attr = CFString::new(attr);
     let mut value: CFTypeRef = std::ptr::null();
@@ -492,10 +476,7 @@ fn ax_value_point(
     }
 }
 
-fn ax_value_size(
-    element: ax::AXUIElementRef,
-    attr: &str,
-) -> Option<(f32, f32)> {
+fn ax_value_size(element: ax::AXUIElementRef, attr: &str) -> Option<(f32, f32)> {
     use core_foundation::base::CFTypeRef;
     use core_graphics::geometry::CGSize;
     let attr = CFString::new(attr);
@@ -562,13 +543,8 @@ fn click_at(point: CGPoint) -> ProviderResult<()> {
         CGMouseButton::Left,
     )
     .map_err(|_| ProviderError::Failed("create mouse-down".into()))?;
-    let up = CGEvent::new_mouse_event(
-        source,
-        CGEventType::LeftMouseUp,
-        point,
-        CGMouseButton::Left,
-    )
-    .map_err(|_| ProviderError::Failed("create mouse-up".into()))?;
+    let up = CGEvent::new_mouse_event(source, CGEventType::LeftMouseUp, point, CGMouseButton::Left)
+        .map_err(|_| ProviderError::Failed("create mouse-up".into()))?;
     down.post(CGEventTapLocation::HID);
     up.post(CGEventTapLocation::HID);
     Ok(())
@@ -604,15 +580,8 @@ fn scroll_wheel(direction: ScrollDirection, amount: i32) -> ProviderResult<()> {
         ScrollDirection::Left => (0, amount),
         ScrollDirection::Right => (0, -amount),
     };
-    let event = CGEvent::new_scroll_event(
-        source,
-        ScrollEventUnit::PIXEL,
-        2,
-        dy,
-        dx,
-        0,
-    )
-    .map_err(|_| ProviderError::Failed("create scroll event".into()))?;
+    let event = CGEvent::new_scroll_event(source, ScrollEventUnit::PIXEL, 2, dy, dx, 0)
+        .map_err(|_| ProviderError::Failed("create scroll event".into()))?;
     event.post(CGEventTapLocation::HID);
     Ok(())
 }

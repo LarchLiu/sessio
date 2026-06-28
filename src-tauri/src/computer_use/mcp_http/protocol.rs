@@ -19,8 +19,15 @@ pub struct McpRequest {
 /// An MCP JSON-RPC response (success or error).
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpResponse {
-    Result { id: Value, result: Value },
-    Error { id: Value, code: i64, message: String },
+    Result {
+        id: Value,
+        result: Value,
+    },
+    Error {
+        id: Value,
+        code: i64,
+        message: String,
+    },
 }
 
 impl McpRequest {

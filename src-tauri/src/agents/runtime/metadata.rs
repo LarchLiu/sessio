@@ -35,8 +35,7 @@ pub fn runtime_metadata_from_agent_info(
 ) -> Option<RuntimeAgentMetadata> {
     let runtime_agent = Agent::from_db_str(&agent.id)?;
     let capabilities = cached.and_then(|metadata| metadata.capabilities.clone());
-    let computer_use_eligible =
-        derive_computer_use_eligible(runtime_agent, capabilities.as_ref());
+    let computer_use_eligible = derive_computer_use_eligible(runtime_agent, capabilities.as_ref());
     Some(RuntimeAgentMetadata {
         agent: runtime_agent,
         enabled: agent.enabled,
@@ -400,13 +399,19 @@ mod tests {
         let mut not_injectable = RuntimeCapabilitySet::fake();
         not_injectable.mcp_injection = Default::default();
         assert!(!not_injectable.mcp_injection.is_injectable());
-        assert!(!derive_computer_use_eligible(Agent::Pi, Some(&not_injectable)));
+        assert!(!derive_computer_use_eligible(
+            Agent::Pi,
+            Some(&not_injectable)
+        ));
 
         let mut acp_http = RuntimeCapabilitySet::fake();
         acp_http.mcp_injection.http = true;
         assert!(derive_computer_use_eligible(Agent::Codex, Some(&acp_http)));
         assert!(derive_computer_use_eligible(Agent::Claude, Some(&acp_http)));
-        assert!(!derive_computer_use_eligible(Agent::Opencode, Some(&acp_http)));
+        assert!(!derive_computer_use_eligible(
+            Agent::Opencode,
+            Some(&acp_http)
+        ));
     }
 
     #[test]
