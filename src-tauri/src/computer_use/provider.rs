@@ -101,14 +101,24 @@ pub struct UiElement {
 #[serde(rename_all = "snake_case")]
 pub enum AllowedAction {
     ClickElement,
+    ClickAt,
+    SecondaryClick,
+    DoubleClick,
+    Drag,
+    SetValue,
     TypeText,
     PressKey,
     Scroll,
 }
 
 impl AllowedAction {
-    pub const ALL: [AllowedAction; 4] = [
+    pub const ALL: [AllowedAction; 9] = [
         AllowedAction::ClickElement,
+        AllowedAction::ClickAt,
+        AllowedAction::SecondaryClick,
+        AllowedAction::DoubleClick,
+        AllowedAction::Drag,
+        AllowedAction::SetValue,
         AllowedAction::TypeText,
         AllowedAction::PressKey,
         AllowedAction::Scroll,
@@ -243,6 +253,17 @@ pub trait ComputerUseProvider: Send + Sync {
     fn capture_app_state(&self, target: &AppTarget) -> ProviderResult<RawAppState>;
 
     fn click_element(&self, target: &AppTarget, element: &ElementId) -> ProviderResult<()>;
+    /// Click a screen-space point resolved by the host from snapshot metadata.
+    fn click_point(&self, target: &AppTarget, point: Point) -> ProviderResult<()>;
+    /// Secondary/right click a screen-space point.
+    fn secondary_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()>;
+    /// Double click a screen-space point.
+    fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()>;
+    /// Drag between two screen-space points.
+    fn drag(&self, target: &AppTarget, from: Point, to: Point) -> ProviderResult<()>;
+    /// Set an accessibility element's value directly.
+    fn set_value(&self, target: &AppTarget, element: &ElementId, value: &str)
+        -> ProviderResult<()>;
     fn type_text(&self, target: &AppTarget, text: &str) -> ProviderResult<()>;
     fn press_key(&self, target: &AppTarget, key: &str) -> ProviderResult<()>;
     fn scroll(
@@ -313,6 +334,10 @@ mod fake {
         pub fn actions(&self) -> Vec<String> {
             self.recorded.lock().unwrap().clone()
         }
+    }
+
+    fn point_label(point: Point) -> String {
+        format!("{:.1},{:.1}", point.x, point.y)
     }
 
     impl ComputerUseProvider for FakeProvider {
@@ -391,6 +416,47 @@ mod fake {
                 return Err(ProviderError::ElementNotFound(element.clone()));
             }
             self.record(format!("click:{}:{}", target.app_id, element));
+            Ok(())
+        }
+        fn click_point(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+            self.record(format!("click_at:{}:{}", target.app_id, point_label(point)));
+            Ok(())
+        }
+        fn secondary_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+            self.record(format!(
+                "secondary_click:{}:{}",
+                target.app_id,
+                point_label(point)
+            ));
+            Ok(())
+        }
+        fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+            self.record(format!(
+                "double_click:{}:{}",
+                target.app_id,
+                point_label(point)
+            ));
+            Ok(())
+        }
+        fn drag(&self, target: &AppTarget, from: Point, to: Point) -> ProviderResult<()> {
+            self.record(format!(
+                "drag:{}:{}->{}",
+                target.app_id,
+                point_label(from),
+                point_label(to)
+            ));
+            Ok(())
+        }
+        fn set_value(
+            &self,
+            target: &AppTarget,
+            element: &ElementId,
+            value: &str,
+        ) -> ProviderResult<()> {
+            if !self.elements.iter().any(|e| &e.id == element) {
+                return Err(ProviderError::ElementNotFound(element.clone()));
+            }
+            self.record(format!("set_value:{}:{}:{}", target.app_id, element, value));
             Ok(())
         }
         fn type_text(&self, target: &AppTarget, text: &str) -> ProviderResult<()> {

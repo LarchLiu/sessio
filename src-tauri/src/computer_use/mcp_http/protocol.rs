@@ -120,6 +120,35 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         }
         json!({ "type": "object", "properties": props, "required": ["snapshotId"], "additionalProperties": false })
     };
+    let coord_space = json!({
+        "type": "string",
+        "enum": ["screenshot", "screen"],
+        "default": "screenshot"
+    });
+    let point_action_arg = json!({
+        "type": "object",
+        "properties": {
+            "snapshotId": { "type": "string" },
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "coordSpace": coord_space.clone()
+        },
+        "required": ["snapshotId", "x", "y"],
+        "additionalProperties": false
+    });
+    let drag_arg = json!({
+        "type": "object",
+        "properties": {
+            "snapshotId": { "type": "string" },
+            "fromX": { "type": "number" },
+            "fromY": { "type": "number" },
+            "toX": { "type": "number" },
+            "toY": { "type": "number" },
+            "coordSpace": coord_space
+        },
+        "required": ["snapshotId", "fromX", "fromY", "toX", "toY"],
+        "additionalProperties": false
+    });
     vec![
         ToolDefinition {
             name: "computer_status",
@@ -150,6 +179,34 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             name: "computer_click_element",
             description: "Click an accessibility element from the latest snapshot.",
             input_schema: snapshot_arg(json!({ "elementId": { "type": "string" } })),
+        },
+        ToolDefinition {
+            name: "computer_click_at",
+            description: "Click a point from the latest snapshot. Coordinates default to screenshot pixels and are mapped to screen points by the host.",
+            input_schema: point_action_arg.clone(),
+        },
+        ToolDefinition {
+            name: "computer_secondary_click",
+            description: "Secondary/right click a point from the latest snapshot. Coordinates default to screenshot pixels.",
+            input_schema: point_action_arg.clone(),
+        },
+        ToolDefinition {
+            name: "computer_double_click",
+            description: "Double click a point from the latest snapshot. Coordinates default to screenshot pixels.",
+            input_schema: point_action_arg,
+        },
+        ToolDefinition {
+            name: "computer_drag",
+            description: "Drag between two points from the latest snapshot. Coordinates default to screenshot pixels.",
+            input_schema: drag_arg,
+        },
+        ToolDefinition {
+            name: "computer_set_value",
+            description: "Set an accessibility element's value directly from the latest snapshot.",
+            input_schema: snapshot_arg(json!({
+                "elementId": { "type": "string" },
+                "value": { "type": "string" }
+            })),
         },
         ToolDefinition {
             name: "computer_type_text",
@@ -185,6 +242,11 @@ pub const TOOL_DEFINITIONS: &[&str] = &[
     "computer_launch_app",
     "computer_get_app_state",
     "computer_click_element",
+    "computer_click_at",
+    "computer_secondary_click",
+    "computer_double_click",
+    "computer_drag",
+    "computer_set_value",
     "computer_type_text",
     "computer_press_key",
     "computer_scroll",

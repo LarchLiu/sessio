@@ -5,8 +5,8 @@
 //! cleanly (observation-only or fully disabled) rather than failing to build.
 
 use crate::computer_use::provider::{
-    AppId, AppLaunchResult, AppTarget, ComputerUseProvider, ElementId, InstalledApp, ProviderError,
-    ProviderResult, RawAppState, ScrollDirection,
+    AppId, AppLaunchResult, AppTarget, ComputerUseProvider, ElementId, InstalledApp, Point,
+    ProviderError, ProviderResult, RawAppState, ScrollDirection,
 };
 
 pub struct UnsupportedProvider;
@@ -46,6 +46,31 @@ impl ComputerUseProvider for UnsupportedProvider {
 
     fn click_element(&self, _target: &AppTarget, _element: &ElementId) -> ProviderResult<()> {
         Err(ProviderError::Unsupported("click_element"))
+    }
+
+    fn click_point(&self, _target: &AppTarget, _point: Point) -> ProviderResult<()> {
+        Err(ProviderError::Unsupported("click_point"))
+    }
+
+    fn secondary_click(&self, _target: &AppTarget, _point: Point) -> ProviderResult<()> {
+        Err(ProviderError::Unsupported("secondary_click"))
+    }
+
+    fn double_click(&self, _target: &AppTarget, _point: Point) -> ProviderResult<()> {
+        Err(ProviderError::Unsupported("double_click"))
+    }
+
+    fn drag(&self, _target: &AppTarget, _from: Point, _to: Point) -> ProviderResult<()> {
+        Err(ProviderError::Unsupported("drag"))
+    }
+
+    fn set_value(
+        &self,
+        _target: &AppTarget,
+        _element: &ElementId,
+        _value: &str,
+    ) -> ProviderResult<()> {
+        Err(ProviderError::Unsupported("set_value"))
     }
 
     fn type_text(&self, _target: &AppTarget, _text: &str) -> ProviderResult<()> {

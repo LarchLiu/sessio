@@ -307,8 +307,8 @@ impl ComputerUseHost {
         AllowedAction::ALL
             .into_iter()
             .filter(|action| match action {
-                // Element clicks require an inspected element tree.
-                AllowedAction::ClickElement => can_inspect,
+                // Element-targeted actions require an inspected element tree.
+                AllowedAction::ClickElement | AllowedAction::SetValue => can_inspect,
                 _ => true,
             })
             .collect()
@@ -359,6 +359,19 @@ impl ComputerUseHost {
         Ok(screenshot)
     }
 
+    fn resolve_point_for_snapshot(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        point: Point,
+        coordinate_space: CoordinateSpace,
+    ) -> Result<Point, ComputerUseError> {
+        let screenshot = self.snapshot_screenshot(session_id, snapshot)?;
+        screenshot
+            .resolve_point(point, coordinate_space)
+            .map_err(ComputerUseError::Coordinate)
+    }
+
     fn require_control(
         &self,
         session_id: &str,
@@ -382,10 +395,8 @@ impl ComputerUseHost {
         perm: &DesktopControlPermissionStatus,
     ) -> Result<(AppTarget, Point), ComputerUseError> {
         let target = self.require_control_target(session_id, snapshot, perm)?;
-        let screenshot = self.snapshot_screenshot(session_id, snapshot)?;
-        let screen_point = screenshot
-            .resolve_point(point, coordinate_space)
-            .map_err(ComputerUseError::Coordinate)?;
+        let screen_point =
+            self.resolve_point_for_snapshot(session_id, snapshot, point, coordinate_space)?;
         self.begin_foreground(session_id);
         Ok((target, screen_point))
     }
@@ -403,6 +414,106 @@ impl ComputerUseHost {
         let target = self.require_control(session_id, snapshot, perm)?;
         self.provider
             .click_element(&target, &element_id.to_string())?;
+        self.capture_post_action_state(session_id, &target, perm)
+    }
+
+    /// `computer_click_at` — click a point in the latest snapshot's screenshot
+    /// coordinate space by default.
+    pub fn click_at(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        point: Point,
+        coordinate_space: CoordinateSpace,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<AppState, ComputerUseError> {
+        let (target, screen_point) = self.resolve_coordinate_action_point(
+            session_id,
+            snapshot,
+            point,
+            coordinate_space,
+            perm,
+        )?;
+        self.provider.click_point(&target, screen_point)?;
+        self.capture_post_action_state(session_id, &target, perm)
+    }
+
+    /// `computer_secondary_click` — right/secondary click a point in the latest
+    /// snapshot's screenshot coordinate space by default.
+    pub fn secondary_click(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        point: Point,
+        coordinate_space: CoordinateSpace,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<AppState, ComputerUseError> {
+        let (target, screen_point) = self.resolve_coordinate_action_point(
+            session_id,
+            snapshot,
+            point,
+            coordinate_space,
+            perm,
+        )?;
+        self.provider.secondary_click(&target, screen_point)?;
+        self.capture_post_action_state(session_id, &target, perm)
+    }
+
+    /// `computer_double_click` — double click a point in the latest snapshot's
+    /// screenshot coordinate space by default.
+    pub fn double_click(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        point: Point,
+        coordinate_space: CoordinateSpace,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<AppState, ComputerUseError> {
+        let (target, screen_point) = self.resolve_coordinate_action_point(
+            session_id,
+            snapshot,
+            point,
+            coordinate_space,
+            perm,
+        )?;
+        self.provider.double_click(&target, screen_point)?;
+        self.capture_post_action_state(session_id, &target, perm)
+    }
+
+    /// `computer_drag` — drag between two points in the latest snapshot's
+    /// screenshot coordinate space by default.
+    pub fn drag(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        from: Point,
+        to: Point,
+        coordinate_space: CoordinateSpace,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<AppState, ComputerUseError> {
+        let target = self.require_control_target(session_id, snapshot, perm)?;
+        let screen_from =
+            self.resolve_point_for_snapshot(session_id, snapshot, from, coordinate_space)?;
+        let screen_to =
+            self.resolve_point_for_snapshot(session_id, snapshot, to, coordinate_space)?;
+        self.begin_foreground(session_id);
+        self.provider.drag(&target, screen_from, screen_to)?;
+        self.capture_post_action_state(session_id, &target, perm)
+    }
+
+    /// `computer_set_value` — set an inspected element's value directly.
+    pub fn set_value(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        element_id: &str,
+        value: &str,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<AppState, ComputerUseError> {
+        self.require_permission(perm, RequiredCapability::Inspect)?;
+        let target = self.require_control(session_id, snapshot, perm)?;
+        self.provider
+            .set_value(&target, &element_id.to_string(), value)?;
         self.capture_post_action_state(session_id, &target, perm)
     }
 
@@ -831,6 +942,64 @@ mod tests {
         assert_eq!(
             provider.actions(),
             vec!["click:com.example.app:el-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn coordinate_actions_reach_provider_with_screen_points() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app("s1", &target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+
+        let state = h.get_app_state("s1", &p).unwrap();
+        let post_click = h
+            .click_at(
+                "s1",
+                &SnapshotId(state.snapshot_id),
+                Point { x: 360.0, y: 225.0 },
+                CoordinateSpace::Screenshot,
+                &p,
+            )
+            .unwrap();
+
+        h.drag(
+            "s1",
+            &SnapshotId(post_click.snapshot_id),
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 720.0, y: 450.0 },
+            CoordinateSpace::Screenshot,
+            &p,
+        )
+        .unwrap();
+
+        assert_eq!(
+            provider.actions(),
+            vec![
+                "click_at:com.example.app:190.0,132.5".to_string(),
+                "drag:com.example.app:10.0,20.0->370.0,245.0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn set_value_reaches_provider() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app("s1", &target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        h.set_value("s1", &SnapshotId(state.snapshot_id), "el-1", "42", &p)
+            .unwrap();
+
+        assert_eq!(
+            provider.actions(),
+            vec!["set_value:com.example.app:el-1:42".to_string()]
         );
     }
 

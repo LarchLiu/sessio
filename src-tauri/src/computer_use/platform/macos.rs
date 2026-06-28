@@ -28,15 +28,15 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
-    CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, ScrollEventUnit,
+    CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField, ScrollEventUnit,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
 
 use crate::computer_use::provider::{
     AppId, AppLaunchResult, AppTarget, ComputerUseProvider, CoordinateSpace, DisplayMetadata,
-    ElementId, InstalledApp, ProviderError, ProviderResult, RawAppState, Rect, ScreenshotRef,
-    ScrollDirection, UiElement,
+    ElementId, InstalledApp, Point, ProviderError, ProviderResult, RawAppState, Rect,
+    ScreenshotRef, ScrollDirection, UiElement,
 };
 
 /// The macOS provider. Stateless: every call re-reads live system state.
@@ -101,7 +101,37 @@ impl ComputerUseProvider for MacosProvider {
         let pid = resolve_pid(&target.app_id)?;
         let center = ax_element_center(pid, element)?
             .ok_or_else(|| ProviderError::ElementNotFound(element.clone()))?;
-        click_at(center)
+        left_click_at(center)
+    }
+
+    fn click_point(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+        let _pid = resolve_pid(&target.app_id)?;
+        left_click_at(cg_point(point))
+    }
+
+    fn secondary_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+        let _pid = resolve_pid(&target.app_id)?;
+        secondary_click_at(cg_point(point))
+    }
+
+    fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+        let _pid = resolve_pid(&target.app_id)?;
+        double_click_at(cg_point(point))
+    }
+
+    fn drag(&self, target: &AppTarget, from: Point, to: Point) -> ProviderResult<()> {
+        let _pid = resolve_pid(&target.app_id)?;
+        drag_between(cg_point(from), cg_point(to))
+    }
+
+    fn set_value(
+        &self,
+        target: &AppTarget,
+        element: &ElementId,
+        value: &str,
+    ) -> ProviderResult<()> {
+        let pid = resolve_pid(&target.app_id)?;
+        set_ax_value_for_id(pid, element, value)
     }
 
     fn type_text(&self, _target: &AppTarget, text: &str) -> ProviderResult<()> {
@@ -477,6 +507,11 @@ mod ax {
             attribute: CFStringRef,
             value: *mut CFTypeRef,
         ) -> AXError;
+        pub fn AXUIElementSetAttributeValue(
+            element: AXUIElementRef,
+            attribute: CFStringRef,
+            value: CFTypeRef,
+        ) -> AXError;
     }
 
     // AX attribute names. Apple exposes these as exported `CFStringRef` statics
@@ -710,6 +745,59 @@ fn ax_element_center(pid: i32, element_id: &ElementId) -> ProviderResult<Option<
     }
 }
 
+fn set_ax_value_for_id(pid: i32, element_id: &ElementId, value: &str) -> ProviderResult<()> {
+    use core_foundation::base::CFTypeRef;
+    let root = unsafe { ax::AXUIElementCreateApplication(pid) };
+    if root.is_null() {
+        return Err(ProviderError::ElementNotFound(element_id.clone()));
+    }
+    let mut next_id = 0u64;
+    let result = set_ax_value_walk(root, 0, &mut next_id, element_id, value);
+    unsafe { cf_release(root as CFTypeRef) };
+    match result {
+        Some(ax::kAXErrorSuccess) => Ok(()),
+        Some(err) => Err(ProviderError::Failed(format!(
+            "set AXValue failed for {element_id}: AXError {err}"
+        ))),
+        None => Err(ProviderError::ElementNotFound(element_id.clone())),
+    }
+}
+
+fn set_ax_value_walk(
+    element: ax::AXUIElementRef,
+    depth: usize,
+    next_id: &mut u64,
+    element_id: &ElementId,
+    value: &str,
+) -> Option<ax::AXError> {
+    if depth > AX_MAX_DEPTH || *next_id as usize >= AX_MAX_ELEMENTS {
+        return None;
+    }
+    let role = ax_string_attr(element, ax::ROLE).unwrap_or_default();
+    if is_actionable_role(&role) {
+        *next_id += 1;
+        if format!("ax-{}", *next_id) == *element_id {
+            return Some(ax_set_string_value(element, value));
+        }
+    }
+    if let Some(children) = ax_children(element) {
+        for child in children {
+            if let Some(result) = set_ax_value_walk(child, depth + 1, next_id, element_id, value) {
+                return Some(result);
+            }
+        }
+    }
+    None
+}
+
+fn ax_set_string_value(element: ax::AXUIElementRef, value: &str) -> ax::AXError {
+    let attr = CFString::new(ax::VALUE);
+    let value = CFString::new(value);
+    unsafe {
+        ax::AXUIElementSetAttributeValue(element, attr.as_concrete_TypeRef(), value.as_CFTypeRef())
+    }
+}
+
 unsafe fn cf_release(cf: core_foundation::base::CFTypeRef) {
     use core_foundation::base::CFRelease;
     if !cf.is_null() {
@@ -724,18 +812,100 @@ fn event_source() -> ProviderResult<CGEventSource> {
         .map_err(|_| ProviderError::Failed("could not create CGEventSource".into()))
 }
 
-fn click_at(point: CGPoint) -> ProviderResult<()> {
+fn cg_point(point: Point) -> CGPoint {
+    CGPoint {
+        x: f64::from(point.x),
+        y: f64::from(point.y),
+    }
+}
+
+fn left_click_at(point: CGPoint) -> ProviderResult<()> {
+    mouse_click_at(
+        point,
+        CGMouseButton::Left,
+        CGEventType::LeftMouseDown,
+        CGEventType::LeftMouseUp,
+        1,
+    )
+}
+
+fn secondary_click_at(point: CGPoint) -> ProviderResult<()> {
+    mouse_click_at(
+        point,
+        CGMouseButton::Right,
+        CGEventType::RightMouseDown,
+        CGEventType::RightMouseUp,
+        1,
+    )
+}
+
+fn mouse_click_at(
+    point: CGPoint,
+    button: CGMouseButton,
+    down_type: CGEventType,
+    up_type: CGEventType,
+    click_state: i64,
+) -> ProviderResult<()> {
+    let source = event_source()?;
+    let down = CGEvent::new_mouse_event(source.clone(), down_type, point, button)
+        .map_err(|_| ProviderError::Failed("create mouse-down".into()))?;
+    let up = CGEvent::new_mouse_event(source, up_type, point, button)
+        .map_err(|_| ProviderError::Failed("create mouse-up".into()))?;
+    down.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
+    up.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
+    down.post(CGEventTapLocation::HID);
+    up.post(CGEventTapLocation::HID);
+    Ok(())
+}
+
+fn double_click_at(point: CGPoint) -> ProviderResult<()> {
+    let source = event_source()?;
+    for click_state in [1, 2] {
+        let down = CGEvent::new_mouse_event(
+            source.clone(),
+            CGEventType::LeftMouseDown,
+            point,
+            CGMouseButton::Left,
+        )
+        .map_err(|_| ProviderError::Failed("create double-click mouse-down".into()))?;
+        let up = CGEvent::new_mouse_event(
+            source.clone(),
+            CGEventType::LeftMouseUp,
+            point,
+            CGMouseButton::Left,
+        )
+        .map_err(|_| ProviderError::Failed("create double-click mouse-up".into()))?;
+        down.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
+        up.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
+        down.post(CGEventTapLocation::HID);
+        up.post(CGEventTapLocation::HID);
+        thread::sleep(Duration::from_millis(40));
+    }
+    Ok(())
+}
+
+fn drag_between(from: CGPoint, to: CGPoint) -> ProviderResult<()> {
     let source = event_source()?;
     let down = CGEvent::new_mouse_event(
         source.clone(),
         CGEventType::LeftMouseDown,
-        point,
+        from,
         CGMouseButton::Left,
     )
-    .map_err(|_| ProviderError::Failed("create mouse-down".into()))?;
-    let up = CGEvent::new_mouse_event(source, CGEventType::LeftMouseUp, point, CGMouseButton::Left)
-        .map_err(|_| ProviderError::Failed("create mouse-up".into()))?;
+    .map_err(|_| ProviderError::Failed("create drag mouse-down".into()))?;
+    let drag = CGEvent::new_mouse_event(
+        source.clone(),
+        CGEventType::LeftMouseDragged,
+        to,
+        CGMouseButton::Left,
+    )
+    .map_err(|_| ProviderError::Failed("create mouse-dragged".into()))?;
+    let up = CGEvent::new_mouse_event(source, CGEventType::LeftMouseUp, to, CGMouseButton::Left)
+        .map_err(|_| ProviderError::Failed("create drag mouse-up".into()))?;
     down.post(CGEventTapLocation::HID);
+    thread::sleep(Duration::from_millis(20));
+    drag.post(CGEventTapLocation::HID);
+    thread::sleep(Duration::from_millis(20));
     up.post(CGEventTapLocation::HID);
     Ok(())
 }

@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use crate::computer_use::host::ComputerUseHost;
 use crate::computer_use::lease::SnapshotId;
-use crate::computer_use::provider::{AppTarget, ScrollDirection};
+use crate::computer_use::provider::{AppTarget, CoordinateSpace, Point, ScrollDirection};
 use crate::desktop_control::DesktopControlPermissionStatus;
 
 use super::protocol::{
@@ -124,6 +124,62 @@ fn run_tool(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
         }
+        "computer_click_at" => {
+            let snapshot = parse_snapshot(args)?;
+            let point = parse_point(args, "x", "y")?;
+            let coord_space = parse_coordinate_space(args)?;
+            let state = host
+                .click_at(session_id, &snapshot, point, coord_space, perm)
+                .map_err(|e| e.to_string())?;
+            Ok(tool_json_result(
+                serde_json::to_value(&state).unwrap_or_default(),
+            ))
+        }
+        "computer_secondary_click" => {
+            let snapshot = parse_snapshot(args)?;
+            let point = parse_point(args, "x", "y")?;
+            let coord_space = parse_coordinate_space(args)?;
+            let state = host
+                .secondary_click(session_id, &snapshot, point, coord_space, perm)
+                .map_err(|e| e.to_string())?;
+            Ok(tool_json_result(
+                serde_json::to_value(&state).unwrap_or_default(),
+            ))
+        }
+        "computer_double_click" => {
+            let snapshot = parse_snapshot(args)?;
+            let point = parse_point(args, "x", "y")?;
+            let coord_space = parse_coordinate_space(args)?;
+            let state = host
+                .double_click(session_id, &snapshot, point, coord_space, perm)
+                .map_err(|e| e.to_string())?;
+            Ok(tool_json_result(
+                serde_json::to_value(&state).unwrap_or_default(),
+            ))
+        }
+        "computer_drag" => {
+            let snapshot = parse_snapshot(args)?;
+            let from = parse_point(args, "fromX", "fromY")?;
+            let to = parse_point(args, "toX", "toY")?;
+            let coord_space = parse_coordinate_space(args)?;
+            let state = host
+                .drag(session_id, &snapshot, from, to, coord_space, perm)
+                .map_err(|e| e.to_string())?;
+            Ok(tool_json_result(
+                serde_json::to_value(&state).unwrap_or_default(),
+            ))
+        }
+        "computer_set_value" => {
+            let snapshot = parse_snapshot(args)?;
+            let element = arg_str(args, "elementId")?;
+            let value = arg_str(args, "value")?;
+            let state = host
+                .set_value(session_id, &snapshot, &element, &value, perm)
+                .map_err(|e| e.to_string())?;
+            Ok(tool_json_result(
+                serde_json::to_value(&state).unwrap_or_default(),
+            ))
+        }
         "computer_type_text" => {
             let snapshot = parse_snapshot(args)?;
             let text = arg_str(args, "text")?;
@@ -184,6 +240,26 @@ fn parse_snapshot(args: &Value) -> Result<SnapshotId, String> {
     Ok(SnapshotId(arg_str(args, "snapshotId")?))
 }
 
+fn parse_point(args: &Value, x_key: &str, y_key: &str) -> Result<Point, String> {
+    Ok(Point {
+        x: arg_f32(args, x_key)?,
+        y: arg_f32(args, y_key)?,
+    })
+}
+
+fn parse_coordinate_space(args: &Value) -> Result<CoordinateSpace, String> {
+    match args
+        .get("coordSpace")
+        .or_else(|| args.get("coordinateSpace"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("screenshot")
+    {
+        "screenshot" => Ok(CoordinateSpace::Screenshot),
+        "screen" => Ok(CoordinateSpace::Screen),
+        other => Err(format!("invalid coordSpace: {other}")),
+    }
+}
+
 fn parse_direction(args: &Value) -> Result<ScrollDirection, String> {
     match args.get("direction").and_then(|d| d.as_str()) {
         Some("up") => Ok(ScrollDirection::Up),
@@ -199,6 +275,13 @@ fn arg_str(args: &Value, key: &str) -> Result<String, String> {
     args.get(key)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+        .ok_or_else(|| format!("missing argument: {key}"))
+}
+
+fn arg_f32(args: &Value, key: &str) -> Result<f32, String> {
+    args.get(key)
+        .and_then(|v| v.as_f64())
+        .map(|n| n as f32)
         .ok_or_else(|| format!("missing argument: {key}"))
 }
 
@@ -343,6 +426,51 @@ mod tests {
                     result["structuredContent"]["snapshotId"],
                     parsed["snapshotId"]
                 );
+            }
+            _ => panic!("expected result"),
+        }
+    }
+
+    #[test]
+    fn coordinate_tool_defaults_to_screenshot_space() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        let p = perm();
+        h.approvals().approve_session("s1");
+        h.approvals()
+            .approve_app("s1", &"com.example.app".to_string());
+        h.start(
+            "s1",
+            AppTarget {
+                app_id: "com.example.app".into(),
+                window_id: None,
+            },
+            &p,
+        )
+        .unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let click = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({ "name": "computer_click_at", "arguments": { "snapshotId": state.snapshot_id, "x": 360, "y": 225 } }),
+            ),
+        );
+
+        match click {
+            McpResponse::Result { result, .. } => {
+                assert!(
+                    result.get("isError").is_none(),
+                    "click_at should succeed: {result}"
+                );
+                assert_eq!(
+                    provider.actions(),
+                    vec!["click_at:com.example.app:190.0,132.5".to_string()]
+                );
+                assert!(result["structuredContent"]["snapshotId"].is_string());
             }
             _ => panic!("expected result"),
         }
