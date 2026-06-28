@@ -4571,6 +4571,8 @@ fn complete_screenshot_overlay_capture(
 
 #[cfg(not(target_os = "macos"))]
 fn desktop_control_inputs() -> desktop_control::DesktopControlInputs {
+    let input_injection_supported =
+        crate::computer_use::platform::default_provider().supports_control();
     use desktop_control::{DesktopControlInputs, DesktopPlatform, PermissionTier};
     DesktopControlInputs {
         platform: DesktopPlatform::current(),
@@ -4580,23 +4582,27 @@ fn desktop_control_inputs() -> desktop_control::DesktopControlInputs {
         // rather than denied.
         screenshots: PermissionTier::new(true, false),
         accessibility: PermissionTier::new(true, false),
-        // Input injection is net-new (Phase 3) and not yet implemented for any
-        // platform's provider.
-        input_injection_supported: false,
+        // Reflect the current platform provider's real control support so the
+        // shared desktop-control status stays aligned with computer-use runtime
+        // capabilities.
+        input_injection_supported,
     }
 }
 
 #[cfg(target_os = "macos")]
 fn desktop_control_inputs() -> desktop_control::DesktopControlInputs {
+    let input_injection_supported =
+        crate::computer_use::platform::default_provider().supports_control();
     use desktop_control::{DesktopControlInputs, DesktopPlatform, PermissionTier};
     DesktopControlInputs {
         platform: DesktopPlatform::Macos,
         requires_permission: true,
         screenshots: PermissionTier::new(appshot_screenshots_permission_granted(), true),
         accessibility: PermissionTier::new(appshot_accessibility_permission_granted(), true),
-        // Input injection is net-new (Phase 3); no provider yet, so control is
-        // not yet supported even when accessibility is trusted.
-        input_injection_supported: false,
+        // Reflect the current platform provider's real control support so the
+        // shared desktop-control status stays aligned with computer-use runtime
+        // capabilities.
+        input_injection_supported,
     }
 }
 

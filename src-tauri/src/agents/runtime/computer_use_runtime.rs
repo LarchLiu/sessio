@@ -202,7 +202,8 @@ mod tests {
         assert!(injection.url.ends_with("/mcp"));
         assert!(!injection.bearer_token.is_empty());
         // Injection alone does not grant session approval; the UI does that
-        // explicitly after session start.
+        // explicitly after session start. This test keeps the runtime in an
+        // observe/inspect-only permission shape on purpose.
         assert!(!rt.host().approvals().session_approved("s1"));
     }
 
