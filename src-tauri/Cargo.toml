@@ -27,6 +27,7 @@ croner = "2"
 dirs = "5.0"
 agent-client-protocol = { version = "1.0.0", features = ["unstable_session_fork", "unstable_mcp_over_acp"] }
 futures = "0.3"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 shell-words = "1.1"
 walkdir = "2.5"
 sha2 = "0.10"
@@ -45,6 +46,7 @@ md-5 = "0.10"
 tauri-plugin-process = "2"
 tauri-plugin-shell = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "multipart"] }
+rmcp = { version = "=1.7.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 tokio = { version = "1", features = ["io-util", "macros", "process", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["compat"] }
