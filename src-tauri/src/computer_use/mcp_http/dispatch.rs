@@ -14,8 +14,8 @@ use crate::computer_use::provider::{AppTarget, ScrollDirection};
 use crate::desktop_control::DesktopControlPermissionStatus;
 
 use super::protocol::{
-    initialize_result, tool_error_result, tool_text_result, tools_list_result, McpRequest,
-    McpResponse,
+    initialize_result, tool_error_result, tool_json_result, tool_text_result, tools_list_result,
+    McpRequest, McpResponse,
 };
 
 /// Route an MCP request for `session_id` to the host.
@@ -78,14 +78,14 @@ fn run_tool(
     match name {
         "computer_status" => {
             let status = host.status(session_id, perm);
-            Ok(tool_text_result(
-                serde_json::to_string(&status).unwrap_or_default(),
+            Ok(tool_json_result(
+                serde_json::to_value(&status).unwrap_or_default(),
             ))
         }
         "computer_list_apps" => {
             let apps = host.list_apps(perm).map_err(|e| e.to_string())?;
-            Ok(tool_text_result(
-                serde_json::to_string(&apps).unwrap_or_default(),
+            Ok(tool_json_result(
+                serde_json::to_value(&apps).unwrap_or_default(),
             ))
         }
         "computer_start" => {
@@ -93,15 +93,15 @@ fn run_tool(
             let lease = host
                 .start(session_id, target, perm)
                 .map_err(|e| e.to_string())?;
-            Ok(tool_text_result(json!({ "lease": lease }).to_string()))
+            Ok(tool_json_result(json!({ "lease": lease })))
         }
         "computer_launch_app" => {
             let target = parse_target(args)?;
             let result = host
                 .launch_app(session_id, target, perm)
                 .map_err(|e| e.to_string())?;
-            Ok(tool_text_result(
-                serde_json::to_string(&result).unwrap_or_default(),
+            Ok(tool_json_result(
+                serde_json::to_value(&result).unwrap_or_default(),
             ))
         }
         "computer_get_app_state" => {
@@ -110,38 +110,50 @@ fn run_tool(
                 None => host.get_app_state(session_id, perm),
             }
             .map_err(|e| e.to_string())?;
-            Ok(tool_text_result(
-                serde_json::to_string(&state).unwrap_or_default(),
+            Ok(tool_json_result(
+                serde_json::to_value(&state).unwrap_or_default(),
             ))
         }
         "computer_click_element" => {
             let snapshot = parse_snapshot(args)?;
             let element = arg_str(args, "elementId")?;
-            host.click_element(session_id, &snapshot, &element, perm)
+            let state = host
+                .click_element(session_id, &snapshot, &element, perm)
                 .map_err(|e| e.to_string())?;
-            Ok(tool_text_result("ok"))
+            Ok(tool_json_result(
+                serde_json::to_value(&state).unwrap_or_default(),
+            ))
         }
         "computer_type_text" => {
             let snapshot = parse_snapshot(args)?;
             let text = arg_str(args, "text")?;
-            host.type_text(session_id, &snapshot, &text, perm)
+            let state = host
+                .type_text(session_id, &snapshot, &text, perm)
                 .map_err(|e| e.to_string())?;
-            Ok(tool_text_result("ok"))
+            Ok(tool_json_result(
+                serde_json::to_value(&state).unwrap_or_default(),
+            ))
         }
         "computer_press_key" => {
             let snapshot = parse_snapshot(args)?;
             let key = arg_str(args, "key")?;
-            host.press_key(session_id, &snapshot, &key, perm)
+            let state = host
+                .press_key(session_id, &snapshot, &key, perm)
                 .map_err(|e| e.to_string())?;
-            Ok(tool_text_result("ok"))
+            Ok(tool_json_result(
+                serde_json::to_value(&state).unwrap_or_default(),
+            ))
         }
         "computer_scroll" => {
             let snapshot = parse_snapshot(args)?;
             let direction = parse_direction(args)?;
             let amount = args.get("amount").and_then(|a| a.as_i64()).unwrap_or(0) as i32;
-            host.scroll(session_id, &snapshot, direction, amount, perm)
+            let state = host
+                .scroll(session_id, &snapshot, direction, amount, perm)
                 .map_err(|e| e.to_string())?;
-            Ok(tool_text_result("ok"))
+            Ok(tool_json_result(
+                serde_json::to_value(&state).unwrap_or_default(),
+            ))
         }
         "computer_stop" => {
             host.stop(session_id);
@@ -323,7 +335,14 @@ mod tests {
                 assert!(
                     result.get("isError").is_none(),
                     "click should succeed: {result}"
-                )
+                );
+                let text = result["content"][0]["text"].as_str().unwrap();
+                let parsed: Value = serde_json::from_str(text).unwrap();
+                assert_ne!(parsed["snapshotId"].as_str().unwrap(), snapshot_id);
+                assert_eq!(
+                    result["structuredContent"]["snapshotId"],
+                    parsed["snapshotId"]
+                );
             }
             _ => panic!("expected result"),
         }

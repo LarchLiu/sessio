@@ -239,21 +239,46 @@ impl ComputerUseHost {
         if needs_lease {
             self.leases.open(session_id, target.clone())?;
         }
-        let mut raw = self.provider.capture_app_state(&target)?;
+        let raw = self.provider.capture_app_state(&target)?;
+        let snapshot = self.next_snapshot(session_id)?;
 
+        Ok(self.app_state_from_raw(snapshot, raw, perm, launched))
+    }
+
+    fn next_snapshot(&self, session_id: &str) -> Result<SnapshotId, ComputerUseError> {
+        Ok(self
+            .leases
+            .with_lease(session_id, |lease| lease.next_snapshot())?)
+    }
+
+    fn capture_post_action_state(
+        &self,
+        session_id: &str,
+        target: &AppTarget,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<AppState, ComputerUseError> {
+        let snapshot = self.next_snapshot(session_id)?;
+        let raw = self.provider.capture_app_state(target)?;
+        Ok(self.app_state_from_raw(snapshot, raw, perm, false))
+    }
+
+    fn app_state_from_raw(
+        &self,
+        snapshot: SnapshotId,
+        mut raw: super::provider::RawAppState,
+        perm: &DesktopControlPermissionStatus,
+        launched: bool,
+    ) -> AppState {
         // Inspection is a separate tier: without it, do not expose the AX tree
         // and do not allow element-targeted actions.
         let can_inspect = perm.can_inspect;
         if !can_inspect {
             raw.elements.clear();
         }
-        let snapshot = self
-            .leases
-            .with_lease(session_id, |lease| lease.next_snapshot())?;
 
         let allowed_actions = self.allowed_actions(perm, can_inspect);
 
-        Ok(AppState {
+        AppState {
             snapshot_id: snapshot.0,
             target: raw.target,
             launched,
@@ -261,7 +286,7 @@ impl ComputerUseHost {
             screenshot: raw.screenshot,
             elements: raw.elements,
             allowed_actions,
-        })
+        }
     }
 
     fn allowed_actions(
@@ -329,12 +354,12 @@ impl ComputerUseHost {
         snapshot: &SnapshotId,
         element_id: &str,
         perm: &DesktopControlPermissionStatus,
-    ) -> Result<(), ComputerUseError> {
+    ) -> Result<AppState, ComputerUseError> {
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
-        Ok(self
-            .provider
-            .click_element(&target, &element_id.to_string())?)
+        self.provider
+            .click_element(&target, &element_id.to_string())?;
+        self.capture_post_action_state(session_id, &target, perm)
     }
 
     /// `computer_type_text` — type text into the focused element.
@@ -344,9 +369,10 @@ impl ComputerUseHost {
         snapshot: &SnapshotId,
         text: &str,
         perm: &DesktopControlPermissionStatus,
-    ) -> Result<(), ComputerUseError> {
+    ) -> Result<AppState, ComputerUseError> {
         let target = self.require_control(session_id, snapshot, perm)?;
-        Ok(self.provider.type_text(&target, text)?)
+        self.provider.type_text(&target, text)?;
+        self.capture_post_action_state(session_id, &target, perm)
     }
 
     /// `computer_press_key` — press a key / chord.
@@ -356,9 +382,10 @@ impl ComputerUseHost {
         snapshot: &SnapshotId,
         key: &str,
         perm: &DesktopControlPermissionStatus,
-    ) -> Result<(), ComputerUseError> {
+    ) -> Result<AppState, ComputerUseError> {
         let target = self.require_control(session_id, snapshot, perm)?;
-        Ok(self.provider.press_key(&target, key)?)
+        self.provider.press_key(&target, key)?;
+        self.capture_post_action_state(session_id, &target, perm)
     }
 
     /// `computer_scroll` — scroll the target.
@@ -369,9 +396,10 @@ impl ComputerUseHost {
         direction: ScrollDirection,
         amount: i32,
         perm: &DesktopControlPermissionStatus,
-    ) -> Result<(), ComputerUseError> {
+    ) -> Result<AppState, ComputerUseError> {
         let target = self.require_control(session_id, snapshot, perm)?;
-        Ok(self.provider.scroll(&target, direction, amount)?)
+        self.provider.scroll(&target, direction, amount)?;
+        self.capture_post_action_state(session_id, &target, perm)
     }
 
     /// `computer_stop` — release the session's lease. Idempotent.
@@ -652,8 +680,17 @@ mod tests {
             h.type_text("s1", &stale, "hi", &p),
             Err(ComputerUseError::Snapshot(SnapshotError::Stale))
         ));
-        // Fresh snapshot works.
-        h.type_text("s1", &SnapshotId(fresh.snapshot_id), "hi", &p)
+        // Fresh snapshot works and returns the new authoritative post-action
+        // state. The pre-action snapshot is immediately stale afterwards.
+        let post_action = h
+            .type_text("s1", &SnapshotId(fresh.snapshot_id.clone()), "hi", &p)
+            .unwrap();
+        assert_ne!(post_action.snapshot_id, fresh.snapshot_id);
+        assert!(matches!(
+            h.press_key("s1", &SnapshotId(fresh.snapshot_id), "Enter", &p),
+            Err(ComputerUseError::Snapshot(SnapshotError::Stale))
+        ));
+        h.press_key("s1", &SnapshotId(post_action.snapshot_id), "Enter", &p)
             .unwrap();
     }
 

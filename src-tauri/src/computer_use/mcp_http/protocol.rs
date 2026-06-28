@@ -220,6 +220,15 @@ pub fn tool_text_result(text: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": text.into() }] })
 }
 
+/// Wrap JSON output with both machine-readable structured content and a text
+/// fallback for MCP clients that only render textual tool content.
+pub fn tool_json_result(value: Value) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": value.to_string() }],
+        "structuredContent": value,
+    })
+}
+
 /// Wrap a tool error into the MCP `tools/call` error-content shape (isError).
 pub fn tool_error_result(message: impl Into<String>) -> Value {
     json!({
@@ -279,6 +288,16 @@ mod tests {
         let err = McpResponse::error(json!(8), -32601, "method not found").to_json();
         assert_eq!(err["error"]["code"], -32601);
         assert_eq!(err["error"]["message"], "method not found");
+    }
+
+    #[test]
+    fn json_tool_result_has_structured_content_and_text_fallback() {
+        let result = tool_json_result(json!({ "snapshotId": "s1" }));
+        assert_eq!(result["structuredContent"]["snapshotId"], "s1");
+        assert_eq!(
+            result["content"][0]["text"].as_str().unwrap(),
+            r#"{"snapshotId":"s1"}"#
+        );
     }
 
     #[test]
