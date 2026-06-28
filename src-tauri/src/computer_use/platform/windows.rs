@@ -20,9 +20,15 @@ use crate::computer_use::provider::{
 };
 
 use windows::core::{w, BOOL, BSTR, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, MAX_PATH, RECT, RPC_E_CHANGED_MODE};
+use windows::Win32::Foundation::{
+    CloseHandle, HANDLE, HWND, LPARAM, MAX_PATH, RECT, RPC_E_CHANGED_MODE,
+};
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+};
+use windows::Win32::Security::{
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
@@ -30,7 +36,8 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
 use windows::Win32::System::Threading::{
-    GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
@@ -129,18 +136,18 @@ impl ComputerUseProvider for WindowsProvider {
     }
 
     fn click_element(&self, target: &AppTarget, element: &ElementId) -> ProviderResult<()> {
-        let window = resolve_window(target)?;
+        let window = prepare_target_for_control(target)?;
         let entry = uia_entry_for_id(window.hwnd, element)?;
         invoke_uia_element(&entry.element)
     }
 
     fn click_point(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
-        let _ = raise_app(target)?;
+        let _ = prepare_target_for_control(target)?;
         left_click_at(point)
     }
 
     fn secondary_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
-        let _ = raise_app(target)?;
+        let _ = prepare_target_for_control(target)?;
         right_click_at(point)
     }
 
@@ -153,12 +160,12 @@ impl ComputerUseProvider for WindowsProvider {
     }
 
     fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
-        let _ = raise_app(target)?;
+        let _ = prepare_target_for_control(target)?;
         double_click_at(point)
     }
 
     fn drag(&self, target: &AppTarget, from: Point, to: Point) -> ProviderResult<()> {
-        let _ = raise_app(target)?;
+        let _ = prepare_target_for_control(target)?;
         drag_between(from, to)
     }
 
@@ -168,18 +175,18 @@ impl ComputerUseProvider for WindowsProvider {
         element: &ElementId,
         value: &str,
     ) -> ProviderResult<()> {
-        let window = resolve_window(target)?;
+        let window = prepare_target_for_control(target)?;
         let entry = uia_entry_for_id(window.hwnd, element)?;
         set_uia_value(&entry.element, value)
     }
 
     fn type_text(&self, target: &AppTarget, text: &str) -> ProviderResult<()> {
-        let _ = raise_app(target)?;
+        let _ = prepare_target_for_control(target)?;
         type_unicode(text)
     }
 
     fn press_key(&self, target: &AppTarget, key: &str) -> ProviderResult<()> {
-        let _ = raise_app(target)?;
+        let _ = prepare_target_for_control(target)?;
         press_key_chord(key)
     }
 
@@ -189,7 +196,7 @@ impl ComputerUseProvider for WindowsProvider {
         direction: ScrollDirection,
         amount: i32,
     ) -> ProviderResult<()> {
-        let _ = raise_app(target)?;
+        let _ = prepare_target_for_control(target)?;
         scroll_wheel(direction, amount)
     }
 
@@ -200,7 +207,7 @@ impl ComputerUseProvider for WindowsProvider {
         _direction: ScrollDirection,
         _amount: i32,
     ) -> ProviderResult<()> {
-        let window = resolve_window(target)?;
+        let window = prepare_target_for_control(target)?;
         let entry = uia_entry_for_id(window.hwnd, element)?;
         scroll_uia_element_into_view(&entry.element)
     }
@@ -536,6 +543,98 @@ fn wait_for_visible_window(target: &AppTarget, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(100));
     }
     false
+}
+
+// --- Control eligibility --------------------------------------------------
+
+fn prepare_target_for_control(target: &AppTarget) -> ProviderResult<WindowInfo> {
+    let raised = raise_app(target)?;
+    let window = resolve_window(&raised.target)?;
+    ensure_can_control_window(&window)?;
+    Ok(window)
+}
+
+fn ensure_can_control_window(window: &WindowInfo) -> ProviderResult<()> {
+    let current = current_process_integrity_rid()?;
+    let target = process_integrity_rid(window.pid)?;
+    if target > current {
+        return Err(ProviderError::Failed(format!(
+            "cannot control {} because its window has a higher Windows integrity level and is blocked by UIPI (current integrity RID {current}, target RID {target})",
+            window.name
+        )));
+    }
+    Ok(())
+}
+
+fn current_process_integrity_rid() -> ProviderResult<u32> {
+    let mut token = HANDLE::default();
+    unsafe {
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+            .map_err(|e| ProviderError::Failed(format!("open current process token: {e}")))?;
+    }
+    let result = token_integrity_rid(token);
+    unsafe {
+        let _ = CloseHandle(token);
+    }
+    result
+}
+
+fn process_integrity_rid(pid: u32) -> ProviderResult<u32> {
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .map_err(|e| ProviderError::Failed(format!("open target process {pid}: {e}")))?;
+        let mut token = HANDLE::default();
+        let result = OpenProcessToken(process, TOKEN_QUERY, &mut token)
+            .map_err(|e| ProviderError::Failed(format!("open target process token {pid}: {e}")))
+            .and_then(|_| {
+                let rid = token_integrity_rid(token);
+                let _ = CloseHandle(token);
+                rid
+            });
+        let _ = CloseHandle(process);
+        result
+    }
+}
+
+fn token_integrity_rid(token: HANDLE) -> ProviderResult<u32> {
+    unsafe {
+        let mut needed = 0u32;
+        let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut needed);
+        if needed < std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as u32 {
+            return Err(ProviderError::Failed(
+                "query token integrity level size returned no data".into(),
+            ));
+        }
+        let mut buffer = vec![0u8; needed as usize];
+        GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buffer.as_mut_ptr() as *mut _),
+            needed,
+            &mut needed,
+        )
+        .map_err(|e| ProviderError::Failed(format!("query token integrity level: {e}")))?;
+        let label = &*(buffer.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+        let sid = label.Label.Sid;
+        if sid.is_invalid() {
+            return Err(ProviderError::Failed(
+                "token integrity SID was unavailable".into(),
+            ));
+        }
+        let count_ptr = GetSidSubAuthorityCount(sid);
+        if count_ptr.is_null() || *count_ptr == 0 {
+            return Err(ProviderError::Failed(
+                "token integrity SID had no sub-authorities".into(),
+            ));
+        }
+        let rid_ptr = GetSidSubAuthority(sid, (*count_ptr - 1) as u32);
+        if rid_ptr.is_null() {
+            return Err(ProviderError::Failed(
+                "token integrity RID was unavailable".into(),
+            ));
+        }
+        Ok(*rid_ptr)
+    }
 }
 
 // --- Screenshot / display metadata ---------------------------------------
