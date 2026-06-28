@@ -68,6 +68,9 @@ whatever the user is doing. **Never use it.** Instead:
   Window-menu item. Those commands can report exit code 0 while leaving a
   Dock-minimized window minimized. Use `computer_raise_app` / `sessio cu raise`
   so Sessio can operate on the app/window through AppKit and AX.
+- `open -a <App>` has the same limitation for this workflow: it can activate a
+  process without restoring the specific minimized window you need. Treat it as
+  a human shell convenience, not as the computer-use recovery primitive.
 
 The goal: launching from cold should not disturb the user's frontmost app or
 current Space. Foreground activation is only expected when the agent explicitly
@@ -237,7 +240,7 @@ and extended for Chinese apps:
 | `ax_not_granted`                           | `sessio cu grant --permission accessibility`, then enable Sessio in Accessibility. |
 | `sc_not_granted` (on `get_app_state`)      | Enable Sessio in Screen & System Audio Recording.                      |
 | `app_not_found`                            | App isn't running. `get_app_state` auto-launches in the background; for explicit control use `sessio cu launch-app --bundle <bundle>` / `computer_launch_app`. **Never** use `open -b` — it activates the app and steals focus. |
-| `no visible window found for application`  | The app is running but hidden/minimized or has no on-screen window. Use `computer_raise_app` / `sessio cu raise --bundle <bundle>`, then re-run `get_app_state`. |
+| `no_visible_window` / `no visible window found for application` | The app is running but hidden/minimized or has no on-screen window. Use `computer_raise_app` / `sessio cu raise --bundle <bundle>`, then re-run `get_app_state`. Do not switch to `open -a` or AppleScript; those can exit 0 without restoring Dock-minimized windows. |
 | `ref_stale` / `element_not_found`          | Re-run `get_app_state`.                                                |
 | `action_unsupported`                       | Element has no AXPress. `strategy: "physical"` routes via CGEvent.     |
 | Element snap looks empty on Slack / VS Code / Electron | Re-run `get_app_state` once; `AXEnhancedUserInterface` takes a snap to take effect. |

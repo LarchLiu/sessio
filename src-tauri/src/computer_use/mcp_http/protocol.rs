@@ -251,17 +251,17 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "computer_launch_app",
-            description: "Launch a chosen application without activating it. Requires target-app approval and opens a lease for the app.",
+            description: "Launch a chosen application without activating it. Use for cold/background launch only; this does not restore Dock-minimized windows. Requires target-app approval and opens a lease for the app.",
             input_schema: app_arg.clone(),
         },
         ToolDefinition {
             name: "computer_raise_app",
-            description: "Bring a chosen application/window to the foreground and restore minimized or hidden windows when possible. Use after get_app_state reports no visible window.",
+            description: "Foreground-recovery tool for hidden or Dock-minimized apps. Use this after computer_get_app_state reports no visible window, or before trying screenshots/clicks on a minimized target. Do not substitute open -a, AppleScript activate/frontmost, or Window-menu clicks; those can return success while leaving the window minimized.",
             input_schema: app_arg,
         },
         ToolDefinition {
             name: "computer_get_app_state",
-            description: "Capture the target's screenshot, display metadata, accessibility elements, a fresh snapshot id, and the actions currently allowed. If appId is provided and the app is not running, launch it after target-app approval.",
+            description: "Capture the target's screenshot, display metadata, accessibility elements, a fresh snapshot id, and the actions currently allowed. If appId is provided and the app is not running, launch it after target-app approval. If this reports no visible window, call computer_raise_app for the same bundle, then retry this tool.",
             input_schema: optional_app_arg,
         },
         ToolDefinition {
@@ -481,6 +481,21 @@ mod tests {
         for expected in TOOL_DEFINITIONS {
             assert!(names.contains(expected), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn raise_tool_description_warns_against_unreliable_shell_recovery() {
+        let result = tools_list_result();
+        let tools = result["tools"].as_array().unwrap();
+        let raise = tools
+            .iter()
+            .find(|tool| tool["name"] == "computer_raise_app")
+            .expect("raise tool");
+        let description = raise["description"].as_str().unwrap();
+        assert!(description.contains("Dock-minimized"));
+        assert!(description.contains("computer_get_app_state"));
+        assert!(description.contains("open -a"));
+        assert!(description.contains("AppleScript"));
     }
 
     #[test]

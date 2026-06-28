@@ -118,6 +118,11 @@ There is also one process-architecture constraint worth keeping explicit here:
   - `computer_raise_app` / `sessio cu raise` as the explicit foreground
     recovery path for hidden or minimized apps when `get_app_state` cannot find
     a visible window
+  - model-visible guidance for hidden/minimized window recovery: MCP tool
+    descriptions, runtime prompt notes, CLI help, and `no_visible_window` errors
+    now point agents to `computer_raise_app` / `sessio cu raise` and explicitly
+    warn against `open -a` / AppleScript `activate` / Window-menu fallbacks that
+    can report success without restoring a Dock-minimized window
   - true recent-use ranking for `computer_list_apps` / `sessio cu list-apps
     --days`, using macOS activity metadata when available and falling back
     cleanly when the OS withholds it

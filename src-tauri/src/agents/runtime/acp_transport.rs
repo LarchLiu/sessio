@@ -1292,12 +1292,36 @@ fn prompt_request_from_input(session_id: SessionId, input: AgentInput) -> Result
         attachments,
         options,
     } = input;
-    let normalized_text = normalize_canvas_prompt_text(&text, &options);
+    let normalized_text = normalize_runtime_prompt_text(&text, &options);
     let mut prompt = vec![ContentBlock::Text(TextContent::new(normalized_text))];
     for attachment in attachments {
         prompt.push(content_block_from_attachment(&attachment)?);
     }
     Ok(PromptRequest::new(session_id, prompt))
+}
+
+fn normalize_runtime_prompt_text(text: &str, options: &RuntimeMetadata) -> String {
+    let text = normalize_canvas_prompt_text(text, options);
+    if !runtime_option_bool(options, "computerUse") && !runtime_option_bool(options, "computer_use")
+    {
+        return text;
+    }
+    format!("{}\n\n---\n\n{}", computer_use_prompt_block(), text)
+}
+
+fn runtime_option_bool(options: &RuntimeMetadata, key: &str) -> bool {
+    options
+        .get(key)
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+fn computer_use_prompt_block() -> &'static str {
+    r#"<sessio-computer-use>
+When driving native macOS apps, prefer the injected `computer_*` tools over shell scripts.
+Start with `computer_get_app_state`; use AX refs (`ref`/`elementId`) before screenshot coordinates.
+If the target has no visible window or is Dock-minimized, call `computer_raise_app` for that bundle, then retry `computer_get_app_state`. Do not use `open -a`, AppleScript `activate`/`frontmost`, or Window-menu clicks for this recovery path; those can report success without restoring the window.
+</sessio-computer-use>"#
 }
 
 fn normalize_canvas_prompt_text(text: &str, options: &RuntimeMetadata) -> String {
@@ -1978,6 +2002,28 @@ mod tests {
     fn new_session_request_omits_mcp_server_without_injection() {
         let request = new_session_request(Agent::Codex, "/tmp/ws".to_string(), None);
         assert!(request.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn computer_use_prompt_layer_mentions_raise_recovery() {
+        let mut options = RuntimeMetadata::new();
+        options.insert("computerUse".into(), serde_json::json!(true));
+
+        let text = normalize_runtime_prompt_text("send the message", &options);
+
+        assert!(text.contains("<sessio-computer-use>"));
+        assert!(text.contains("computer_get_app_state"));
+        assert!(text.contains("computer_raise_app"));
+        assert!(text.contains("open -a"));
+        assert!(text.contains("AppleScript"));
+        assert!(text.ends_with("send the message"));
+    }
+
+    #[test]
+    fn computer_use_prompt_layer_is_omitted_when_disabled() {
+        let text = normalize_runtime_prompt_text("send the message", &RuntimeMetadata::new());
+
+        assert_eq!(text, "send the message");
     }
 
     #[test]

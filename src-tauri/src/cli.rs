@@ -1414,7 +1414,7 @@ fn target_args(args: &[String], app_required: bool) -> Result<Value> {
     ensure_known_options(args, &["--app-id", "--bundle", "--window-id"])?;
     let app_id = optional_option(args, "--app-id")?.or(optional_option(args, "--bundle")?);
     if app_required && app_id.is_none() {
-        bail!("missing --app-id");
+        bail!("missing --app-id/--bundle");
     }
     let mut value = serde_json::Map::new();
     if let Some(app_id) = app_id {
@@ -2681,10 +2681,10 @@ Usage:
   sessio cu permissions [--url <mcp-url>] [--token <token>] [--json]
   sessio cu grant --permission <screenshots|accessibility> [--url <mcp-url>] [--token <token>] [--json]
   sessio cu list-apps [--days <n>] [--url <mcp-url>] [--token <token>] [--json]
-  sessio cu start --app-id <bundleId> [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
-  sessio cu launch-app --app-id <bundleId> [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
-  sessio cu raise --app-id <bundleId> [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
-  sessio cu get-app-state [--app-id <bundleId>] [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu start (--app-id <bundleId>|--bundle <bundleId>) [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu launch-app (--app-id <bundleId>|--bundle <bundleId>) [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu raise (--app-id <bundleId>|--bundle <bundleId>) [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
+  sessio cu get-app-state [--app-id <bundleId>|--bundle <bundleId>] [--window-id <id>] [--url <mcp-url>] [--token <token>] [--json]
   sessio cu click --snapshot-id <id> (<ref>|--element-id <id>|--x <px> --y <px>) [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
   sessio cu click-element --snapshot-id <id> (<ref>|--element-id <id>) [--url <mcp-url>] [--token <token>] [--json]
   sessio cu click-at --snapshot-id <id> --x <px> --y <px> [--coord-space <screenshot|screen>] [--url <mcp-url>] [--token <token>] [--json]
@@ -2712,6 +2712,7 @@ Usage:
 Notes:
   --json emits stable machine-readable output for skills and agents.
   cu attaches to an already-running desktop computer-use MCP host; set SESSIO_CU_URL and SESSIO_CU_TOKEN (or pass --url/--token). It fails explicitly instead of starting a separate helper/runtime.
+  cu raise is the reliable recovery path for hidden or Dock-minimized app windows. Do not substitute open -a or AppleScript activate/frontmost/window-menu clicks; those can exit 0 while leaving the window minimized.
   sessions list reads from the Sessio index DB by default and falls back to a filesystem scan when the index is empty/unreadable; a stderr warning is printed when the fallback fires.
   memory search omits qmd's raw payload by default; pass --include-raw for debugging.
   memory resolve omits raw JSONL excerpts by default; pass --include-source-excerpt to attach the byte/line range each source points at.
@@ -2945,6 +2946,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown cu option '--oops'"), "{err}");
+    }
+
+    #[test]
+    fn computer_use_target_error_mentions_bundle_alias() {
+        let err = parse_args(args(&["cu", "raise"])).unwrap_err().to_string();
+
+        assert!(err.contains("missing --app-id/--bundle"), "{err}");
     }
 
     #[test]

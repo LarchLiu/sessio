@@ -272,6 +272,8 @@ pub enum ProviderError {
     ElementNotFound(ElementId),
     #[error("provider does not support {0} on this platform")]
     Unsupported(&'static str),
+    #[error("no visible window found for application")]
+    NoVisibleWindow,
     #[error("provider operation failed: {0}")]
     Failed(String),
 }

@@ -13,7 +13,7 @@ use crate::computer_use::lease::SnapshotId;
 use crate::computer_use::onboarding::{self, PermissionKind};
 use crate::computer_use::permissions::PermissionDenied;
 use crate::computer_use::provider::{
-    AppListOptions, AppTarget, CoordinateSpace, Point, ScrollDirection,
+    AppListOptions, AppTarget, CoordinateSpace, Point, ProviderError, ScrollDirection,
 };
 use crate::desktop_control::DesktopControlPermissionStatus;
 
@@ -276,6 +276,10 @@ fn host_error_message(error: ComputerUseError) -> String {
         }
         ComputerUseError::Permission(PermissionDenied::Control) => {
             "permission_missing:control: input control is unavailable. Call computer_permissions; on macOS this usually requires Accessibility."
+                .into()
+        }
+        ComputerUseError::Provider(ProviderError::NoVisibleWindow) => {
+            "no_visible_window: the target is running but has no visible on-screen window. Call computer_raise_app with the same bundle/appId (or `sessio cu raise --bundle <bundle>`), then retry computer_get_app_state. Do not use `open -a`, AppleScript `activate`/`frontmost`, or Window-menu clicks for Dock-minimized windows; they can report success without restoring the window."
                 .into()
         }
         other => other.to_string(),
@@ -1017,6 +1021,18 @@ mod tests {
             }
             _ => panic!("tool failure must be a result with isError, not a JSON-RPC error"),
         }
+    }
+
+    #[test]
+    fn no_visible_window_error_points_to_raise_tool() {
+        let message =
+            host_error_message(ComputerUseError::Provider(ProviderError::NoVisibleWindow));
+
+        assert!(message.contains("no_visible_window"));
+        assert!(message.contains("computer_raise_app"));
+        assert!(message.contains("sessio cu raise"));
+        assert!(message.contains("open -a"));
+        assert!(message.contains("AppleScript"));
     }
 
     #[test]

@@ -690,9 +690,7 @@ fn frontmost_window_for_pid(pid: i32) -> ProviderResult<(u32, Option<Rect>)> {
             return Ok((window_id, bounds));
         }
     }
-    Err(ProviderError::Failed(
-        "no visible window found for application".into(),
-    ))
+    Err(ProviderError::NoVisibleWindow)
 }
 
 fn capture_window(

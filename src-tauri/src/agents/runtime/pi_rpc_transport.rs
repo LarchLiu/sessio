@@ -1191,7 +1191,7 @@ fn prompt_params_from_input(input: AgentInput) -> Result<Value> {
         attachments,
         options,
     } = input;
-    let mut message = normalize_canvas_prompt_text(&text, &options);
+    let mut message = normalize_runtime_prompt_text(&text, &options);
     let mut images = Vec::new();
     for attachment in attachments {
         match attachment.kind {
@@ -1210,6 +1210,27 @@ fn prompt_params_from_input(input: AgentInput) -> Result<Value> {
         "prompt": message,
         "images": images,
     }))
+}
+
+fn normalize_runtime_prompt_text(text: &str, options: &RuntimeMetadata) -> String {
+    let text = normalize_canvas_prompt_text(text, options);
+    if !runtime_option_bool(options, "computerUse") && !runtime_option_bool(options, "computer_use")
+    {
+        return text;
+    }
+    format!("{}\n\n---\n\n{}", computer_use_prompt_block(), text)
+}
+
+fn runtime_option_bool(options: &RuntimeMetadata, key: &str) -> bool {
+    options.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn computer_use_prompt_block() -> &'static str {
+    r#"<sessio-computer-use>
+When driving native macOS apps, prefer the injected `computer_*` tools over shell scripts.
+Start with `computer_get_app_state`; use AX refs (`ref`/`elementId`) before screenshot coordinates.
+If the target has no visible window or is Dock-minimized, call `computer_raise_app` for that bundle, then retry `computer_get_app_state`. Do not use `open -a`, AppleScript `activate`/`frontmost`, or Window-menu clicks for this recovery path; those can report success without restoring the window.
+</sessio-computer-use>"#
 }
 
 fn normalize_canvas_prompt_text(text: &str, options: &RuntimeMetadata) -> String {
@@ -1999,6 +2020,21 @@ mod tests {
             delta_text(&json!({ "type": "thinking_delta", "delta": " need to" })).as_deref(),
             Some(" need to")
         );
+    }
+
+    #[test]
+    fn computer_use_prompt_layer_mentions_raise_recovery() {
+        let mut options = RuntimeMetadata::new();
+        options.insert("computerUse".into(), json!(true));
+
+        let text = normalize_runtime_prompt_text("send the message", &options);
+
+        assert!(text.contains("<sessio-computer-use>"));
+        assert!(text.contains("computer_get_app_state"));
+        assert!(text.contains("computer_raise_app"));
+        assert!(text.contains("open -a"));
+        assert!(text.contains("AppleScript"));
+        assert!(text.ends_with("send the message"));
     }
 
     #[test]
