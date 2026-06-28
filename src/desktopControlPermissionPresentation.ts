@@ -26,9 +26,6 @@ export type DesktopControlPermissionPresentation = {
   accessibilityKey:
     | "settings.desktop_control_accessibility_granted"
     | "settings.desktop_control_accessibility_required";
-  controlKey:
-    | "settings.desktop_control_control_ready"
-    | "settings.desktop_control_control_unavailable";
 };
 
 export function desktopControlPermissionPresentation(
@@ -47,9 +44,6 @@ export function desktopControlPermissionPresentation(
       accessibilityKey: status?.accessibility.granted
         ? "settings.desktop_control_accessibility_granted"
         : "settings.desktop_control_accessibility_required",
-      controlKey: status?.canControl
-        ? "settings.desktop_control_control_ready"
-        : "settings.desktop_control_control_unavailable",
     };
   }
   // Computer use needs both observe and inspect; control is reported separately
@@ -68,8 +62,5 @@ export function desktopControlPermissionPresentation(
     accessibilityKey: status?.accessibility.granted
       ? "settings.desktop_control_accessibility_granted"
       : "settings.desktop_control_accessibility_required",
-    controlKey: status?.canControl
-      ? "settings.desktop_control_control_ready"
-      : "settings.desktop_control_control_unavailable",
   };
 }

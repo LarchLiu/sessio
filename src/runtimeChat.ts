@@ -602,10 +602,7 @@ function applyRuntimeEventEnvelope(
     transport: event.transport,
     workspacePath: event.workspacePath,
     capabilities,
-    metadata: {
-      ...(existing?.metadata ?? {}),
-      ...(event.metadata ?? {}),
-    },
+    metadata: event.metadata ?? {},
     turns: existing?.turns ?? [],
     sessionState: existing?.sessionState ?? emptyAcpSessionState(),
     protocolMessages: existing?.protocolMessages ?? [],

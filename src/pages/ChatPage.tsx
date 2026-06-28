@@ -40,6 +40,7 @@ import {
   RuntimeCapabilitySet,
   SubagentInfo,
   getComputerUseStatus,
+  disposeAgentRuntimeSession,
   setComputerUseSessionApproval,
   ensureAgentRuntimeSession,
   getSessionHistory,
@@ -86,6 +87,7 @@ import {
 import {
   useComposerInputHistory,
 } from "../hooks/useComposerInputHistory";
+import { useComputerUseFeatureEnabled } from "../hooks/useComputerUseFeatureEnabled";
 import type { ChatComposerController } from "../hooks/useChatComposer";
 import { localeTag, useI18n } from "../i18n";
 import type { ChatView, ViewMode } from "../navigation";
@@ -718,7 +720,15 @@ export function AcpTranscriptPanel({
   const selectedAgentModelValue = agentModelSelectValue(composerAgent, composerModel);
   const selectedComposerAgent =
     runtimeAgents.find((item) => item.agent === composerAgent) ?? null;
-  const composerComputerUseEligible = selectedComposerAgent?.computerUseEligible ?? false;
+  const computerUseFeatureEnabled = useComputerUseFeatureEnabled();
+  const composerComputerUseEligible = Boolean(
+    selectedComposerAgent?.computerUseEligible && computerUseFeatureEnabled,
+  );
+  const sessionComputerUseAttached = Boolean(
+    liveSession && !liveSession.ended && liveSession.metadata?.computerUse,
+  );
+  const sessionComputerUseActive = sessionComputerUseAttached;
+  const [computerUseBusy, setComputerUseBusy] = useState(false);
   const handleComposerEffortChange = useCallback(async (targetAgent: Agent, nextValue: string) => {
     if (targetAgent === composerAgent) setComposerEffort(nextValue);
     try {
@@ -1179,8 +1189,8 @@ export function AcpTranscriptPanel({
 
   useEffect(() => {
     let disposed = false;
-    if (!runtimeSessionId || (!activeTurnId && !computerUseStatus?.foregroundActive)) {
-      setComputerUseStatus((current) => (current?.foregroundActive ? null : current));
+    if (!runtimeSessionId || !sessionComputerUseAttached) {
+      setComputerUseStatus(null);
       return;
     }
 
@@ -1200,7 +1210,11 @@ export function AcpTranscriptPanel({
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [activeTurnId, computerUseStatus?.foregroundActive, runtimeSessionId]);
+  }, [runtimeSessionId, sessionComputerUseAttached]);
+
+  useEffect(() => {
+    setComputerUseEnabled(sessionComputerUseAttached);
+  }, [sessionComputerUseAttached]);
 
   const handleComposerAgentModelChange = useCallback(async (nextValue: string) => {
     const parsed = parseAgentModelSelectValue(nextValue);
@@ -1327,6 +1341,12 @@ export function AcpTranscriptPanel({
             workspacePath,
             agentRuntimeSessionId: sessionId,
             sourceAgent: agent,
+            options: buildRuntimeSessionOptions(
+              composerModel,
+              composerPermissionMode,
+              composerEffort,
+              computerUseEnabled,
+            ),
           })
         : await startAgentSession({
             agent: targetAgent,
@@ -1340,7 +1360,7 @@ export function AcpTranscriptPanel({
               computerUseEnabled,
             ),
           });
-      if (!sameAgent && computerUseEnabled) {
+      if (computerUseEnabled) {
         await setComputerUseSessionApproval(handle.sessioRuntimeSessionId, true);
       }
       if (sameAgent) {
@@ -1533,6 +1553,90 @@ export function AcpTranscriptPanel({
     }
   }, [activeTurnId, runtimeSessionId]);
 
+  const handleComputerUseToggle = useCallback(async () => {
+    if (!composerComputerUseEligible || sending || activeTurnId || computerUseBusy) return;
+    if (!workspacePath) {
+      setComposerError("This session has no workspace path, so computer use cannot be enabled yet.");
+      return;
+    }
+    const nextComputerUseEnabled = !sessionComputerUseAttached;
+    setComputerUseBusy(true);
+    setComposerError(null);
+    try {
+      setComputerUseEnabled(nextComputerUseEnabled);
+      await disposeAgentRuntimeSession(runtimeSessionId).catch(() => {});
+      dispatchLiveEvent({
+        type: "ensure-session",
+        session: pendingLiveSession({
+          sessioRuntimeSessionId: runtimeSessionId,
+          agent: composerAgent,
+          workspacePath,
+          capabilities: fallbackComposerCapabilities,
+        }),
+      });
+      const handle = await ensureAgentRuntimeSession({
+        agent: composerAgent,
+        sessioRuntimeSessionId: runtimeSessionId,
+        workspacePath,
+        agentRuntimeSessionId: sessionId,
+        sourceAgent: agent,
+        options: buildRuntimeSessionOptions(
+          composerModel,
+          composerPermissionMode,
+          composerEffort,
+          nextComputerUseEnabled,
+        ),
+      });
+      if (nextComputerUseEnabled) {
+        await setComputerUseSessionApproval(handle.sessioRuntimeSessionId, true);
+      }
+      if (composerModel) {
+        await setAgentSessionConfigOption(handle.sessioRuntimeSessionId, {
+          configId: "model",
+          value: composerModel,
+        }).catch((err) => {
+          console.warn("set model config failed", err);
+        });
+      }
+      if (composerPermissionMode) {
+        await setAgentSessionConfigOption(handle.sessioRuntimeSessionId, {
+          configId: "mode",
+          value: composerPermissionMode,
+        }).catch((err) => {
+          console.warn("set permission config failed", err);
+        });
+      }
+      if (composerEffort) {
+        await setAgentSessionConfigOption(handle.sessioRuntimeSessionId, {
+          configId: runtimeEffortConfigId(composerAgent),
+          value: composerEffort,
+        }).catch((err) => {
+          console.warn("set effort config failed", err);
+        });
+      }
+    } catch (err) {
+      setComposerError(String(err));
+    } finally {
+      setComputerUseBusy(false);
+    }
+  }, [
+    activeTurnId,
+    agent,
+    composerAgent,
+    composerComputerUseEligible,
+    composerEffort,
+    composerModel,
+    composerPermissionMode,
+    computerUseBusy,
+    dispatchLiveEvent,
+    fallbackComposerCapabilities,
+    runtimeSessionId,
+    sending,
+    sessionComputerUseAttached,
+    sessionId,
+    workspacePath,
+  ]);
+
   const sendWithContext = useCallback(
     async (
       prompt: string,
@@ -1597,7 +1701,10 @@ export function AcpTranscriptPanel({
     selectedAgentModelValue,
     permissionMode: composerPermissionMode,
     computerUseEnabled,
+    computerUseActive: sessionComputerUseActive,
+    computerUseBusy,
     setComputerUseEnabled,
+    handleComputerUseToggle,
     computerUseEligible: composerComputerUseEligible,
     agentModelOptions,
     permissionOptions: composerPermissionOptions,
@@ -1618,10 +1725,13 @@ export function AcpTranscriptPanel({
     composerModel,
     composerPermissionMode,
     composerComputerUseEligible,
+    computerUseBusy,
     computerUseEnabled,
+    sessionComputerUseActive,
     composerText,
     composerPermissionOptions,
     handleComposerAgentModelChange,
+    handleComputerUseToggle,
     handleComposerPermissionChange,
     pasteAttachments,
     pickAttachments,

@@ -49,7 +49,7 @@ describe("desktop control permission presentation", () => {
     );
   });
 
-  it("reports control tier separately from observe/inspect readiness", () => {
+  it("keeps readiness based on observe and inspect even when control differs", () => {
     const granted = desktopControlPermissionPresentation(status({
       screenshots: { granted: true, supported: true },
       accessibility: { granted: true, supported: true },
@@ -57,16 +57,16 @@ describe("desktop control permission presentation", () => {
       canInspect: true,
       canControl: true,
     }));
-    expect(granted.controlKey).toBe("settings.desktop_control_control_ready");
+    expect(granted.ready).toBe(true);
+    expect(granted.descriptionKey).toBe("settings.desktop_control_ready");
 
     const noControl = desktopControlPermissionPresentation(status({
       canObserve: true,
       canInspect: true,
       canControl: false,
     }));
-    expect(noControl.controlKey).toBe(
-      "settings.desktop_control_control_unavailable",
-    );
+    expect(noControl.ready).toBe(true);
+    expect(noControl.descriptionKey).toBe("settings.desktop_control_ready");
   });
 
   it("reports unsupported platforms without permission management", () => {

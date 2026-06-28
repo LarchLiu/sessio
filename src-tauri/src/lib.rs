@@ -8588,6 +8588,16 @@ fn ensure_agent_runtime_session(
 }
 
 #[tauri::command]
+fn dispose_agent_runtime_session(
+    sessio_runtime_session_id: String,
+    runtime: State<'_, RuntimeManager>,
+) -> Result<(), String> {
+    runtime
+        .dispose_session_silent(&sessio_runtime_session_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn load_agent_session(
     agent: Agent,
     runtime_session_id: String,
@@ -9285,6 +9295,7 @@ pub fn run() {
             start_agent_session,
             fork_agent_session,
             ensure_agent_runtime_session,
+            dispose_agent_runtime_session,
             load_agent_session,
             send_agent_input,
             cancel_agent_turn,

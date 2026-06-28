@@ -4,11 +4,13 @@ export default function SwitchControl({
   checked,
   tooltip,
   onToggle,
+  disabled = false,
   className = "",
 }: {
   checked: boolean;
   tooltip?: string;
   onToggle: () => void;
+  disabled?: boolean;
   className?: string;
 }) {
   const control = (
@@ -16,12 +18,14 @@ export default function SwitchControl({
       type="button"
       role="switch"
       aria-checked={checked}
+      disabled={disabled}
       onClick={onToggle}
       className={
         "relative h-5 w-9 rounded-full border transition " +
         (checked
           ? "border-brand/45 bg-brand/20"
           : "border-card-border/[0.12] bg-card-panel") +
+        " disabled:cursor-not-allowed disabled:opacity-40" +
         (className ? ` ${className}` : "")
       }
     >

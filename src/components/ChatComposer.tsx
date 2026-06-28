@@ -108,6 +108,9 @@ export default function ChatComposer({
     "flex min-w-0 items-center " + (compactControls ? "flex-wrap gap-1" : "gap-3");
   const trailingControlsClassName =
     "flex shrink-0 items-center " + (compactControls ? "ml-auto gap-1" : "gap-2.5");
+  const computerUseTooltip = composer.computerUseActive
+    ? t("computer_use.disable_tooltip")
+    : t("computer_use.toggle_tooltip");
 
   useLayoutEffect(() => {
     const node = composerBoxRef.current;
@@ -223,21 +226,27 @@ export default function ChatComposer({
               />
             )}
             {composer.computerUseEligible && (
-              <Tooltip content={t("computer_use.toggle_tooltip")} placement="top">
+              <Tooltip content={computerUseTooltip} placement="top">
                 <button
                   type="button"
-                  disabled={runtimeControlsDisabled}
-                  onClick={() => composer.setComputerUseEnabled((enabled) => !enabled)}
+                  disabled={runtimeControlsDisabled || composer.computerUseBusy}
+                  onClick={() => void composer.handleComputerUseToggle()}
                   className={
-                    "flex h-7 items-center justify-center rounded-full px-2.5 text-ink/55 transition " +
+                    "relative flex h-7 items-center justify-center rounded-full px-2.5 text-ink/55 transition " +
                     (composer.computerUseEnabled
                       ? "bg-ink/12 text-ink"
                       : "hover:bg-ink/8 hover:text-ink") +
                     " disabled:cursor-not-allowed disabled:text-ink/28 disabled:hover:bg-transparent disabled:hover:text-ink/28"
                   }
-                  aria-label={t("computer_use.toggle_tooltip")}
+                  aria-label={computerUseTooltip}
                   aria-pressed={composer.computerUseEnabled}
                 >
+                  {composer.computerUseActive && (
+                    <span
+                      className="absolute right-1 top-1 h-2 w-2 rounded-full bg-emerald ring-2 ring-surface"
+                      aria-hidden="true"
+                    />
+                  )}
                   <MonitorCog className="h-4 w-4" />
                 </button>
               </Tooltip>

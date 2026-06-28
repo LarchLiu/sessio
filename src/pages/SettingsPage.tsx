@@ -33,13 +33,12 @@ import {
   ZAI,
 } from "@lobehub/icons";
 import { ArrowLeft, AtSign, Bot, Check, Circle, Download, Eye, EyeOff, Globe2, GripVertical, Hash, Info, Languages, Link2, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Server, Settings2, Shield, Sparkles, SquareKanban, Sun, Trash2, Workflow, X } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AppshotConfig, AppshotPermissionStatus, AstraConfig, AssistantInfo, ComputerUseSettings, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
+import type { Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AppshotConfig, AstraConfig, AssistantInfo, ComputerUseSettings, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
 import {
   createProcessTemplate,
   detectTelegramUserIds,
   getAppshotConfig,
   getComputerUseSettings,
-  getAppshotPermissionStatus,
   getAstraConfig,
   getDesktopControlPermissionStatus,
   getImBridgeConfig,
@@ -78,7 +77,7 @@ import SegmentedTabs from "../components/SegmentedTabs";
 import SwitchControl from "../components/SwitchControl";
 import Tooltip from "../components/Tooltip";
 import { AiGenerate2Icon, ChannelShare24RegularIcon, DiscordLogoIcon, LarkLogoIcon, QrCodeIcon, Robot3LineIcon, TelegramLogoIcon, TokenOutlineIcon, WechatLogoIcon } from "../components/IconifyIcon";
-import { appshotPermissionPresentation } from "../appshotPermissionPresentation";
+import { emitComputerUseSettingsChanged } from "../computerUseSettingsEvents";
 import { desktopControlPermissionPresentation } from "../desktopControlPermissionPresentation";
 import { type Lang, useI18n } from "../i18n";
 import type { ThemeMode } from "../theme";
@@ -321,7 +320,6 @@ function GeneralSettings({
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
   const [appshotConfig, setAppshotConfig] = useState<AppshotConfig | null>(null);
   const [computerUseSettings, setComputerUseSettings] = useState<ComputerUseSettings | null>(null);
-  const [appshotPermissionStatus, setAppshotPermissionStatus] = useState<AppshotPermissionStatus | null>(null);
   const [desktopControlPermissionStatus, setDesktopControlPermissionStatus] = useState<import("../api").DesktopControlPermissionStatus | null>(null);
   const [proxyEnabled, setProxyEnabled] = useState(false);
   const [proxyUrl, setProxyUrl] = useState("");
@@ -340,10 +338,9 @@ function GeneralSettings({
       getNetworkConfig(),
       getAppshotConfig(),
       getComputerUseSettings(),
-      getAppshotPermissionStatus(),
       getDesktopControlPermissionStatus(),
     ])
-      .then(([config, nextAppshot, nextComputerUse, permissionStatus, desktopStatus]) => {
+      .then(([config, nextAppshot, nextComputerUse, desktopStatus]) => {
         if (cancelled) return;
         setNetworkConfig(config);
         setProxyEnabled(config.proxy.enabled);
@@ -355,7 +352,6 @@ function GeneralSettings({
         setDesktopControlEnabled(nextComputerUse.enabled);
         setInputControlEnabled(nextComputerUse.allowInputInjection);
         setForegroundTakeoverEnabled(nextComputerUse.allowForegroundTakeover);
-        setAppshotPermissionStatus(permissionStatus);
         setDesktopControlPermissionStatus(desktopStatus);
       })
       .catch((err) => onError(String(err)));
@@ -367,23 +363,9 @@ function GeneralSettings({
   useEffect(() => {
     let disposed = false;
     const refreshPermissions = () => {
-      void Promise.all([getAppshotPermissionStatus(), getDesktopControlPermissionStatus()])
-        .then(([appshotStatus, desktopStatus]) => {
+      void getDesktopControlPermissionStatus()
+        .then((desktopStatus) => {
           if (disposed) return;
-          setAppshotPermissionStatus((current) => {
-            if (
-              current?.platform === appshotStatus.platform &&
-              current?.requiresPermission === appshotStatus.requiresPermission &&
-              current?.canCapture === appshotStatus.canCapture &&
-              current?.screenshots.granted === appshotStatus.screenshots.granted &&
-              current?.screenshots.supported === appshotStatus.screenshots.supported &&
-              current?.accessibility.granted === appshotStatus.accessibility.granted &&
-              current?.accessibility.supported === appshotStatus.accessibility.supported
-            ) {
-              return current;
-            }
-            return appshotStatus;
-          });
           setDesktopControlPermissionStatus((current) => {
             if (
               current?.platform === desktopStatus.platform &&
@@ -468,6 +450,7 @@ function GeneralSettings({
       setDesktopControlEnabled(next.enabled);
       setInputControlEnabled(next.allowInputInjection);
       setForegroundTakeoverEnabled(next.allowForegroundTakeover);
+      emitComputerUseSettingsChanged(next);
       onError(null);
     } catch (err) {
       onError(String(err));
@@ -476,11 +459,10 @@ function GeneralSettings({
     }
   };
 
-  const openAppshotPermissions = async () => {
+  const openDesktopControlPermissions = async () => {
     try {
-      setAppshotPermissionStatus(await getAppshotPermissionStatus());
       await onOpenAppshotPermissions();
-      setAppshotPermissionStatus(await getAppshotPermissionStatus());
+      setDesktopControlPermissionStatus(await getDesktopControlPermissionStatus());
       onError(null);
     } catch (err) {
       onError(String(err));
@@ -500,7 +482,6 @@ function GeneralSettings({
       || inputControlEnabled !== computerUseSettings.allowInputInjection
       || foregroundTakeoverEnabled !== computerUseSettings.allowForegroundTakeover
     : false;
-  const appshotPermission = appshotPermissionPresentation(appshotPermissionStatus);
   const desktopControlPermission = desktopControlPermissionPresentation(desktopControlPermissionStatus);
   return (
     <section className="min-w-0 max-w-full">
@@ -543,103 +524,74 @@ function GeneralSettings({
             </button>
           </div>
         </SettingsRow>
-        <SettingsRow
-          icon={<Shield className="h-4 w-4" />}
-          label={t("settings.appshot_permissions")}
-          description={t(appshotPermission.descriptionKey)}
-        >
-          <div className="flex items-center justify-end gap-2">
-            {appshotPermission.requiresPermission ? (
-              <>
-                <div className="flex items-center gap-2 text-caption text-ink/50">
-                  <span className={appshotPermissionStatus?.screenshots.granted ? "text-emerald" : "text-amber"}>
-                    {t(appshotPermission.statusKey)}
-                  </span>
-                  <span className="text-ink/24">·</span>
-                  <span className={appshotPermissionStatus?.accessibility.granted ? "text-emerald" : "text-ink/42"}>
-                    {appshotPermission.accessibilityKey ? t(appshotPermission.accessibilityKey) : null}
-                  </span>
-                </div>
-                {appshotPermission.showManageButton && (
-                  <button
-                    type="button"
-                    onClick={() => void openAppshotPermissions()}
-                    className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]"
-                  >
-                    <Shield className="h-4 w-4" />
-                    {t("settings.appshot_manage_permissions")}
-                  </button>
-                )}
-              </>
-            ) : (
-              <div className="flex items-center gap-1.5 text-caption font-medium text-emerald">
-                <Check className="h-4 w-4" />
-                {t(appshotPermission.statusKey)}
-              </div>
-            )}
-          </div>
-        </SettingsRow>
       </SettingsGroup>
       <SettingsGroup title={t("settings.desktop_control")} flush>
-        <SettingsRow
+        <SettingsStackedRow
           icon={<Shield className="h-4 w-4" />}
           label={t("settings.desktop_control")}
-          description={t(desktopControlPermission.descriptionKey)}
-        >
-          <div className="flex items-center justify-end gap-2">
-            <div className="flex items-center gap-2 text-caption text-ink/50">
-              <span className={desktopControlPermissionStatus?.screenshots.granted ? "text-emerald" : "text-amber"}>
-                {t(desktopControlPermission.screenshotKey)}
-              </span>
-              <span className="text-ink/24">·</span>
-              <span className={desktopControlPermissionStatus?.accessibility.granted ? "text-emerald" : "text-amber"}>
-                {t(desktopControlPermission.accessibilityKey)}
-              </span>
-              <span className="text-ink/24">·</span>
-              <span className={desktopControlPermissionStatus?.canControl ? "text-emerald" : "text-ink/42"}>
-                {t(desktopControlPermission.controlKey)}
-              </span>
-            </div>
-            {desktopControlPermission.showManageButton && (
-              <button
-                type="button"
-                onClick={() => void openAppshotPermissions()}
-                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]"
-              >
-                <Shield className="h-4 w-4" />
-                {t("settings.appshot_manage_permissions")}
-              </button>
-            )}
-          </div>
-        </SettingsRow>
-        <SettingsRow
-          icon={<Monitor className="h-4 w-4" />}
-          label={t("settings.desktop_control_enable")}
           description={t("settings.desktop_control_enable_description")}
         >
-          <div className="flex items-center justify-end gap-3">
-            <span className="text-caption text-ink/45">
-              {desktopControlEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}
-            </span>
-            <SwitchControl
-              checked={desktopControlEnabled}
-              tooltip={t("settings.desktop_control_enable")}
-              onToggle={() => setDesktopControlEnabled((value) => !value)}
-            />
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2 text-caption text-ink/50">
+                <span className="text-ink/60">{t(desktopControlPermission.descriptionKey)}</span>
+                <span className="text-ink/24">·</span>
+                <span className={desktopControlPermissionStatus?.screenshots.granted ? "text-emerald" : "text-amber"}>
+                  {t(desktopControlPermission.screenshotKey)}
+                </span>
+                <span className="text-ink/24">·</span>
+                <span className={desktopControlPermissionStatus?.accessibility.granted ? "text-emerald" : "text-amber"}>
+                  {t(desktopControlPermission.accessibilityKey)}
+                </span>
+              </div>
+              {desktopControlPermission.showManageButton && (
+                <button
+                  type="button"
+                  onClick={() => void openDesktopControlPermissions()}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]"
+                >
+                  <Shield className="h-4 w-4" />
+                  {t("settings.appshot_manage_permissions")}
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-card-border/[0.12] bg-card-chip/[0.04] px-3 py-2.5">
+              <div className="flex items-center gap-3">
+                <span className="text-caption text-ink/45">
+                  {desktopControlEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}
+                </span>
+                <SwitchControl
+                  checked={desktopControlEnabled}
+                  tooltip={t("settings.desktop_control_enable")}
+                  onToggle={() => setDesktopControlEnabled((value) => !value)}
+                />
+              </div>
+              <button
+                type="button"
+                disabled={savingDesktopControl || !desktopControlChanged}
+                onClick={() => void saveDesktopControlSettings()}
+                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35"
+              >
+                {savingDesktopControl ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                {t("project.save")}
+              </button>
+            </div>
           </div>
-        </SettingsRow>
+        </SettingsStackedRow>
         <SettingsRow
           icon={<Bot className="h-4 w-4" />}
           label={t("settings.desktop_control_input_control")}
           description={t("settings.desktop_control_input_control_description")}
+          disabled={!desktopControlEnabled}
         >
           <div className="flex items-center justify-end gap-3">
-            <span className="text-caption text-ink/45">
-              {inputControlEnabled ? t("settings.desktop_control_control_ready") : t("settings.desktop_control_control_unavailable")}
+            <span className={"text-caption " + (desktopControlEnabled ? "text-ink/45" : "text-ink/30")}>
+              {inputControlEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}
             </span>
             <SwitchControl
               checked={inputControlEnabled}
               tooltip={t("settings.desktop_control_input_control")}
+              disabled={!desktopControlEnabled}
               onToggle={() => setInputControlEnabled((value) => !value)}
             />
           </div>
@@ -648,22 +600,18 @@ function GeneralSettings({
           icon={<SquareKanban className="h-4 w-4" />}
           label={t("settings.desktop_control_foreground_takeover")}
           description={t("settings.desktop_control_foreground_takeover_description")}
+          disabled={!desktopControlEnabled}
         >
-          <div className="flex items-center justify-end gap-2">
+          <div className="flex items-center justify-end gap-3">
+            <span className={"text-caption " + (desktopControlEnabled ? "text-ink/45" : "text-ink/30")}>
+              {foregroundTakeoverEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}
+            </span>
             <SwitchControl
               checked={foregroundTakeoverEnabled}
               tooltip={t("settings.desktop_control_foreground_takeover")}
+              disabled={!desktopControlEnabled}
               onToggle={() => setForegroundTakeoverEnabled((value) => !value)}
             />
-            <button
-              type="button"
-              disabled={savingDesktopControl || !desktopControlChanged}
-              onClick={() => void saveDesktopControlSettings()}
-              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35"
-            >
-              {savingDesktopControl ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-              {t("project.save")}
-            </button>
           </div>
         </SettingsRow>
       </SettingsGroup>
@@ -4211,15 +4159,17 @@ function SettingsRow({
   icon,
   label,
   description,
+  disabled = false,
   children,
 }: {
   icon: ReactNode;
   label: string;
   description: string;
+  disabled?: boolean;
   children: ReactNode;
 }) {
   return (
-    <div className="grid min-h-[72px] grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-ink/[0.12] px-3 py-3 last:border-b-0">
+    <div className={"grid min-h-[72px] grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-ink/[0.12] px-3 py-3 last:border-b-0" + (disabled ? " opacity-55" : "")}>
       <div className="flex min-w-0 gap-3">
         <span className="mt-0.5 text-ink/55">{icon}</span>
         <span className="min-w-0">

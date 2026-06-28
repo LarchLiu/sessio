@@ -1791,6 +1791,14 @@ fn session_config_from_options(
 }
 
 fn normalize_runtime_permission_mode(agent: Agent, value: &str) -> String {
+    if agent == Agent::Codex {
+        return match value.trim().to_ascii_lowercase().as_str() {
+            "read-only" => "read-only".to_string(),
+            "auto" | "agent" => "agent".to_string(),
+            "full-access" | "agent-full-access" => "agent-full-access".to_string(),
+            other => other.to_string(),
+        };
+    }
     if agent != Agent::Claude {
         return value.trim().to_string();
     }
@@ -1910,7 +1918,11 @@ mod tests {
         );
         assert_eq!(
             normalize_runtime_permission_mode(Agent::Codex, "full-access"),
-            "full-access"
+            "agent-full-access"
+        );
+        assert_eq!(
+            normalize_runtime_permission_mode(Agent::Codex, "auto"),
+            "agent"
         );
     }
 

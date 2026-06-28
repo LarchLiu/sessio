@@ -88,9 +88,9 @@ export function runtimePermissionModeIcon(agent: Agent | null | undefined, value
     switch (value) {
       case "read-only":
         return <Hand className={className} />;
-      case "auto":
+      case "agent":
         return <ShieldEllipsis className={className} />;
-      case "full-access":
+      case "agent-full-access":
         return <ShieldAlert className={className} />;
     }
   }

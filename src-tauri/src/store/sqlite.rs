@@ -1433,9 +1433,9 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
             ],
             permission_mode: Some("read-only"),
             permission_modes: vec![
-                runtime_option("read-only", "Default permissions"),
-                runtime_option("auto", "Auto-review"),
-                runtime_option("full-access", "Full access"),
+                runtime_option("read-only", "Ask for approval"),
+                runtime_option("agent", "Approve for me"),
+                runtime_option("agent-full-access", "Full access"),
             ],
             enabled: true,
             transport: RuntimeTransportKind::Acp,

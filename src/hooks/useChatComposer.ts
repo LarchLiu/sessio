@@ -45,6 +45,7 @@ import {
   selectionModel,
   selectionPermissionMode,
 } from "../runtimeAgents";
+import { useComputerUseFeatureEnabled } from "./useComputerUseFeatureEnabled";
 
 type PendingSessionExtras = Omit<
   Partial<PendingNewChatSession>,
@@ -96,7 +97,10 @@ export interface ChatComposerController {
   selectedAgentModelValue: string;
   permissionMode: string;
   computerUseEnabled: boolean;
+  computerUseActive: boolean;
+  computerUseBusy: boolean;
   setComputerUseEnabled: Dispatch<SetStateAction<boolean>>;
+  handleComputerUseToggle: () => void | Promise<void>;
   computerUseEligible: boolean;
   agentModelOptions: ReturnType<typeof agentModelSelectOptions>;
   permissionOptions: ReturnType<typeof runtimePermissionModeOptions>;
@@ -155,7 +159,10 @@ export function useChatComposer({
   const selectedAgentModelValue = agent ? agentModelSelectValue(agent, model) : "";
   const selectedRuntimeAgent =
     agent ? runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent) ?? null : null;
-  const computerUseEligible = selectedRuntimeAgent?.computerUseEligible ?? false;
+  const computerUseFeatureEnabled = useComputerUseFeatureEnabled();
+  const computerUseEligible = Boolean(
+    selectedRuntimeAgent?.computerUseEligible && computerUseFeatureEnabled,
+  );
 
   const handleEffortChange = useCallback(async (targetAgent: Agent, nextValue: string) => {
     if (targetAgent === agent) setEffort(nextValue);
@@ -466,7 +473,10 @@ export function useChatComposer({
     selectedAgentModelValue,
     permissionMode,
     computerUseEnabled,
+    computerUseActive: computerUseEnabled,
+    computerUseBusy: false,
     setComputerUseEnabled,
+    handleComputerUseToggle: () => setComputerUseEnabled((enabled) => !enabled),
     computerUseEligible,
     agentModelOptions,
     permissionOptions,
