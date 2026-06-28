@@ -34,9 +34,9 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
 
 use crate::computer_use::provider::{
-    AppId, AppLaunchResult, AppTarget, ComputerUseProvider, DisplayMetadata, ElementId,
-    InstalledApp, ProviderError, ProviderResult, RawAppState, Rect, ScreenshotRef, ScrollDirection,
-    UiElement,
+    AppId, AppLaunchResult, AppTarget, ComputerUseProvider, CoordinateSpace, DisplayMetadata,
+    ElementId, InstalledApp, ProviderError, ProviderResult, RawAppState, Rect, ScreenshotRef,
+    ScrollDirection, UiElement,
 };
 
 /// The macOS provider. Stateless: every call re-reads live system state.
@@ -85,14 +85,15 @@ impl ComputerUseProvider for MacosProvider {
     fn capture_app_state(&self, target: &AppTarget) -> ProviderResult<RawAppState> {
         let pid = resolve_pid(&target.app_id)?;
         let (window_id, bounds) = frontmost_window_for_pid(pid)?;
-        let screenshot = capture_window(&self.capture_dir, window_id)?;
-        let elements = ax_elements_for_pid(pid).unwrap_or_default();
         let display = display_metadata();
+        let screen_bounds = bounds.unwrap_or_else(|| display_screen_bounds(&display));
+        let screenshot = capture_window(&self.capture_dir, window_id, screen_bounds)?;
+        let elements = ax_elements_for_pid(pid).unwrap_or_default();
         Ok(RawAppState {
             target: target.clone(),
             display,
             screenshot,
-            elements: elements_with_bounds(elements, bounds),
+            elements: elements_with_bounds(elements, Some(screen_bounds)),
         })
     }
 
@@ -383,7 +384,11 @@ fn frontmost_window_for_pid(pid: i32) -> ProviderResult<(u32, Option<Rect>)> {
     ))
 }
 
-fn capture_window(dir: &PathBuf, window_id: u32) -> ProviderResult<ScreenshotRef> {
+fn capture_window(
+    dir: &PathBuf,
+    window_id: u32,
+    screen_bounds: Rect,
+) -> ProviderResult<ScreenshotRef> {
     std::fs::create_dir_all(dir)
         .map_err(|e| ProviderError::Failed(format!("create capture dir: {e}")))?;
     let path = dir.join(format!("snapshot-{window_id}.png"));
@@ -408,10 +413,16 @@ fn capture_window(dir: &PathBuf, window_id: u32) -> ProviderResult<ScreenshotRef
         let _ = std::fs::remove_file(&path);
         return Err(ProviderError::Failed("empty capture".into()));
     }
+    let (width, height) = image::image_dimensions(&path)
+        .map_err(|e| ProviderError::Failed(format!("decode capture dimensions: {e}")))?;
     Ok(ScreenshotRef {
         handle: path.to_string_lossy().to_string(),
         format: "png".into(),
         byte_len: meta.len(),
+        width,
+        height,
+        default_coordinate_space: CoordinateSpace::Screenshot,
+        screen_bounds,
     })
 }
 
@@ -423,6 +434,20 @@ fn display_metadata() -> DisplayMetadata {
         // CGDisplay does not expose the backing scale directly here; default to
         // 2.0 on Retina-era hardware. Refined against NSScreen in a later pass.
         scale: 2.0,
+    }
+}
+
+fn display_screen_bounds(display: &DisplayMetadata) -> Rect {
+    let scale = if display.scale > 0.0 {
+        display.scale
+    } else {
+        1.0
+    };
+    Rect {
+        x: 0.0,
+        y: 0.0,
+        width: display.width as f32 / scale,
+        height: display.height as f32 / scale,
     }
 }
 

@@ -20,8 +20,8 @@ use super::approvals::{ApprovalDecision, ApprovalRegistry};
 use super::lease::{LeaseError, LeaseRegistry, SnapshotError, SnapshotId};
 use super::permissions::{self, PermissionDenied, RequiredCapability};
 use super::provider::{
-    AllowedAction, AppLaunchResult, AppState, AppTarget, ComputerUseProvider, InstalledApp,
-    ProviderError, ScrollDirection,
+    AllowedAction, AppLaunchResult, AppState, AppTarget, ComputerUseProvider, CoordinateSpace,
+    InstalledApp, Point, ProviderError, ScreenshotRef, ScrollDirection,
 };
 use super::settings::ComputerUseSettings;
 
@@ -38,6 +38,8 @@ pub enum ComputerUseError {
     Lease(#[from] LeaseError),
     #[error("snapshot error: {0}")]
     Snapshot(#[from] SnapshotError),
+    #[error("coordinate error: {0}")]
+    Coordinate(String),
     #[error("provider error: {0}")]
     Provider(#[from] ProviderError),
 }
@@ -240,15 +242,19 @@ impl ComputerUseHost {
             self.leases.open(session_id, target.clone())?;
         }
         let raw = self.provider.capture_app_state(&target)?;
-        let snapshot = self.next_snapshot(session_id)?;
+        let snapshot = self.next_snapshot(session_id, raw.screenshot.clone())?;
 
         Ok(self.app_state_from_raw(snapshot, raw, perm, launched))
     }
 
-    fn next_snapshot(&self, session_id: &str) -> Result<SnapshotId, ComputerUseError> {
+    fn next_snapshot(
+        &self,
+        session_id: &str,
+        screenshot: ScreenshotRef,
+    ) -> Result<SnapshotId, ComputerUseError> {
         Ok(self
             .leases
-            .with_lease(session_id, |lease| lease.next_snapshot())?)
+            .with_lease(session_id, |lease| lease.next_snapshot(screenshot))?)
     }
 
     fn capture_post_action_state(
@@ -257,8 +263,8 @@ impl ComputerUseHost {
         target: &AppTarget,
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
-        let snapshot = self.next_snapshot(session_id)?;
         let raw = self.provider.capture_app_state(target)?;
+        let snapshot = self.next_snapshot(session_id, raw.screenshot.clone())?;
         Ok(self.app_state_from_raw(snapshot, raw, perm, false))
     }
 
@@ -321,7 +327,7 @@ impl ComputerUseHost {
         }
     }
 
-    fn require_control(
+    fn require_control_target(
         &self,
         session_id: &str,
         snapshot: &SnapshotId,
@@ -339,11 +345,49 @@ impl ComputerUseHost {
                 "input injection",
             )));
         }
+        Ok(target)
+    }
+
+    fn snapshot_screenshot(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+    ) -> Result<ScreenshotRef, ComputerUseError> {
+        let screenshot = self
+            .leases
+            .with_lease(session_id, |lease| lease.screenshot_for_snapshot(snapshot))??;
+        Ok(screenshot)
+    }
+
+    fn require_control(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<AppTarget, ComputerUseError> {
+        let target = self.require_control_target(session_id, snapshot, perm)?;
         // A control action is about to run: the agent is driving input, so the
         // session is in foreground takeover until it stops/aborts. This is what
         // the takeover warning overlay observes.
         self.begin_foreground(session_id);
         Ok(target)
+    }
+
+    pub fn resolve_coordinate_action_point(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        point: Point,
+        coordinate_space: CoordinateSpace,
+        perm: &DesktopControlPermissionStatus,
+    ) -> Result<(AppTarget, Point), ComputerUseError> {
+        let target = self.require_control_target(session_id, snapshot, perm)?;
+        let screenshot = self.snapshot_screenshot(session_id, snapshot)?;
+        let screen_point = screenshot
+            .resolve_point(point, coordinate_space)
+            .map_err(ComputerUseError::Coordinate)?;
+        self.begin_foreground(session_id);
+        Ok((target, screen_point))
     }
 
     /// `computer_click_element` — click an inspected element. Requires control +
@@ -692,6 +736,44 @@ mod tests {
         ));
         h.press_key("s1", &SnapshotId(post_action.snapshot_id), "Enter", &p)
             .unwrap();
+    }
+
+    #[test]
+    fn coordinate_action_resolution_uses_latest_snapshot_mapping() {
+        let h = host(ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app("s1", &target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+
+        let first = h.get_app_state("s1", &p).unwrap();
+        let stale = SnapshotId(first.snapshot_id);
+        let fresh = h.get_app_state("s1", &p).unwrap();
+
+        assert!(matches!(
+            h.resolve_coordinate_action_point(
+                "s1",
+                &stale,
+                Point { x: 360.0, y: 225.0 },
+                CoordinateSpace::Screenshot,
+                &p
+            ),
+            Err(ComputerUseError::Snapshot(SnapshotError::Stale))
+        ));
+
+        let (resolved_target, screen_point) = h
+            .resolve_coordinate_action_point(
+                "s1",
+                &SnapshotId(fresh.snapshot_id),
+                Point { x: 360.0, y: 225.0 },
+                CoordinateSpace::Screenshot,
+                &p,
+            )
+            .unwrap();
+
+        assert_eq!(resolved_target, target());
+        assert_eq!(screen_point, Point { x: 190.0, y: 132.5 });
+        assert!(h.foreground_active("s1"));
     }
 
     #[test]

@@ -63,6 +63,24 @@ pub struct Rect {
     pub height: f32,
 }
 
+/// A point used by coordinate-based actions.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Coordinate spaces accepted by coordinate-based actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinateSpace {
+    /// Pixel coordinates in the screenshot returned by the latest snapshot.
+    Screenshot,
+    /// Raw display-space points, useful for platform/provider internals.
+    Screen,
+}
+
 /// A single accessibility element exposed to the model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,13 +118,62 @@ impl AllowedAction {
 /// A reference to a captured screenshot. The image bytes are stored out-of-band
 /// (temp file / handle) rather than inlined, per the tool-model truncation
 /// guidance; the model receives the handle, not the pixels.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenshotRef {
     /// Opaque handle the broker/host can resolve back to bytes.
     pub handle: String,
     pub format: String,
     pub byte_len: u64,
+    /// Pixel dimensions of the screenshot image referenced by `handle`.
+    pub width: u32,
+    pub height: u32,
+    /// The default space future coordinate tools should interpret `x`/`y` in.
+    pub default_coordinate_space: CoordinateSpace,
+    /// The display-space rectangle, in screen points, represented by the whole
+    /// screenshot image. Screenshot pixels map linearly into this rect.
+    pub screen_bounds: Rect,
+}
+
+impl ScreenshotRef {
+    pub fn resolve_point(
+        &self,
+        point: Point,
+        coordinate_space: CoordinateSpace,
+    ) -> Result<Point, String> {
+        match coordinate_space {
+            CoordinateSpace::Screen => Ok(point),
+            CoordinateSpace::Screenshot => self.screenshot_point_to_screen_point(point),
+        }
+    }
+
+    pub fn screenshot_point_to_screen_point(&self, point: Point) -> Result<Point, String> {
+        if self.width == 0 || self.height == 0 {
+            return Err("screenshot has empty dimensions".into());
+        }
+        if self.screen_bounds.width <= 0.0 || self.screen_bounds.height <= 0.0 {
+            return Err("screenshot has empty screen bounds".into());
+        }
+        if point.x < 0.0
+            || point.y < 0.0
+            || point.x > self.width as f32
+            || point.y > self.height as f32
+        {
+            return Err(format!(
+                "screenshot coordinate out of bounds: ({}, {}) outside {}x{}",
+                point.x, point.y, self.width, self.height
+            ));
+        }
+
+        let screen_x =
+            self.screen_bounds.x + (point.x / self.width as f32) * self.screen_bounds.width;
+        let screen_y =
+            self.screen_bounds.y + (point.y / self.height as f32) * self.screen_bounds.height;
+        Ok(Point {
+            x: screen_x,
+            y: screen_y,
+        })
+    }
 }
 
 /// The raw app state a provider returns for one capture. The host stamps it with
@@ -305,6 +372,15 @@ mod fake {
                     handle: format!("snap-{}", *counter),
                     format: "png".into(),
                     byte_len: 1024,
+                    width: 720,
+                    height: 450,
+                    default_coordinate_space: CoordinateSpace::Screenshot,
+                    screen_bounds: Rect {
+                        x: 10.0,
+                        y: 20.0,
+                        width: 360.0,
+                        height: 225.0,
+                    },
                 },
                 elements: self.elements.clone(),
             })
@@ -337,5 +413,63 @@ mod fake {
             ));
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_coordinates_map_to_screen_points() {
+        let screenshot = ScreenshotRef {
+            handle: "snap".into(),
+            format: "png".into(),
+            byte_len: 1,
+            width: 200,
+            height: 100,
+            default_coordinate_space: CoordinateSpace::Screenshot,
+            screen_bounds: Rect {
+                x: 50.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0,
+            },
+        };
+
+        assert_eq!(
+            screenshot
+                .resolve_point(Point { x: 100.0, y: 50.0 }, CoordinateSpace::Screenshot)
+                .unwrap(),
+            Point { x: 100.0, y: 45.0 }
+        );
+        assert_eq!(
+            screenshot
+                .resolve_point(Point { x: 7.0, y: 9.0 }, CoordinateSpace::Screen)
+                .unwrap(),
+            Point { x: 7.0, y: 9.0 }
+        );
+    }
+
+    #[test]
+    fn screenshot_coordinate_mapping_rejects_out_of_bounds_points() {
+        let screenshot = ScreenshotRef {
+            handle: "snap".into(),
+            format: "png".into(),
+            byte_len: 1,
+            width: 200,
+            height: 100,
+            default_coordinate_space: CoordinateSpace::Screenshot,
+            screen_bounds: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+        };
+
+        assert!(screenshot
+            .screenshot_point_to_screen_point(Point { x: 201.0, y: 50.0 })
+            .is_err());
     }
 }

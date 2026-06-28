@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use super::provider::AppTarget;
+use super::provider::{AppTarget, ScreenshotRef};
 
 /// A per-lease snapshot identifier. Encodes the lease and a monotonic counter so
 /// staleness is checkable by string comparison and never collides across leases.
@@ -43,6 +43,7 @@ pub struct Lease {
     pub target: AppTarget,
     snapshot_counter: u64,
     latest_snapshot: Option<SnapshotId>,
+    latest_screenshot: Option<ScreenshotRef>,
 }
 
 impl Lease {
@@ -53,14 +54,16 @@ impl Lease {
             target,
             snapshot_counter: 0,
             latest_snapshot: None,
+            latest_screenshot: None,
         }
     }
 
     /// Stamp a new snapshot, making it the only currently-valid one.
-    pub fn next_snapshot(&mut self) -> SnapshotId {
+    pub fn next_snapshot(&mut self, screenshot: ScreenshotRef) -> SnapshotId {
         self.snapshot_counter += 1;
         let id = SnapshotId::new(&self.id, self.snapshot_counter);
         self.latest_snapshot = Some(id.clone());
+        self.latest_screenshot = Some(screenshot);
         id
     }
 
@@ -81,6 +84,17 @@ impl Lease {
             return Err(SnapshotError::Stale);
         }
         Ok(())
+    }
+
+    /// Return the host-recorded screenshot metadata for the latest snapshot.
+    pub fn screenshot_for_snapshot(
+        &self,
+        candidate: &SnapshotId,
+    ) -> Result<ScreenshotRef, SnapshotError> {
+        self.check_snapshot(candidate)?;
+        self.latest_screenshot
+            .clone()
+            .ok_or(SnapshotError::NoSnapshot)
     }
 }
 
@@ -159,11 +173,29 @@ impl LeaseRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::computer_use::provider::{CoordinateSpace, Rect};
 
     fn target() -> AppTarget {
         AppTarget {
             app_id: "com.example.app".into(),
             window_id: None,
+        }
+    }
+
+    fn screenshot() -> ScreenshotRef {
+        ScreenshotRef {
+            handle: "snap".into(),
+            format: "png".into(),
+            byte_len: 1,
+            width: 100,
+            height: 50,
+            default_coordinate_space: CoordinateSpace::Screenshot,
+            screen_bounds: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 50.0,
+                height: 25.0,
+            },
         }
     }
 
@@ -191,13 +223,17 @@ mod tests {
             .unwrap();
         assert!(latest.is_none());
 
-        let first = reg.with_lease("s1", |l| l.next_snapshot()).unwrap();
+        let first = reg
+            .with_lease("s1", |l| l.next_snapshot(screenshot()))
+            .unwrap();
         reg.with_lease("s1", |l| l.check_snapshot(&first))
             .unwrap()
             .unwrap();
 
         // Capture again → first becomes stale.
-        let second = reg.with_lease("s1", |l| l.next_snapshot()).unwrap();
+        let second = reg
+            .with_lease("s1", |l| l.next_snapshot(screenshot()))
+            .unwrap();
         assert_eq!(
             reg.with_lease("s1", |l| l.check_snapshot(&first)).unwrap(),
             Err(SnapshotError::Stale)
@@ -212,8 +248,11 @@ mod tests {
         let reg = LeaseRegistry::new();
         reg.open("s1", target()).unwrap();
         reg.open("s2", target()).unwrap();
-        let s1_snap = reg.with_lease("s1", |l| l.next_snapshot()).unwrap();
-        reg.with_lease("s2", |l| l.next_snapshot()).unwrap();
+        let s1_snap = reg
+            .with_lease("s1", |l| l.next_snapshot(screenshot()))
+            .unwrap();
+        reg.with_lease("s2", |l| l.next_snapshot(screenshot()))
+            .unwrap();
         // s1's snapshot id must not validate against s2's lease.
         assert_eq!(
             reg.with_lease("s2", |l| l.check_snapshot(&s1_snap))
@@ -241,5 +280,21 @@ mod tests {
             reg.with_lease("missing", |_| ()).err(),
             Some(LeaseError::NoLease)
         );
+    }
+
+    #[test]
+    fn latest_snapshot_carries_screenshot_metadata() {
+        let reg = LeaseRegistry::new();
+        reg.open("s1", target()).unwrap();
+        let screenshot = screenshot();
+        let snap = reg
+            .with_lease("s1", |l| l.next_snapshot(screenshot.clone()))
+            .unwrap();
+
+        let stored = reg
+            .with_lease("s1", |l| l.screenshot_for_snapshot(&snap))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored, screenshot);
     }
 }

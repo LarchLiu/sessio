@@ -27,7 +27,7 @@ pub use lease::{Lease, LeaseRegistry, SnapshotId};
 pub use mcp_http::{McpHttpServer, McpServerHandle};
 pub use platform::default_provider;
 pub use provider::{
-    AllowedAction, AppLaunchResult, AppState, AppTarget, ComputerUseProvider, DisplayMetadata,
-    ElementId, InstalledApp, UiElement,
+    AllowedAction, AppLaunchResult, AppState, AppTarget, ComputerUseProvider, CoordinateSpace,
+    DisplayMetadata, ElementId, InstalledApp, Point, ScreenshotRef, UiElement,
 };
 pub use settings::ComputerUseSettings;
