@@ -232,461 +232,136 @@ It makes several expectations especially explicit:
 For Sessio, this means `computer-use-skill.md` should be treated as a local
 capability target, not just as copied documentation.
 
-## Capability Gaps Against SKILL.md
-
-### A. Tool surface gaps
-
-The skill describes a richer action surface than Sessio currently exposes.
-
-Missing or materially incomplete tools:
-
-- `launch_app`
-- pixel/coordinate click
-- right click / secondary action
-- double click
-- drag
-- `set_value`
-- explicit onboarding tools such as `permissions` and `grant`
-
-Current constraint:
-
-- [provider.rs](../src-tauri/src/computer_use/provider.rs) only models four
-  allowed actions: click element, type text, press key, scroll
-- [protocol.rs](../src-tauri/src/computer_use/mcp_http/protocol.rs) only
-  advertises the nine-tool MVP catalog above
-
-### B. No pixel fallback path
-
-`SKILL.md` treats AX refs plus pixel fallback as the central operating model.
-Sessio currently supports only element-targeted click, not coordinate-targeted
-actions.
-
-That means Sessio cannot currently handle the important class of apps described
-in the skill:
-
-- sparse AX trees
-- custom-drawn apps
-- Qt apps
-- Electron apps with incomplete AX
-- AX-disabled apps
-
-### C. No secondary-click, double-click, or drag semantics
-
-The skill expects these to be first-class capabilities. Sessio currently has no
-tool schema or provider contract for them.
-
-This is not only a missing tool name problem. It also means:
-
-- no action authorization path
-- no host-level allowed-action modeling
-- no MCP schema
-- no macOS implementation hooks
-
-### D. No direct value-setting API
-
-The skill includes `set_value` for sliders, steppers, and editable fields. In
-Sessio, value changes are currently limited to typed keystrokes.
-
-That is weaker for:
-
-- sliders
-- numeric steppers
-- fields that are easier to mutate through AX than through typing
-
-### E. No app auto-launch / background launch
-
-The skill expects:
-
-- `get_app_state` can auto-launch a target app in the background
-- `launch_app` can open an app without activating it
-
-Sessio currently requires the target app to be running already. The current
-macOS provider resolves by bundle id against running apps only.
-
-There is also an approval-boundary issue to keep explicit here:
-
-- `launch_app` and auto-launch via `computer_get_app_state` should go through
-  the same target-app approval path
-- a read-shaped tool such as `computer_get_app_state` should not silently widen
-  permissions just because it can trigger launch as a side effect
-- if `computer_get_app_state` launches the app, the response should say so
-
-### F. No installed/recent app discovery
-
-The skill's `list_apps` behavior includes running and recently used apps.
-Sessio currently lists running apps only.
-
-This makes discovery weaker and makes cold-start workflows harder.
-
-### G. No pid-scoped or background-targeted event routing
-
-`SKILL.md` explicitly describes event routing to the target pid without forcing
-foreground activation. Sessio's current macOS provider posts events to the
-global HID tap.
-
-That means Sessio does not yet match the skill's stronger guarantees around:
-
-- reduced focus stealing
-- target-specific input routing
-- better behavior when the user is active in another app
-
-### H. No screenshot-coordinate mapping contract
-
-The skill defines an important coordinate-space rule:
-
-- pixel coordinates are based on the screenshot returned by the latest
-  `get_app_state`
-- the runtime maps screenshot pixels back to real screen points
-
-Sessio currently returns display metadata and screenshot references, but it does
-not yet define a coordinate-space contract because pixel actions do not exist.
-
-This must be added before coordinate actions are trustworthy on Retina or any
-downsampled screenshot flow.
-
-The local [computer-use-skill.md](./computer-use-skill.md) also makes one more
-expectation explicit here: MCP should default to screenshot-space coordinates,
-not leave coordinate semantics implicit.
-
-### I. No post-action screenshot return shape
-
-The skill's preferred MCP path automatically returns a fresh screenshot after
-every action. Sessio currently returns text-only MCP tool results.
-
-This is a major usability gap because it forces the agent to reason from stale
-state unless it explicitly calls `computer_get_app_state` again.
-
-The local [computer-use-skill.md](./computer-use-skill.md) strengthens this
-into an interface expectation, not just a convenience note. That makes it a
-good acceptance target for future MCP response-shape work.
-
-There is also a deeper contract problem underneath the missing screenshot:
-
-- actions currently validate the latest snapshot id before acting, but they do
-  not mint a fresh post-action snapshot id
-- the same pre-action snapshot remains the lease's latest snapshot until another
-  explicit `computer_get_app_state`
-- MCP helpers currently wrap tool success as text-only content, not structured
-  post-action state
-
-For parity with the skill, the fix should be a **post-action state contract**,
-not only a screenshot convenience:
-
-- every action response should return the new authoritative state the model
-  should reason from
-- that state should include either a full `app_state` or enough data to replace
-  it, including a fresh snapshot id
-- the pre-action snapshot should no longer remain implicitly authoritative after
-  a successful mutation
-
-### J. Permission and onboarding tools are not exposed to the model
-
-The skill exposes onboarding helpers:
-
-- `permissions`
-- `grant`
-
-Sessio currently has settings screens and permission-panel commands, but does
-not expose these as part of the computer-use MCP tool family.
-
-That means the agent cannot guide its own onboarding path through the same
-computer-use interface.
-
-### K. Host control policy conflates input control with foreground takeover
-
-The shared desktop-control truth source is now in better shape than earlier
-drafts of this plan assumed. The remaining problem is higher in the stack:
-
-- [src-tauri/src/computer_use/host.rs](../src-tauri/src/computer_use/host.rs)
-  currently defines control availability as
-  `allow_input_injection && allow_foreground_takeover`
-- control actions currently mark the session as foreground-active
-- [src/pages/SettingsPage.tsx](../src/pages/SettingsPage.tsx) still presents
-  `Input control` and `Foreground takeover` as separate toggles
-
-That creates a policy-model mismatch:
-
-- the UI suggests two independent settings
-- the runtime treats them as one combined gate
-- future pid-scoped or non-activating control paths have nowhere to plug in
-  because all control is treated as takeover control
-
-This plan should therefore treat the issue as a host-policy design gap, not a
-desktop-control truth-source bug.
-
-The immediate direction for Sessio should be:
-
-- treat `computer use enabled` as already implying that control is allowed
-- remove separate product-policy gates such as `allow_input_injection`
-- only keep `foreground takeover` as a future concept if actions are explicitly
-  modeled by whether they actually require foreground takeover
-
-### L. No CLI parity layer (historical gap)
-
-The skill provides two interfaces:
-
-- MCP tools
-- CLI commands
-
-At the time this plan was written, Sessio had the MCP path only. The current
-implementation now exposes a `sessio cu ...` CLI surface aligned with the
-in-repo skill contract.
-
-That means Sessio still lacks:
-
-- scripting entry points
-- deterministic stdout workflows
-- a stable JSON CLI for other agent skills or external automation
-
-There is also an architecture boundary to keep explicit:
-
-- CLI parity should not implicitly introduce a helper, daemon, or separate
-  always-on automation service in this phase
-- the first CLI shape should be a thin operator surface attached to the
-  existing desktop-host implementation
-- if no eligible desktop host/session is available, the CLI should fail
-  explicitly instead of silently creating a different runtime model
-
-### M. No app-specific playbooks or skill resources
-
-The skill references app-specific playbooks. Sessio currently has no equivalent
-computer-use playbook layer for app-specific guidance such as:
-
-- Music
-- Spotify
-- Notion
-- Numbers
-- NetEase Music
-
-This does not block the MVP, but it does block parity with the richer skill
-experience.
-
-The in-repo [computer-use-skill.md](./computer-use-skill.md) is especially
-useful here because it already names concrete playbook candidates and how they
-should be used operationally.
-
-The boundary to keep here is:
-
-- playbook content and inventory belong in this capability plan
-- how those playbooks are injected into model context belongs in the prompt
-  refactor / skill-integration work, not here
-
-## Gap Categories
-
-### Category 1: Must-fix correctness gaps
-
-These create inconsistent or misleading behavior today:
-
-- host policy still models control as one combined
-  `allow_input_injection && allow_foreground_takeover` gate
-- auto-launch semantics are not yet pinned to the existing app-approval model
-- tool surface does not match what the product UI implies
-- action responses do not provide enough post-action state or snapshot turnover
-
-### Category 2: Must-have capability gaps for native-app usefulness
-
-These are required for broad real-world native-app automation:
-
-- pixel click fallback
-- right click
-- double click
-- drag
-- app launch
-- value setting
-
-### Category 3: Important robustness gaps
-
-- cold-start workflow parity for `get_app_state`
-- pid-scoped / background-targeted event delivery
-- screenshot coordinate mapping
-- installed/recent app discovery
-- onboarding tools
-
-### Category 4: Productization gaps
-
-- CLI parity
-- app-specific playbooks
-- richer response rendering
-
-## Recommended Implementation Order
+## Completion Audit Against SKILL.md
+
+The original gaps in this plan have now been implemented in the in-process
+Sessio desktop host. This section is the current audit record; earlier gap
+language should be treated as historical background only.
+
+| Area | Current status | Primary evidence |
+| --- | --- | --- |
+| Host policy | Complete. `ComputerUseSettings` has a single product switch (`enabled`); control is allowed when enabled, OS control is available, approvals pass, and the provider supports control. Legacy config keys are parsed only for compatibility and are not serialized back. | [settings.rs](../src-tauri/src/computer_use/settings.rs), [host.rs](../src-tauri/src/computer_use/host.rs), [config.rs](../src-tauri/src/config.rs), [SettingsPage.tsx](../src/pages/SettingsPage.tsx) |
+| App launch and discovery | Complete. `computer_launch_app` launches without activation, `computer_raise_app` is the explicit foreground recovery path, and `computer_get_app_state` can launch approved stopped targets before snapshotting. `computer_list_apps` returns installed plus running apps with recent-use ranking metadata when macOS exposes it. | [provider.rs](../src-tauri/src/computer_use/provider.rs), [macos.rs](../src-tauri/src/computer_use/platform/macos.rs), [dispatch.rs](../src-tauri/src/computer_use/mcp_http/dispatch.rs) |
+| Post-action state | Complete. Successful mutating actions capture a fresh authoritative `AppState`, mint a new snapshot id, and return structured content plus inline screenshot image content when the handle is readable. Stale pre-action snapshot ids are rejected. | [host.rs](../src-tauri/src/computer_use/host.rs), [protocol.rs](../src-tauri/src/computer_use/mcp_http/protocol.rs), [dispatch.rs](../src-tauri/src/computer_use/mcp_http/dispatch.rs), [lease.rs](../src-tauri/src/computer_use/lease.rs) |
+| Screenshot coordinate contract | Complete. Coordinate actions default to screenshot-space pixels, map through the stored screenshot bounds into screen-space points, and are tied to the latest snapshot. `coordSpace` / `coord_space` allow explicit screen-space input when needed. | [provider.rs](../src-tauri/src/computer_use/provider.rs), [host.rs](../src-tauri/src/computer_use/host.rs), [dispatch.rs](../src-tauri/src/computer_use/mcp_http/dispatch.rs) |
+| Action surface | Complete. The provider, host, MCP protocol, and CLI cover AX click, coordinate click, secondary action, double click, drag, set value, type text, press key, and scroll. AX refs are preferred where available, with screenshot-coordinate fallback. | [provider.rs](../src-tauri/src/computer_use/provider.rs), [host.rs](../src-tauri/src/computer_use/host.rs), [protocol.rs](../src-tauri/src/computer_use/mcp_http/protocol.rs), [cli.rs](../src-tauri/src/cli.rs) |
+| macOS implementation | Complete for the current in-process scope. Screenshots prefer ScreenCaptureKit and fall back to `screencapture -l`; physical events use pid-scoped `CGEventPostToPid`; AX actions include `AXPress`, `AXShowMenu`, scroll actions, `AXValue`, minimized-window restoration, and Electron AX flags. | [macos.rs](../src-tauri/src/computer_use/platform/macos.rs), [build.rs](../src-tauri/build.rs), [Cargo.toml](../src-tauri/Cargo.toml) |
+| Onboarding tools | Complete. `computer_permissions` and `computer_grant` expose permission status and supported OS settings flows through the computer-use MCP surface and `sessio cu`. | [onboarding.rs](../src-tauri/src/computer_use/onboarding.rs), [dispatch.rs](../src-tauri/src/computer_use/mcp_http/dispatch.rs), [cli.rs](../src-tauri/src/cli.rs) |
+| CLI parity | Complete for the in-process architecture. `sessio cu` attaches to an already-running desktop computer-use MCP host, supports `--json`, mirrors the MCP verbs, and fails explicitly instead of starting a separate helper/runtime. | [cli.rs](../src-tauri/src/cli.rs) |
+| Skill resources and playbooks | Complete. The canonical skill is bundled as `computer-use-skill/SKILL.md`, app playbooks are bundled next to it, and computer-use turns inject the resolved local skill path instead of expanding the full skill into every prompt. | [computer-use-skill.md](./computer-use-skill.md), [computer-use/playbooks](./computer-use/playbooks), [skill_resource.rs](../src-tauri/src/computer_use/skill_resource.rs), [tauri.conf.json](../src-tauri/tauri.conf.json) |
+
+## Completed Implementation Phases
 
 ### Phase 1: Re-baseline host control policy
 
-Goal:
+Status: complete.
 
-- make `computer use enabled` map directly to the runtime's control semantics
+Evidence:
 
-Tasks:
-
-- keep the shared desktop-control truth source as an OS/provider fact source,
-  not a product-policy gate
-- remove separate product-policy control gates such as
-  `allow_input_injection`
-- remove `allow_foreground_takeover` as a prerequisite for all control actions
-- decide whether `foreground takeover` remains:
-  - a purely runtime/overlay state
-  - or a future per-action policy once non-takeover control paths exist
-- ensure Settings, overlay, status, and allowed-actions all read the same
-  policy model
-
-Acceptance:
-
-- enabling computer use means control actions are product-allowed, subject only
-  to OS capability, approvals, and session state
-- the product no longer invents fake independence between separate control
-  toggles
-- Settings labels map 1:1 to host behavior
+- Settings expose one computer-use enable switch instead of independent
+  `input control` / `foreground takeover` toggles.
+- The host status reports control from settings + OS capability + provider
+  support, not from product-policy sub-switches.
+- Foreground activity remains a runtime overlay/abort state, not a prerequisite
+  for every control action.
 
 ### Phase 2: Add app launch and discovery workflow parity
 
-Goal:
+Status: complete.
 
-- support the skill's cold-start, snap-first operating model
+Evidence:
 
-Tasks:
-
-- add background app launch
-- add optional explicit `launch_app`
-- allow `get_app_state` to satisfy the skill's "launch if needed, then snap"
-  workflow without manual pre-launch
-- make `launch_app` and launch-via-`get_app_state` share the same target-app
-  approval rule
-- do not allow `get_app_state` to silently launch an unapproved target
-- expose whether the returned state came from an already-running app or a new
-  background launch
-- add recent/installed app discovery strategy
-
-Acceptance:
-
-- auto-launch never bypasses the app-approval boundary just because the entry
-  point was `computer_get_app_state`
-- the agent can discover and open a target app without manual pre-launch
-- cold-start workflows do not depend on `open -b` or prior user setup
+- `computer_launch_app` performs background launch without activation.
+- `computer_raise_app` handles hidden/minimized foreground recovery and is
+  surfaced in tool descriptions, runtime prompt hints, CLI help, and
+  `no_visible_window` errors.
+- `computer_get_app_state` launches stopped targets only after session and app
+  approval, then returns whether the state was launched.
+- `computer_list_apps` includes installed apps, running apps, `--days`, and
+  recent-use metadata from macOS Knowledge/Spotlight when available.
 
 ### Phase 3: Add post-action state and snapshot contract
 
-Goal:
+Status: complete.
 
-- eliminate stale-state reasoning after mutations
+Evidence:
 
-Tasks:
-
-- extend MCP tool responses to include authoritative post-action state
-- decide whether the returned unit is:
-  - full `app_state`
-  - or image + minimal metadata + fresh snapshot id
-- ensure successful control actions advance snapshot authority instead of
-  leaving the pre-action snapshot implicitly current
-- update MCP content handling so action responses are not limited to text-only
-  wrappers
-
-Acceptance:
-
-- the agent can observe action results without an immediate extra snapshot call
-- every successful mutation yields the new state the next action must target
-- the pre-action snapshot is no longer silently reusable as authoritative state
+- Mutating actions return a new `AppState` rather than text-only success.
+- The returned state includes a fresh snapshot id and screenshot metadata.
+- MCP responses include `structuredContent` and inline screenshot image content
+  when the screenshot file can be read.
+- The pre-action snapshot becomes stale after a successful mutation.
 
 ### Phase 4: Add screenshot coordinate-space semantics
 
-Goal:
+Status: complete.
 
-- make pixel actions reliable against the snapshot the model actually saw
+Evidence:
 
-Tasks:
-
-- define screenshot-space vs screen-space contract
-- record enough snapshot metadata to map image coordinates back to real screen
-  points
-- tie coordinate actions to the latest authoritative snapshot
-- reject or clearly define stale coordinate usage
-
-Acceptance:
-
-- coordinate actions line up with the screenshot the model used to reason
+- `ScreenshotRef` records image pixel dimensions plus the represented screen
+  bounds.
+- Screenshot-space points map linearly into screen-space points before provider
+  dispatch.
+- Coordinate actions default to screenshot-space and reject stale snapshots.
 
 ### Phase 5: Expand the provider and tool contract
 
-Goal:
+Status: complete.
 
-- close the most important action-surface gaps on top of the corrected state and
-  coordinate contracts
+Evidence:
 
-Tasks:
-
-- add provider contract support for:
-  - coordinate click
-  - secondary click
-  - double click
-  - drag
-  - set value
-- extend host allowed-action modeling
-- extend MCP schemas and dispatch
-- expose coordinate actions only with the screenshot-space semantics from Phase
-  4, not before
-
-Acceptance:
-
-- the tool protocol can represent both AX-targeted and pixel-targeted actions
-- the host can gate the new actions consistently
+- The provider contract, host, MCP catalog, dispatch layer, and `sessio cu`
+  surface include coordinate click, secondary click, double click, drag, and
+  direct AX value setting.
+- The macOS provider implements these actions through AX where appropriate and
+  pid-scoped CGEvent fallback for physical interactions.
 
 ### Phase 6: Expose onboarding tools
 
-Goal:
+Status: complete.
 
-- make permission setup agent-addressable
+Evidence:
 
-Tasks:
-
-- add `permissions` status tool
-- add `grant` helper tool or explicit permission-open flow
-- align returned error codes with onboarding guidance
-
-Acceptance:
-
-- an agent can explain and advance the permission setup process using the
-  computer-use surface itself
+- `computer_permissions` reports screen recording, Accessibility, and control
+  readiness with actionable guidance.
+- `computer_grant` opens the relevant macOS settings flow when supported.
+- Permission-related tool errors point agents back to those onboarding tools.
 
 ### Phase 7: Add CLI parity
 
-Goal:
+Status: complete.
 
-- expose the same core capability to scripts and skill-based integrations
+Evidence:
 
-Tasks:
-
-- design `sessio cu ...` commands
-- define the initial CLI as attached to the running desktop-host
-  implementation, not as a standalone daemon/service
-- define the local auth/session-routing model the CLI uses to reach that host
-- add `--json` machine-readable output
-- keep verb names aligned with MCP where practical
-
-Acceptance:
-
-- Sessio has a stable non-MCP automation surface for computer use without
-  changing the current in-process architecture
-- headless or daemonized external automation remains explicitly out of scope for
-  this phase
+- `sessio cu` exposes the core MCP verbs, supports stable `--json`, and accepts
+  skill-compatible aliases such as `--bundle`, positional refs, and
+  `coord_space`.
+- The CLI attaches to a running desktop MCP host through URL/token routing and
+  does not create a helper, daemon, or separate automation runtime.
 
 ### Phase 8: Add app playbooks
 
-Goal:
+Status: complete.
 
-- improve reliability for known apps
+Evidence:
 
-Tasks:
+- App playbooks are versioned under
+  [docs/computer-use/playbooks](./computer-use/playbooks).
+- [index.json](./computer-use/playbooks/index.json) records the inventory,
+  target bundles, primary strategy, fallback strategy, and review status.
+- Release builds bundle the skill and playbook directory as app resources.
 
-- create app-specific usage notes
-- define the playbook file/resource shape and versioned inventory
-- keep model-exposure and prompt-injection mechanics in the prompt refactor
-  plan, not in this document
-- use [computer-use-skill.md](./computer-use-skill.md) as the initial inventory
-  for playbook targets and operating conventions
+## Explicit Future Architecture Scope
 
-Acceptance:
+The following items are intentionally **not** part of the current in-process
+parity goal:
 
-- app-specific guidance content is versioned and reviewable in-repo
-- prompt/runtime injection ownership remains intentionally separate
+- helper/daemon-only commands such as `shot`, `lens`, and `shutdown`
+- a separate signed helper app or always-on sidecar daemon
+- CLI operation that survives desktop UI shutdowns
+
+Those belong to a later helper/daemon architecture decision if TCC identity,
+lifecycle isolation, or external automation requirements justify it.
 
 ## Proposed File Areas
 
