@@ -42,10 +42,10 @@ use core_graphics::geometry::{CGPoint, CGRect};
 use foreign_types::ForeignType;
 use image::{imageops::FilterType, ImageFormat, ImageReader};
 use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
-use objc2::{AnyThread, Message};
-use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
+use objc2::{AnyThread, MainThreadMarker, Message};
+use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSScreen};
 use objc2_core_graphics::CGImage;
-use objc2_foundation::{NSArray, NSDictionary, NSError};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSPoint, NSRect, NSSize};
 
 use crate::computer_use::provider::{
     AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ComputerUseProvider,
@@ -58,6 +58,38 @@ use crate::computer_use::provider::{
 struct FrontmostApp {
     pid: i32,
     app: objc2::rc::Retained<objc2_app_kit::NSRunningApplication>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InputDispatchRoute {
+    TargetPid,
+    Hid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputActionKind {
+    MouseClick,
+    MouseSecondaryClick,
+    MouseDoubleClick,
+    MouseDrag,
+    Scroll,
+    KeyboardText,
+    KeyboardKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppInputProfile {
+    Native,
+    WebLike,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EventTarget {
+    route: InputDispatchRoute,
+    pid: i32,
+    ensure_frontmost: bool,
+    restore_frontmost: bool,
 }
 
 /// The macOS provider. Stateless: every call re-reads live system state.
@@ -110,7 +142,7 @@ impl ComputerUseProvider for MacosProvider {
     fn capture_app_state(&self, target: &AppTarget) -> ProviderResult<RawAppState> {
         let pid = resolve_pid(&target.app_id)?;
         let (window_id, bounds) = frontmost_window_for_pid(pid)?;
-        let display = display_metadata();
+        let display = display_metadata_for_window_bounds(bounds);
         let screen_bounds = bounds.unwrap_or_else(|| display_screen_bounds(&display));
         let screenshot = capture_window(&self.capture_dir, window_id, screen_bounds)?;
         let elements = ax_elements_for_pid(pid).unwrap_or_default();
@@ -129,12 +161,18 @@ impl ComputerUseProvider for MacosProvider {
 
     fn click_point(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
         let pid = resolve_pid(&target.app_id)?;
-        left_click_at(Some(pid), cg_point(point))
+        left_click_at(
+            event_target_for(target, pid, InputActionKind::MouseClick),
+            cg_point(point),
+        )
     }
 
     fn secondary_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
         let pid = resolve_pid(&target.app_id)?;
-        secondary_click_at(Some(pid), cg_point(point))
+        secondary_click_at(
+            event_target_for(target, pid, InputActionKind::MouseSecondaryClick),
+            cg_point(point),
+        )
     }
 
     fn secondary_click_element(
@@ -148,12 +186,19 @@ impl ComputerUseProvider for MacosProvider {
 
     fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
         let pid = resolve_pid(&target.app_id)?;
-        double_click_at(Some(pid), cg_point(point))
+        double_click_at(
+            event_target_for(target, pid, InputActionKind::MouseDoubleClick),
+            cg_point(point),
+        )
     }
 
     fn drag(&self, target: &AppTarget, from: Point, to: Point) -> ProviderResult<()> {
         let pid = resolve_pid(&target.app_id)?;
-        drag_between(Some(pid), cg_point(from), cg_point(to))
+        drag_between(
+            event_target_for(target, pid, InputActionKind::MouseDrag),
+            cg_point(from),
+            cg_point(to),
+        )
     }
 
     fn set_value(
@@ -168,14 +213,21 @@ impl ComputerUseProvider for MacosProvider {
 
     fn type_text(&self, target: &AppTarget, text: &str) -> ProviderResult<()> {
         let pid = resolve_pid(&target.app_id)?;
-        type_unicode(Some(pid), text)
+        type_unicode(
+            event_target_for(target, pid, InputActionKind::KeyboardText),
+            text,
+        )
     }
 
     fn press_key(&self, target: &AppTarget, key: &str) -> ProviderResult<()> {
         let pid = resolve_pid(&target.app_id)?;
         let (keycode, flags) = keycode_and_flags_for(key)
             .ok_or_else(|| ProviderError::Failed(format!("unknown key: {key}")))?;
-        press_keycode(Some(pid), keycode, flags)
+        press_keycode(
+            event_target_for(target, pid, InputActionKind::KeyboardKey),
+            keycode,
+            flags,
+        )
     }
 
     fn scroll(
@@ -185,7 +237,11 @@ impl ComputerUseProvider for MacosProvider {
         amount: i32,
     ) -> ProviderResult<()> {
         let pid = resolve_pid(&target.app_id)?;
-        scroll_wheel(Some(pid), direction, amount)
+        scroll_wheel(
+            event_target_for(target, pid, InputActionKind::Scroll),
+            direction,
+            amount,
+        )
     }
 
     fn scroll_element(
@@ -520,6 +576,123 @@ fn installed_app_url(app_id: &str) -> Option<objc2::rc::Retained<objc2_foundatio
     use objc2_foundation::NSString;
     let workspace = NSWorkspace::sharedWorkspace();
     workspace.URLForApplicationWithBundleIdentifier(&NSString::from_str(app_id))
+}
+
+fn event_target_for(target: &AppTarget, pid: i32, action: InputActionKind) -> EventTarget {
+    let profile = app_input_profile(target, pid);
+    let route = match action {
+        InputActionKind::KeyboardText | InputActionKind::KeyboardKey => InputDispatchRoute::TargetPid,
+        InputActionKind::MouseClick
+        | InputActionKind::MouseSecondaryClick
+        | InputActionKind::MouseDoubleClick
+        | InputActionKind::MouseDrag
+        | InputActionKind::Scroll => match profile {
+            AppInputProfile::Native => InputDispatchRoute::TargetPid,
+            AppInputProfile::WebLike => InputDispatchRoute::Hid,
+        },
+    };
+    let ensure_frontmost = matches!(route, InputDispatchRoute::Hid);
+    let restore_frontmost = !ensure_frontmost;
+
+    crate::computer_use::diagnostics::write(
+        "input_dispatch_route",
+        serde_json::json!({
+            "appId": target.app_id,
+            "windowId": target.window_id,
+            "pid": pid,
+            "action": match action {
+                InputActionKind::MouseClick => "mouse_click",
+                InputActionKind::MouseSecondaryClick => "mouse_secondary_click",
+                InputActionKind::MouseDoubleClick => "mouse_double_click",
+                InputActionKind::MouseDrag => "mouse_drag",
+                InputActionKind::Scroll => "scroll",
+                InputActionKind::KeyboardText => "keyboard_text",
+                InputActionKind::KeyboardKey => "keyboard_key",
+            },
+            "profile": match profile {
+                AppInputProfile::Native => "native",
+                AppInputProfile::WebLike => "web_like",
+            },
+            "route": route,
+            "ensureFrontmost": ensure_frontmost,
+            "restoreFrontmost": restore_frontmost,
+        }),
+    );
+
+    EventTarget {
+        route,
+        pid,
+        ensure_frontmost,
+        restore_frontmost,
+    }
+}
+
+fn target_pid_event_target(pid: i32) -> EventTarget {
+    EventTarget {
+        route: InputDispatchRoute::TargetPid,
+        pid,
+        ensure_frontmost: false,
+        restore_frontmost: true,
+    }
+}
+
+fn app_input_profile(target: &AppTarget, pid: i32) -> AppInputProfile {
+    if is_known_web_like_bundle(&target.app_id) {
+        return AppInputProfile::WebLike;
+    }
+    if bundle_has_web_like_framework_markers(&target.app_id) {
+        return AppInputProfile::WebLike;
+    }
+    if running_application_name(pid)
+        .map(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.contains("netease") || lower.contains("cloudmusic")
+        })
+        .unwrap_or(false)
+    {
+        return AppInputProfile::WebLike;
+    }
+    AppInputProfile::Native
+}
+
+fn is_known_web_like_bundle(app_id: &str) -> bool {
+    matches!(
+        app_id,
+        "com.netease.163music"
+            | "com.spotify.client"
+            | "notion.id"
+            | "com.tinyspeck.slackmacgap"
+            | "com.microsoft.VSCode"
+    )
+}
+
+fn bundle_has_web_like_framework_markers(app_id: &str) -> bool {
+    let Some(url) = installed_app_url(app_id) else {
+        return false;
+    };
+    let Some(path) = url.path().map(|p| p.to_string()) else {
+        return false;
+    };
+    let contents = PathBuf::from(path).join("Contents");
+    let markers = [
+        contents.join("Frameworks").join("Electron Framework.framework"),
+        contents.join("Frameworks").join("QtWebEngineCore.framework"),
+        contents.join("Frameworks").join("QtWebEngineWidgets.framework"),
+        contents.join("Frameworks").join("QtWebEngineQuick.framework"),
+    ];
+    markers.iter().any(|path| path.exists())
+}
+
+fn running_application_name(pid: i32) -> Option<String> {
+    let app = running_application_for_pid(pid)?;
+    app.localizedName().map(|name| name.to_string())
+}
+
+fn running_application_for_pid(
+    pid: i32,
+) -> Option<objc2::rc::Retained<objc2_app_kit::NSRunningApplication>> {
+    use objc2_app_kit::NSRunningApplication;
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
 }
 
 #[allow(deprecated)]
@@ -1017,14 +1190,7 @@ fn sck_stream_configuration(screen_bounds: Rect) -> ProviderResult<Retained<AnyO
 }
 
 fn display_scale_from_capture_bounds(screen_bounds: Rect) -> f32 {
-    let display = display_metadata();
-    if screen_bounds.width > 0.0 {
-        (display.width as f32 / screen_bounds.width)
-            .clamp(1.0, 4.0)
-            .round()
-    } else {
-        display.scale.max(1.0)
-    }
+    display_metadata_for_window_bounds(Some(screen_bounds)).scale.max(1.0)
 }
 
 fn capture_pixel_size_for_bounds(screen_bounds: Rect, scale: f32) -> (usize, usize) {
@@ -1048,15 +1214,120 @@ unsafe extern "C" {
     fn CGImageRetain(image: core_graphics::sys::CGImageRef) -> core_graphics::sys::CGImageRef;
 }
 
-fn display_metadata() -> DisplayMetadata {
+fn display_metadata_for_window_bounds(bounds: Option<Rect>) -> DisplayMetadata {
+    let screen = screen_for_rect(bounds)
+        .or_else(main_screen)
+        .or_else(|| screen_for_cg_display_bounds(CGDisplay::main().bounds()));
+
+    if let Some(screen) = screen {
+        let frame = screen.frame();
+        let scale = screen.backingScaleFactor() as f32;
+        return DisplayMetadata {
+            width: logical_dimension_to_pixels(frame.size.width, scale),
+            height: logical_dimension_to_pixels(frame.size.height, scale),
+            scale: sanitize_scale(scale),
+        };
+    }
+
     let main = CGDisplay::main();
     DisplayMetadata {
         width: main.pixels_wide() as u32,
         height: main.pixels_high() as u32,
-        // CGDisplay does not expose the backing scale directly here; default to
-        // 2.0 on Retina-era hardware. Refined against NSScreen in a later pass.
-        scale: 2.0,
+        scale: 1.0,
     }
+}
+
+fn screen_for_rect(bounds: Option<Rect>) -> Option<Retained<NSScreen>> {
+    let bounds = bounds?;
+    let rect = ns_rect_from_rect(bounds)?;
+    let center = NSPoint::new(
+        rect.origin.x + (rect.size.width / 2.0),
+        rect.origin.y + (rect.size.height / 2.0),
+    );
+    let mtm = MainThreadMarker::new()?;
+
+    NSScreen::screens(mtm)
+        .iter()
+        .find(|screen| ns_rect_contains_point(screen.frame(), center))
+        .map(|screen| screen.retain())
+        .or_else(|| {
+            screen_for_cg_display_bounds(cg_display_bounds_for_point(center).unwrap_or_else(|| {
+                CGDisplay::main().bounds()
+            }))
+        })
+}
+
+fn main_screen() -> Option<Retained<NSScreen>> {
+    let mtm = MainThreadMarker::new()?;
+    NSScreen::mainScreen(mtm)
+}
+
+fn screen_for_cg_display_bounds(bounds: CGRect) -> Option<Retained<NSScreen>> {
+    let mtm = MainThreadMarker::new()?;
+    NSScreen::screens(mtm)
+        .iter()
+        .find(|screen| ns_rect_nearly_equals_cg_rect(screen.frame(), bounds))
+        .map(|screen| screen.retain())
+}
+
+fn cg_display_bounds_for_point(point: NSPoint) -> Option<CGRect> {
+    let window_center = CGPoint::new(point.x, point.y);
+    CGDisplay::active_displays().ok().and_then(|display_ids| {
+        display_ids.into_iter().find_map(|display_id| {
+            let display = CGDisplay::new(display_id);
+            let bounds = display.bounds();
+            cg_rect_contains_point(bounds, window_center).then_some(bounds)
+        })
+    })
+}
+
+fn ns_rect_from_rect(rect: Rect) -> Option<NSRect> {
+    if !rect.x.is_finite()
+        || !rect.y.is_finite()
+        || !rect.width.is_finite()
+        || !rect.height.is_finite()
+        || rect.width <= 0.0
+        || rect.height <= 0.0
+    {
+        return None;
+    }
+    Some(NSRect::new(
+        NSPoint::new(rect.x as f64, rect.y as f64),
+        NSSize::new(rect.width as f64, rect.height as f64),
+    ))
+}
+
+fn logical_dimension_to_pixels(value: f64, scale: f32) -> u32 {
+    ((value * f64::from(sanitize_scale(scale))).round() as u32).max(1)
+}
+
+fn sanitize_scale(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
+fn ns_rect_contains_point(rect: NSRect, point: NSPoint) -> bool {
+    point.x >= rect.origin.x
+        && point.y >= rect.origin.y
+        && point.x <= rect.origin.x + rect.size.width
+        && point.y <= rect.origin.y + rect.size.height
+}
+
+fn cg_rect_contains_point(rect: CGRect, point: CGPoint) -> bool {
+    point.x >= rect.origin.x
+        && point.y >= rect.origin.y
+        && point.x <= rect.origin.x + rect.size.width
+        && point.y <= rect.origin.y + rect.size.height
+}
+
+fn ns_rect_nearly_equals_cg_rect(ns_rect: NSRect, cg_rect: CGRect) -> bool {
+    (ns_rect.origin.x - cg_rect.origin.x).abs() < 1.0
+        && (ns_rect.origin.y - cg_rect.origin.y).abs() < 1.0
+        && (ns_rect.size.width - cg_rect.size.width).abs() < 1.0
+        && (ns_rect.size.height - cg_rect.size.height).abs() < 1.0
 }
 
 fn display_screen_bounds(display: &DisplayMetadata) -> Rect {
@@ -1149,7 +1420,14 @@ fn ax_elements_for_pid(pid: i32) -> Option<Vec<UiElement>> {
     enable_electron_accessibility_flags(root);
     let mut out = Vec::new();
     let mut next_id = 0u64;
-    walk_ax(root, 0, &mut next_id, &mut out);
+    if let Some(windows) = ax_windows(root) {
+        for window in windows {
+            walk_ax(window, 0, &mut next_id, &mut out);
+            unsafe { cf_release(window as CFTypeRef) };
+        }
+    } else {
+        walk_ax(root, 0, &mut next_id, &mut out);
+    }
     // Release the root we created.
     unsafe { cf_release(root as CFTypeRef) };
     Some(out)
@@ -1236,6 +1514,15 @@ fn ax_bool_attr(element: ax::AXUIElementRef, attr: &str) -> Option<bool> {
 
 fn ax_children(element: ax::AXUIElementRef) -> Option<Vec<ax::AXUIElementRef>> {
     let array = ax_array_attr(element, ax::CHILDREN)?;
+    ax_retained_array_items(array)
+}
+
+fn ax_windows(element: ax::AXUIElementRef) -> Option<Vec<ax::AXUIElementRef>> {
+    let array = ax_array_attr(element, ax::WINDOWS)?;
+    ax_retained_array_items(array)
+}
+
+fn ax_retained_array_items(array: CFArray<*const c_void>) -> Option<Vec<ax::AXUIElementRef>> {
     let mut out = Vec::with_capacity(array.len() as usize);
     for item in array.iter() {
         if item.is_null() {
@@ -1385,7 +1672,7 @@ fn click_ax_element(pid: i32, element_id: &ElementId) -> ProviderResult<()> {
         return Ok(());
     }
     match ax_element_center(pid, element_id)? {
-        Some(center) => left_click_at(Some(pid), center),
+        Some(center) => left_click_at(target_pid_event_target(pid), center),
         None => Err(ProviderError::ElementNotFound(element_id.clone())),
     }
 }
@@ -1396,7 +1683,7 @@ fn secondary_ax_element(pid: i32, element_id: &ElementId) -> ProviderResult<()> 
         return Ok(());
     }
     match ax_element_center(pid, element_id)? {
-        Some(center) => secondary_click_at(Some(pid), center),
+        Some(center) => secondary_click_at(target_pid_event_target(pid), center),
         None => Err(ProviderError::ElementNotFound(element_id.clone())),
     }
 }
@@ -1421,7 +1708,7 @@ fn scroll_ax_element(
     if visible == ax::kAXErrorSuccess {
         return Ok(());
     }
-    scroll_wheel(Some(pid), direction, amount)
+    scroll_wheel(target_pid_event_target(pid), direction, amount)
 }
 
 fn set_ax_value_for_id(pid: i32, element_id: &ElementId, value: &str) -> ProviderResult<()> {
@@ -1590,9 +1877,9 @@ fn cg_rect(rect: Rect) -> CGRect {
     }
 }
 
-fn left_click_at(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
+fn left_click_at(target: EventTarget, point: CGPoint) -> ProviderResult<()> {
     mouse_click_at(
-        pid,
+        target,
         point,
         CGMouseButton::Left,
         CGEventType::LeftMouseDown,
@@ -1601,9 +1888,9 @@ fn left_click_at(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
     )
 }
 
-fn secondary_click_at(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
+fn secondary_click_at(target: EventTarget, point: CGPoint) -> ProviderResult<()> {
     mouse_click_at(
-        pid,
+        target,
         point,
         CGMouseButton::Right,
         CGEventType::RightMouseDown,
@@ -1612,7 +1899,7 @@ fn secondary_click_at(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
     )
 }
 
-fn move_mouse_to(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
+fn move_mouse_to(target: EventTarget, point: CGPoint) -> ProviderResult<()> {
     let source = event_source()?;
     let moved = CGEvent::new_mouse_event(
         source,
@@ -1621,19 +1908,19 @@ fn move_mouse_to(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
         CGMouseButton::Left,
     )
     .map_err(|_| ProviderError::Failed("create mouse-moved".into()))?;
-    post_event_sequence(pid, &[&moved]);
+    post_event_sequence(target, &[&moved]);
     Ok(())
 }
 
 fn mouse_click_at(
-    pid: Option<i32>,
+    target: EventTarget,
     point: CGPoint,
     button: CGMouseButton,
     down_type: CGEventType,
     up_type: CGEventType,
     click_state: i64,
 ) -> ProviderResult<()> {
-    move_mouse_to(pid, point)?;
+    move_mouse_to(target, point)?;
     thread::sleep(Duration::from_millis(20));
     let source = event_source()?;
     let down = CGEvent::new_mouse_event(source.clone(), down_type, point, button)
@@ -1642,12 +1929,12 @@ fn mouse_click_at(
         .map_err(|_| ProviderError::Failed("create mouse-up".into()))?;
     down.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
     up.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
-    post_event_sequence(pid, &[&down, &up]);
+    post_event_sequence(target, &[&down, &up]);
     Ok(())
 }
 
-fn double_click_at(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
-    move_mouse_to(pid, point)?;
+fn double_click_at(target: EventTarget, point: CGPoint) -> ProviderResult<()> {
+    move_mouse_to(target, point)?;
     thread::sleep(Duration::from_millis(20));
     let source = event_source()?;
     for click_state in [1, 2] {
@@ -1667,14 +1954,14 @@ fn double_click_at(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
         .map_err(|_| ProviderError::Failed("create double-click mouse-up".into()))?;
         down.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
         up.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
-        post_event_sequence(pid, &[&down, &up]);
+        post_event_sequence(target, &[&down, &up]);
         thread::sleep(Duration::from_millis(40));
     }
     Ok(())
 }
 
-fn drag_between(pid: Option<i32>, from: CGPoint, to: CGPoint) -> ProviderResult<()> {
-    move_mouse_to(pid, from)?;
+fn drag_between(target: EventTarget, from: CGPoint, to: CGPoint) -> ProviderResult<()> {
+    move_mouse_to(target, from)?;
     thread::sleep(Duration::from_millis(20));
     let source = event_source()?;
     let down = CGEvent::new_mouse_event(
@@ -1694,27 +1981,30 @@ fn drag_between(pid: Option<i32>, from: CGPoint, to: CGPoint) -> ProviderResult<
     let up = CGEvent::new_mouse_event(source, CGEventType::LeftMouseUp, to, CGMouseButton::Left)
         .map_err(|_| ProviderError::Failed("create drag mouse-up".into()))?;
     let original_frontmost = frontmost_app();
-    post_event(pid, &down);
+    post_event(target, &down);
     thread::sleep(Duration::from_millis(20));
-    post_event(pid, &drag);
+    post_event(target, &drag);
     thread::sleep(Duration::from_millis(20));
-    post_event(pid, &up);
+    post_event(target, &up);
     restore_frontmost_if_changed(original_frontmost);
     Ok(())
 }
 
-fn type_unicode(pid: Option<i32>, text: &str) -> ProviderResult<()> {
+fn type_unicode(target: EventTarget, text: &str) -> ProviderResult<()> {
     let source = event_source()?;
-    // A single keyboard event carrying the unicode string is the simplest
-    // reliable path for arbitrary text (no per-char keycode mapping).
-    let event = CGEvent::new_keyboard_event(source, 0, true)
-        .map_err(|_| ProviderError::Failed("create keyboard event".into()))?;
-    event.set_string(text);
-    post_event_sequence(pid, &[&event]);
+    // Send paired key-down/key-up events so Chromium/Qt text inputs observe a
+    // complete keyboard lifecycle instead of a lone unicode key-down.
+    let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
+        .map_err(|_| ProviderError::Failed("create keyboard key-down".into()))?;
+    let up = CGEvent::new_keyboard_event(source, 0, false)
+        .map_err(|_| ProviderError::Failed("create keyboard key-up".into()))?;
+    down.set_string(text);
+    up.set_string(text);
+    post_event_sequence(target, &[&down, &up]);
     Ok(())
 }
 
-fn press_keycode(pid: Option<i32>, keycode: u16, flags: CGEventFlags) -> ProviderResult<()> {
+fn press_keycode(target: EventTarget, keycode: u16, flags: CGEventFlags) -> ProviderResult<()> {
     let source = event_source()?;
     let down = CGEvent::new_keyboard_event(source.clone(), keycode, true)
         .map_err(|_| ProviderError::Failed("create key-down".into()))?;
@@ -1722,11 +2012,11 @@ fn press_keycode(pid: Option<i32>, keycode: u16, flags: CGEventFlags) -> Provide
         .map_err(|_| ProviderError::Failed("create key-up".into()))?;
     down.set_flags(flags);
     up.set_flags(flags);
-    post_event_sequence(pid, &[&down, &up]);
+    post_event_sequence(target, &[&down, &up]);
     Ok(())
 }
 
-fn scroll_wheel(pid: Option<i32>, direction: ScrollDirection, amount: i32) -> ProviderResult<()> {
+fn scroll_wheel(target: EventTarget, direction: ScrollDirection, amount: i32) -> ProviderResult<()> {
     let source = event_source()?;
     let (dy, dx) = match direction {
         ScrollDirection::Up => (amount, 0),
@@ -1736,24 +2026,97 @@ fn scroll_wheel(pid: Option<i32>, direction: ScrollDirection, amount: i32) -> Pr
     };
     let event = CGEvent::new_scroll_event(source, ScrollEventUnit::PIXEL, 2, dy, dx, 0)
         .map_err(|_| ProviderError::Failed("create scroll event".into()))?;
-    post_event_sequence(pid, &[&event]);
+    post_event_sequence(target, &[&event]);
     Ok(())
 }
 
-fn post_event_sequence(pid: Option<i32>, events: &[&CGEvent]) {
-    let original_frontmost = frontmost_app();
+fn post_event_sequence(target: EventTarget, events: &[&CGEvent]) {
+    let original_frontmost = prepare_event_dispatch(target);
     for event in events {
-        post_event(pid, event);
+        post_event(target, event);
     }
-    restore_frontmost_if_changed(original_frontmost);
+    finish_event_dispatch(target, original_frontmost);
 }
 
-fn post_event(pid: Option<i32>, event: &CGEvent) {
-    if let Some(pid) = pid {
-        event.post_to_pid(pid);
-    } else {
-        event.post(CGEventTapLocation::HID);
+fn post_event(target: EventTarget, event: &CGEvent) {
+    match target.route {
+        InputDispatchRoute::TargetPid => event.post_to_pid(target.pid),
+        InputDispatchRoute::Hid => event.post(CGEventTapLocation::HID),
     }
+}
+
+fn prepare_event_dispatch(target: EventTarget) -> Option<FrontmostApp> {
+    let original_frontmost = frontmost_app();
+    let frontmost_before_pid = original_frontmost.as_ref().map(|app| app.pid);
+    let frontmost_before_bundle_id = original_frontmost
+        .as_ref()
+        .and_then(|app| app_bundle_id(&app.app));
+    let target_bundle_id = running_application_for_pid(target.pid)
+        .and_then(|app| app_bundle_id(&app));
+    let was_frontmost = frontmost_before_pid == Some(target.pid);
+    let activated = if target.ensure_frontmost && !was_frontmost {
+        activate_target_pid(target.pid)
+    } else {
+        false
+    };
+    let activation_confirmed = if target.ensure_frontmost {
+        wait_for_frontmost_pid(target.pid, Duration::from_millis(300))
+    } else {
+        false
+    };
+    if target.ensure_frontmost && activation_confirmed {
+        thread::sleep(Duration::from_millis(30));
+    }
+    let current_frontmost = frontmost_app();
+    crate::computer_use::diagnostics::write(
+        "input_frontmost_prepare",
+        serde_json::json!({
+            "route": target.route,
+            "targetPid": target.pid,
+            "targetBundleId": target_bundle_id,
+            "ensureFrontmost": target.ensure_frontmost,
+            "restoreFrontmost": target.restore_frontmost,
+            "wasFrontmost": was_frontmost,
+            "activated": activated,
+            "activationConfirmed": activation_confirmed,
+            "frontmostBeforePid": frontmost_before_pid,
+            "frontmostBeforeBundleId": frontmost_before_bundle_id,
+            "frontmostAfterPid": current_frontmost.as_ref().map(|app| app.pid),
+            "frontmostAfterBundleId": current_frontmost
+                .as_ref()
+                .and_then(|app| app_bundle_id(&app.app)),
+        }),
+    );
+    original_frontmost
+}
+
+fn finish_event_dispatch(target: EventTarget, original_frontmost: Option<FrontmostApp>) {
+    if !target.restore_frontmost {
+        crate::computer_use::diagnostics::write(
+            "input_frontmost_restore",
+            serde_json::json!({
+                "route": target.route,
+                "targetPid": target.pid,
+                "restoreFrontmost": false,
+                "skipped": true,
+                "currentFrontmostPid": frontmost_app().as_ref().map(|app| app.pid),
+            }),
+        );
+        return;
+    }
+
+    let restored = restore_frontmost_if_changed(original_frontmost.clone());
+    crate::computer_use::diagnostics::write(
+        "input_frontmost_restore",
+        serde_json::json!({
+            "route": target.route,
+            "targetPid": target.pid,
+            "restoreFrontmost": true,
+            "restored": restored,
+            "originalFrontmostPid": original_frontmost.as_ref().map(|app| app.pid),
+            "currentFrontmostPid": frontmost_app().as_ref().map(|app| app.pid),
+        }),
+    );
 }
 
 fn frontmost_app() -> Option<FrontmostApp> {
@@ -1765,20 +2128,56 @@ fn frontmost_app() -> Option<FrontmostApp> {
     })
 }
 
-fn restore_frontmost_if_changed(original: Option<FrontmostApp>) {
+fn app_bundle_id(app: &objc2::rc::Retained<objc2_app_kit::NSRunningApplication>) -> Option<String> {
+    app.bundleIdentifier().map(|bundle_id| bundle_id.to_string())
+}
+
+fn activate_target_pid(pid: i32) -> bool {
+    use objc2_app_kit::NSApplicationActivationOptions;
+
+    let Some(app) = running_application_for_pid(pid) else {
+        return false;
+    };
+    restore_minimized_ax_windows(pid);
+    let _ = app.unhide();
+    #[allow(deprecated)]
+    let activated = app.activateWithOptions(
+        NSApplicationActivationOptions::ActivateAllWindows
+            | NSApplicationActivationOptions::ActivateIgnoringOtherApps,
+    );
+    restore_minimized_ax_windows(pid);
+    activated
+}
+
+fn wait_for_frontmost_pid(pid: i32, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if frontmost_app()
+            .map(|current| current.pid == pid)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+fn restore_frontmost_if_changed(original: Option<FrontmostApp>) -> bool {
     let Some(original) = original else {
-        return;
+        return false;
     };
     thread::sleep(Duration::from_millis(10));
     if frontmost_app()
         .map(|current| current.pid == original.pid)
         .unwrap_or(false)
     {
-        return;
+        return false;
     }
     let _ = original
         .app
         .activateWithOptions(objc2_app_kit::NSApplicationActivationOptions(0));
+    true
 }
 
 /// Minimal keycode map for common named keys (US layout virtual keycodes).
@@ -1976,6 +2375,32 @@ mod tests {
             Some(1782645753)
         );
         assert_eq!(parse_mdls_utc_timestamp("(null)"), None);
+    }
+
+    #[test]
+    fn known_web_like_bundle_uses_hid_for_mouse_but_not_keyboard() {
+        let target = AppTarget {
+            app_id: "com.netease.163music".into(),
+            window_id: None,
+        };
+
+        let mouse = event_target_for(&target, 42, InputActionKind::MouseClick);
+        let keyboard = event_target_for(&target, 42, InputActionKind::KeyboardKey);
+
+        assert_eq!(mouse.route, InputDispatchRoute::Hid);
+        assert_eq!(keyboard.route, InputDispatchRoute::TargetPid);
+    }
+
+    #[test]
+    fn native_bundle_uses_pid_for_mouse() {
+        let target = AppTarget {
+            app_id: "com.apple.TextEdit".into(),
+            window_id: None,
+        };
+
+        let mouse = event_target_for(&target, 42, InputActionKind::MouseClick);
+
+        assert_eq!(mouse.route, InputDispatchRoute::TargetPid);
     }
 
     #[test]

@@ -13,6 +13,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 
@@ -46,6 +48,37 @@ pub enum ComputerUseError {
     Coordinate(String),
     #[error("provider error: {0}")]
     Provider(#[from] ProviderError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PostActionCaptureTiming {
+    initial_delay_ms: u64,
+    poll_interval_ms: u64,
+    total_window_ms: u64,
+}
+
+impl PostActionCaptureTiming {
+    #[cfg(not(test))]
+    const DEFAULT: Self = Self {
+        initial_delay_ms: 500,
+        poll_interval_ms: 500,
+        total_window_ms: 2000,
+    };
+
+    #[cfg(test)]
+    const DEFAULT: Self = Self {
+        initial_delay_ms: 0,
+        poll_interval_ms: 0,
+        total_window_ms: 0,
+    };
+
+    fn attempt_count(self) -> usize {
+        if self.total_window_ms <= self.initial_delay_ms || self.poll_interval_ms == 0 {
+            1
+        } else {
+            1 + ((self.total_window_ms - self.initial_delay_ms) / self.poll_interval_ms) as usize
+        }
+    }
 }
 
 /// The host. Cheap to clone (`Arc` internals) so it can be shared across the
@@ -328,10 +361,99 @@ impl ComputerUseHost {
         target: &AppTarget,
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
-        let mut raw = self.provider.capture_app_state(target)?;
+        self.capture_post_action_state_with_timing(
+            session_id,
+            target,
+            perm,
+            PostActionCaptureTiming::DEFAULT,
+        )
+    }
+
+    fn capture_post_action_state_with_timing(
+        &self,
+        session_id: &str,
+        target: &AppTarget,
+        perm: &DesktopControlPermissionStatus,
+        timing: PostActionCaptureTiming,
+    ) -> Result<AppState, ComputerUseError> {
+        let started = Instant::now();
+        let attempts_total = timing.attempt_count();
+        super::diagnostics::write(
+            "post_action_capture_start",
+            json!({
+                "sessionId": session_id,
+                "target": target,
+                "initialDelayMs": timing.initial_delay_ms,
+                "pollIntervalMs": timing.poll_interval_ms,
+                "totalWindowMs": timing.total_window_ms,
+                "attemptsTotal": attempts_total,
+            }),
+        );
+
+        if timing.initial_delay_ms > 0 {
+            thread::sleep(Duration::from_millis(timing.initial_delay_ms));
+        }
+
+        let mut last_raw = None;
+        for attempt_index in 0..attempts_total {
+            if attempt_index > 0 && timing.poll_interval_ms > 0 {
+                thread::sleep(Duration::from_millis(timing.poll_interval_ms));
+            }
+
+            let raw = match self.provider.capture_app_state(target) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    super::diagnostics::write(
+                        "post_action_capture_failed",
+                        json!({
+                            "sessionId": session_id,
+                            "target": target,
+                            "attempt": attempt_index + 1,
+                            "attemptsTotal": attempts_total,
+                            "elapsedMs": started.elapsed().as_millis() as u64,
+                            "error": error.to_string(),
+                        }),
+                    );
+                    return Err(error.into());
+                }
+            };
+
+            super::diagnostics::write(
+                "post_action_capture_attempt",
+                json!({
+                    "sessionId": session_id,
+                    "target": target,
+                    "attempt": attempt_index + 1,
+                    "attemptsTotal": attempts_total,
+                    "elapsedMs": started.elapsed().as_millis() as u64,
+                    "screenshotHandle": raw.screenshot.handle.as_str(),
+                    "screenshotWidth": raw.screenshot.width,
+                    "screenshotHeight": raw.screenshot.height,
+                    "screenshotByteLen": raw.screenshot.byte_len,
+                }),
+            );
+
+            last_raw = Some(raw);
+        }
+
+        let mut raw = last_raw.expect("post-action capture should run at least once");
         self.filter_elements_for_permissions(&mut raw, perm);
         let snapshot =
             self.next_snapshot(session_id, raw.screenshot.clone(), raw.elements.clone())?;
+        super::diagnostics::write(
+            "post_action_capture_complete",
+            json!({
+                "sessionId": session_id,
+                "target": target,
+                "attemptsTotal": attempts_total,
+                "elapsedMs": started.elapsed().as_millis() as u64,
+                "snapshotId": snapshot.0.as_str(),
+                "screenshotHandle": raw.screenshot.handle.as_str(),
+                "screenshotWidth": raw.screenshot.width,
+                "screenshotHeight": raw.screenshot.height,
+                "screenshotByteLen": raw.screenshot.byte_len,
+            }),
+        );
         Ok(self.app_state_from_raw(snapshot, raw, perm, false))
     }
 
@@ -502,6 +624,24 @@ impl ComputerUseHost {
                 "resolvedScreenFrom": screen_from,
                 "resolvedScreenTo": screen_to,
                 "screenshot": screenshot,
+            }),
+        );
+    }
+
+    fn write_keyboard_action_record(
+        event: &str,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        target: &AppTarget,
+        payload: serde_json::Value,
+    ) {
+        super::diagnostics::write(
+            event,
+            json!({
+                "sessionId": session_id,
+                "snapshotId": snapshot.0.as_str(),
+                "target": target,
+                "payload": payload,
             }),
         );
     }
@@ -856,6 +996,15 @@ impl ComputerUseHost {
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
         let target = self.require_control(session_id, snapshot, perm)?;
+        Self::write_keyboard_action_record(
+            "type_text_dispatch",
+            session_id,
+            snapshot,
+            &target,
+            json!({
+                "textLen": text.chars().count(),
+            }),
+        );
         self.provider.type_text(&target, text)?;
         self.capture_post_action_state(session_id, &target, perm)
     }
@@ -869,6 +1018,15 @@ impl ComputerUseHost {
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
         let target = self.require_control(session_id, snapshot, perm)?;
+        Self::write_keyboard_action_record(
+            "press_key_dispatch",
+            session_id,
+            snapshot,
+            &target,
+            json!({
+                "key": key,
+            }),
+        );
         self.provider.press_key(&target, key)?;
         self.capture_post_action_state(session_id, &target, perm)
     }
@@ -1473,6 +1631,32 @@ mod tests {
             provider.actions(),
             vec!["click:com.example.app:el-1".to_string()]
         );
+    }
+
+    #[test]
+    fn post_action_capture_returns_last_polled_capture() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+
+        let state = h
+            .capture_post_action_state_with_timing(
+                "s1",
+                &target(),
+                &p,
+                PostActionCaptureTiming {
+                    initial_delay_ms: 0,
+                    poll_interval_ms: 1,
+                    total_window_ms: 2,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(provider.capture_count(), 3);
+        assert_eq!(state.screenshot.handle, "snap-3");
     }
 
     #[test]

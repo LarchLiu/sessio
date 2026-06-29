@@ -5,13 +5,12 @@
 //! user can see where an agent is about to act.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{
-    utils::config::Color, AppHandle, Emitter, Listener, Manager, WebviewUrl,
-    WebviewWindowBuilder,
+    utils::config::Color, AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
 };
 
@@ -35,6 +34,8 @@ struct PointerOverlayState {
 }
 
 pub type PointerEventSink = Arc<dyn Fn(ComputerUsePointerEvent) + Send + Sync>;
+
+static POINTER_OVERLAY_STATE: OnceLock<Arc<Mutex<PointerOverlayState>>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -108,14 +109,13 @@ impl ComputerUsePointerEvent {
 }
 
 pub fn tauri_pointer_event_sink(app: AppHandle) -> PointerEventSink {
-    let state = Arc::new(Mutex::new(PointerOverlayState::default()));
+    let state = pointer_overlay_state();
     if let Err(error) = ensure_pointer_overlay_windows(&app, &state) {
         super::diagnostics::write(
             "pointer_overlay_ensure_failed",
             serde_json::json!({ "error": error }),
         );
     }
-    register_pointer_overlay_ready_listener(&app, Arc::clone(&state));
     Arc::new(move |event| {
         if let Err(error) = show_and_emit_pointer_event(&app, &state, event) {
             super::diagnostics::write(
@@ -124,6 +124,25 @@ pub fn tauri_pointer_event_sink(app: AppHandle) -> PointerEventSink {
             );
         }
     })
+}
+
+fn pointer_overlay_state() -> Arc<Mutex<PointerOverlayState>> {
+    POINTER_OVERLAY_STATE
+        .get_or_init(|| Arc::new(Mutex::new(PointerOverlayState::default())))
+        .clone()
+}
+
+pub fn mark_pointer_overlay_ready(app: &AppHandle, label: &str) -> Result<(), String> {
+    let state = POINTER_OVERLAY_STATE
+        .get()
+        .cloned()
+        .ok_or_else(|| "pointer overlay state is not initialized".to_string())?;
+    let overlay = app
+        .get_webview_window(label)
+        .ok_or_else(|| "Pointer overlay window is not available".to_string())?;
+    let _ = overlay.show();
+    let _ = overlay.set_ignore_cursor_events(true);
+    flush_pointer_overlay_queue(app, &state, label)
 }
 
 fn show_and_emit_pointer_event(
@@ -261,70 +280,47 @@ fn ensure_pointer_overlay_windows(
     Ok(labels)
 }
 
-fn register_pointer_overlay_ready_listener(app: &AppHandle, state: Arc<Mutex<PointerOverlayState>>) {
-    let app_handle = app.clone();
-    let listener_state = Arc::clone(&state);
-    let _ = app.listen_any(POINTER_OVERLAY_READY_EVENT, move |event| {
-        let Some(label) = serde_json::from_str::<serde_json::Value>(event.payload())
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("label")
-                    .and_then(|label| label.as_str())
-                    .map(str::to_string)
-            })
-        else {
+fn flush_pointer_overlay_queue(
+    app: &AppHandle,
+    state: &Arc<Mutex<PointerOverlayState>>,
+    label: &str,
+) -> Result<(), String> {
+    let pending = {
+        let mut state = state.lock().map_err(|error| error.to_string())?;
+        state.windows.insert(label.to_string(), true);
+        prune_stale_pending(&mut state);
+        state.pending.remove(label).unwrap_or_default()
+    };
+
+    super::diagnostics::write(
+        "pointer_overlay_ready",
+        serde_json::json!({
+            "label": label,
+            "queuedCount": pending.len(),
+        }),
+    );
+
+    for queued in pending {
+        if let Err(error) = app.emit_to(label, POINTER_EVENT_NAME, &queued.event) {
             super::diagnostics::write(
-                "pointer_overlay_ready_missing_label",
-                serde_json::json!({ "payload": event.payload() }),
+                "pointer_overlay_flush_failed",
+                serde_json::json!({
+                    "label": label,
+                    "event": queued.event,
+                    "error": error.to_string(),
+                }),
             );
-            return;
-        };
-        let pending = {
-            let mut state = match listener_state.lock() {
-                Ok(state) => state,
-                Err(error) => {
-                    super::diagnostics::write(
-                        "pointer_overlay_ready_state_failed",
-                        serde_json::json!({ "label": label, "error": error.to_string() }),
-                    );
-                    return;
-                }
-            };
-            state.windows.insert(label.clone(), true);
-            prune_stale_pending(&mut state);
-            state.pending.remove(&label).unwrap_or_default()
-        };
-
-        super::diagnostics::write(
-            "pointer_overlay_ready",
-            serde_json::json!({
-                "label": label,
-                "queuedCount": pending.len(),
-            }),
-        );
-
-        for queued in pending {
-            if let Err(error) = app_handle.emit_to(&label, POINTER_EVENT_NAME, &queued.event) {
-                super::diagnostics::write(
-                    "pointer_overlay_flush_failed",
-                    serde_json::json!({
-                        "label": label,
-                        "event": queued.event,
-                        "error": error.to_string(),
-                    }),
-                );
-            } else {
-                super::diagnostics::write(
-                    "pointer_overlay_flush",
-                    serde_json::json!({
-                        "label": label,
-                        "event": queued.event,
-                    }),
-                );
-            }
+        } else {
+            super::diagnostics::write(
+                "pointer_overlay_flush",
+                serde_json::json!({
+                    "label": label,
+                    "event": queued.event,
+                }),
+            );
         }
-    });
+    }
+    Ok(())
 }
 
 fn prune_stale_pending(state: &mut PointerOverlayState) {

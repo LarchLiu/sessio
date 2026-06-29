@@ -410,6 +410,10 @@ mod fake {
         pub fn actions(&self) -> Vec<String> {
             self.recorded.lock().unwrap().clone()
         }
+
+        pub fn capture_count(&self) -> u64 {
+            *self.capture_counter.lock().unwrap()
+        }
     }
 
     fn point_label(point: Point) -> String {

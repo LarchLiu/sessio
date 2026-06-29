@@ -20,13 +20,11 @@ import {
   completeScreenshotOverlayCapture,
   finishScreenshotOverlay,
   getScreenshotOverlaySource,
-  screenshotOverlayReady,
+  readLocalImageDataUrl,
   savePastedAttachment,
   type ScreenshotOverlayWindowCandidate,
   type ScreenshotOverlaySource,
 } from "../api";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useI18n } from "../i18n";
 import {
   canSelectWindows,
@@ -68,10 +66,6 @@ type OverlayCancelledPayload = {
   requestId: string;
 };
 
-function windowLabel(): string {
-  return getCurrentWindow().label;
-}
-
 export default function ScreenshotOverlayWindow() {
   const { t } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -107,20 +101,24 @@ export default function ScreenshotOverlayWindow() {
         if (overlaySource.initialSelection) {
           setSelection(rectToAnnotation(overlaySource.initialSelection, "initial-selection"));
         }
+        const dataUrl = await readLocalImageDataUrl(overlaySource.sourcePath);
+        if (disposed) return;
         const image = new Image();
         image.onload = () => {
           if (disposed) return;
           imageRef.current = image;
           setImageReady(true);
-          void screenshotOverlayReady({ label: windowLabel() });
         };
         image.onerror = () => {
           if (disposed) return;
           setError(t("screenshot.capture_failed", { error: "Could not load screenshot" }));
         };
-        image.src = convertFileSrc(overlaySource.sourcePath);
+        image.src = dataUrl;
       })
-      .catch((err) => setError(String(err)));
+      .catch((err) => {
+        if (disposed) return;
+        setError(String(err));
+      });
     return () => {
       disposed = true;
     };
@@ -372,7 +370,11 @@ export default function ScreenshotOverlayWindow() {
         className="block h-screen w-screen"
         style={{ cursor: canvasCursor }}
       />
-      {!imageReady && !error && null}
+      {!imageReady && !error && (
+        <div className="pointer-events-none fixed inset-0 flex items-center justify-center bg-black/72">
+          <LoaderCircle className="h-6 w-6 animate-spin text-white/70" />
+        </div>
+      )}
       {toolbarRect && (
         <ScreenshotOverlayToolbar
           rect={toolbarRect}

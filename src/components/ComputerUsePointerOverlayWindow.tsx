@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { emit, listen } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { computerUsePointerOverlayReady } from "../api";
 
 type PointerAction =
   | "click"
@@ -41,7 +42,6 @@ interface PointerVisualState {
 }
 
 const EVENT_NAME = "computer_use_pointer_event";
-const READY_EVENT_NAME = "computer_use_pointer_overlay_ready";
 const HIDE_DELAY_MS = 1200;
 
 function windowLabel(): string {
@@ -113,7 +113,6 @@ export default function ComputerUsePointerOverlayWindow() {
   useEffect(() => {
     document.documentElement.classList.add("computer-use-pointer-overlay-root");
     document.body.classList.add("computer-use-pointer-overlay-body");
-    void emit(READY_EVENT_NAME, { label: windowLabel() });
     return () => {
       document.documentElement.classList.remove("computer-use-pointer-overlay-root");
       document.body.classList.remove("computer-use-pointer-overlay-body");
@@ -147,6 +146,10 @@ export default function ComputerUsePointerOverlayWindow() {
       hideTimerRef.current = window.setTimeout(() => {
         setVisual((current) => ({ ...current, visible: false, dragTo: null }));
       }, HIDE_DELAY_MS);
+    });
+    void unlistenPromise.then(() => {
+      if (disposed) return;
+      return computerUsePointerOverlayReady({ label: windowLabel() });
     });
 
     return () => {

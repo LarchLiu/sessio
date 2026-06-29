@@ -156,7 +156,7 @@ struct ScreenshotOverlayCancelledPayload {
 
 #[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ScreenshotOverlayReadyPayload {
+struct ComputerUsePointerOverlayReadyPayload {
     label: String,
 }
 
@@ -3923,7 +3923,6 @@ async fn open_screenshot_overlay_capture(
         .background_color(Color(0, 0, 0, 0))
         .always_on_top(true)
         .skip_taskbar(true)
-        .visible(false)
         .initialization_script(init_script)
         .position(pos.x as f64 / scale, pos.y as f64 / scale)
         .inner_size(size.width as f64 / scale, size.height as f64 / scale)
@@ -3936,6 +3935,8 @@ async fn open_screenshot_overlay_capture(
             return Err(error.to_string());
         }
     };
+    let _ = overlay.show();
+    let _ = overlay.set_focus();
     let cleanup_app = app.clone();
     let cleanup_label = label.clone();
     overlay.on_window_event(move |event| {
@@ -3970,18 +3971,12 @@ fn get_screenshot_overlay_source(
         .ok_or_else(|| "Screenshot overlay source is not available".to_string())
 }
 
-#[cfg(target_os = "macos")]
 #[tauri::command]
-fn screenshot_overlay_ready(
+fn computer_use_pointer_overlay_ready(
     app: AppHandle,
-    payload: ScreenshotOverlayReadyPayload,
+    payload: ComputerUsePointerOverlayReadyPayload,
 ) -> Result<(), String> {
-    let overlay = app
-        .get_webview_window(&payload.label)
-        .ok_or_else(|| "Screenshot overlay window is not available".to_string())?;
-    let _ = overlay.show();
-    let _ = overlay.set_focus();
-    Ok(())
+    computer_use::pointer_overlay::mark_pointer_overlay_ready(&app, &payload.label)
 }
 
 #[cfg(target_os = "macos")]
@@ -9288,7 +9283,7 @@ pub fn run() {
             capture_interactive_screen_png,
             open_screenshot_overlay_capture,
             get_screenshot_overlay_source,
-            screenshot_overlay_ready,
+            computer_use_pointer_overlay_ready,
             finish_screenshot_overlay,
             complete_screenshot_overlay_capture,
             read_local_text_file,

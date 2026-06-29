@@ -1239,7 +1239,7 @@ export interface ScreenshotOverlayWindow {
   label: string;
 }
 
-export interface ScreenshotOverlayReadyRequest {
+export interface ComputerUsePointerOverlayReadyRequest {
   label: string;
 }
 
@@ -2460,10 +2460,10 @@ export async function getScreenshotOverlaySource(): Promise<ScreenshotOverlaySou
   return invoke<ScreenshotOverlaySource>("get_screenshot_overlay_source");
 }
 
-export async function screenshotOverlayReady(
-  req: ScreenshotOverlayReadyRequest,
+export async function computerUsePointerOverlayReady(
+  req: ComputerUsePointerOverlayReadyRequest,
 ): Promise<void> {
-  return invoke<void>("screenshot_overlay_ready", { payload: req });
+  return invoke<void>("computer_use_pointer_overlay_ready", { payload: req });
 }
 
 export async function finishScreenshotOverlay(): Promise<void> {
