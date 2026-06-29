@@ -98,7 +98,6 @@ export interface ChatComposerController {
   permissionMode: string;
   computerUseEnabled: boolean;
   computerUseActive: boolean;
-  computerUseBusy: boolean;
   setComputerUseEnabled: Dispatch<SetStateAction<boolean>>;
   handleComputerUseToggle: () => void | Promise<void>;
   computerUseEligible: boolean;
@@ -474,7 +473,6 @@ export function useChatComposer({
     permissionMode,
     computerUseEnabled,
     computerUseActive: computerUseEnabled,
-    computerUseBusy: false,
     setComputerUseEnabled,
     handleComputerUseToggle: () => setComputerUseEnabled((enabled) => !enabled),
     computerUseEligible,

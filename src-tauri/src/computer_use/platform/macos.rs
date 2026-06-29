@@ -726,7 +726,7 @@ fn capture_window_with_screencapture(
     window_id: u32,
     screen_bounds: Rect,
 ) -> ProviderResult<ScreenshotRef> {
-    let path = dir.join(format!("snapshot-{window_id}.png"));
+    let path = capture_output_path(dir, window_id, "png");
     let status = std::process::Command::new("screencapture")
         .arg("-x") // no sound
         .arg("-o") // no window shadow
@@ -766,10 +766,17 @@ fn capture_window_with_sck(
     window_id: u32,
     screen_bounds: Rect,
 ) -> ProviderResult<ScreenshotRef> {
-    let path = dir.join(format!("snapshot-{window_id}-sck.png"));
+    let path = capture_output_path(dir, window_id, "sck.png");
     let image = sck_capture_window_image(window_id, screen_bounds)?;
     write_cg_image_png(&image, &path)?;
     screenshot_ref_from_path(&path, screen_bounds)
+}
+
+fn capture_output_path(dir: &Path, window_id: u32, suffix: &str) -> PathBuf {
+    dir.join(format!(
+        "snapshot-{window_id}-{}.{suffix}",
+        uuid::Uuid::new_v4().simple()
+    ))
 }
 
 fn screenshot_ref_from_path(path: &Path, screen_bounds: Rect) -> ProviderResult<ScreenshotRef> {
@@ -1109,6 +1116,7 @@ fn walk_ax(element: ax::AXUIElementRef, depth: usize, next_id: &mut u64, out: &m
     if let Some(children) = ax_children(element) {
         for child in children {
             walk_ax(child, depth + 1, next_id, out);
+            unsafe { cf_release(child as core_foundation::base::CFTypeRef) };
         }
     }
 }
@@ -1160,8 +1168,24 @@ fn ax_bool_attr(element: ax::AXUIElementRef, attr: &str) -> Option<bool> {
 }
 
 fn ax_children(element: ax::AXUIElementRef) -> Option<Vec<ax::AXUIElementRef>> {
+    let array = ax_array_attr(element, ax::CHILDREN)?;
+    let mut out = Vec::with_capacity(array.len() as usize);
+    for item in array.iter() {
+        if item.is_null() {
+            continue;
+        }
+        // The returned CFArray owns its elements. Retain each child before the
+        // array drops so recursive AX reads never operate on dangling refs.
+        let child = *item as ax::AXUIElementRef;
+        unsafe { cf_retain(child as core_foundation::base::CFTypeRef) };
+        out.push(child);
+    }
+    Some(out)
+}
+
+fn ax_array_attr(element: ax::AXUIElementRef, attr: &str) -> Option<CFArray<*const c_void>> {
     use core_foundation::base::CFTypeRef;
-    let attr = CFString::new(ax::CHILDREN);
+    let attr = CFString::new(attr);
     let mut value: CFTypeRef = std::ptr::null();
     let err = unsafe {
         ax::AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value)
@@ -1169,14 +1193,13 @@ fn ax_children(element: ax::AXUIElementRef) -> Option<Vec<ax::AXUIElementRef>> {
     if err != ax::kAXErrorSuccess || value.is_null() {
         return None;
     }
-    // value is a CFArray of AXUIElementRef. Take create-rule ownership of the
-    // array; the elements are owned by the array.
-    let array: CFArray<*const c_void> = unsafe { CFArray::wrap_under_create_rule(value as _) };
-    let mut out = Vec::with_capacity(array.len() as usize);
-    for item in array.iter() {
-        out.push(*item as ax::AXUIElementRef);
+    let cf = unsafe { CFType::wrap_under_create_rule(value) };
+    if cf.type_of() != CFArray::<*const c_void>::type_id() {
+        return None;
     }
-    Some(out)
+    let array_ref = cf.as_CFTypeRef() as _;
+    std::mem::forget(cf);
+    Some(unsafe { CFArray::wrap_under_create_rule(array_ref) })
 }
 
 /// Read the on-screen bounds of an AX element via its position + size, which are
@@ -1204,6 +1227,7 @@ mod axvalue {
 
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
+        pub fn AXValueGetTypeID() -> core_foundation::base::CFTypeID;
         pub fn AXValueGetValue(value: AXValueRef, the_type: u32, value_ptr: *mut c_void) -> bool;
     }
 
@@ -1222,15 +1246,18 @@ fn ax_value_point(element: ax::AXUIElementRef, attr: &str) -> Option<(f32, f32)>
     if err != ax::kAXErrorSuccess || value.is_null() {
         return None;
     }
+    let cf = unsafe { CFType::wrap_under_create_rule(value) };
+    if cf.type_of() != unsafe { axvalue::AXValueGetTypeID() } {
+        return None;
+    }
     let mut point = CGPoint { x: 0.0, y: 0.0 };
     let ok = unsafe {
         axvalue::AXValueGetValue(
-            axvalue::as_axvalue(value),
+            axvalue::as_axvalue(cf.as_CFTypeRef()),
             axvalue::kAXValueTypeCGPoint,
             &mut point as *mut CGPoint as *mut c_void,
         )
     };
-    unsafe { cf_release(value) };
     if ok {
         Some((point.x as f32, point.y as f32))
     } else {
@@ -1249,18 +1276,21 @@ fn ax_value_size(element: ax::AXUIElementRef, attr: &str) -> Option<(f32, f32)> 
     if err != ax::kAXErrorSuccess || value.is_null() {
         return None;
     }
+    let cf = unsafe { CFType::wrap_under_create_rule(value) };
+    if cf.type_of() != unsafe { axvalue::AXValueGetTypeID() } {
+        return None;
+    }
     let mut size = CGSize {
         width: 0.0,
         height: 0.0,
     };
     let ok = unsafe {
         axvalue::AXValueGetValue(
-            axvalue::as_axvalue(value),
+            axvalue::as_axvalue(cf.as_CFTypeRef()),
             axvalue::kAXValueTypeCGSize,
             &mut size as *mut CGSize as *mut c_void,
         )
     };
-    unsafe { cf_release(value) };
     if ok {
         Some((size.width as f32, size.height as f32))
     } else {
@@ -1385,10 +1415,15 @@ fn with_ax_element_walk<T>(
         }
     }
     if let Some(children) = ax_children(element) {
+        let mut found = None;
         for child in children {
-            if let Some(result) = with_ax_element_walk(child, depth + 1, next_id, element_id, f) {
-                return Some(result);
+            if found.is_none() {
+                found = with_ax_element_walk(child, depth + 1, next_id, element_id, f);
             }
+            unsafe { cf_release(child as core_foundation::base::CFTypeRef) };
+        }
+        if found.is_some() {
+            return found;
         }
     }
     None
@@ -1425,19 +1460,16 @@ fn restore_minimized_ax_windows(pid: i32) {
 }
 
 fn restore_minimized_ax_windows_for_root(root: ax::AXUIElementRef, windows_attr: &str) {
-    use core_foundation::base::CFTypeRef;
-    let attr = CFString::new(windows_attr);
-    let mut value: CFTypeRef = std::ptr::null();
-    let err =
-        unsafe { ax::AXUIElementCopyAttributeValue(root, attr.as_concrete_TypeRef(), &mut value) };
-    if err != ax::kAXErrorSuccess || value.is_null() {
+    let Some(array) = ax_array_attr(root, windows_attr) else {
         return;
-    }
-    let array: CFArray<*const c_void> = unsafe { CFArray::wrap_under_create_rule(value as _) };
+    };
     let minimized = CFString::new(ax::MINIMIZED);
     let false_value = CFBoolean::false_value();
     let raise = CFString::new(ax::RAISE_ACTION);
     for item in array.iter() {
+        if item.is_null() {
+            continue;
+        }
         let window = *item as ax::AXUIElementRef;
         let _ = unsafe {
             ax::AXUIElementSetAttributeValue(
@@ -1454,6 +1486,13 @@ unsafe fn cf_release(cf: core_foundation::base::CFTypeRef) {
     use core_foundation::base::CFRelease;
     if !cf.is_null() {
         CFRelease(cf);
+    }
+}
+
+unsafe fn cf_retain(cf: core_foundation::base::CFTypeRef) {
+    use core_foundation::base::CFRetain;
+    if !cf.is_null() {
+        CFRetain(cf);
     }
 }
 
@@ -1783,6 +1822,22 @@ mod tests {
 
         assert_eq!(capture_pixel_size_for_bounds(bounds, 2.0), (640, 360));
         assert_eq!(capture_pixel_size_for_bounds(bounds, 0.0), (320, 180));
+    }
+
+    #[test]
+    fn capture_output_path_is_unique_per_snapshot() {
+        let dir = PathBuf::from("/tmp/sessio-computer-use-test");
+
+        let first = capture_output_path(&dir, 42, "png");
+        let second = capture_output_path(&dir, 42, "png");
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), Some(dir.as_path()));
+        assert!(first
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .starts_with("snapshot-42-"));
     }
 
     #[test]

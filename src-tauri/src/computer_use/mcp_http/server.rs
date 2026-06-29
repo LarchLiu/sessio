@@ -371,7 +371,12 @@ async fn require_mcp_auth(
     next: Next,
 ) -> Response {
     let auth_header = authorization_header(&headers);
-    match state.tokens.resolve(auth_header.as_deref(), true) {
+    let is_loopback = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|addr| addr.0.ip().is_loopback())
+        .unwrap_or(false);
+    match state.tokens.resolve(auth_header.as_deref(), is_loopback) {
         Ok(_) => next.run(request).await,
         Err(error) => (StatusCode::UNAUTHORIZED, error.to_string()).into_response(),
     }

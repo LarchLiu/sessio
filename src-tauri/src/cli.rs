@@ -312,6 +312,7 @@ fn call_computer_use_tool(
     let response = reqwest::blocking::Client::new()
         .post(&resolved.url)
         .bearer_auth(&resolved.token)
+        .header("Accept", "application/json, text/event-stream")
         .json(&body)
         .send()
         .with_context(|| {
@@ -423,6 +424,7 @@ fn validate_cu_session(session: &crate::computer_use::broker::ExternalSession) -
     client
         .post(normalize_cu_url(&session.mcp_url))
         .bearer_auth(&session.token)
+        .header("Accept", "application/json, text/event-stream")
         .json(&body)
         .send()
         .map(|response| response.status().is_success())

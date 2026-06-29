@@ -513,18 +513,42 @@ impl RuntimeManager {
         }
     }
 
-    /// Resolve an agent's probed runtime capabilities from the metadata cache,
-    /// if available. Used to gate computer-use injection on `mcp_injection.http`.
+    /// Resolve an agent's probed runtime capabilities. Prefer the in-memory
+    /// metadata cache, but fall back to the DB record so early sessions don't
+    /// silently miss computer-use injection while startup probing is still
+    /// refreshing the cache.
     fn probed_capabilities(&self, agent: Agent) -> Option<RuntimeCapabilitySet> {
-        let cache = self
+        if let Some(cache) = self
             .inner
             .app
-            .try_state::<super::metadata::RuntimeAgentsCache>()?;
-        cache
-            .get()
-            .into_iter()
-            .find(|metadata| metadata.agent == agent)
-            .and_then(|metadata| metadata.capabilities)
+            .try_state::<super::metadata::RuntimeAgentsCache>()
+        {
+            if let Some(capabilities) = cache
+                .get()
+                .into_iter()
+                .find(|metadata| metadata.agent == agent)
+                .and_then(|metadata| metadata.capabilities)
+            {
+                return Some(capabilities);
+            }
+        }
+
+        let Some(store) = self.inner.app.try_state::<Arc<dyn SessionStore>>() else {
+            return None;
+        };
+        match super::metadata::runtime_agents_from_db(store.inner().clone(), &[]) {
+            Ok(agents) => agents
+                .into_iter()
+                .find(|metadata| metadata.agent == agent)
+                .and_then(|metadata| metadata.capabilities),
+            Err(error) => {
+                log::warn!(
+                    "[sessio-runtime:computer-use] failed to read DB capabilities for agent={}: {error}",
+                    agent.as_str()
+                );
+                None
+            }
+        }
     }
 
     /// If the session requested computer use and the agent is eligible (HTTP MCP

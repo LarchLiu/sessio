@@ -229,7 +229,7 @@ export default function ChatComposer({
               <Tooltip content={computerUseTooltip} placement="top">
                 <button
                   type="button"
-                  disabled={runtimeControlsDisabled || composer.computerUseBusy}
+                  disabled={runtimeControlsDisabled}
                   onClick={() => void composer.handleComputerUseToggle()}
                   className={
                     "relative flex h-7 items-center justify-center rounded-full px-2.5 text-ink/55 transition " +
