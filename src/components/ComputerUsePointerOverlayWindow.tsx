@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 type PointerAction =
   | "click"
@@ -40,7 +41,12 @@ interface PointerVisualState {
 }
 
 const EVENT_NAME = "computer_use_pointer_event";
+const READY_EVENT_NAME = "computer_use_pointer_overlay_ready";
 const HIDE_DELAY_MS = 1200;
+
+function windowLabel(): string {
+  return getCurrentWindow().label;
+}
 
 function numberParam(params: URLSearchParams, key: string, fallback: number): number {
   const raw = params.get(key);
@@ -107,6 +113,7 @@ export default function ComputerUsePointerOverlayWindow() {
   useEffect(() => {
     document.documentElement.classList.add("computer-use-pointer-overlay-root");
     document.body.classList.add("computer-use-pointer-overlay-body");
+    void emit(READY_EVENT_NAME, { label: windowLabel() });
     return () => {
       document.documentElement.classList.remove("computer-use-pointer-overlay-root");
       document.body.classList.remove("computer-use-pointer-overlay-body");

@@ -4,18 +4,35 @@
 //! real AX/UIA and input-injection work. The overlay only mirrors intent so the
 //! user can see where an agent is about to act.
 
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{
-    utils::config::Color, AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
+    utils::config::Color, AppHandle, Emitter, Listener, Manager, WebviewUrl,
+    WebviewWindowBuilder,
     WindowEvent,
 };
 
 use super::provider::Point;
 
 pub const POINTER_EVENT_NAME: &str = "computer_use_pointer_event";
+pub const POINTER_OVERLAY_READY_EVENT: &str = "computer_use_pointer_overlay_ready";
 const POINTER_OVERLAY_LABEL_PREFIX: &str = "computer-use-pointer-overlay";
+const POINTER_OVERLAY_EVENT_TTL: Duration = Duration::from_secs(3);
+
+#[derive(Debug, Clone)]
+struct PendingPointerEvent {
+    event: ComputerUsePointerEvent,
+    queued_at: Instant,
+}
+
+#[derive(Default)]
+struct PointerOverlayState {
+    windows: HashMap<String, bool>,
+    pending: HashMap<String, VecDeque<PendingPointerEvent>>,
+}
 
 pub type PointerEventSink = Arc<dyn Fn(ComputerUsePointerEvent) + Send + Sync>;
 
@@ -91,27 +108,74 @@ impl ComputerUsePointerEvent {
 }
 
 pub fn tauri_pointer_event_sink(app: AppHandle) -> PointerEventSink {
-    let _ = ensure_pointer_overlay_windows(&app);
+    let state = Arc::new(Mutex::new(PointerOverlayState::default()));
+    if let Err(error) = ensure_pointer_overlay_windows(&app, &state) {
+        super::diagnostics::write(
+            "pointer_overlay_ensure_failed",
+            serde_json::json!({ "error": error }),
+        );
+    }
+    register_pointer_overlay_ready_listener(&app, Arc::clone(&state));
     Arc::new(move |event| {
-        if let Err(error) = show_and_emit_pointer_event(&app, event) {
-            log::debug!("[computer-use:pointer-overlay] {error}");
+        if let Err(error) = show_and_emit_pointer_event(&app, &state, event) {
+            super::diagnostics::write(
+                "pointer_overlay_emit_failed",
+                serde_json::json!({ "error": error }),
+            );
         }
     })
 }
 
 fn show_and_emit_pointer_event(
     app: &AppHandle,
+    state: &Arc<Mutex<PointerOverlayState>>,
     event: ComputerUsePointerEvent,
 ) -> Result<(), String> {
-    let labels = ensure_pointer_overlay_windows(app)?;
+    let labels = ensure_pointer_overlay_windows(app, state)?;
     for label in labels {
-        app.emit_to(&label, POINTER_EVENT_NAME, &event)
-            .map_err(|error| error.to_string())?;
+        let ready = {
+            let mut state = state.lock().map_err(|error| error.to_string())?;
+            prune_stale_pending(&mut state);
+            *state.windows.entry(label.clone()).or_insert(false)
+        };
+        if ready {
+            app.emit_to(&label, POINTER_EVENT_NAME, &event)
+                .map_err(|error| error.to_string())?;
+            super::diagnostics::write(
+                "pointer_overlay_emit",
+                serde_json::json!({
+                    "label": label,
+                    "ready": true,
+                    "event": event,
+                }),
+            );
+        } else {
+            let mut state = state.lock().map_err(|error| error.to_string())?;
+            state
+                .pending
+                .entry(label.clone())
+                .or_default()
+                .push_back(PendingPointerEvent {
+                    event: event.clone(),
+                    queued_at: Instant::now(),
+                });
+            super::diagnostics::write(
+                "pointer_overlay_queue",
+                serde_json::json!({
+                    "label": label,
+                    "ready": false,
+                    "event": event,
+                }),
+            );
+        }
     }
     Ok(())
 }
 
-fn ensure_pointer_overlay_windows(app: &AppHandle) -> Result<Vec<String>, String> {
+fn ensure_pointer_overlay_windows(
+    app: &AppHandle,
+    state: &Arc<Mutex<PointerOverlayState>>,
+) -> Result<Vec<String>, String> {
     let monitors = app
         .available_monitors()
         .map_err(|error| error.to_string())?;
@@ -122,6 +186,10 @@ fn ensure_pointer_overlay_windows(app: &AppHandle) -> Result<Vec<String>, String
         labels.push(label.clone());
         if app.get_webview_window(&label).is_some() {
             continue;
+        }
+        {
+            let mut overlay_state = state.lock().map_err(|error| error.to_string())?;
+            overlay_state.windows.insert(label.clone(), false);
         }
 
         let scale = monitor.scale_factor().max(1.0);
@@ -172,6 +240,17 @@ fn ensure_pointer_overlay_windows(app: &AppHandle) -> Result<Vec<String>, String
         let _ = window.set_ignore_cursor_events(true);
         let _ = window.set_visible_on_all_workspaces(true);
         let _ = window.show();
+        super::diagnostics::write(
+            "pointer_overlay_window_created",
+            serde_json::json!({
+                "label": label,
+                "originX": origin_x,
+                "originY": origin_y,
+                "width": width,
+                "height": height,
+                "monitorScale": scale,
+            }),
+        );
         window.on_window_event(|event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -180,4 +259,83 @@ fn ensure_pointer_overlay_windows(app: &AppHandle) -> Result<Vec<String>, String
     }
 
     Ok(labels)
+}
+
+fn register_pointer_overlay_ready_listener(app: &AppHandle, state: Arc<Mutex<PointerOverlayState>>) {
+    let app_handle = app.clone();
+    let listener_state = Arc::clone(&state);
+    let _ = app.listen_any(POINTER_OVERLAY_READY_EVENT, move |event| {
+        let Some(label) = serde_json::from_str::<serde_json::Value>(event.payload())
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("label")
+                    .and_then(|label| label.as_str())
+                    .map(str::to_string)
+            })
+        else {
+            super::diagnostics::write(
+                "pointer_overlay_ready_missing_label",
+                serde_json::json!({ "payload": event.payload() }),
+            );
+            return;
+        };
+        let pending = {
+            let mut state = match listener_state.lock() {
+                Ok(state) => state,
+                Err(error) => {
+                    super::diagnostics::write(
+                        "pointer_overlay_ready_state_failed",
+                        serde_json::json!({ "label": label, "error": error.to_string() }),
+                    );
+                    return;
+                }
+            };
+            state.windows.insert(label.clone(), true);
+            prune_stale_pending(&mut state);
+            state.pending.remove(&label).unwrap_or_default()
+        };
+
+        super::diagnostics::write(
+            "pointer_overlay_ready",
+            serde_json::json!({
+                "label": label,
+                "queuedCount": pending.len(),
+            }),
+        );
+
+        for queued in pending {
+            if let Err(error) = app_handle.emit_to(&label, POINTER_EVENT_NAME, &queued.event) {
+                super::diagnostics::write(
+                    "pointer_overlay_flush_failed",
+                    serde_json::json!({
+                        "label": label,
+                        "event": queued.event,
+                        "error": error.to_string(),
+                    }),
+                );
+            } else {
+                super::diagnostics::write(
+                    "pointer_overlay_flush",
+                    serde_json::json!({
+                        "label": label,
+                        "event": queued.event,
+                    }),
+                );
+            }
+        }
+    });
+}
+
+fn prune_stale_pending(state: &mut PointerOverlayState) {
+    let now = Instant::now();
+    for pending in state.pending.values_mut() {
+        while let Some(front) = pending.front() {
+            if now.duration_since(front.queued_at) <= POINTER_OVERLAY_EVENT_TTL {
+                break;
+            }
+            pending.pop_front();
+        }
+    }
+    state.pending.retain(|_, pending| !pending.is_empty());
 }

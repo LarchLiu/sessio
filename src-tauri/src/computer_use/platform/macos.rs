@@ -18,6 +18,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+use std::fs::File;
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -38,6 +40,7 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
 use foreign_types::ForeignType;
+use image::{imageops::FilterType, ImageFormat, ImageReader};
 use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
 use objc2::{AnyThread, Message};
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
@@ -730,6 +733,7 @@ fn capture_window_with_screencapture(
     let path = capture_output_path(dir, window_id, "png");
     let image = cg_window_image(window_id, cg_rect(screen_bounds))?;
     write_cg_image_png(&image, &path)?;
+    normalize_capture_image_to_screen_points(&path, screen_bounds)?;
     screenshot_ref_from_path(&path, screen_bounds, Some(ScreenshotCaptureKind::WindowCg))
 }
 
@@ -741,6 +745,7 @@ fn capture_window_with_sck(
     let path = capture_output_path(dir, window_id, "sck.png");
     let image = sck_capture_window_image(window_id, screen_bounds)?;
     write_cg_image_png(&image, &path)?;
+    normalize_capture_image_to_screen_points(&path, screen_bounds)?;
     screenshot_ref_from_path(&path, screen_bounds, Some(ScreenshotCaptureKind::WindowSck))
 }
 
@@ -774,6 +779,70 @@ fn screenshot_ref_from_path(
         capture_kind,
         screen_bounds,
     })
+}
+
+fn normalize_capture_image_to_screen_points(path: &Path, screen_bounds: Rect) -> ProviderResult<()> {
+    let (current_width, current_height) = image::image_dimensions(path)
+        .map_err(|e| ProviderError::Failed(format!("decode capture dimensions: {e}")))?;
+    let Some((target_width, target_height)) =
+        normalized_capture_size(current_width, current_height, screen_bounds)
+    else {
+        return Ok(());
+    };
+
+    let image = ImageReader::open(path)
+        .map_err(|e| ProviderError::Failed(format!("open capture for resize: {e}")))?
+        .with_guessed_format()
+        .map_err(|e| ProviderError::Failed(format!("guess capture format: {e}")))?
+        .decode()
+        .map_err(|e| ProviderError::Failed(format!("decode capture for resize: {e}")))?;
+    let resized = image.resize_exact(target_width, target_height, FilterType::Triangle);
+    let temp_path = path.with_extension("normalized.png");
+    let file = File::create(&temp_path)
+        .map_err(|e| ProviderError::Failed(format!("create normalized capture: {e}")))?;
+    let mut writer = BufWriter::new(file);
+    resized
+        .write_to(&mut writer, ImageFormat::Png)
+        .map_err(|e| ProviderError::Failed(format!("write normalized capture: {e}")))?;
+    std::fs::rename(&temp_path, path)
+        .map_err(|e| ProviderError::Failed(format!("replace normalized capture: {e}")))?;
+    Ok(())
+}
+
+fn normalized_capture_size(
+    current_width: u32,
+    current_height: u32,
+    screen_bounds: Rect,
+) -> Option<(u32, u32)> {
+    let target_width = logical_capture_dimension(screen_bounds.width)?;
+    let target_height = logical_capture_dimension(screen_bounds.height)?;
+    if current_width == target_width && current_height == target_height {
+        return None;
+    }
+    if current_width < target_width || current_height < target_height {
+        return None;
+    }
+
+    let width_scale = current_width as f32 / target_width as f32;
+    let height_scale = current_height as f32 / target_height as f32;
+    if !width_scale.is_finite() || !height_scale.is_finite() {
+        return None;
+    }
+    if (width_scale - height_scale).abs() > 0.08 {
+        return None;
+    }
+    Some((target_width, target_height))
+}
+
+fn logical_capture_dimension(value: f32) -> Option<u32> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    let rounded = value.round();
+    if rounded < 1.0 || rounded > u32::MAX as f32 {
+        return None;
+    }
+    Some(rounded as u32)
 }
 
 fn write_cg_image_png(image: &core_graphics::image::CGImage, path: &Path) -> ProviderResult<()> {
@@ -1543,6 +1612,19 @@ fn secondary_click_at(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
     )
 }
 
+fn move_mouse_to(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
+    let source = event_source()?;
+    let moved = CGEvent::new_mouse_event(
+        source,
+        CGEventType::MouseMoved,
+        point,
+        CGMouseButton::Left,
+    )
+    .map_err(|_| ProviderError::Failed("create mouse-moved".into()))?;
+    post_event_sequence(pid, &[&moved]);
+    Ok(())
+}
+
 fn mouse_click_at(
     pid: Option<i32>,
     point: CGPoint,
@@ -1551,6 +1633,8 @@ fn mouse_click_at(
     up_type: CGEventType,
     click_state: i64,
 ) -> ProviderResult<()> {
+    move_mouse_to(pid, point)?;
+    thread::sleep(Duration::from_millis(20));
     let source = event_source()?;
     let down = CGEvent::new_mouse_event(source.clone(), down_type, point, button)
         .map_err(|_| ProviderError::Failed("create mouse-down".into()))?;
@@ -1563,6 +1647,8 @@ fn mouse_click_at(
 }
 
 fn double_click_at(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
+    move_mouse_to(pid, point)?;
+    thread::sleep(Duration::from_millis(20));
     let source = event_source()?;
     for click_state in [1, 2] {
         let down = CGEvent::new_mouse_event(
@@ -1588,6 +1674,8 @@ fn double_click_at(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
 }
 
 fn drag_between(pid: Option<i32>, from: CGPoint, to: CGPoint) -> ProviderResult<()> {
+    move_mouse_to(pid, from)?;
+    thread::sleep(Duration::from_millis(20));
     let source = event_source()?;
     let down = CGEvent::new_mouse_event(
         source.clone(),
@@ -1833,6 +1921,20 @@ mod tests {
 
         assert_eq!(capture_pixel_size_for_bounds(bounds, 2.0), (640, 360));
         assert_eq!(capture_pixel_size_for_bounds(bounds, 0.0), (320, 180));
+    }
+
+    #[test]
+    fn normalized_capture_size_shrinks_retina_window_capture_to_logical_points() {
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1057.0,
+            height: 752.0,
+        };
+
+        assert_eq!(normalized_capture_size(2114, 1504, bounds), Some((1057, 752)));
+        assert_eq!(normalized_capture_size(1057, 752, bounds), None);
+        assert_eq!(normalized_capture_size(1000, 700, bounds), None);
     }
 
     #[test]

@@ -26,6 +26,7 @@ import {
   type ScreenshotOverlaySource,
 } from "../api";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useI18n } from "../i18n";
 import {
   canSelectWindows,
@@ -68,9 +69,7 @@ type OverlayCancelledPayload = {
 };
 
 function windowLabel(): string {
-  return (window as typeof window & {
-    __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } };
-  }).__TAURI_INTERNALS__?.metadata?.currentWindow?.label ?? "";
+  return getCurrentWindow().label;
 }
 
 export default function ScreenshotOverlayWindow() {
