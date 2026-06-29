@@ -170,6 +170,15 @@ impl AllowedAction {
 /// (temp file / handle) rather than inlined, per the tool-model truncation
 /// guidance; the model receives the handle, not the pixels.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenshotCaptureKind {
+    WindowSck,
+    WindowCg,
+    ScreenRectCg,
+    ScreenRectGdi,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenshotRef {
     /// Opaque handle the broker/host can resolve back to bytes.
@@ -181,6 +190,10 @@ pub struct ScreenshotRef {
     pub height: u32,
     /// The default space future coordinate tools should interpret `x`/`y` in.
     pub default_coordinate_space: CoordinateSpace,
+    /// Optional capture implementation metadata for diagnostics and strategy
+    /// selection. Older snapshots may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_kind: Option<ScreenshotCaptureKind>,
     /// The display-space rectangle, in screen points, represented by the whole
     /// screenshot image. Screenshot pixels map linearly into this rect.
     pub screen_bounds: Rect,
@@ -487,6 +500,7 @@ mod fake {
                     width: 720,
                     height: 450,
                     default_coordinate_space: CoordinateSpace::Screenshot,
+                    capture_kind: None,
                     screen_bounds: Rect {
                         x: 10.0,
                         y: 20.0,
@@ -612,6 +626,7 @@ mod tests {
             width: 200,
             height: 100,
             default_coordinate_space: CoordinateSpace::Screenshot,
+            capture_kind: None,
             screen_bounds: Rect {
                 x: 50.0,
                 y: 20.0,
@@ -643,6 +658,7 @@ mod tests {
             width: 200,
             height: 100,
             default_coordinate_space: CoordinateSpace::Screenshot,
+            capture_kind: None,
             screen_bounds: Rect {
                 x: 0.0,
                 y: 0.0,

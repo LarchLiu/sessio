@@ -70,6 +70,7 @@ use tauri::RunEvent;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
+    utils::config::Color,
     AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
     WindowEvent,
 };
@@ -151,6 +152,12 @@ struct ScreenshotOverlayWindowDto {
 #[serde(rename_all = "camelCase")]
 struct ScreenshotOverlayCancelledPayload {
     request_id: String,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScreenshotOverlayReadyPayload {
+    label: String,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -3167,35 +3174,8 @@ async fn capture_window_area_png(
         return Ok(saved);
     }
 
-    let rect = format!(
-        "{},{},{},{}",
-        x.floor() as i64,
-        y.floor() as i64,
-        width.ceil() as i64,
-        height.ceil() as i64
-    );
-    let status = std::process::Command::new("screencapture")
-        .arg("-x")
-        .arg("-t")
-        .arg("png")
-        .arg("-R")
-        .arg(rect)
-        .arg(&path)
-        .status()
-        .map_err(|e| format!("Failed to start native screenshot capture: {e}"))?;
-    if !status.success() {
-        return Err(format!(
-            "Native screenshot capture failed with status {status}"
-        ));
-    }
-    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
-    if meta.len() == 0 {
-        let _ = std::fs::remove_file(&path);
-        return Err("Native screenshot capture produced an empty PNG".to_string());
-    }
-    Ok(SavedPastedAttachment {
-        path: path.to_string_lossy().to_string(),
-    })
+    let image = cg_image_for_screen_rect(x, y, width, height)?;
+    write_cg_image_png_to_path(&image, &path)
 }
 
 #[cfg(target_os = "macos")]
@@ -3317,6 +3297,89 @@ async fn capture_webview_area_png(
 }
 
 #[cfg(target_os = "macos")]
+fn write_cg_image_png_to_path(
+    image: &core_graphics::image::CGImage,
+    path: &Path,
+) -> Result<SavedPastedAttachment, String> {
+    use foreign_types::ForeignType;
+    use objc2::AnyThread;
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
+    use objc2_core_graphics::CGImage;
+    use objc2_foundation::NSDictionary;
+
+    let cg_image = unsafe { &*(image.as_ptr() as *const CGImage) };
+    let bitmap = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), cg_image);
+    let properties = NSDictionary::<objc2_app_kit::NSBitmapImageRepPropertyKey, AnyObject>::new();
+    let png = unsafe {
+        bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
+    }
+    .ok_or_else(|| "CGImage PNG encoding failed".to_string())?;
+    let path_string = objc2_foundation::NSString::from_str(&path.to_string_lossy());
+    if !png.writeToFile_atomically(&path_string, true) {
+        return Err("CGImage PNG write failed".to_string());
+    }
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.len() == 0 {
+        let _ = std::fs::remove_file(path);
+        return Err("CGImage PNG write produced an empty file".to_string());
+    }
+    Ok(SavedPastedAttachment {
+        path: path.to_string_lossy().to_string(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn cg_image_for_screen_rect(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<core_graphics::image::CGImage, String> {
+    use core_graphics::display::CGDisplay;
+    use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+
+    let rect = CGRect::new(
+        &CGPoint::new(x, y),
+        &CGSize::new(width.max(1.0), height.max(1.0)),
+    );
+    CGDisplay::active_displays()
+        .map_err(|e| format!("Could not enumerate displays: {e:?}"))?
+        .into_iter()
+        .find_map(|display_id| {
+            let display = CGDisplay::new(display_id);
+            let bounds = display.bounds();
+            let display_x2 = bounds.origin.x + bounds.size.width;
+            let display_y2 = bounds.origin.y + bounds.size.height;
+            let rect_x2 = rect.origin.x + rect.size.width;
+            let rect_y2 = rect.origin.y + rect.size.height;
+            let intersects = rect.origin.x < display_x2
+                && rect_x2 > bounds.origin.x
+                && rect.origin.y < display_y2
+                && rect_y2 > bounds.origin.y;
+            intersects.then(|| display.image_for_rect(rect)).flatten()
+        })
+        .ok_or_else(|| "Could not capture screen rect image".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn cg_image_for_window(window_id: u32, bounds: core_graphics::geometry::CGRect) -> Result<core_graphics::image::CGImage, String> {
+    use core_graphics::display::CGDisplay;
+    use core_graphics::window::{
+        kCGWindowImageBestResolution, kCGWindowImageBoundsIgnoreFraming,
+        kCGWindowListOptionIncludingWindow,
+    };
+
+    CGDisplay::screenshot(
+        bounds,
+        kCGWindowListOptionIncludingWindow,
+        window_id,
+        kCGWindowImageBoundsIgnoreFraming | kCGWindowImageBestResolution,
+    )
+    .ok_or_else(|| format!("Could not capture window image for {window_id}"))
+}
+
+#[cfg(target_os = "macos")]
 fn capture_frontmost_window_png(
     app: &AppHandle,
     file_name: Option<String>,
@@ -3383,7 +3446,7 @@ fn capture_frontmost_window_png(
             .and_then(|value| value.to_f64())
     }
 
-    let mut target_window_id: Option<u32> = None;
+    let mut target_window: Option<(u32, CGRect)> = None;
     for value in &windows {
         let cf_type = unsafe { CFType::wrap_under_get_rule(*value) };
         let Some(dict) = cf_type.downcast::<CFDictionary>() else {
@@ -3418,37 +3481,14 @@ fn capture_frontmost_window_png(
         else {
             continue;
         };
-        target_window_id = Some(window_id);
+        target_window = Some((window_id, bounds));
         break;
     }
 
-    let window_id = target_window_id
+    let (window_id, bounds) = target_window
         .ok_or_else(|| "Could not find a visible frontmost window to capture".to_string())?;
-
-    let status = std::process::Command::new("screencapture")
-        .arg("-x")
-        .arg("-o")
-        .arg("-t")
-        .arg("png")
-        .arg("-l")
-        .arg(window_id.to_string())
-        .arg(&path)
-        .status()
-        .map_err(|e| format!("Failed to start appshot capture: {e}"))?;
-    if !status.success() {
-        let _ = std::fs::remove_file(&path);
-        return Err(format!("Appshot capture failed with status {status}"));
-    }
-
-    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
-    if meta.len() == 0 {
-        let _ = std::fs::remove_file(&path);
-        return Err("Appshot capture produced an empty PNG".to_string());
-    }
-
-    Ok(SavedPastedAttachment {
-        path: path.to_string_lossy().to_string(),
-    })
+    let image = cg_image_for_window(window_id, bounds)?;
+    write_cg_image_png_to_path(&image, &path)
 }
 
 #[cfg(target_os = "macos")]
@@ -3620,32 +3660,13 @@ fn capture_monitor_background_png(
     ));
     let pos = monitor.position();
     let size = monitor.size();
-    let rect = format!("{},{},{},{}", pos.x, pos.y, size.width, size.height);
-
-    let status = std::process::Command::new("screencapture")
-        .arg("-x")
-        .arg("-t")
-        .arg("png")
-        .arg(format!("-R{rect}"))
-        .arg(&path)
-        .status()
-        .map_err(|e| format!("Failed to start screenshot overlay capture: {e}"))?;
-    if !status.success() {
-        let _ = std::fs::remove_file(&path);
-        return Err(format!(
-            "Screenshot overlay capture failed with status {status}"
-        ));
-    }
-
-    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
-    if meta.len() == 0 {
-        let _ = std::fs::remove_file(&path);
-        return Err("Screenshot overlay capture produced an empty PNG".to_string());
-    }
-
-    Ok(SavedPastedAttachment {
-        path: path.to_string_lossy().to_string(),
-    })
+    let image = cg_image_for_screen_rect(
+        f64::from(pos.x),
+        f64::from(pos.y),
+        f64::from(size.width),
+        f64::from(size.height),
+    )?;
+    write_cg_image_png_to_path(&image, &path)
 }
 
 #[cfg(target_os = "macos")]
@@ -3880,13 +3901,30 @@ async fn open_screenshot_overlay_capture(
     let size = monitor.size();
     let scale = monitor.scale_factor();
     let url = WebviewUrl::App("index.html?screenshotOverlay=1".into());
+    let init_script = r#"
+        document.documentElement.style.background = 'transparent';
+        document.documentElement.style.backgroundColor = 'transparent';
+        if (document.body) {
+          document.body.style.background = 'transparent';
+          document.body.style.backgroundColor = 'transparent';
+        } else {
+          window.addEventListener('DOMContentLoaded', () => {
+            document.body.style.background = 'transparent';
+            document.body.style.backgroundColor = 'transparent';
+          }, { once: true });
+        }
+    "#;
     let overlay = match WebviewWindowBuilder::new(&app, &label, url)
         .title("Screenshot")
         .decorations(false)
         .shadow(false)
         .resizable(false)
+        .transparent(true)
+        .background_color(Color(0, 0, 0, 0))
         .always_on_top(true)
         .skip_taskbar(true)
+        .visible(false)
+        .initialization_script(init_script)
         .position(pos.x as f64 / scale, pos.y as f64 / scale)
         .inner_size(size.width as f64 / scale, size.height as f64 / scale)
         .focused(true)
@@ -3915,7 +3953,6 @@ async fn open_screenshot_overlay_capture(
             cleanup_screenshot_overlay(&cleanup_app, &cleanup_label, reveal_main);
         }
     });
-    let _ = overlay.set_focus();
 
     Ok(ScreenshotOverlayWindowDto { label })
 }
@@ -3931,6 +3968,20 @@ fn get_screenshot_overlay_source(
         .get(window.label())
         .cloned()
         .ok_or_else(|| "Screenshot overlay source is not available".to_string())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn screenshot_overlay_ready(
+    app: AppHandle,
+    payload: ScreenshotOverlayReadyPayload,
+) -> Result<(), String> {
+    let overlay = app
+        .get_webview_window(&payload.label)
+        .ok_or_else(|| "Screenshot overlay window is not available".to_string())?;
+    let _ = overlay.show();
+    let _ = overlay.set_focus();
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -9237,6 +9288,7 @@ pub fn run() {
             capture_interactive_screen_png,
             open_screenshot_overlay_capture,
             get_screenshot_overlay_source,
+            screenshot_overlay_ready,
             finish_screenshot_overlay,
             complete_screenshot_overlay_capture,
             read_local_text_file,

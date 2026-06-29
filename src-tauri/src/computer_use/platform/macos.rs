@@ -2,7 +2,7 @@
 //!
 //! - **App enumeration**: `NSWorkspace.runningApplications`.
 //! - **Screenshot**: ScreenCaptureKit targeting the app's frontmost
-//!   desktop-independent window, with `screencapture -l` as a compatibility
+//!   desktop-independent window, with a CoreGraphics window-image compatibility
 //!   fallback.
 //! - **Element tree**: the Accessibility API (`AXUIElement*`).
 //! - **Input injection**: `CGEvent` keyboard / mouse / scroll synthesis.
@@ -47,7 +47,8 @@ use objc2_foundation::{NSArray, NSDictionary, NSError};
 use crate::computer_use::provider::{
     AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ComputerUseProvider,
     CoordinateSpace, DisplayMetadata, ElementId, InstalledApp, Point, ProviderError,
-    ProviderResult, RawAppState, Rect, ScreenshotRef, ScrollDirection, UiElement,
+    ProviderResult, RawAppState, Rect, ScreenshotCaptureKind, ScreenshotRef, ScrollDirection,
+    UiElement,
 };
 
 #[derive(Clone)]
@@ -727,38 +728,9 @@ fn capture_window_with_screencapture(
     screen_bounds: Rect,
 ) -> ProviderResult<ScreenshotRef> {
     let path = capture_output_path(dir, window_id, "png");
-    let status = std::process::Command::new("screencapture")
-        .arg("-x") // no sound
-        .arg("-o") // no window shadow
-        .arg("-t")
-        .arg("png")
-        .arg("-l")
-        .arg(window_id.to_string())
-        .arg(&path)
-        .status()
-        .map_err(|e| ProviderError::Failed(format!("start screencapture: {e}")))?;
-    if !status.success() {
-        return Err(ProviderError::Failed(format!(
-            "screencapture failed: {status}"
-        )));
-    }
-    let meta = std::fs::metadata(&path)
-        .map_err(|e| ProviderError::Failed(format!("stat capture: {e}")))?;
-    if meta.len() == 0 {
-        let _ = std::fs::remove_file(&path);
-        return Err(ProviderError::Failed("empty capture".into()));
-    }
-    let (width, height) = image::image_dimensions(&path)
-        .map_err(|e| ProviderError::Failed(format!("decode capture dimensions: {e}")))?;
-    Ok(ScreenshotRef {
-        handle: path.to_string_lossy().to_string(),
-        format: "png".into(),
-        byte_len: meta.len(),
-        width,
-        height,
-        default_coordinate_space: CoordinateSpace::Screenshot,
-        screen_bounds,
-    })
+    let image = cg_window_image(window_id, cg_rect(screen_bounds))?;
+    write_cg_image_png(&image, &path)?;
+    screenshot_ref_from_path(&path, screen_bounds, Some(ScreenshotCaptureKind::WindowCg))
 }
 
 fn capture_window_with_sck(
@@ -769,7 +741,7 @@ fn capture_window_with_sck(
     let path = capture_output_path(dir, window_id, "sck.png");
     let image = sck_capture_window_image(window_id, screen_bounds)?;
     write_cg_image_png(&image, &path)?;
-    screenshot_ref_from_path(&path, screen_bounds)
+    screenshot_ref_from_path(&path, screen_bounds, Some(ScreenshotCaptureKind::WindowSck))
 }
 
 fn capture_output_path(dir: &Path, window_id: u32, suffix: &str) -> PathBuf {
@@ -779,7 +751,11 @@ fn capture_output_path(dir: &Path, window_id: u32, suffix: &str) -> PathBuf {
     ))
 }
 
-fn screenshot_ref_from_path(path: &Path, screen_bounds: Rect) -> ProviderResult<ScreenshotRef> {
+fn screenshot_ref_from_path(
+    path: &Path,
+    screen_bounds: Rect,
+    capture_kind: Option<ScreenshotCaptureKind>,
+) -> ProviderResult<ScreenshotRef> {
     let meta =
         std::fs::metadata(path).map_err(|e| ProviderError::Failed(format!("stat capture: {e}")))?;
     if meta.len() == 0 {
@@ -795,6 +771,7 @@ fn screenshot_ref_from_path(path: &Path, screen_bounds: Rect) -> ProviderResult<
         width,
         height,
         default_coordinate_space: CoordinateSpace::Screenshot,
+        capture_kind,
         screen_bounds,
     })
 }
@@ -815,6 +792,27 @@ fn write_cg_image_png(image: &core_graphics::image::CGImage, path: &Path) -> Pro
             "ScreenCaptureKit PNG write failed".into(),
         ))
     }
+}
+
+fn cg_window_image(
+    window_id: u32,
+    bounds: CGRect,
+) -> ProviderResult<core_graphics::image::CGImage> {
+    use core_graphics::window::{
+        kCGWindowImageBestResolution, kCGWindowListOptionIncludingWindow,
+    };
+
+    CGDisplay::screenshot(
+        bounds,
+        kCGWindowListOptionIncludingWindow,
+        window_id,
+        kCGWindowImageBestResolution,
+    )
+    .ok_or_else(|| {
+        ProviderError::Failed(format!(
+            "CoreGraphics window capture failed for window {window_id}"
+        ))
+    })
 }
 
 fn sck_capture_window_image(
@@ -1510,6 +1508,19 @@ fn cg_point(point: Point) -> CGPoint {
     }
 }
 
+fn cg_rect(rect: Rect) -> CGRect {
+    CGRect {
+        origin: CGPoint {
+            x: f64::from(rect.x),
+            y: f64::from(rect.y),
+        },
+        size: core_graphics::geometry::CGSize {
+            width: f64::from(rect.width),
+            height: f64::from(rect.height),
+        },
+    }
+}
+
 fn left_click_at(pid: Option<i32>, point: CGPoint) -> ProviderResult<()> {
     mouse_click_at(
         pid,
@@ -1838,6 +1849,22 @@ mod tests {
             .and_then(|name| name.to_str())
             .unwrap_or_default()
             .starts_with("snapshot-42-"));
+    }
+
+    #[test]
+    fn cg_rect_preserves_window_bounds_geometry() {
+        let bounds = Rect {
+            x: 12.5,
+            y: 34.0,
+            width: 640.0,
+            height: 360.0,
+        };
+
+        let rect = cg_rect(bounds);
+        assert_eq!(rect.origin.x, 12.5);
+        assert_eq!(rect.origin.y, 34.0);
+        assert_eq!(rect.size.width, 640.0);
+        assert_eq!(rect.size.height, 360.0);
     }
 
     #[test]

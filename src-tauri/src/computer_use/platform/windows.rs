@@ -16,7 +16,8 @@ use std::time::Duration;
 use crate::computer_use::provider::{
     AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ComputerUseProvider,
     CoordinateSpace, DisplayMetadata, ElementId, InstalledApp, Point, ProviderError,
-    ProviderResult, RawAppState, Rect, ScreenshotRef, ScrollDirection, UiElement,
+    ProviderResult, RawAppState, Rect, ScreenshotCaptureKind, ScreenshotRef, ScrollDirection,
+    UiElement,
 };
 
 use windows::core::{w, BOOL, BSTR, PCWSTR};
@@ -667,6 +668,7 @@ fn capture_window(window: &WindowInfo, capture_dir: &Path) -> ProviderResult<Scr
         width,
         height,
         default_coordinate_space: CoordinateSpace::Screenshot,
+        capture_kind: Some(ScreenshotCaptureKind::ScreenRectGdi),
         screen_bounds: window.rect,
     })
 }

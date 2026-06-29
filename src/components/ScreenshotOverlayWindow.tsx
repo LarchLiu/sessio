@@ -20,11 +20,12 @@ import {
   completeScreenshotOverlayCapture,
   finishScreenshotOverlay,
   getScreenshotOverlaySource,
-  readLocalImageDataUrl,
+  screenshotOverlayReady,
   savePastedAttachment,
   type ScreenshotOverlayWindowCandidate,
   type ScreenshotOverlaySource,
 } from "../api";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { useI18n } from "../i18n";
 import {
   canSelectWindows,
@@ -66,6 +67,12 @@ type OverlayCancelledPayload = {
   requestId: string;
 };
 
+function windowLabel(): string {
+  return (window as typeof window & {
+    __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } };
+  }).__TAURI_INTERNALS__?.metadata?.currentWindow?.label ?? "";
+}
+
 export default function ScreenshotOverlayWindow() {
   const { t } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -91,8 +98,8 @@ export default function ScreenshotOverlayWindow() {
   } | null>(null);
 
   useEffect(() => {
-    document.documentElement.style.background = "#000";
-    document.body.style.background = "#000";
+    document.documentElement.style.background = "transparent";
+    document.body.style.background = "transparent";
     let disposed = false;
     getScreenshotOverlaySource()
       .then(async (overlaySource) => {
@@ -101,19 +108,18 @@ export default function ScreenshotOverlayWindow() {
         if (overlaySource.initialSelection) {
           setSelection(rectToAnnotation(overlaySource.initialSelection, "initial-selection"));
         }
-        const dataUrl = await readLocalImageDataUrl(overlaySource.sourcePath);
-        if (disposed) return;
         const image = new Image();
         image.onload = () => {
           if (disposed) return;
           imageRef.current = image;
           setImageReady(true);
+          void screenshotOverlayReady({ label: windowLabel() });
         };
         image.onerror = () => {
           if (disposed) return;
           setError(t("screenshot.capture_failed", { error: "Could not load screenshot" }));
         };
-        image.src = dataUrl;
+        image.src = convertFileSrc(overlaySource.sourcePath);
       })
       .catch((err) => setError(String(err)));
     return () => {
@@ -351,7 +357,7 @@ export default function ScreenshotOverlayWindow() {
     : null;
 
   return (
-    <div className="fixed inset-0 cursor-crosshair overflow-hidden bg-black text-white">
+    <div className="fixed inset-0 cursor-crosshair overflow-hidden bg-transparent text-white">
       <canvas
         ref={canvasRef}
         onPointerDown={pointerDown}
@@ -367,11 +373,7 @@ export default function ScreenshotOverlayWindow() {
         className="block h-screen w-screen"
         style={{ cursor: canvasCursor }}
       />
-      {!imageReady && !error && (
-        <div className="pointer-events-none fixed inset-0 flex items-center justify-center bg-black">
-          <LoaderCircle className="h-6 w-6 animate-spin text-white/70" />
-        </div>
-      )}
+      {!imageReady && !error && null}
       {toolbarRect && (
         <ScreenshotOverlayToolbar
           rect={toolbarRect}

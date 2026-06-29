@@ -14,6 +14,7 @@
 pub mod approvals;
 pub mod broker;
 pub mod config;
+pub mod diagnostics;
 pub mod host;
 pub mod lease;
 pub mod mcp_http;

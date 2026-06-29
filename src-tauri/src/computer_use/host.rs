@@ -14,6 +14,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
+use serde_json::json;
+
 use crate::desktop_control::DesktopControlPermissionStatus;
 
 use super::approvals::{ApprovalDecision, ApprovalRegistry};
@@ -430,6 +432,80 @@ impl ComputerUseHost {
         Ok(screenshot)
     }
 
+    fn write_coordinate_resolution_record(
+        session_id: &str,
+        snapshot: &SnapshotId,
+        point: Point,
+        coordinate_space: CoordinateSpace,
+        screenshot: Option<&ScreenshotRef>,
+        resolved_screen_point: Option<Point>,
+        error: Option<String>,
+    ) {
+        super::diagnostics::write(
+            "coordinate_resolution",
+            json!({
+                "sessionId": session_id,
+                "snapshotId": snapshot.0.as_str(),
+                "inputPoint": point,
+                "coordinateSpace": coordinate_space,
+                "screenshot": screenshot,
+                "resolvedScreenPoint": resolved_screen_point,
+                "error": error,
+            }),
+        );
+    }
+
+    fn write_point_action_record(
+        event: &str,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        target: &AppTarget,
+        point: Point,
+        coordinate_space: CoordinateSpace,
+        screen_point: Point,
+        screenshot: Option<&ScreenshotRef>,
+    ) {
+        super::diagnostics::write(
+            event,
+            json!({
+                "sessionId": session_id,
+                "snapshotId": snapshot.0.as_str(),
+                "target": target,
+                "inputPoint": point,
+                "coordinateSpace": coordinate_space,
+                "resolvedScreenPoint": screen_point,
+                "screenshot": screenshot,
+            }),
+        );
+    }
+
+    fn write_drag_action_record(
+        session_id: &str,
+        snapshot: &SnapshotId,
+        target: &AppTarget,
+        from: Point,
+        to: Point,
+        coordinate_space: CoordinateSpace,
+        screen_from: Point,
+        screen_to: Point,
+        screenshot: Option<&ScreenshotRef>,
+    ) {
+        super::diagnostics::write(
+            "drag_dispatch",
+            json!({
+                "sessionId": session_id,
+                "snapshotId": snapshot.0.as_str(),
+                "target": target,
+                "from": from,
+                "to": to,
+                "coordinateSpace": coordinate_space,
+                "resolvedScreenFrom": screen_from,
+                "resolvedScreenTo": screen_to,
+                "screenshot": screenshot,
+            }),
+        );
+    }
+
     fn resolve_point_for_snapshot(
         &self,
         session_id: &str,
@@ -437,10 +513,34 @@ impl ComputerUseHost {
         point: Point,
         coordinate_space: CoordinateSpace,
     ) -> Result<Point, ComputerUseError> {
-        let screenshot = self.snapshot_screenshot(session_id, snapshot)?;
-        screenshot
+        let screenshot = match self.snapshot_screenshot(session_id, snapshot) {
+            Ok(screenshot) => screenshot,
+            Err(error) => {
+                Self::write_coordinate_resolution_record(
+                    session_id,
+                    snapshot,
+                    point,
+                    coordinate_space,
+                    None,
+                    None,
+                    Some(error.to_string()),
+                );
+                return Err(error);
+            }
+        };
+        let resolved = screenshot
             .resolve_point(point, coordinate_space)
-            .map_err(ComputerUseError::Coordinate)
+            .map_err(ComputerUseError::Coordinate);
+        Self::write_coordinate_resolution_record(
+            session_id,
+            snapshot,
+            point,
+            coordinate_space,
+            Some(&screenshot),
+            resolved.as_ref().ok().copied(),
+            resolved.as_ref().err().map(ToString::to_string),
+        );
+        resolved
     }
 
     fn element_center_for_snapshot(
@@ -569,6 +669,17 @@ impl ComputerUseHost {
             coordinate_space,
             perm,
         )?;
+        let screenshot = self.snapshot_screenshot(session_id, snapshot).ok();
+        Self::write_point_action_record(
+            "click_at_dispatch",
+            session_id,
+            snapshot,
+            &target,
+            point,
+            coordinate_space,
+            screen_point,
+            screenshot.as_ref(),
+        );
         self.emit_pointer_event(ComputerUsePointerEvent::point(
             session_id,
             ComputerUsePointerAction::Click,
@@ -595,6 +706,17 @@ impl ComputerUseHost {
             coordinate_space,
             perm,
         )?;
+        let screenshot = self.snapshot_screenshot(session_id, snapshot).ok();
+        Self::write_point_action_record(
+            "secondary_click_dispatch",
+            session_id,
+            snapshot,
+            &target,
+            point,
+            coordinate_space,
+            screen_point,
+            screenshot.as_ref(),
+        );
         self.emit_pointer_event(ComputerUsePointerEvent::point(
             session_id,
             ComputerUsePointerAction::SecondaryClick,
@@ -644,6 +766,17 @@ impl ComputerUseHost {
             coordinate_space,
             perm,
         )?;
+        let screenshot = self.snapshot_screenshot(session_id, snapshot).ok();
+        Self::write_point_action_record(
+            "double_click_dispatch",
+            session_id,
+            snapshot,
+            &target,
+            point,
+            coordinate_space,
+            screen_point,
+            screenshot.as_ref(),
+        );
         self.emit_pointer_event(ComputerUsePointerEvent::point(
             session_id,
             ComputerUsePointerAction::DoubleClick,
@@ -669,6 +802,18 @@ impl ComputerUseHost {
             self.resolve_point_for_snapshot(session_id, snapshot, from, coordinate_space)?;
         let screen_to =
             self.resolve_point_for_snapshot(session_id, snapshot, to, coordinate_space)?;
+        let screenshot = self.snapshot_screenshot(session_id, snapshot).ok();
+        Self::write_drag_action_record(
+            session_id,
+            snapshot,
+            &target,
+            from,
+            to,
+            coordinate_space,
+            screen_from,
+            screen_to,
+            screenshot.as_ref(),
+        );
         self.begin_foreground(session_id);
         self.emit_pointer_event(ComputerUsePointerEvent::drag(
             session_id,

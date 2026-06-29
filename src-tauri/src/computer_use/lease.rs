@@ -212,6 +212,7 @@ mod tests {
             width: 100,
             height: 50,
             default_coordinate_space: CoordinateSpace::Screenshot,
+            capture_kind: None,
             screen_bounds: Rect {
                 x: 0.0,
                 y: 0.0,

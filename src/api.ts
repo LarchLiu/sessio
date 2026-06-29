@@ -1239,6 +1239,10 @@ export interface ScreenshotOverlayWindow {
   label: string;
 }
 
+export interface ScreenshotOverlayReadyRequest {
+  label: string;
+}
+
 export interface ScreenshotOverlayInitialSelection {
   x: number;
   y: number;
@@ -2454,6 +2458,12 @@ export async function openScreenshotOverlayCapture(
 
 export async function getScreenshotOverlaySource(): Promise<ScreenshotOverlaySource> {
   return invoke<ScreenshotOverlaySource>("get_screenshot_overlay_source");
+}
+
+export async function screenshotOverlayReady(
+  req: ScreenshotOverlayReadyRequest,
+): Promise<void> {
+  return invoke<void>("screenshot_overlay_ready", { payload: req });
 }
 
 export async function finishScreenshotOverlay(): Promise<void> {

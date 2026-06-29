@@ -7,7 +7,10 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    utils::config::Color, AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
+    WindowEvent,
+};
 
 use super::provider::Point;
 
@@ -88,6 +91,7 @@ impl ComputerUsePointerEvent {
 }
 
 pub fn tauri_pointer_event_sink(app: AppHandle) -> PointerEventSink {
+    let _ = ensure_pointer_overlay_windows(&app);
     Arc::new(move |event| {
         if let Err(error) = show_and_emit_pointer_event(&app, event) {
             log::debug!("[computer-use:pointer-overlay] {error}");
@@ -133,6 +137,19 @@ fn ensure_pointer_overlay_windows(app: &AppHandle) -> Result<Vec<String>, String
             )
             .into(),
         );
+        let init_script = r#"
+            document.documentElement.style.background = 'transparent';
+            document.documentElement.style.backgroundColor = 'transparent';
+            if (document.body) {
+              document.body.style.background = 'transparent';
+              document.body.style.backgroundColor = 'transparent';
+            } else {
+              window.addEventListener('DOMContentLoaded', () => {
+                document.body.style.background = 'transparent';
+                document.body.style.backgroundColor = 'transparent';
+              }, { once: true });
+            }
+        "#;
 
         let window = WebviewWindowBuilder::new(app, &label, url)
             .title("Computer Use Pointer")
@@ -140,10 +157,13 @@ fn ensure_pointer_overlay_windows(app: &AppHandle) -> Result<Vec<String>, String
             .shadow(false)
             .resizable(false)
             .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
             .always_on_top(true)
             .visible_on_all_workspaces(true)
             .skip_taskbar(true)
             .focused(false)
+            .visible(false)
+            .initialization_script(init_script)
             .position(origin_x, origin_y)
             .inner_size(width, height)
             .build()
@@ -151,6 +171,7 @@ fn ensure_pointer_overlay_windows(app: &AppHandle) -> Result<Vec<String>, String
 
         let _ = window.set_ignore_cursor_events(true);
         let _ = window.set_visible_on_all_workspaces(true);
+        let _ = window.show();
         window.on_window_event(|event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
