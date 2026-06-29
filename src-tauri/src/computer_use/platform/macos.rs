@@ -78,10 +78,11 @@ enum InputActionKind {
     KeyboardKey,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AppInputProfile {
-    Native,
-    WebLike,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AppInputSignals {
+    has_embedded_web_runtime: bool,
+    ax_element_count: usize,
+    actionable_ax_element_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,7 +157,7 @@ impl ComputerUseProvider for MacosProvider {
 
     fn click_element(&self, target: &AppTarget, element: &ElementId) -> ProviderResult<()> {
         let pid = resolve_pid(&target.app_id)?;
-        click_ax_element(pid, element)
+        click_ax_element(target, pid, element)
     }
 
     fn click_point(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
@@ -181,7 +182,7 @@ impl ComputerUseProvider for MacosProvider {
         element: &ElementId,
     ) -> ProviderResult<()> {
         let pid = resolve_pid(&target.app_id)?;
-        secondary_ax_element(pid, element)
+        secondary_ax_element(target, pid, element)
     }
 
     fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
@@ -252,7 +253,7 @@ impl ComputerUseProvider for MacosProvider {
         amount: i32,
     ) -> ProviderResult<()> {
         let pid = resolve_pid(&target.app_id)?;
-        scroll_ax_element(pid, element, direction, amount)
+        scroll_ax_element(target, pid, element, direction, amount)
     }
 }
 
@@ -579,20 +580,33 @@ fn installed_app_url(app_id: &str) -> Option<objc2::rc::Retained<objc2_foundatio
 }
 
 fn event_target_for(target: &AppTarget, pid: i32, action: InputActionKind) -> EventTarget {
-    let profile = app_input_profile(target, pid);
-    let route = match action {
-        InputActionKind::KeyboardText | InputActionKind::KeyboardKey => InputDispatchRoute::TargetPid,
-        InputActionKind::MouseClick
-        | InputActionKind::MouseSecondaryClick
-        | InputActionKind::MouseDoubleClick
-        | InputActionKind::MouseDrag
-        | InputActionKind::Scroll => match profile {
-            AppInputProfile::Native => InputDispatchRoute::TargetPid,
-            AppInputProfile::WebLike => InputDispatchRoute::Hid,
-        },
-    };
+    let has_embedded_web_runtime = bundle_has_embedded_web_runtime_markers(&target.app_id);
+    event_target_for_route(
+        target,
+        pid,
+        action,
+        dispatch_route_for_action(action, has_embedded_web_runtime),
+        Some(default_route_reason_for_action(
+            action,
+            has_embedded_web_runtime,
+        )),
+    )
+}
+
+fn event_target_for_route(
+    target: &AppTarget,
+    pid: i32,
+    action: InputActionKind,
+    route: InputDispatchRoute,
+    route_reason_override: Option<&'static str>,
+) -> EventTarget {
+    let signals = app_input_signals(target, pid);
+    let has_embedded_web_runtime = signals.has_embedded_web_runtime;
     let ensure_frontmost = matches!(route, InputDispatchRoute::Hid);
     let restore_frontmost = !ensure_frontmost;
+    let route_reason = route_reason_override.unwrap_or_else(|| {
+        default_route_reason_for_action(action, has_embedded_web_runtime)
+    });
 
     crate::computer_use::diagnostics::write(
         "input_dispatch_route",
@@ -609,13 +623,14 @@ fn event_target_for(target: &AppTarget, pid: i32, action: InputActionKind) -> Ev
                 InputActionKind::KeyboardText => "keyboard_text",
                 InputActionKind::KeyboardKey => "keyboard_key",
             },
-            "profile": match profile {
-                AppInputProfile::Native => "native",
-                AppInputProfile::WebLike => "web_like",
-            },
+            "profile": "operation_based",
             "route": route,
+            "routeReason": route_reason,
             "ensureFrontmost": ensure_frontmost,
             "restoreFrontmost": restore_frontmost,
+            "hasEmbeddedWebRuntime": signals.has_embedded_web_runtime,
+            "axElementCount": signals.ax_element_count,
+            "actionableAxElementCount": signals.actionable_ax_element_count,
         }),
     );
 
@@ -627,46 +642,69 @@ fn event_target_for(target: &AppTarget, pid: i32, action: InputActionKind) -> Ev
     }
 }
 
-fn target_pid_event_target(pid: i32) -> EventTarget {
-    EventTarget {
-        route: InputDispatchRoute::TargetPid,
-        pid,
-        ensure_frontmost: false,
-        restore_frontmost: true,
+fn dispatch_route_for_action(
+    action: InputActionKind,
+    has_embedded_web_runtime: bool,
+) -> InputDispatchRoute {
+    match action {
+        InputActionKind::KeyboardText | InputActionKind::KeyboardKey => InputDispatchRoute::TargetPid,
+        InputActionKind::MouseClick
+        | InputActionKind::MouseSecondaryClick
+        | InputActionKind::MouseDoubleClick
+        | InputActionKind::MouseDrag
+        | InputActionKind::Scroll => {
+            if has_embedded_web_runtime {
+                InputDispatchRoute::Hid
+            } else {
+                InputDispatchRoute::TargetPid
+            }
+        }
     }
 }
 
-fn app_input_profile(target: &AppTarget, pid: i32) -> AppInputProfile {
-    if is_known_web_like_bundle(&target.app_id) {
-        return AppInputProfile::WebLike;
+fn default_route_reason_for_action(
+    action: InputActionKind,
+    has_embedded_web_runtime: bool,
+) -> &'static str {
+    match action {
+        InputActionKind::KeyboardText | InputActionKind::KeyboardKey => {
+            "keyboard_actions_prefer_background_target_pid"
+        }
+        InputActionKind::MouseClick
+        | InputActionKind::MouseSecondaryClick
+        | InputActionKind::MouseDoubleClick
+        | InputActionKind::MouseDrag
+        | InputActionKind::Scroll => {
+            if has_embedded_web_runtime {
+                "mouse_actions_web_runtime_require_foreground_hid"
+            } else {
+                "mouse_actions_native_prefer_background_target_pid"
+            }
+        }
     }
-    if bundle_has_web_like_framework_markers(&target.app_id) {
-        return AppInputProfile::WebLike;
-    }
-    if running_application_name(pid)
-        .map(|name| {
-            let lower = name.to_ascii_lowercase();
-            lower.contains("netease") || lower.contains("cloudmusic")
-        })
-        .unwrap_or(false)
-    {
-        return AppInputProfile::WebLike;
-    }
-    AppInputProfile::Native
 }
 
-fn is_known_web_like_bundle(app_id: &str) -> bool {
-    matches!(
-        app_id,
-        "com.netease.163music"
-            | "com.spotify.client"
-            | "notion.id"
-            | "com.tinyspeck.slackmacgap"
-            | "com.microsoft.VSCode"
+fn element_fallback_route(
+    target: &AppTarget,
+    action: InputActionKind,
+) -> (InputDispatchRoute, &'static str) {
+    let has_embedded_web_runtime = bundle_has_embedded_web_runtime_markers(&target.app_id);
+    (
+        dispatch_route_for_action(action, has_embedded_web_runtime),
+        default_route_reason_for_action(action, has_embedded_web_runtime),
     )
 }
 
-fn bundle_has_web_like_framework_markers(app_id: &str) -> bool {
+fn app_input_signals(target: &AppTarget, pid: i32) -> AppInputSignals {
+    let elements = ax_elements_for_pid(pid).unwrap_or_default();
+    AppInputSignals {
+        has_embedded_web_runtime: bundle_has_embedded_web_runtime_markers(&target.app_id),
+        ax_element_count: elements.len(),
+        actionable_ax_element_count: elements.iter().filter(|element| element.actionable).count(),
+    }
+}
+
+fn bundle_has_embedded_web_runtime_markers(app_id: &str) -> bool {
     let Some(url) = installed_app_url(app_id) else {
         return false;
     };
@@ -676,16 +714,14 @@ fn bundle_has_web_like_framework_markers(app_id: &str) -> bool {
     let contents = PathBuf::from(path).join("Contents");
     let markers = [
         contents.join("Frameworks").join("Electron Framework.framework"),
+        contents
+            .join("Frameworks")
+            .join("Chromium Embedded Framework.framework"),
         contents.join("Frameworks").join("QtWebEngineCore.framework"),
         contents.join("Frameworks").join("QtWebEngineWidgets.framework"),
         contents.join("Frameworks").join("QtWebEngineQuick.framework"),
     ];
     markers.iter().any(|path| path.exists())
-}
-
-fn running_application_name(pid: i32) -> Option<String> {
-    let app = running_application_for_pid(pid)?;
-    app.localizedName().map(|name| name.to_string())
 }
 
 fn running_application_for_pid(
@@ -763,30 +799,18 @@ fn running_application(
 }
 
 fn raise_app_foreground(target: &AppTarget) -> ProviderResult<AppRaiseResult> {
-    use objc2_app_kit::NSApplicationActivationOptions;
-
     let mut launched = false;
     if !self_is_app_running(&target.app_id)? {
         launched = launch_app_background(target)?.launched;
     }
     let pid = resolve_pid(&target.app_id)?;
-    restore_minimized_ax_windows(pid);
-    let app = running_application(&target.app_id)
-        .ok_or_else(|| ProviderError::AppNotFound(target.app_id.clone()))?;
-    let _ = app.unhide();
-    #[allow(deprecated)]
-    let activated = app.activateWithOptions(
-        NSApplicationActivationOptions::ActivateAllWindows
-            | NSApplicationActivationOptions::ActivateIgnoringOtherApps,
-    );
-    restore_minimized_ax_windows(pid);
-    let visible = wait_for_visible_window(pid, Duration::from_secs(2));
+    let activation = activate_running_app(&target.app_id, pid);
     Ok(AppRaiseResult {
         target: target.clone(),
         launched,
         running: true,
-        activated,
-        visible,
+        activated: activation.activated,
+        visible: activation.visible,
     })
 }
 
@@ -807,6 +831,131 @@ fn wait_for_visible_window(pid: i32, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(100));
     }
     false
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActivationOutcome {
+    activated: bool,
+    visible: bool,
+    reopen_attempted: bool,
+    reopen_succeeded: bool,
+}
+
+fn activate_running_app(app_id: &str, pid: i32) -> ActivationOutcome {
+    use objc2_app_kit::NSApplicationActivationOptions;
+
+    let had_visible_window = frontmost_window_for_pid(pid).is_ok();
+    let reopen_attempted = !had_visible_window;
+    let reopen_succeeded = if reopen_attempted {
+        reopen_running_app_windows(app_id)
+    } else {
+        false
+    };
+
+    restore_minimized_ax_windows(pid);
+
+    let activated = running_application(app_id)
+        .map(|app| {
+            let _ = app.unhide();
+            #[allow(deprecated)]
+            app.activateWithOptions(
+                NSApplicationActivationOptions::ActivateAllWindows
+                    | NSApplicationActivationOptions::ActivateIgnoringOtherApps,
+            )
+        })
+        .unwrap_or(false);
+
+    restore_minimized_ax_windows(pid);
+    let visible = wait_for_visible_window(pid, Duration::from_secs(2));
+
+    crate::computer_use::diagnostics::write(
+        "app_activation",
+        serde_json::json!({
+            "appId": app_id,
+            "pid": pid,
+            "hadVisibleWindow": had_visible_window,
+            "reopenAttempted": reopen_attempted,
+            "reopenSucceeded": reopen_succeeded,
+            "activated": activated,
+            "visible": visible,
+        }),
+    );
+
+    ActivationOutcome {
+        activated,
+        visible,
+        reopen_attempted,
+        reopen_succeeded,
+    }
+}
+
+fn reopen_running_app_windows(app_id: &str) -> bool {
+    use objc2_app_kit::{NSRunningApplication, NSWorkspace, NSWorkspaceOpenConfiguration};
+
+    let Some(app_url) = installed_app_url(app_id) else {
+        crate::computer_use::diagnostics::write(
+            "app_reopen_request",
+            serde_json::json!({
+                "appId": app_id,
+                "requested": false,
+                "reason": "app_url_not_found",
+            }),
+        );
+        return false;
+    };
+
+    let config = NSWorkspaceOpenConfiguration::configuration();
+    config.setActivates(true);
+    config.setAddsToRecentItems(false);
+    config.setCreatesNewApplicationInstance(false);
+    config.setAllowsRunningApplicationSubstitution(true);
+
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<i32, String>>(1);
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    let block = RcBlock::new({
+        let tx = Arc::clone(&tx);
+        move |app: *mut NSRunningApplication, error: *mut NSError| {
+            let result = if !error.is_null() {
+                Err(unsafe { ns_error_description(&*error) })
+            } else if app.is_null() {
+                Err("NSWorkspace returned no running application".to_string())
+            } else {
+                Ok(unsafe { (*app).processIdentifier() })
+            };
+            if let Ok(mut sender) = tx.lock() {
+                if let Some(sender) = sender.take() {
+                    let _ = sender.send(result);
+                }
+            }
+        }
+    });
+
+    NSWorkspace::sharedWorkspace().openApplicationAtURL_configuration_completionHandler(
+        &app_url,
+        &config,
+        Some(&*block),
+    );
+
+    let reopen_result = match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(returned_pid)) => Ok(returned_pid),
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(format!("timed out waiting for NSWorkspace reopen: {error}")),
+    };
+
+    let succeeded = reopen_result.is_ok();
+    crate::computer_use::diagnostics::write(
+        "app_reopen_request",
+        serde_json::json!({
+            "appId": app_id,
+            "requested": true,
+            "succeeded": succeeded,
+            "result": match reopen_result {
+                Ok(returned_pid) => serde_json::json!({ "pid": returned_pid }),
+                Err(error) => serde_json::json!({ "error": error }),
+            },
+        }),
+    );
+    succeeded
 }
 
 // --- Window discovery + capture ------------------------------------------
@@ -1408,9 +1557,10 @@ mod ax {
     }
 }
 
-/// Walk the AX tree for an app and flatten a conservative set of actionable
-/// elements. Returns an empty vec on any AX failure (caller treats AX as
-/// best-effort; absence of elements just means no element-targeted actions).
+/// Walk the AX tree for the app's current UI surface and flatten the full set
+/// of discovered nodes. `actionable` is only a marker; non-actionable nodes are
+/// still surfaced so menus, groups, labels, and other contextual structure are
+/// available to the model.
 fn ax_elements_for_pid(pid: i32) -> Option<Vec<UiElement>> {
     use core_foundation::base::CFTypeRef;
     let root = unsafe { ax::AXUIElementCreateApplication(pid) };
@@ -1420,10 +1570,10 @@ fn ax_elements_for_pid(pid: i32) -> Option<Vec<UiElement>> {
     enable_electron_accessibility_flags(root);
     let mut out = Vec::new();
     let mut next_id = 0u64;
-    if let Some(windows) = ax_windows(root) {
-        for window in windows {
-            walk_ax(window, 0, &mut next_id, &mut out);
-            unsafe { cf_release(window as CFTypeRef) };
+    if let Some(entries) = ax_traversal_roots(root) {
+        for entry in entries {
+            walk_ax(entry, 0, &mut next_id, &mut out);
+            unsafe { cf_release(entry as CFTypeRef) };
         }
     } else {
         walk_ax(root, 0, &mut next_id, &mut out);
@@ -1444,18 +1594,17 @@ fn walk_ax(element: ax::AXUIElementRef, depth: usize, next_id: &mut u64, out: &m
     let label = ax_string_attr(element, ax::TITLE).or_else(|| ax_string_attr(element, ax::VALUE));
     let bounds = ax_bounds(element);
     let enabled = ax_bool_attr(element, ax::ENABLED).unwrap_or(true);
+    let actionable = enabled && is_actionable_role(&role);
 
-    if is_actionable_role(&role) {
-        *next_id += 1;
-        out.push(UiElement {
-            id: format!("ax-{}", *next_id),
-            role: role.clone(),
-            label,
-            bounds,
-            bounds_coordinate_space: bounds.map(|_| CoordinateSpace::Screen),
-            actionable: enabled,
-        });
-    }
+    *next_id += 1;
+    out.push(UiElement {
+        id: format!("ax-{}", *next_id),
+        role: role.clone(),
+        label,
+        bounds,
+        bounds_coordinate_space: bounds.map(|_| CoordinateSpace::Screen),
+        actionable,
+    });
 
     // Recurse into children.
     if let Some(children) = ax_children(element) {
@@ -1522,6 +1671,50 @@ fn ax_windows(element: ax::AXUIElementRef) -> Option<Vec<ax::AXUIElementRef>> {
     ax_retained_array_items(array)
 }
 
+fn ax_traversal_roots(root: ax::AXUIElementRef) -> Option<Vec<ax::AXUIElementRef>> {
+    let mut out = Vec::new();
+
+    if let Some(focused) = ax_ui_element_attr(root, "AXFocusedWindow") {
+        out.push(focused);
+    }
+    if let Some(main) = ax_ui_element_attr(root, "AXMainWindow") {
+        push_unique_ax_element(&mut out, main);
+    }
+    if let Some(windows) = ax_windows(root) {
+        for window in windows {
+            push_unique_ax_element(&mut out, window);
+        }
+    }
+    if let Some(all_windows) = ax_all_windows(root) {
+        for window in all_windows {
+            push_unique_ax_element(&mut out, window);
+        }
+    }
+    if let Some(menu_bar) = ax_ui_element_attr(root, "AXMenuBar") {
+        push_unique_ax_element(&mut out, menu_bar);
+    }
+
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn ax_all_windows(element: ax::AXUIElementRef) -> Option<Vec<ax::AXUIElementRef>> {
+    let array = ax_array_attr(element, "AXAllWindows")?;
+    ax_retained_array_items(array)
+}
+
+fn push_unique_ax_element(out: &mut Vec<ax::AXUIElementRef>, element: ax::AXUIElementRef) {
+    let ptr = element as usize;
+    if out.iter().any(|existing| *existing as usize == ptr) {
+        unsafe { cf_release(element as core_foundation::base::CFTypeRef) };
+        return;
+    }
+    out.push(element);
+}
+
 fn ax_retained_array_items(array: CFArray<*const c_void>) -> Option<Vec<ax::AXUIElementRef>> {
     let mut out = Vec::with_capacity(array.len() as usize);
     for item in array.iter() {
@@ -1554,6 +1747,25 @@ fn ax_array_attr(element: ax::AXUIElementRef, attr: &str) -> Option<CFArray<*con
     let array_ref = cf.as_CFTypeRef() as _;
     std::mem::forget(cf);
     Some(unsafe { CFArray::wrap_under_create_rule(array_ref) })
+}
+
+fn ax_ui_element_attr(element: ax::AXUIElementRef, attr: &str) -> Option<ax::AXUIElementRef> {
+    use core_foundation::base::CFTypeRef;
+    let attr = CFString::new(attr);
+    let mut value: CFTypeRef = std::ptr::null();
+    let err = unsafe {
+        ax::AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value)
+    };
+    if err != ax::kAXErrorSuccess || value.is_null() {
+        return None;
+    }
+    let cf = unsafe { CFType::wrap_under_create_rule(value) };
+    let child = cf.as_CFTypeRef() as ax::AXUIElementRef;
+    if child.is_null() {
+        return None;
+    }
+    unsafe { cf_retain(child as CFTypeRef) };
+    Some(child)
 }
 
 /// Read the on-screen bounds of an AX element via its position + size, which are
@@ -1657,7 +1869,9 @@ fn ax_value_size(element: ax::AXUIElementRef, attr: &str) -> Option<(f32, f32)> 
 fn ax_element_center(pid: i32, element_id: &ElementId) -> ProviderResult<Option<CGPoint>> {
     let elements = ax_elements_for_pid(pid).unwrap_or_default();
     let element = elements.iter().find(|e| &e.id == element_id);
-    match element.and_then(|e| e.bounds) {
+    match element
+        .and_then(|e| e.bounds.filter(|bounds| bounds.width > 0.0 && bounds.height > 0.0))
+    {
         Some(b) => Ok(Some(CGPoint {
             x: (b.x + b.width / 2.0) as f64,
             y: (b.y + b.height / 2.0) as f64,
@@ -1666,34 +1880,102 @@ fn ax_element_center(pid: i32, element_id: &ElementId) -> ProviderResult<Option<
     }
 }
 
-fn click_ax_element(pid: i32, element_id: &ElementId) -> ProviderResult<()> {
+fn click_ax_element(target: &AppTarget, pid: i32, element_id: &ElementId) -> ProviderResult<()> {
+    let (fallback_route, fallback_reason) =
+        element_fallback_route(target, InputActionKind::MouseClick);
+    crate::computer_use::diagnostics::write(
+        "element_action_strategy",
+        serde_json::json!({
+            "appId": target.app_id,
+            "pid": pid,
+            "elementId": element_id,
+            "action": "click",
+            "profile": "operation_based",
+            "usesAxAction": true,
+            "fallbackRoute": fallback_route,
+            "fallbackReason": fallback_reason,
+        }),
+    );
     let action = perform_ax_action_for_id(pid, element_id, ax::PRESS_ACTION)?;
     if action == ax::kAXErrorSuccess {
         return Ok(());
     }
     match ax_element_center(pid, element_id)? {
-        Some(center) => left_click_at(target_pid_event_target(pid), center),
+        Some(center) => left_click_at(
+            event_target_for_route(
+                target,
+                pid,
+                InputActionKind::MouseClick,
+                fallback_route,
+                Some(fallback_reason),
+            ),
+            center,
+        ),
         None => Err(ProviderError::ElementNotFound(element_id.clone())),
     }
 }
 
-fn secondary_ax_element(pid: i32, element_id: &ElementId) -> ProviderResult<()> {
+fn secondary_ax_element(
+    target: &AppTarget,
+    pid: i32,
+    element_id: &ElementId,
+) -> ProviderResult<()> {
+    let (fallback_route, fallback_reason) =
+        element_fallback_route(target, InputActionKind::MouseSecondaryClick);
+    crate::computer_use::diagnostics::write(
+        "element_action_strategy",
+        serde_json::json!({
+            "appId": target.app_id,
+            "pid": pid,
+            "elementId": element_id,
+            "action": "secondary_click",
+            "profile": "operation_based",
+            "usesAxAction": true,
+            "fallbackRoute": fallback_route,
+            "fallbackReason": fallback_reason,
+        }),
+    );
     let action = perform_ax_action_for_id(pid, element_id, ax::SHOW_MENU_ACTION)?;
     if action == ax::kAXErrorSuccess {
         return Ok(());
     }
     match ax_element_center(pid, element_id)? {
-        Some(center) => secondary_click_at(target_pid_event_target(pid), center),
+        Some(center) => secondary_click_at(
+            event_target_for_route(
+                target,
+                pid,
+                InputActionKind::MouseSecondaryClick,
+                fallback_route,
+                Some(fallback_reason),
+            ),
+            center,
+        ),
         None => Err(ProviderError::ElementNotFound(element_id.clone())),
     }
 }
 
 fn scroll_ax_element(
+    target: &AppTarget,
     pid: i32,
     element_id: &ElementId,
     direction: ScrollDirection,
     amount: i32,
 ) -> ProviderResult<()> {
+    let (fallback_route, fallback_reason) =
+        element_fallback_route(target, InputActionKind::Scroll);
+    crate::computer_use::diagnostics::write(
+        "element_action_strategy",
+        serde_json::json!({
+            "appId": target.app_id,
+            "pid": pid,
+            "elementId": element_id,
+            "action": "scroll",
+            "profile": "operation_based",
+            "usesAxAction": true,
+            "fallbackRoute": fallback_route,
+            "fallbackReason": fallback_reason,
+        }),
+    );
     let action = match direction {
         ScrollDirection::Up => ax::SCROLL_UP_ACTION,
         ScrollDirection::Down => ax::SCROLL_DOWN_ACTION,
@@ -1708,7 +1990,17 @@ fn scroll_ax_element(
     if visible == ax::kAXErrorSuccess {
         return Ok(());
     }
-    scroll_wheel(target_pid_event_target(pid), direction, amount)
+    scroll_wheel(
+        event_target_for_route(
+            target,
+            pid,
+            InputActionKind::Scroll,
+            fallback_route,
+            Some(fallback_reason),
+        ),
+        direction,
+        amount,
+    )
 }
 
 fn set_ax_value_for_id(pid: i32, element_id: &ElementId, value: &str) -> ProviderResult<()> {
@@ -1761,12 +2053,9 @@ fn with_ax_element_walk<T>(
     if depth > AX_MAX_DEPTH || *next_id as usize >= AX_MAX_ELEMENTS {
         return None;
     }
-    let role = ax_string_attr(element, ax::ROLE).unwrap_or_default();
-    if is_actionable_role(&role) {
-        *next_id += 1;
-        if format!("ax-{}", *next_id) == *element_id {
-            return f(element);
-        }
+    *next_id += 1;
+    if format!("ax-{}", *next_id) == *element_id {
+        return f(element);
     }
     if let Some(children) = ax_children(element) {
         let mut found = None;
@@ -2133,20 +2422,25 @@ fn app_bundle_id(app: &objc2::rc::Retained<objc2_app_kit::NSRunningApplication>)
 }
 
 fn activate_target_pid(pid: i32) -> bool {
-    use objc2_app_kit::NSApplicationActivationOptions;
-
     let Some(app) = running_application_for_pid(pid) else {
         return false;
     };
-    restore_minimized_ax_windows(pid);
-    let _ = app.unhide();
-    #[allow(deprecated)]
-    let activated = app.activateWithOptions(
-        NSApplicationActivationOptions::ActivateAllWindows
-            | NSApplicationActivationOptions::ActivateIgnoringOtherApps,
+    let Some(app_id) = app_bundle_id(&app) else {
+        return false;
+    };
+    let activation = activate_running_app(&app_id, pid);
+    crate::computer_use::diagnostics::write(
+        "activate_target_pid",
+        serde_json::json!({
+            "appId": app_id,
+            "pid": pid,
+            "activated": activation.activated,
+            "visible": activation.visible,
+            "reopenAttempted": activation.reopen_attempted,
+            "reopenSucceeded": activation.reopen_succeeded,
+        }),
     );
-    restore_minimized_ax_windows(pid);
-    activated
+    activation.activated
 }
 
 fn wait_for_frontmost_pid(pid: i32, timeout: Duration) -> bool {
@@ -2298,7 +2592,8 @@ mod tests {
     fn actionable_roles_are_a_conservative_set() {
         assert!(is_actionable_role("AXButton"));
         assert!(is_actionable_role("AXTextField"));
-        // Containers / static text are not directly actionable.
+        assert!(is_actionable_role("AXMenuItem"));
+        // Containers / static text are still captured, just not marked actionable.
         assert!(!is_actionable_role("AXGroup"));
         assert!(!is_actionable_role("AXStaticText"));
         assert!(!is_actionable_role(""));
@@ -2378,29 +2673,63 @@ mod tests {
     }
 
     #[test]
-    fn known_web_like_bundle_uses_hid_for_mouse_but_not_keyboard() {
-        let target = AppTarget {
-            app_id: "com.netease.163music".into(),
-            window_id: None,
-        };
-
-        let mouse = event_target_for(&target, 42, InputActionKind::MouseClick);
-        let keyboard = event_target_for(&target, 42, InputActionKind::KeyboardKey);
-
-        assert_eq!(mouse.route, InputDispatchRoute::Hid);
-        assert_eq!(keyboard.route, InputDispatchRoute::TargetPid);
+    fn operation_based_routing_keeps_keyboard_on_pid() {
+        assert_eq!(
+            dispatch_route_for_action(InputActionKind::KeyboardKey, false),
+            InputDispatchRoute::TargetPid
+        );
+        assert_eq!(
+            dispatch_route_for_action(InputActionKind::KeyboardText, true),
+            InputDispatchRoute::TargetPid
+        );
     }
 
     #[test]
-    fn native_bundle_uses_pid_for_mouse() {
-        let target = AppTarget {
-            app_id: "com.apple.TextEdit".into(),
-            window_id: None,
-        };
+    fn operation_based_routing_keeps_native_mouse_actions_in_background() {
+        assert_eq!(
+            dispatch_route_for_action(InputActionKind::MouseClick, false),
+            InputDispatchRoute::TargetPid
+        );
+        assert_eq!(
+            dispatch_route_for_action(InputActionKind::MouseSecondaryClick, false),
+            InputDispatchRoute::TargetPid
+        );
+        assert_eq!(
+            dispatch_route_for_action(InputActionKind::MouseDoubleClick, false),
+            InputDispatchRoute::TargetPid
+        );
+        assert_eq!(
+            dispatch_route_for_action(InputActionKind::MouseDrag, false),
+            InputDispatchRoute::TargetPid
+        );
+        assert_eq!(
+            dispatch_route_for_action(InputActionKind::Scroll, false),
+            InputDispatchRoute::TargetPid
+        );
+    }
 
-        let mouse = event_target_for(&target, 42, InputActionKind::MouseClick);
-
-        assert_eq!(mouse.route, InputDispatchRoute::TargetPid);
+    #[test]
+    fn operation_based_routing_escalates_web_runtime_mouse_actions_to_hid() {
+        assert_eq!(
+            dispatch_route_for_action(InputActionKind::MouseClick, true),
+            InputDispatchRoute::Hid
+        );
+        assert_eq!(
+            dispatch_route_for_action(InputActionKind::MouseSecondaryClick, true),
+            InputDispatchRoute::Hid
+        );
+        assert_eq!(
+            dispatch_route_for_action(InputActionKind::MouseDoubleClick, true),
+            InputDispatchRoute::Hid
+        );
+        assert_eq!(
+            dispatch_route_for_action(InputActionKind::MouseDrag, true),
+            InputDispatchRoute::Hid
+        );
+        assert_eq!(
+            dispatch_route_for_action(InputActionKind::Scroll, true),
+            InputDispatchRoute::Hid
+        );
     }
 
     #[test]
