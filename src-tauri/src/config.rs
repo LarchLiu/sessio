@@ -110,6 +110,7 @@ struct RawAppshotConfig {
 struct RawComputerUseConfig {
     enabled: Option<bool>,
     approved_apps: Option<Vec<String>>,
+    app_route_preferences: Option<std::collections::BTreeMap<String, crate::computer_use::settings::AppRoutePreferences>>,
     allow_input_injection: Option<bool>,
     allow_foreground_takeover: Option<bool>,
 }
@@ -279,6 +280,14 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 "approved_apps" => {
                     raw.computer_use.approved_apps =
                         value.map(|value| parse_string_array(&value)).transpose()?
+                }
+                "app_route_preferences" => {
+                    raw.computer_use.app_route_preferences = value
+                        .map(|value| {
+                            serde_json::from_str::<std::collections::BTreeMap<String, crate::computer_use::settings::AppRoutePreferences>>(&value)
+                                .map_err(anyhow::Error::from)
+                        })
+                        .transpose()?
                 }
                 "allow_input_injection" => {
                     raw.computer_use.allow_input_injection = value.map(parse_bool).transpose()?
@@ -509,6 +518,10 @@ fn resolve_computer_use_config(raw: RawConfig) -> ComputerUseSettings {
     ComputerUseSettings {
         enabled: raw.computer_use.enabled.unwrap_or(defaults.enabled),
         approved_apps: normalized_string_list(raw.computer_use.approved_apps.unwrap_or_default()),
+        app_route_preferences: raw
+            .computer_use
+            .app_route_preferences
+            .unwrap_or_default(),
     }
 }
 
@@ -758,6 +771,14 @@ fn serialize_computer_use_config(config: &ComputerUseSettings) -> String {
     if !config.approved_apps.is_empty() {
         out.push_str("approved_apps = ");
         out.push_str(&toml_string_array(&config.approved_apps));
+        out.push('\n');
+    }
+    if !config.app_route_preferences.is_empty() {
+        out.push_str("app_route_preferences = ");
+        out.push_str(&toml_string(
+            &serde_json::to_string(&config.app_route_preferences)
+                .expect("serialize computer use route preferences"),
+        ));
         out.push('\n');
     }
     out
@@ -1042,15 +1063,24 @@ mod tests {
 
     #[test]
     fn parses_computer_use_config() {
-        let raw = parse_raw_config(
+        let prefs_json = serde_json::to_string(&std::collections::BTreeMap::from([(
+            "com.example.one".to_string(),
+            crate::computer_use::settings::AppRoutePreferences {
+                click_at: Some(crate::computer_use::settings::OperationRoutePreference::Hid),
+                ..crate::computer_use::settings::AppRoutePreferences::default()
+            },
+        )]))
+        .unwrap();
+        let raw = parse_raw_config(&format!(
             r#"
             [computer_use]
             enabled = false
             approved_apps = ["com.example.two", "com.example.one", "com.example.two", ""]
+            app_route_preferences = {prefs_json:?}
             allow_input_injection = true
             allow_foreground_takeover = false
-            "#,
-        )
+            "#
+        ))
         .unwrap();
         let config = super::resolve_app_config(raw, false).unwrap();
 
@@ -1059,8 +1089,18 @@ mod tests {
             config.computer_use.approved_apps,
             vec!["com.example.one".to_string(), "com.example.two".to_string()]
         );
+        assert_eq!(
+            config
+                .computer_use
+                .app_route_preferences
+                .get("com.example.one")
+                .and_then(|prefs| prefs.click_at.as_ref())
+                .map(|pref| pref.to_dispatch_route()),
+            Some(crate::computer_use::provider::ClickDispatchRoute::Hid)
+        );
         let serialized = serialize_app_config(&config);
         assert!(serialized.contains(r#"approved_apps = ["com.example.one", "com.example.two"]"#));
+        assert!(serialized.contains("app_route_preferences = "));
         assert!(!serialized.contains("allow_input_injection"));
         assert!(!serialized.contains("allow_foreground_takeover"));
     }

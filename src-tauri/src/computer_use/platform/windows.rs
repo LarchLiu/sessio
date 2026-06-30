@@ -150,6 +150,7 @@ impl ComputerUseProvider for WindowsProvider {
         Ok(ClickExecutionResult {
             route: ClickExecutionRoute::Uia,
             outcome: ClickExecutionOutcome::SemanticSuccess,
+            next_dispatch_route: None,
         })
     }
 
@@ -164,6 +165,7 @@ impl ComputerUseProvider for WindowsProvider {
         Ok(ClickExecutionResult {
             route: ClickExecutionRoute::Native,
             outcome: ClickExecutionOutcome::ObservedEffect,
+            next_dispatch_route: None,
         })
     }
 
@@ -179,6 +181,7 @@ impl ComputerUseProvider for WindowsProvider {
             kind: ActionExecutionKind::SecondaryClick,
             route: ActionExecutionRoute::Native,
             outcome: ActionExecutionOutcome::Dispatched,
+            next_dispatch_route: None,
         })
     }
 
@@ -203,6 +206,7 @@ impl ComputerUseProvider for WindowsProvider {
             kind: ActionExecutionKind::DoubleClick,
             route: ActionExecutionRoute::Native,
             outcome: ActionExecutionOutcome::Dispatched,
+            next_dispatch_route: None,
         })
     }
 
@@ -219,6 +223,7 @@ impl ComputerUseProvider for WindowsProvider {
             kind: ActionExecutionKind::Drag,
             route: ActionExecutionRoute::Native,
             outcome: ActionExecutionOutcome::Dispatched,
+            next_dispatch_route: None,
         })
     }
 
@@ -256,6 +261,7 @@ impl ComputerUseProvider for WindowsProvider {
             kind: ActionExecutionKind::Scroll,
             route: ActionExecutionRoute::Native,
             outcome: ActionExecutionOutcome::Dispatched,
+            next_dispatch_route: None,
         })
     }
 
@@ -274,6 +280,7 @@ impl ComputerUseProvider for WindowsProvider {
             kind: ActionExecutionKind::Scroll,
             route: ActionExecutionRoute::Uia,
             outcome: ActionExecutionOutcome::SemanticSuccess,
+            next_dispatch_route: None,
         })
     }
 }
@@ -734,6 +741,7 @@ fn capture_window(window: &WindowInfo, capture_dir: &Path) -> ProviderResult<Scr
         default_coordinate_space: CoordinateSpace::Screenshot,
         capture_kind: Some(ScreenshotCaptureKind::ScreenRectGdi),
         screen_bounds: window.rect,
+        click_marker: None,
     })
 }
 
@@ -1273,16 +1281,19 @@ fn set_uia_value(
                 kind: ActionExecutionKind::SetValue,
                 route: ActionExecutionRoute::Uia,
                 outcome: ActionExecutionOutcome::SemanticSuccess,
+                next_dispatch_route: None,
             }),
             Ok(_) => Ok(ActionExecutionResult {
                 kind: ActionExecutionKind::SetValue,
                 route: ActionExecutionRoute::Uia,
                 outcome: ActionExecutionOutcome::NoEffect,
+                next_dispatch_route: None,
             }),
             Err(_) => Ok(ActionExecutionResult {
                 kind: ActionExecutionKind::SetValue,
                 route: ActionExecutionRoute::Uia,
                 outcome: ActionExecutionOutcome::Uncertain,
+                next_dispatch_route: None,
             }),
         }
     }

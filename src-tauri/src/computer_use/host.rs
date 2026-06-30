@@ -24,14 +24,29 @@ use crate::desktop_control::DesktopControlPermissionStatus;
 use super::approvals::{ApprovalDecision, ApprovalRegistry};
 use super::lease::{LeaseError, LeaseRegistry, SnapshotError, SnapshotId};
 use super::permissions::{self, PermissionDenied, RequiredCapability};
-use super::pointer_overlay::{ComputerUsePointerAction, ComputerUsePointerEvent, PointerEventSink};
+use super::pointer_overlay::{
+    self, ComputerUsePointerAction, ComputerUsePointerEvent, PointerEventSink,
+};
 use super::provider::{
     ActionExecutionKind, ActionExecutionOutcome, ActionExecutionResult, ActionExecutionRoute,
     AllowedAction, AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppState, AppTarget,
-    ClickDispatchRoute, ClickExecutionResult, ComputerUseProvider, CoordinateSpace,
-    InstalledApp, Point, ProviderError, RawAppState, ScreenshotRef, ScrollDirection, UiElement,
+    ClickDispatchRoute, ClickExecutionOutcome, ClickExecutionResult, ClickExecutionRoute,
+    ComputerUseProvider, CoordinateSpace, InstalledApp, Point, ProviderError, RawAppState,
+    ScreenshotRef, ScrollDirection, UiElement,
 };
-use super::settings::ComputerUseSettings;
+use super::settings::{AppRoutePreferences, ComputerUseSettings, OperationRoutePreference};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoutePreferenceKey {
+    ClickElement,
+    ClickAt,
+    SecondaryClickElement,
+    SecondaryClickAt,
+    DoubleClick,
+    Drag,
+    ScrollElement,
+    Scroll,
+}
 
 /// Errors surfaced to the agent (mapped into tool errors by the injection layer).
 #[derive(Debug, thiserror::Error)]
@@ -97,6 +112,195 @@ pub struct ComputerUseHost {
 }
 
 impl ComputerUseHost {
+    fn preferred_route_for_app(
+        &self,
+        app_id: &str,
+        key: RoutePreferenceKey,
+    ) -> Option<ClickDispatchRoute> {
+        let settings = self.settings();
+        let prefs = settings.app_route_preferences.get(app_id)?;
+        let pref = match key {
+            RoutePreferenceKey::ClickElement => prefs.click_element.as_ref(),
+            RoutePreferenceKey::ClickAt => prefs.click_at.as_ref(),
+            RoutePreferenceKey::SecondaryClickElement => prefs.secondary_click_element.as_ref(),
+            RoutePreferenceKey::SecondaryClickAt => prefs.secondary_click_at.as_ref(),
+            RoutePreferenceKey::DoubleClick => prefs.double_click.as_ref(),
+            RoutePreferenceKey::Drag => prefs.drag.as_ref(),
+            RoutePreferenceKey::ScrollElement => prefs.scroll_element.as_ref(),
+            RoutePreferenceKey::Scroll => prefs.scroll.as_ref(),
+        }?;
+        Some(pref.to_dispatch_route())
+    }
+
+    fn effective_route_for_auto(
+        &self,
+        target: &AppTarget,
+        requested: ClickDispatchRoute,
+        key: RoutePreferenceKey,
+    ) -> ClickDispatchRoute {
+        if requested != ClickDispatchRoute::Auto {
+            return requested;
+        }
+        self.preferred_route_for_app(&target.app_id, key)
+            .unwrap_or(ClickDispatchRoute::Auto)
+    }
+
+    fn remember_route_preference(
+        &self,
+        app_id: &str,
+        key: RoutePreferenceKey,
+        route: ClickDispatchRoute,
+    ) {
+        let Some(preference) = OperationRoutePreference::from_click_route(route) else {
+            return;
+        };
+
+        let mut settings = self.settings();
+        let entry = settings
+            .app_route_preferences
+            .entry(app_id.to_string())
+            .or_insert_with(AppRoutePreferences::default);
+        let slot = match key {
+            RoutePreferenceKey::ClickElement => &mut entry.click_element,
+            RoutePreferenceKey::ClickAt => &mut entry.click_at,
+            RoutePreferenceKey::SecondaryClickElement => &mut entry.secondary_click_element,
+            RoutePreferenceKey::SecondaryClickAt => &mut entry.secondary_click_at,
+            RoutePreferenceKey::DoubleClick => &mut entry.double_click,
+            RoutePreferenceKey::Drag => &mut entry.drag,
+            RoutePreferenceKey::ScrollElement => &mut entry.scroll_element,
+            RoutePreferenceKey::Scroll => &mut entry.scroll,
+        };
+
+        if slot.as_ref() == Some(&preference) {
+            return;
+        }
+        *slot = Some(preference);
+        self.update_settings(settings.clone());
+
+        match super::config::save_settings(settings.clone()) {
+            Ok(saved) => self.update_settings(saved),
+            Err(error) => log::warn!(
+                "[computer-use:route-pref] failed to persist route preference for {}: {}",
+                app_id,
+                error
+            ),
+        }
+    }
+
+    fn remember_primary_click_route(
+        &self,
+        target: &AppTarget,
+        requested_route: ClickDispatchRoute,
+        key: RoutePreferenceKey,
+        result: ClickExecutionResult,
+    ) {
+        if !matches!(
+            result.outcome,
+            ClickExecutionOutcome::SemanticSuccess | ClickExecutionOutcome::ObservedEffect
+        ) {
+            return;
+        }
+        let route = match result.route {
+            ClickExecutionRoute::Ax => ClickDispatchRoute::Ax,
+            ClickExecutionRoute::TargetPid => ClickDispatchRoute::TargetPid,
+            ClickExecutionRoute::Hid => ClickDispatchRoute::Hid,
+            _ => return,
+        };
+        if requested_route != ClickDispatchRoute::Auto && requested_route != route {
+            return;
+        }
+        self.remember_route_preference(&target.app_id, key, route);
+    }
+
+    fn remember_action_route(
+        &self,
+        target: &AppTarget,
+        requested_route: ClickDispatchRoute,
+        key: RoutePreferenceKey,
+        result: ActionExecutionResult,
+    ) {
+        if !matches!(
+            result.outcome,
+            ActionExecutionOutcome::SemanticSuccess | ActionExecutionOutcome::Dispatched
+        ) {
+            return;
+        }
+        let route = match result.route {
+            ActionExecutionRoute::Ax => ClickDispatchRoute::Ax,
+            ActionExecutionRoute::TargetPid => ClickDispatchRoute::TargetPid,
+            ActionExecutionRoute::Hid => ClickDispatchRoute::Hid,
+            _ => return,
+        };
+        if requested_route != ClickDispatchRoute::Auto && requested_route != route {
+            return;
+        }
+        self.remember_route_preference(&target.app_id, key, route);
+    }
+
+    fn next_click_retry_route(
+        route: ClickExecutionRoute,
+        outcome: ClickExecutionOutcome,
+        element_targeted: bool,
+    ) -> Option<ClickDispatchRoute> {
+        if outcome != ClickExecutionOutcome::NoEffect {
+            return None;
+        }
+
+        match (element_targeted, route) {
+            (true, ClickExecutionRoute::Ax) => Some(ClickDispatchRoute::TargetPid),
+            (_, ClickExecutionRoute::TargetPid) => Some(ClickDispatchRoute::Hid),
+            _ => None,
+        }
+    }
+
+    fn next_action_retry_route(
+        kind: ActionExecutionKind,
+        route: ActionExecutionRoute,
+        outcome: ActionExecutionOutcome,
+        element_targeted: bool,
+    ) -> Option<ClickDispatchRoute> {
+        if outcome != ActionExecutionOutcome::NoEffect {
+            return None;
+        }
+
+        match kind {
+            ActionExecutionKind::SecondaryClick | ActionExecutionKind::Scroll => {
+                match (element_targeted, route) {
+                    (true, ActionExecutionRoute::Ax) => Some(ClickDispatchRoute::TargetPid),
+                    (_, ActionExecutionRoute::TargetPid) => Some(ClickDispatchRoute::Hid),
+                    _ => None,
+                }
+            }
+            ActionExecutionKind::DoubleClick | ActionExecutionKind::Drag => match route {
+                ActionExecutionRoute::TargetPid => Some(ClickDispatchRoute::Hid),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn annotate_click_result(
+        mut result: ClickExecutionResult,
+        element_targeted: bool,
+    ) -> ClickExecutionResult {
+        result.next_dispatch_route =
+            Self::next_click_retry_route(result.route, result.outcome, element_targeted);
+        result
+    }
+
+    fn annotate_action_result(
+        mut result: ActionExecutionResult,
+        element_targeted: bool,
+    ) -> ActionExecutionResult {
+        result.next_dispatch_route = Self::next_action_retry_route(
+            result.kind,
+            result.route,
+            result.outcome,
+            element_targeted,
+        );
+        result
+    }
+
     fn validate_click_route_for_element(
         route_hint: ClickDispatchRoute,
     ) -> Result<(), ComputerUseError> {
@@ -398,16 +602,23 @@ impl ComputerUseHost {
             }
             None => (self.leases.target(session_id)?, false),
         };
-        let launched = if self.provider.is_app_running(&target.app_id)? {
+        let launched = if super::diagnostics::with_session_scope(Some(session_id), || {
+            self.provider.is_app_running(&target.app_id)
+        })? {
             false
         } else {
             self.require_approval(session_id, &target.app_id)?;
-            self.provider.launch_app(&target)?.launched
+            super::diagnostics::with_session_scope(Some(session_id), || {
+                self.provider.launch_app(&target)
+            })?
+            .launched
         };
         if needs_lease {
             self.leases.open(session_id, target.clone())?;
         }
-        let mut raw = self.provider.capture_app_state(&target)?;
+        let mut raw = super::diagnostics::with_session_scope(Some(session_id), || {
+            self.provider.capture_app_state(&target)
+        })?;
         self.filter_elements_for_permissions(&mut raw, perm);
         let snapshot =
             self.next_snapshot(session_id, raw.screenshot.clone(), raw.elements.clone())?;
@@ -433,6 +644,7 @@ impl ComputerUseHost {
         perm: &DesktopControlPermissionStatus,
         timing: PostActionCaptureTiming,
         click_id: Option<&str>,
+        click_screen_point: Option<Point>,
         last_click_result: Option<ClickExecutionResult>,
         last_action_result: Option<ActionExecutionResult>,
     ) -> Result<AppState, ComputerUseError> {
@@ -444,6 +656,7 @@ impl ComputerUseHost {
                 "target": target,
                 "delayMs": timing.delay_ms,
                 "clickId": click_id,
+                "clickScreenPoint": click_screen_point,
                 "lastClickResult": last_click_result,
                 "lastActionResult": last_action_result,
             }),
@@ -453,7 +666,9 @@ impl ComputerUseHost {
             thread::sleep(Duration::from_millis(timing.delay_ms));
         }
 
-        let mut raw = match self.provider.capture_app_state(target) {
+        let mut raw = match super::diagnostics::with_session_scope(Some(session_id), || {
+            self.provider.capture_app_state(target)
+        }) {
             Ok(raw) => raw,
             Err(error) => {
                 super::diagnostics::write(
@@ -463,6 +678,7 @@ impl ComputerUseHost {
                         "target": target,
                         "elapsedMs": started.elapsed().as_millis() as u64,
                         "clickId": click_id,
+                        "clickScreenPoint": click_screen_point,
                         "lastClickResult": last_click_result,
                         "lastActionResult": last_action_result,
                         "error": error.to_string(),
@@ -481,6 +697,7 @@ impl ComputerUseHost {
                 "attemptsTotal": 1,
                 "elapsedMs": started.elapsed().as_millis() as u64,
                 "clickId": click_id,
+                "clickScreenPoint": click_screen_point,
                 "lastClickResult": last_click_result,
                 "lastActionResult": last_action_result,
                 "screenshotHandle": raw.screenshot.handle.as_str(),
@@ -489,6 +706,7 @@ impl ComputerUseHost {
                 "screenshotByteLen": raw.screenshot.byte_len,
             }),
         );
+        Self::apply_click_marker(&mut raw, click_screen_point);
 
         self.filter_elements_for_permissions(&mut raw, perm);
         let snapshot =
@@ -501,6 +719,7 @@ impl ComputerUseHost {
                 "attemptsTotal": 1,
                 "elapsedMs": started.elapsed().as_millis() as u64,
                 "clickId": click_id,
+                "clickScreenPoint": click_screen_point,
                 "lastClickResult": last_click_result,
                 "lastActionResult": last_action_result,
                 "snapshotId": snapshot.0.as_str(),
@@ -508,6 +727,7 @@ impl ComputerUseHost {
                 "screenshotWidth": raw.screenshot.width,
                 "screenshotHeight": raw.screenshot.height,
                 "screenshotByteLen": raw.screenshot.byte_len,
+                "clickMarker": raw.screenshot.click_marker,
             }),
         );
         Ok(self.app_state_from_raw(
@@ -530,6 +750,18 @@ impl ComputerUseHost {
         if !perm.can_inspect {
             raw.elements.clear();
         }
+    }
+
+    fn apply_click_marker(raw: &mut RawAppState, click_screen_point: Option<Point>) {
+        raw.screenshot.click_marker = click_screen_point.and_then(|point| {
+            raw.screenshot
+                .screen_point_to_screenshot_point(point)
+                .ok()
+                .map(|projected| Point {
+                    x: projected.x.clamp(0.0, raw.screenshot.width as f32),
+                    y: projected.y.clamp(0.0, raw.screenshot.height as f32),
+                })
+        });
     }
 
     fn app_state_from_raw(
@@ -802,7 +1034,9 @@ impl ComputerUseHost {
         let call_id = self.next_provider_call_id();
         let started = Instant::now();
         Self::write_provider_call_start_record(&call_id, context, payload);
-        match f(self.provider.as_ref()) {
+        match super::diagnostics::with_session_scope(Some(context.session_id), || {
+            f(self.provider.as_ref())
+        }) {
             Ok(value) => {
                 Self::write_provider_call_complete_record(
                     &call_id,
@@ -1015,6 +1249,11 @@ impl ComputerUseHost {
         let target = self.require_control(session_id, snapshot, perm)?;
         let element = self.snapshot_element(session_id, snapshot, element_id)?;
         let resolved_screen_point = self.element_center_for_snapshot(session_id, snapshot, element_id)?;
+        let effective_route = self.effective_route_for_auto(
+            &target,
+            route_hint,
+            RoutePreferenceKey::ClickElement,
+        );
         self.emit_element_pointer_event(
             session_id,
             snapshot,
@@ -1028,7 +1267,7 @@ impl ComputerUseHost {
             snapshot,
             &target,
             &click_id,
-            route_hint,
+            effective_route,
             element.as_ref(),
             resolved_screen_point,
         );
@@ -1043,16 +1282,25 @@ impl ComputerUseHost {
             json!({
                 "elementId": element_id,
                 "resolvedScreenPoint": resolved_screen_point,
-                "dispatchRoute": route_hint,
+                "dispatchRoute": effective_route,
+                "requestedDispatchRoute": route_hint,
             }),
             |result: &ClickExecutionResult| {
                 json!({
                     "route": result.route,
                     "outcome": result.outcome,
+                    "nextDispatchRoute": result.next_dispatch_route,
                 })
             },
-            |provider| provider.click_element(&target, &element_id.to_string(), route_hint),
+            |provider| provider.click_element(&target, &element_id.to_string(), effective_route),
         )?;
+        let click_result = Self::annotate_click_result(click_result, true);
+        self.remember_primary_click_route(
+            &target,
+            route_hint,
+            RoutePreferenceKey::ClickElement,
+            click_result,
+        );
         Self::write_primary_click_result_record(
             "primary_click_result",
             session_id,
@@ -1067,6 +1315,7 @@ impl ComputerUseHost {
             perm,
             PostActionCaptureTiming::DEFAULT,
             Some(&click_id),
+            resolved_screen_point,
             Some(click_result),
             None,
         )
@@ -1091,6 +1340,8 @@ impl ComputerUseHost {
             coordinate_space,
             perm,
         )?;
+        let effective_route =
+            self.effective_route_for_auto(&target, route_hint, RoutePreferenceKey::ClickAt);
         let screenshot = self.snapshot_screenshot(session_id, snapshot).ok();
         let click_id = self.next_click_id();
         Self::write_point_action_record(
@@ -1099,7 +1350,7 @@ impl ComputerUseHost {
             snapshot,
             &target,
             Some(&click_id),
-            Some(route_hint),
+            Some(effective_route),
             point,
             coordinate_space,
             screen_point,
@@ -1121,16 +1372,25 @@ impl ComputerUseHost {
             json!({
                 "screenPoint": screen_point,
                 "coordinateSpace": coordinate_space,
-                "dispatchRoute": route_hint,
+                "dispatchRoute": effective_route,
+                "requestedDispatchRoute": route_hint,
             }),
             |result: &ClickExecutionResult| {
                 json!({
                     "route": result.route,
                     "outcome": result.outcome,
+                    "nextDispatchRoute": result.next_dispatch_route,
                 })
             },
-            |provider| provider.click_point(&target, screen_point, route_hint),
+            |provider| provider.click_point(&target, screen_point, effective_route),
         )?;
+        let click_result = Self::annotate_click_result(click_result, false);
+        self.remember_primary_click_route(
+            &target,
+            route_hint,
+            RoutePreferenceKey::ClickAt,
+            click_result,
+        );
         Self::write_primary_click_result_record(
             "primary_click_result",
             session_id,
@@ -1145,6 +1405,7 @@ impl ComputerUseHost {
             perm,
             PostActionCaptureTiming::DEFAULT,
             Some(&click_id),
+            Some(screen_point),
             Some(click_result),
             None,
         )
@@ -1169,6 +1430,11 @@ impl ComputerUseHost {
             coordinate_space,
             perm,
         )?;
+        let effective_route = self.effective_route_for_auto(
+            &target,
+            route_hint,
+            RoutePreferenceKey::SecondaryClickAt,
+        );
         let screenshot = self.snapshot_screenshot(session_id, snapshot).ok();
         Self::write_point_action_record(
             "secondary_click_dispatch",
@@ -1176,7 +1442,7 @@ impl ComputerUseHost {
             snapshot,
             &target,
             None,
-            Some(route_hint),
+            Some(effective_route),
             point,
             coordinate_space,
             screen_point,
@@ -1197,17 +1463,26 @@ impl ComputerUseHost {
             },
             json!({
                 "screenPoint": screen_point,
-                "dispatchRoute": route_hint,
+                "dispatchRoute": effective_route,
+                "requestedDispatchRoute": route_hint,
             }),
             |_| json!({}),
-            |provider| provider.secondary_click(&target, screen_point, route_hint),
+            |provider| provider.secondary_click(&target, screen_point, effective_route),
         )?;
+        let action_result = Self::annotate_action_result(action_result, false);
+        self.remember_action_route(
+            &target,
+            route_hint,
+            RoutePreferenceKey::SecondaryClickAt,
+            action_result,
+        );
         self.capture_post_action_state_with_timing(
             session_id,
             &target,
             perm,
             PostActionCaptureTiming::DEFAULT,
             None,
+            Some(screen_point),
             None,
             Some(action_result),
         )
@@ -1226,6 +1501,11 @@ impl ComputerUseHost {
         Self::validate_mouse_route_for_element(route_hint)?;
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
+        let effective_route = self.effective_route_for_auto(
+            &target,
+            route_hint,
+            RoutePreferenceKey::SecondaryClickElement,
+        );
         self.emit_element_pointer_event(
             session_id,
             snapshot,
@@ -1243,21 +1523,30 @@ impl ComputerUseHost {
             },
             json!({
                 "elementId": element_id,
-                "dispatchRoute": route_hint,
+                "dispatchRoute": effective_route,
+                "requestedDispatchRoute": route_hint,
             }),
             |_| json!({}),
             |provider| provider.secondary_click_element(
                 &target,
                 &element_id.to_string(),
-                route_hint,
+                effective_route,
             ),
         )?;
+        let action_result = Self::annotate_action_result(action_result, true);
+        self.remember_action_route(
+            &target,
+            route_hint,
+            RoutePreferenceKey::SecondaryClickElement,
+            action_result,
+        );
         self.capture_post_action_state_with_timing(
             session_id,
             &target,
             perm,
             PostActionCaptureTiming::DEFAULT,
             None,
+            self.element_center_for_snapshot(session_id, snapshot, element_id)?,
             None,
             Some(action_result),
         )
@@ -1282,6 +1571,8 @@ impl ComputerUseHost {
             coordinate_space,
             perm,
         )?;
+        let effective_route =
+            self.effective_route_for_auto(&target, route_hint, RoutePreferenceKey::DoubleClick);
         let screenshot = self.snapshot_screenshot(session_id, snapshot).ok();
         Self::write_point_action_record(
             "double_click_dispatch",
@@ -1289,7 +1580,7 @@ impl ComputerUseHost {
             snapshot,
             &target,
             None,
-            Some(route_hint),
+            Some(effective_route),
             point,
             coordinate_space,
             screen_point,
@@ -1310,17 +1601,26 @@ impl ComputerUseHost {
             },
             json!({
                 "screenPoint": screen_point,
-                "dispatchRoute": route_hint,
+                "dispatchRoute": effective_route,
+                "requestedDispatchRoute": route_hint,
             }),
             |_| json!({}),
-            |provider| provider.double_click(&target, screen_point, route_hint),
+            |provider| provider.double_click(&target, screen_point, effective_route),
         )?;
+        let action_result = Self::annotate_action_result(action_result, false);
+        self.remember_action_route(
+            &target,
+            route_hint,
+            RoutePreferenceKey::DoubleClick,
+            action_result,
+        );
         self.capture_post_action_state_with_timing(
             session_id,
             &target,
             perm,
             PostActionCaptureTiming::DEFAULT,
             None,
+            Some(screen_point),
             None,
             Some(action_result),
         )
@@ -1344,12 +1644,14 @@ impl ComputerUseHost {
             self.resolve_point_for_snapshot(session_id, snapshot, from, coordinate_space)?;
         let screen_to =
             self.resolve_point_for_snapshot(session_id, snapshot, to, coordinate_space)?;
+        let effective_route =
+            self.effective_route_for_auto(&target, route_hint, RoutePreferenceKey::Drag);
         let screenshot = self.snapshot_screenshot(session_id, snapshot).ok();
         Self::write_drag_action_record(
             session_id,
             snapshot,
             &target,
-            route_hint,
+            effective_route,
             from,
             to,
             coordinate_space,
@@ -1374,17 +1676,26 @@ impl ComputerUseHost {
             json!({
                 "screenFrom": screen_from,
                 "screenTo": screen_to,
-                "dispatchRoute": route_hint,
+                "dispatchRoute": effective_route,
+                "requestedDispatchRoute": route_hint,
             }),
             |_| json!({}),
-            |provider| provider.drag(&target, screen_from, screen_to, route_hint),
+            |provider| provider.drag(&target, screen_from, screen_to, effective_route),
         )?;
+        let action_result = Self::annotate_action_result(action_result, false);
+        self.remember_action_route(
+            &target,
+            route_hint,
+            RoutePreferenceKey::Drag,
+            action_result,
+        );
         self.capture_post_action_state_with_timing(
             session_id,
             &target,
             perm,
             PostActionCaptureTiming::DEFAULT,
             None,
+            Some(screen_to),
             None,
             Some(action_result),
         )
@@ -1423,12 +1734,14 @@ impl ComputerUseHost {
             |_| json!({}),
             |provider| provider.set_value(&target, &element_id.to_string(), value),
         )?;
+        let action_result = Self::annotate_action_result(action_result, true);
         self.capture_post_action_state_with_timing(
             session_id,
             &target,
             perm,
             PostActionCaptureTiming::DEFAULT,
             None,
+            self.element_center_for_snapshot(session_id, snapshot, element_id)?,
             None,
             Some(action_result),
         )
@@ -1473,10 +1786,12 @@ impl ComputerUseHost {
             PostActionCaptureTiming::DEFAULT,
             None,
             None,
+            None,
             Some(ActionExecutionResult {
                 kind: ActionExecutionKind::TypeText,
                 route: ActionExecutionRoute::TargetPid,
                 outcome: ActionExecutionOutcome::Dispatched,
+                next_dispatch_route: None,
             }),
         )
     }
@@ -1520,10 +1835,12 @@ impl ComputerUseHost {
             PostActionCaptureTiming::DEFAULT,
             None,
             None,
+            None,
             Some(ActionExecutionResult {
                 kind: ActionExecutionKind::PressKey,
                 route: ActionExecutionRoute::TargetPid,
                 outcome: ActionExecutionOutcome::Dispatched,
+                next_dispatch_route: None,
             }),
         )
     }
@@ -1540,6 +1857,8 @@ impl ComputerUseHost {
     ) -> Result<AppState, ComputerUseError> {
         Self::validate_mouse_route_for_point(route_hint)?;
         let target = self.require_control(session_id, snapshot, perm)?;
+        let effective_route =
+            self.effective_route_for_auto(&target, route_hint, RoutePreferenceKey::Scroll);
         let action_result = self.invoke_provider(
             ProviderCallContext {
                 session_id,
@@ -1551,16 +1870,25 @@ impl ComputerUseHost {
             json!({
                 "direction": direction,
                 "amount": amount,
-                "dispatchRoute": route_hint,
+                "dispatchRoute": effective_route,
+                "requestedDispatchRoute": route_hint,
             }),
             |_| json!({}),
-            |provider| provider.scroll(&target, direction, amount, route_hint),
+            |provider| provider.scroll(&target, direction, amount, effective_route),
         )?;
+        let action_result = Self::annotate_action_result(action_result, false);
+        self.remember_action_route(
+            &target,
+            route_hint,
+            RoutePreferenceKey::Scroll,
+            action_result,
+        );
         self.capture_post_action_state_with_timing(
             session_id,
             &target,
             perm,
             PostActionCaptureTiming::DEFAULT,
+            None,
             None,
             None,
             Some(action_result),
@@ -1582,6 +1910,11 @@ impl ComputerUseHost {
         Self::validate_mouse_route_for_element(route_hint)?;
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
+        let effective_route = self.effective_route_for_auto(
+            &target,
+            route_hint,
+            RoutePreferenceKey::ScrollElement,
+        );
         self.emit_element_pointer_event(
             session_id,
             snapshot,
@@ -1601,7 +1934,8 @@ impl ComputerUseHost {
                 "elementId": element_id,
                 "direction": direction,
                 "amount": amount,
-                "dispatchRoute": route_hint,
+                "dispatchRoute": effective_route,
+                "requestedDispatchRoute": route_hint,
             }),
             |_| json!({}),
             |provider| provider.scroll_element(
@@ -1609,15 +1943,23 @@ impl ComputerUseHost {
                 &element_id.to_string(),
                 direction,
                 amount,
-                route_hint,
+                effective_route,
             ),
         )?;
+        let action_result = Self::annotate_action_result(action_result, true);
+        self.remember_action_route(
+            &target,
+            route_hint,
+            RoutePreferenceKey::ScrollElement,
+            action_result,
+        );
         self.capture_post_action_state_with_timing(
             session_id,
             &target,
             perm,
             PostActionCaptureTiming::DEFAULT,
             None,
+            self.element_center_for_snapshot(session_id, snapshot, element_id)?,
             None,
             Some(action_result),
         )
@@ -1628,6 +1970,7 @@ impl ComputerUseHost {
         self.leases.close(session_id);
         self.end_foreground(session_id);
         self.clear_pending_app_approval(session_id);
+        pointer_overlay::hide_session(session_id);
     }
 
     // --- Foreground takeover + abort ------------------------------------
@@ -1661,6 +2004,7 @@ impl ComputerUseHost {
         self.end_foreground(session_id);
         self.leases.close(session_id);
         self.clear_pending_app_approval(session_id);
+        pointer_overlay::hide_session(session_id);
     }
 
     /// Clear the app-approval hint for a session once the user has responded or
@@ -2223,8 +2567,37 @@ mod tests {
             Some(ClickExecutionResult {
                 route: ClickExecutionRoute::Native,
                 outcome: ClickExecutionOutcome::ObservedEffect,
+                next_dispatch_route: None,
             })
         );
+    }
+
+    #[test]
+    fn annotate_click_result_suggests_hid_after_pid_no_effect() {
+        let result = ComputerUseHost::annotate_click_result(
+            ClickExecutionResult {
+                route: ClickExecutionRoute::TargetPid,
+                outcome: ClickExecutionOutcome::NoEffect,
+                next_dispatch_route: None,
+            },
+            false,
+        );
+
+        assert_eq!(result.next_dispatch_route, Some(ClickDispatchRoute::Hid));
+    }
+
+    #[test]
+    fn annotate_click_result_suggests_pid_after_ax_no_effect_for_elements() {
+        let result = ComputerUseHost::annotate_click_result(
+            ClickExecutionResult {
+                route: ClickExecutionRoute::Ax,
+                outcome: ClickExecutionOutcome::NoEffect,
+                next_dispatch_route: None,
+            },
+            true,
+        );
+
+        assert_eq!(result.next_dispatch_route, Some(ClickDispatchRoute::TargetPid));
     }
 
     #[test]
@@ -2307,9 +2680,14 @@ mod tests {
             ClickDispatchRoute::Auto,
             &p,
         )
-            .unwrap();
+        .unwrap();
 
-        let log = std::fs::read_to_string(&path).unwrap();
+        let log = std::fs::read_to_string(&path)
+            .or_else(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                std::fs::read_to_string(&path)
+            })
+            .unwrap();
         let mut dispatch_id = None;
         let mut dispatch_role = None;
         let mut dispatch_label = None;
@@ -2360,6 +2738,7 @@ mod tests {
                 &target(),
                 &p,
                 PostActionCaptureTiming { delay_ms: 0 },
+                None,
                 None,
                 None,
                 None,
@@ -2428,6 +2807,102 @@ mod tests {
         assert_eq!(
             provider.actions(),
             vec!["click:com.example.app:el-1:Hid".to_string()]
+        );
+    }
+
+    #[test]
+    fn auto_click_uses_saved_app_route_preference() {
+        let provider = Arc::new(FakeProvider::default());
+        let mut settings = ComputerUseSettings::enabled();
+        settings.app_route_preferences.insert(
+            "com.example.app".to_string(),
+            AppRoutePreferences {
+                click_at: Some(OperationRoutePreference::Hid),
+                ..AppRoutePreferences::default()
+            },
+        );
+        let h = ComputerUseHost::new(provider.clone(), settings);
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        h.click_at(
+            "s1",
+            &SnapshotId(state.snapshot_id),
+            Point { x: 360.0, y: 225.0 },
+            CoordinateSpace::Screenshot,
+            ClickDispatchRoute::Auto,
+            &p,
+        )
+        .unwrap();
+
+        assert_eq!(
+            provider.actions(),
+            vec!["click_at:com.example.app:190.0,132.5:Hid".to_string()]
+        );
+    }
+
+    #[test]
+    fn explicit_successful_click_route_is_persisted_for_future_auto() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        h.click_at(
+            "s1",
+            &SnapshotId(state.snapshot_id),
+            Point { x: 360.0, y: 225.0 },
+            CoordinateSpace::Screenshot,
+            ClickDispatchRoute::Hid,
+            &p,
+        )
+        .unwrap();
+
+        let settings = h.settings();
+        assert_eq!(
+            settings
+                .app_route_preferences
+                .get("com.example.app")
+                .and_then(|prefs| prefs.click_at.as_ref())
+                .map(|pref| pref.to_dispatch_route()),
+            Some(ClickDispatchRoute::Hid)
+        );
+    }
+
+    #[test]
+    fn explicit_successful_action_route_is_persisted_for_future_auto() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        h.double_click(
+            "s1",
+            &SnapshotId(state.snapshot_id),
+            Point { x: 360.0, y: 225.0 },
+            CoordinateSpace::Screenshot,
+            ClickDispatchRoute::TargetPid,
+            &p,
+        )
+        .unwrap();
+
+        let settings = h.settings();
+        assert_eq!(
+            settings
+                .app_route_preferences
+                .get("com.example.app")
+                .and_then(|prefs| prefs.double_click.as_ref())
+                .map(|pref| pref.to_dispatch_route()),
+            Some(ClickDispatchRoute::TargetPid)
         );
     }
 
@@ -2555,6 +3030,7 @@ mod tests {
                 kind: ActionExecutionKind::SetValue,
                 route: ActionExecutionRoute::Ax,
                 outcome: ActionExecutionOutcome::SemanticSuccess,
+                next_dispatch_route: None,
             })
         );
     }
@@ -2623,6 +3099,7 @@ mod tests {
                 kind: ActionExecutionKind::SecondaryClick,
                 route: ActionExecutionRoute::Ax,
                 outcome: ActionExecutionOutcome::SemanticSuccess,
+                next_dispatch_route: None,
             })
         );
 
@@ -2642,6 +3119,7 @@ mod tests {
                 kind: ActionExecutionKind::DoubleClick,
                 route: ActionExecutionRoute::TargetPid,
                 outcome: ActionExecutionOutcome::Dispatched,
+                next_dispatch_route: None,
             })
         );
 
@@ -2662,6 +3140,7 @@ mod tests {
                 kind: ActionExecutionKind::Drag,
                 route: ActionExecutionRoute::TargetPid,
                 outcome: ActionExecutionOutcome::Dispatched,
+                next_dispatch_route: None,
             })
         );
 
@@ -2682,6 +3161,7 @@ mod tests {
                 kind: ActionExecutionKind::Scroll,
                 route: ActionExecutionRoute::Ax,
                 outcome: ActionExecutionOutcome::SemanticSuccess,
+                next_dispatch_route: None,
             })
         );
     }

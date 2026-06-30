@@ -159,6 +159,14 @@ pub fn release_session(session_id: &str) {
     let _ = session_id;
 }
 
+pub fn hide_session(session_id: &str) {
+    #[cfg(target_os = "macos")]
+    native_macos::hide_session(session_id);
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = session_id;
+}
+
 pub fn mark_pointer_overlay_ready(app: &AppHandle, label: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -196,35 +204,53 @@ mod native_macos {
     use std::thread;
     use std::time::Duration;
 
-    use objc2::{rc::Retained, MainThreadMarker, MainThreadOnly};
+    use block2::RcBlock;
+    use core_graphics::display::CGDisplay;
+    use objc2::{rc::Retained, runtime::Bool, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSBackingStoreType, NSBox, NSBoxType, NSColor, NSEvent, NSFont, NSPanel, NSScreen,
-        NSScreenSaverWindowLevel, NSStatusWindowLevel, NSTextField, NSView,
-        NSWindowCollectionBehavior, NSWindowStyleMask,
+        NSAffineTransformNSAppKitAdditions, NSBackingStoreType, NSBezierPath, NSBox, NSBoxType,
+        NSColor, NSEvent, NSFont, NSGraphicsContext, NSImage, NSImageInterpolation,
+        NSImageScaling, NSImageView, NSPanel, NSScreen, NSScreenSaverWindowLevel, NSShadow,
+        NSStatusWindowLevel, NSTextAlignment, NSTextField, NSView,
+        NSWindowCollectionBehavior,
+        NSWindowStyleMask,
     };
-    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+    use objc2_foundation::{NSAffineTransform, NSPoint, NSRect, NSSize, NSString};
     use tauri::AppHandle;
 
     use super::{ComputerUsePointerAction, ComputerUsePointerEvent, POINTER_OVERLAY_LABEL_PREFIX};
 
     const HIDE_DELAY_MS: u64 = 600_000;
-    const MOTION_STEP_DELAY_MS: u64 = 14;
-    const MOTION_MIN_STEPS: usize = 6;
-    const MOTION_MAX_STEPS: usize = 18;
-    const MOTION_DISTANCE_PER_STEP: f64 = 52.0;
+    const PULSE_HIDE_DELAY_MS: u64 = 90;
+    const MOTION_STEP_DELAY_MS: u64 = 16;
+    const MOTION_MIN_STEPS: usize = 10;
+    const MOTION_MAX_STEPS: usize = 28;
+    const MOTION_DISTANCE_PER_STEP: f64 = 26.0;
     const MOTION_CURVE_MIN: f64 = 10.0;
     const MOTION_CURVE_MAX: f64 = 40.0;
-    const POINTER_SIZE: f64 = 18.0;
-    const DOT_SIZE: f64 = 6.0;
-    const LABEL_WIDTH: f64 = 220.0;
+    const POINTER_SIZE: f64 = 28.0;
+    const CURSOR_TRIANGLE_SIDE: f64 = 16.0;
+    const CURSOR_SHADOW_BLUR_RADIUS: f64 = 8.0;
+    const CURSOR_FLIGHT_SCALE_AMPLITUDE: f64 = 0.30;
+    const CURSOR_SHADOW_SCALE_MULTIPLIER: f64 = 20.0;
+    const CURSOR_LANDING_SETTLE_SCALE: f64 = 1.06;
+    const LABEL_POP_IN_SCALE: f64 = 0.72;
+    const LABEL_POP_IN_ALPHA: f64 = 0.78;
+    const LANDING_SETTLE_DELAY_MS: u64 = 45;
+    const PULSE_FLASH_SCALE: f64 = 1.18;
+    const PULSE_SETTLE_SCALE: f64 = 1.0;
+    const PULSE_FLASH_BORDER_ALPHA: f64 = 0.18;
+    const PULSE_FLASH_FILL_ALPHA: f64 = 0.14;
+    const PULSE_SETTLE_BORDER_ALPHA: f64 = 0.12;
+    const PULSE_SETTLE_FILL_ALPHA: f64 = 0.05;
+    const POINTER_GLOW_SIZE: f64 = 32.0;
+    const POINTER_IDLE_ROTATION_DEGREES: f64 = -35.0;
     const LABEL_HEIGHT: f64 = 18.0;
-    const LABEL_BOX_HEIGHT: f64 = 24.0;
+    const LABEL_BOX_HEIGHT: f64 = 22.0;
     const LABEL_BOX_PADDING_X: f64 = 10.0;
-    const LABEL_TEXT_INSET_X: f64 = 9.0;
-    const LABEL_TEXT_INSET_Y: f64 = 4.0;
-    const LABEL_OFFSET_X: f64 = 16.0;
-    const LABEL_OFFSET_Y: f64 = 12.0;
-    const PULSE_SIZE: f64 = 34.0;
+    const LABEL_OFFSET_X: f64 = 10.0;
+    const LABEL_OFFSET_Y: f64 = 7.0;
+    const PULSE_SIZE: f64 = 28.0;
     const OVERLAY_EDGE_PADDING: f64 = 8.0;
 
     #[derive(Debug, Clone, Copy)]
@@ -244,6 +270,7 @@ mod native_macos {
     #[derive(Debug, Default)]
     struct NativePointerCursorState {
         current_point: Option<ScreenPoint>,
+        visible_session_id: Option<String>,
     }
 
     #[derive(Debug)]
@@ -258,15 +285,19 @@ mod native_macos {
     struct NativeOverlayWindow {
         label: String,
         panel_ptr: usize,
-        ring_ptr: usize,
-        dot_ptr: usize,
+        glow_ptr: usize,
+        cursor_ptr: usize,
         pulse_ptr: usize,
         label_box_ptr: usize,
         label_ptr: usize,
-        origin_x: f64,
-        origin_y: f64,
-        width: f64,
-        height: f64,
+        appkit_origin_x: f64,
+        appkit_origin_y: f64,
+        appkit_width: f64,
+        appkit_height: f64,
+        quartz_origin_x: f64,
+        quartz_origin_y: f64,
+        quartz_width: f64,
+        quartz_height: f64,
         hide_generation: u64,
     }
 
@@ -315,7 +346,31 @@ mod native_macos {
             sessions.remove(session_id);
             sessions.is_empty()
         };
+        let should_hide = {
+            let cursor_state = native_pointer_cursor_state();
+            let Ok(mut state) = cursor_state.lock() else {
+                return;
+            };
+            let visible = state.visible_session_id.as_deref() == Some(session_id);
+            if visible {
+                state.visible_session_id = None;
+            }
+            visible
+        };
+        if should_destroy {
+            invalidate_pending_overlay_hides();
+        } else if should_hide {
+            invalidate_pending_overlay_hides();
+        }
         if !should_destroy {
+            if should_hide {
+                let Some(app) = POINTER_OVERLAY_APP_HANDLE.get().cloned() else {
+                    return;
+                };
+                let _ = app.run_on_main_thread(move || {
+                    hide_all_pointer_overlay_windows_on_main();
+                });
+            }
             return;
         }
         let Some(app) = POINTER_OVERLAY_APP_HANDLE.get().cloned() else {
@@ -323,6 +378,38 @@ mod native_macos {
         };
         let _ = app.run_on_main_thread(move || {
             destroy_all_pointer_overlay_windows_on_main();
+        });
+    }
+
+    pub(super) fn hide_session(session_id: &str) {
+        let should_hide = {
+            let cursor_state = native_pointer_cursor_state();
+            let Ok(mut state) = cursor_state.lock() else {
+                return;
+            };
+            let visible = state.visible_session_id.as_deref() == Some(session_id);
+            if visible {
+                state.visible_session_id = None;
+            }
+            visible
+        };
+        if !should_hide {
+            return;
+        }
+        invalidate_pending_overlay_hides();
+        let Some(app) = POINTER_OVERLAY_APP_HANDLE.get().cloned() else {
+            return;
+        };
+        let session_id = session_id.to_string();
+        let _ = app.run_on_main_thread(move || {
+            hide_all_pointer_overlay_windows_on_main();
+            super::super::diagnostics::write(
+                "pointer_overlay_hide_session",
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "native": true,
+                }),
+            );
         });
     }
 
@@ -351,19 +438,31 @@ mod native_macos {
             let label = format!("{POINTER_OVERLAY_LABEL_PREFIX}-{index}");
             let frame = screen.frame();
             let scale = screen.backingScaleFactor().max(1.0);
-            let origin_x = frame.origin.x;
-            let origin_y = frame.origin.y;
-            let width = frame.size.width;
-            let height = frame.size.height;
+            let appkit_origin_x = frame.origin.x;
+            let appkit_origin_y = frame.origin.y;
+            let appkit_width = frame.size.width;
+            let appkit_height = frame.size.height;
+            let cg_bounds = CGDisplay::new(screen.CGDirectDisplayID()).bounds();
+            let quartz_origin_x = cg_bounds.origin.x;
+            let quartz_origin_y = cg_bounds.origin.y;
+            let quartz_width = cg_bounds.size.width.max(1.0);
+            let quartz_height = cg_bounds.size.height.max(1.0);
 
             if let Some(existing) = overlays.get_mut(&label) {
-                existing.origin_x = origin_x;
-                existing.origin_y = origin_y;
-                existing.width = width;
-                existing.height = height;
+                existing.appkit_origin_x = appkit_origin_x;
+                existing.appkit_origin_y = appkit_origin_y;
+                existing.appkit_width = appkit_width;
+                existing.appkit_height = appkit_height;
+                existing.quartz_origin_x = quartz_origin_x;
+                existing.quartz_origin_y = quartz_origin_y;
+                existing.quartz_width = quartz_width;
+                existing.quartz_height = quartz_height;
                 let panel = unsafe { &*(existing.panel_ptr as *mut NSPanel) };
                 panel.setFrame_display(
-                    NSRect::new(NSPoint::new(origin_x, origin_y), NSSize::new(width, height)),
+                    NSRect::new(
+                        NSPoint::new(appkit_origin_x, appkit_origin_y),
+                        NSSize::new(appkit_width, appkit_height),
+                    ),
                     true,
                 );
                 continue;
@@ -374,28 +473,28 @@ mod native_macos {
                 .contentView()
                 .ok_or_else(|| "Pointer overlay content view is unavailable".to_string())?;
 
-            let ring = build_ring_view(mtm);
-            let dot = build_dot_view(mtm);
+            let glow = build_glow_view(mtm);
+            let cursor = build_cursor_view(mtm)?;
             let pulse = build_pulse_view(mtm);
             let label_box = build_label_box_view(mtm);
             let label_view = build_label_view(mtm);
 
             content.addSubview(&pulse);
             content.addSubview(&label_box);
-            content.addSubview(&ring);
-            content.addSubview(&dot);
+            content.addSubview(&glow);
+            content.addSubview(&cursor);
             content.addSubview(&label_view);
 
             pulse.setHidden(true);
             label_box.setHidden(true);
-            ring.setHidden(true);
-            dot.setHidden(true);
+            glow.setHidden(true);
+            cursor.setHidden(true);
             label_view.setHidden(true);
             panel.orderOut(None);
 
             let panel_ptr = Retained::into_raw(panel) as usize;
-            let ring_ptr = (&*ring as *const NSBox) as usize;
-            let dot_ptr = (&*dot as *const NSBox) as usize;
+            let glow_ptr = (&*glow as *const NSBox) as usize;
+            let cursor_ptr = (&*cursor as *const NSImageView) as usize;
             let pulse_ptr = (&*pulse as *const NSBox) as usize;
             let label_box_ptr = (&*label_box as *const NSBox) as usize;
             let label_ptr = (&*label_view as *const NSTextField) as usize;
@@ -405,15 +504,19 @@ mod native_macos {
                 NativeOverlayWindow {
                     label: label.clone(),
                     panel_ptr,
-                    ring_ptr,
-                    dot_ptr,
+                    glow_ptr,
+                    cursor_ptr,
                     pulse_ptr,
                     label_box_ptr,
                     label_ptr,
-                    origin_x,
-                    origin_y,
-                    width,
-                    height,
+                    appkit_origin_x,
+                    appkit_origin_y,
+                    appkit_width,
+                    appkit_height,
+                    quartz_origin_x,
+                    quartz_origin_y,
+                    quartz_width,
+                    quartz_height,
                     hide_generation: 0,
                 },
             );
@@ -422,10 +525,14 @@ mod native_macos {
                 "pointer_overlay_window_created",
                 serde_json::json!({
                     "label": label,
-                    "originX": origin_x,
-                    "originY": origin_y,
-                    "width": width,
-                    "height": height,
+                    "appkitOriginX": appkit_origin_x,
+                    "appkitOriginY": appkit_origin_y,
+                    "appkitWidth": appkit_width,
+                    "appkitHeight": appkit_height,
+                    "quartzOriginX": quartz_origin_x,
+                    "quartzOriginY": quartz_origin_y,
+                    "quartzWidth": quartz_width,
+                    "quartzHeight": quartz_height,
                     "monitorScale": scale,
                     "native": true,
                 }),
@@ -488,6 +595,7 @@ mod native_macos {
             .map_err(|_| "pointer overlay display was cancelled".to_string())??;
         if let Ok(mut state) = native_pointer_cursor_state().lock() {
             state.current_point = Some(motion.end);
+            state.visible_session_id = Some(event.session_id.clone());
         }
 
         super::super::diagnostics::write(
@@ -507,6 +615,33 @@ mod native_macos {
                 "event": event,
             }),
         );
+
+        if action_shows_pulse(&event) {
+            let app_for_pulse_hide = app.clone();
+            let pulse_label = label.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(PULSE_HIDE_DELAY_MS));
+                let windows = native_pointer_windows();
+                let should_hide_pulse = windows
+                    .lock()
+                    .ok()
+                    .and_then(|overlays| overlays.get(&pulse_label).cloned())
+                    .map(|overlay| overlay.hide_generation == generation)
+                    .unwrap_or(false);
+                if !should_hide_pulse {
+                    return;
+                }
+                let label_for_hide = pulse_label.clone();
+                let _ = app_for_pulse_hide.run_on_main_thread(move || {
+                    let windows = native_pointer_windows();
+                    if let Ok(overlays) = windows.lock() {
+                        if let Some(overlay) = overlays.get(&label_for_hide) {
+                            hide_pointer_pulse_on_main(overlay);
+                        }
+                    };
+                });
+            });
+        }
 
         let app_for_hide = app.clone();
         thread::spawn(move || {
@@ -546,10 +681,7 @@ mod native_macos {
             .map(|(x, y)| (f64::from(x), f64::from(y)));
         if let Some((x, y)) = point {
             for overlay in overlays.values() {
-                if x >= overlay.origin_x
-                    && x <= overlay.origin_x + overlay.width
-                    && y >= overlay.origin_y
-                    && y <= overlay.origin_y + overlay.height
+                if overlay_contains_quartz_point(overlay, ScreenPoint { x, y })
                 {
                     return Some(overlay.label.clone());
                 }
@@ -566,26 +698,69 @@ mod native_macos {
         let end = event_terminal_screen_point(overlays, event);
         let (start, seeded_from_real_mouse) = match prior_point {
             Some(point) => (point, false),
-            None => (current_system_mouse_location().unwrap_or(end), true),
+            None => (current_system_mouse_location(overlays).unwrap_or(end), true),
         };
         let frames = motion_frames_for_event(start, end, event);
         let label_text = action_label(event.action.clone(), event.label.as_deref());
+        let mut prior_frame_point = start;
         for (index, frame) in frames.iter().enumerate() {
+            let rotation_degrees = if index + 1 == frames.len() {
+                POINTER_IDLE_ROTATION_DEGREES
+            } else {
+                motion_heading_rotation_degrees(prior_frame_point, *frame)
+                    .unwrap_or(POINTER_IDLE_ROTATION_DEGREES)
+            };
+            let linear_progress = (index + 1) as f64 / frames.len() as f64;
+            let cursor_scale = cursor_scale_for_progress(linear_progress);
             render_pointer_frame_on_main(
                 overlays,
                 *frame,
+                rotation_degrees,
+                cursor_scale,
                 event.action.clone(),
-                if index + 1 == frames.len() {
-                    Some(label_text.as_str())
-                } else {
-                    None
-                },
-                index + 1 == frames.len(),
+                None,
+                1.0,
+                1.0,
+                false,
+                1.0,
+                0.0,
+                0.0,
             )?;
+            prior_frame_point = *frame;
             if index + 1 != frames.len() {
                 thread::sleep(Duration::from_millis(MOTION_STEP_DELAY_MS));
             }
         }
+        let show_pulse = action_shows_pulse(event);
+        render_pointer_frame_on_main(
+            overlays,
+            end,
+            POINTER_IDLE_ROTATION_DEGREES,
+            CURSOR_LANDING_SETTLE_SCALE,
+            event.action.clone(),
+            Some(label_text.as_str()),
+            LABEL_POP_IN_SCALE,
+            LABEL_POP_IN_ALPHA,
+            show_pulse,
+            PULSE_FLASH_SCALE,
+            PULSE_FLASH_BORDER_ALPHA,
+            PULSE_FLASH_FILL_ALPHA,
+        )?;
+        thread::sleep(Duration::from_millis(LANDING_SETTLE_DELAY_MS));
+        render_pointer_frame_on_main(
+            overlays,
+            end,
+            POINTER_IDLE_ROTATION_DEGREES,
+            1.0,
+            event.action.clone(),
+            Some(label_text.as_str()),
+            1.0,
+            1.0,
+            show_pulse,
+            PULSE_SETTLE_SCALE,
+            PULSE_SETTLE_BORDER_ALPHA,
+            PULSE_SETTLE_FILL_ALPHA,
+        )?;
         Ok(PointerMotionSummary {
             start,
             end,
@@ -605,16 +780,43 @@ mod native_macos {
         );
     }
 
+    fn hide_pointer_pulse_on_main(overlay: &NativeOverlayWindow) {
+        let pulse = unsafe { &*(overlay.pulse_ptr as *mut NSBox) };
+        pulse.setHidden(true);
+    }
+
+    fn invalidate_pending_overlay_hides() {
+        let windows = native_pointer_windows();
+        if let Ok(mut overlays) = windows.lock() {
+            for overlay in overlays.values_mut() {
+                overlay.hide_generation = overlay.hide_generation.saturating_add(1);
+            }
+        };
+    }
+
+    fn hide_all_pointer_overlay_windows_on_main() {
+        let windows = native_pointer_windows();
+        let overlays = {
+            let Ok(overlays) = windows.lock() else {
+                return;
+            };
+            overlays.values().cloned().collect::<Vec<_>>()
+        };
+        for overlay in overlays {
+            conceal_pointer_overlay_on_main(&overlay);
+        }
+    }
+
     fn conceal_pointer_overlay_on_main(overlay: &NativeOverlayWindow) {
         let panel = unsafe { &*(overlay.panel_ptr as *mut NSPanel) };
-        let ring = unsafe { &*(overlay.ring_ptr as *mut NSBox) };
-        let dot = unsafe { &*(overlay.dot_ptr as *mut NSBox) };
+        let glow = unsafe { &*(overlay.glow_ptr as *mut NSBox) };
+        let cursor = unsafe { &*(overlay.cursor_ptr as *mut NSImageView) };
         let pulse = unsafe { &*(overlay.pulse_ptr as *mut NSBox) };
         let label_box = unsafe { &*(overlay.label_box_ptr as *mut NSBox) };
         let label = unsafe { &*(overlay.label_ptr as *mut NSTextField) };
         pulse.setHidden(true);
-        ring.setHidden(true);
-        dot.setHidden(true);
+        glow.setHidden(true);
+        cursor.setHidden(true);
         label_box.setHidden(true);
         label.setHidden(true);
         panel.orderOut(None);
@@ -623,14 +825,22 @@ mod native_macos {
     fn render_pointer_frame_on_main(
         overlays: &[NativeOverlayWindow],
         screen_point: ScreenPoint,
+        rotation_degrees: f64,
+        cursor_scale: f64,
         action: ComputerUsePointerAction,
         label_text: Option<&str>,
+        label_scale: f64,
+        label_alpha: f64,
         show_pulse: bool,
+        pulse_scale: f64,
+        pulse_border_alpha: f64,
+        pulse_fill_alpha: f64,
     ) -> Result<(), String> {
         let active_label = overlay_label_for_screen_point(overlays, screen_point)
             .or_else(|| overlays.first().map(|overlay| overlay.label.clone()))
             .ok_or_else(|| "No native pointer overlays are available".to_string())?;
         let color = action_color(action);
+        let appkit_rotation_degrees = appkit_cursor_rotation_degrees(rotation_degrees);
 
         for overlay in overlays {
             if overlay.label != active_label {
@@ -639,50 +849,70 @@ mod native_macos {
             }
 
             let panel = unsafe { &*(overlay.panel_ptr as *mut NSPanel) };
-            let ring = unsafe { &*(overlay.ring_ptr as *mut NSBox) };
-            let dot = unsafe { &*(overlay.dot_ptr as *mut NSBox) };
+            let glow = unsafe { &*(overlay.glow_ptr as *mut NSBox) };
+            let cursor = unsafe { &*(overlay.cursor_ptr as *mut NSImageView) };
             let pulse = unsafe { &*(overlay.pulse_ptr as *mut NSBox) };
             let label_box = unsafe { &*(overlay.label_box_ptr as *mut NSBox) };
             let label = unsafe { &*(overlay.label_ptr as *mut NSTextField) };
-            let point = overlay_local_point(panel, overlay, screen_point);
-            let ring_origin =
-                NSPoint::new(point.x - (POINTER_SIZE / 2.0), point.y - (POINTER_SIZE / 2.0));
-            let dot_origin = NSPoint::new(point.x - (DOT_SIZE / 2.0), point.y - (DOT_SIZE / 2.0));
-            let pulse_origin =
-                NSPoint::new(point.x - (PULSE_SIZE / 2.0), point.y - (PULSE_SIZE / 2.0));
+            let point = overlay_local_point(
+                panel,
+                overlay,
+                quartz_screen_point_to_appkit(overlay, screen_point),
+            );
+            let cursor_size = pointer_size_for_scale(cursor_scale);
+            let cursor_origin =
+                cursor_origin_for_target(point, appkit_rotation_degrees, cursor_scale);
+            let cursor_center = cursor_center_for_origin(cursor_origin, cursor_size);
+            let pulse_size = PULSE_SIZE * pulse_scale;
+            let pulse_origin = NSPoint::new(
+                cursor_center.x - (pulse_size / 2.0),
+                cursor_center.y - (pulse_size / 2.0),
+            );
 
             pulse.setFrame(NSRect::new(
                 pulse_origin,
-                NSSize::new(PULSE_SIZE, PULSE_SIZE),
+                NSSize::new(pulse_size, pulse_size),
             ));
-            ring.setFrame(NSRect::new(
-                ring_origin,
-                NSSize::new(POINTER_SIZE, POINTER_SIZE),
+            cursor.setFrame(NSRect::new(
+                cursor_origin,
+                NSSize::new(cursor_size, cursor_size),
             ));
-            dot.setFrame(NSRect::new(dot_origin, NSSize::new(DOT_SIZE, DOT_SIZE)));
+            if let Some(image) = cursor_image_for_rotation(appkit_rotation_degrees) {
+                cursor.setImage(Some(&image));
+            }
 
-            pulse.setBorderColor(&color.colorWithAlphaComponent(0.52));
-            ring.setBorderColor(&color);
-            dot.setFillColor(&color);
+            pulse.setBorderColor(&color.colorWithAlphaComponent(pulse_border_alpha));
+            pulse.setFillColor(&color.colorWithAlphaComponent(pulse_fill_alpha));
+            cursor.setContentTintColor(Some(&color));
+            let shadow = cursor_shadow(&color, cursor_shadow_blur_radius(cursor_scale));
+            cursor.setShadow(Some(&shadow));
             pulse.setHidden(!show_pulse);
-            ring.setHidden(false);
-            dot.setHidden(false);
+            glow.setHidden(true);
+            cursor.setHidden(false);
 
             if let Some(text) = label_text.filter(|text| !text.is_empty()) {
                 let label_box_width = label_width_for_text(text);
-                let label_origin = clamped_label_origin(overlay, point, label_box_width);
+                let scaled_width = label_box_width * label_scale;
+                let scaled_height = LABEL_BOX_HEIGHT * label_scale;
+                let label_origin = clamped_label_origin(overlay, cursor_center, scaled_width);
                 label_box.setFrame(NSRect::new(
                     label_origin,
-                    NSSize::new(label_box_width, LABEL_BOX_HEIGHT),
+                    NSSize::new(scaled_width, scaled_height),
                 ));
                 label.setStringValue(&NSString::from_str(text));
+                let label_height = LABEL_HEIGHT * label_scale;
                 label.setFrame(NSRect::new(
                     NSPoint::new(
-                        label_origin.x + LABEL_TEXT_INSET_X,
-                        label_origin.y + LABEL_TEXT_INSET_Y,
+                        label_origin.x,
+                        label_origin.y + ((scaled_height - label_height) / 2.0).max(0.0),
                     ),
-                    NSSize::new(label_box_width - (LABEL_TEXT_INSET_X * 2.0), LABEL_HEIGHT),
+                    NSSize::new(
+                        scaled_width.max(1.0),
+                        label_height,
+                    ),
                 ));
+                label_box.setAlphaValue(label_alpha);
+                label.setAlphaValue(label_alpha);
                 label_box.setHidden(false);
                 label.setHidden(false);
             } else {
@@ -703,9 +933,21 @@ mod native_macos {
     ) -> NSPoint {
         let converted = panel.convertPointFromScreen(NSPoint::new(point.x, point.y));
         NSPoint::new(
-            converted.x.clamp(0.0, overlay.width),
-            converted.y.clamp(0.0, overlay.height),
+            converted.x.clamp(0.0, overlay.appkit_width),
+            converted.y.clamp(0.0, overlay.appkit_height),
         )
+    }
+
+    fn quartz_screen_point_to_appkit(
+        overlay: &NativeOverlayWindow,
+        point: ScreenPoint,
+    ) -> ScreenPoint {
+        let local_x = point.x - overlay.quartz_origin_x;
+        let local_y = point.y - overlay.quartz_origin_y;
+        ScreenPoint {
+            x: overlay.appkit_origin_x + local_x,
+            y: overlay.appkit_origin_y + (overlay.quartz_height - local_y),
+        }
     }
 
     fn clamped_label_origin(
@@ -713,9 +955,10 @@ mod native_macos {
         point: NSPoint,
         label_box_width: f64,
     ) -> NSPoint {
-        let max_x = (overlay.width - label_box_width - OVERLAY_EDGE_PADDING).max(OVERLAY_EDGE_PADDING);
+        let max_x =
+            (overlay.appkit_width - label_box_width - OVERLAY_EDGE_PADDING).max(OVERLAY_EDGE_PADDING);
         let max_y =
-            (overlay.height - LABEL_BOX_HEIGHT - OVERLAY_EDGE_PADDING).max(OVERLAY_EDGE_PADDING);
+            (overlay.appkit_height - LABEL_BOX_HEIGHT - OVERLAY_EDGE_PADDING).max(OVERLAY_EDGE_PADDING);
         NSPoint::new(
             (point.x + LABEL_OFFSET_X).clamp(OVERLAY_EDGE_PADDING, max_x),
             (point.y + LABEL_OFFSET_Y).clamp(OVERLAY_EDGE_PADDING, max_y),
@@ -728,12 +971,7 @@ mod native_macos {
     ) -> Option<String> {
         overlays
             .iter()
-            .find(|overlay| {
-                point.x >= overlay.origin_x
-                    && point.x <= overlay.origin_x + overlay.width
-                    && point.y >= overlay.origin_y
-                    && point.y <= overlay.origin_y + overlay.height
-            })
+            .find(|overlay| overlay_contains_quartz_point(overlay, point))
             .map(|overlay| overlay.label.clone())
     }
 
@@ -756,8 +994,8 @@ mod native_macos {
         overlays
             .first()
             .map(|overlay| ScreenPoint {
-                x: overlay.origin_x + (overlay.width / 2.0),
-                y: overlay.origin_y + (overlay.height / 2.0),
+                x: overlay.quartz_origin_x + (overlay.quartz_width / 2.0),
+                y: overlay.quartz_origin_y + (overlay.quartz_height / 2.0),
             })
             .unwrap_or(ScreenPoint { x: 0.0, y: 0.0 })
     }
@@ -800,28 +1038,12 @@ mod native_macos {
 
         let steps = ((distance / MOTION_DISTANCE_PER_STEP).ceil() as usize)
             .clamp(MOTION_MIN_STEPS, MOTION_MAX_STEPS);
-        let dx = end.x - start.x;
-        let dy = end.y - start.y;
-        let curve_sign = if ((start.x.round() as i64) ^ (end.y.round() as i64) ^ (dx.round() as i64))
-            & 1
-            == 0
-        {
-            1.0
-        } else {
-            -1.0
-        };
-        let curve = (distance * 0.14).clamp(MOTION_CURVE_MIN, MOTION_CURVE_MAX);
-        let (forward_x, forward_y, perp_x, perp_y) = if distance > 0.0 {
-            let inv = 1.0 / distance;
-            let fx = dx * inv;
-            let fy = dy * inv;
-            (fx, fy, -fy, fx)
-        } else {
-            (0.0, 0.0, 0.0, 0.0)
-        };
+        let mid_x = (start.x + end.x) / 2.0;
+        let mid_y = (start.y + end.y) / 2.0;
+        let curve = (distance * 0.20).clamp(MOTION_CURVE_MIN, MOTION_CURVE_MAX);
         let control = ScreenPoint {
-            x: (start.x + end.x) / 2.0 + (perp_x * curve * curve_sign) + (forward_x * curve * 0.18),
-            y: (start.y + end.y) / 2.0 + (perp_y * curve * curve_sign) + (forward_y * curve * 0.18),
+            x: mid_x,
+            y: mid_y - curve,
         };
 
         (1..=steps)
@@ -853,16 +1075,125 @@ mod native_macos {
         }
     }
 
-    fn current_system_mouse_location() -> Option<ScreenPoint> {
+    fn current_system_mouse_location(overlays: &[NativeOverlayWindow]) -> Option<ScreenPoint> {
         let point = NSEvent::mouseLocation();
         if point.x.is_finite() && point.y.is_finite() {
-            Some(ScreenPoint {
+            let appkit_point = ScreenPoint {
                 x: point.x,
                 y: point.y,
-            })
+            };
+            Some(appkit_screen_point_to_quartz(overlays, appkit_point).unwrap_or(appkit_point))
         } else {
             None
         }
+    }
+
+    fn motion_heading_rotation_degrees(from: ScreenPoint, to: ScreenPoint) -> Option<f64> {
+        let dx = to.x - from.x;
+        let dy = from.y - to.y;
+        if (dx * dx + dy * dy).sqrt() <= 0.25 {
+            return None;
+        }
+        Some(dy.atan2(dx).to_degrees() - 90.0)
+    }
+
+    fn action_shows_pulse(event: &ComputerUsePointerEvent) -> bool {
+        matches!(
+            event.action,
+            ComputerUsePointerAction::Click
+                | ComputerUsePointerAction::SecondaryClick
+                | ComputerUsePointerAction::DoubleClick
+        ) && event.x.zip(event.y).is_some()
+    }
+
+    fn overlay_contains_quartz_point(overlay: &NativeOverlayWindow, point: ScreenPoint) -> bool {
+        point.x >= overlay.quartz_origin_x
+            && point.x <= overlay.quartz_origin_x + overlay.quartz_width
+            && point.y >= overlay.quartz_origin_y
+            && point.y <= overlay.quartz_origin_y + overlay.quartz_height
+    }
+
+    fn appkit_screen_point_to_quartz(
+        overlays: &[NativeOverlayWindow],
+        point: ScreenPoint,
+    ) -> Option<ScreenPoint> {
+        overlays
+            .iter()
+            .find(|overlay| {
+                point.x >= overlay.appkit_origin_x
+                    && point.x <= overlay.appkit_origin_x + overlay.appkit_width
+                    && point.y >= overlay.appkit_origin_y
+                    && point.y <= overlay.appkit_origin_y + overlay.appkit_height
+            })
+            .map(|overlay| {
+                let local_x = point.x - overlay.appkit_origin_x;
+                let local_y = point.y - overlay.appkit_origin_y;
+                ScreenPoint {
+                    x: overlay.quartz_origin_x + local_x,
+                    y: overlay.quartz_origin_y + (overlay.appkit_height - local_y),
+                }
+            })
+    }
+
+    fn cursor_tip_local_point() -> NSPoint {
+        let side = CURSOR_TRIANGLE_SIDE;
+        let height = side * 0.866_025_403_78;
+        let center_x = POINTER_SIZE / 2.0;
+        let center_y = POINTER_SIZE / 2.0;
+        NSPoint::new(center_x, center_y + (height / 1.5))
+    }
+
+    fn cursor_visual_anchor_local_point() -> NSPoint {
+        // Anchor the click target at the triangle tip so the visual hotspot
+        // matches the real click point rather than the triangle centroid.
+        cursor_tip_local_point()
+    }
+
+    fn cursor_base_left_local_point() -> NSPoint {
+        let side = CURSOR_TRIANGLE_SIDE;
+        let height = side * 0.866_025_403_78;
+        let center_x = POINTER_SIZE / 2.0;
+        let center_y = POINTER_SIZE / 2.0;
+        NSPoint::new(center_x - (side / 2.0), center_y - (height / 3.0))
+    }
+
+    fn cursor_base_right_local_point() -> NSPoint {
+        let side = CURSOR_TRIANGLE_SIDE;
+        let height = side * 0.866_025_403_78;
+        let center_x = POINTER_SIZE / 2.0;
+        let center_y = POINTER_SIZE / 2.0;
+        NSPoint::new(center_x + (side / 2.0), center_y - (height / 3.0))
+    }
+
+    fn cursor_origin_for_target(target: NSPoint, rotation_degrees: f64, scale: f64) -> NSPoint {
+        let cursor_size = pointer_size_for_scale(scale);
+        let center_x = cursor_size / 2.0;
+        let center_y = cursor_size / 2.0;
+        let anchor = cursor_visual_anchor_local_point();
+        let anchor_x = anchor.x * scale;
+        let anchor_y = anchor.y * scale;
+        let relative_anchor_x = anchor_x - center_x;
+        let relative_anchor_y = anchor_y - center_y;
+        let radians = rotation_degrees.to_radians();
+        let rotated_anchor_x =
+            (relative_anchor_x * radians.cos()) - (relative_anchor_y * radians.sin());
+        let rotated_anchor_y =
+            (relative_anchor_x * radians.sin()) + (relative_anchor_y * radians.cos());
+        NSPoint::new(
+            target.x - (center_x + rotated_anchor_x),
+            target.y - (center_y + rotated_anchor_y),
+        )
+    }
+
+    fn cursor_center_for_origin(origin: NSPoint, cursor_size: f64) -> NSPoint {
+        NSPoint::new(
+            origin.x + (cursor_size / 2.0),
+            origin.y + (cursor_size / 2.0),
+        )
+    }
+
+    fn appkit_cursor_rotation_degrees(rotation_degrees: f64) -> f64 {
+        -rotation_degrees
     }
 
     fn action_label(action: ComputerUsePointerAction, label: Option<&str>) -> String {
@@ -882,15 +1213,40 @@ mod native_macos {
         match action {
             ComputerUsePointerAction::SecondaryClick => NSColor::systemOrangeColor(),
             ComputerUsePointerAction::DoubleClick => NSColor::systemPinkColor(),
-            ComputerUsePointerAction::Drag => NSColor::systemBlueColor(),
+            ComputerUsePointerAction::Drag => overlay_blue(1.0),
             ComputerUsePointerAction::Semantic => NSColor::systemPurpleColor(),
-            ComputerUsePointerAction::Click => NSColor::controlAccentColor(),
+            ComputerUsePointerAction::Click => overlay_blue(1.0),
         }
     }
 
+    fn overlay_blue(alpha: f64) -> Retained<NSColor> {
+        NSColor::colorWithSRGBRed_green_blue_alpha(51.0 / 255.0, 128.0 / 255.0, 1.0, alpha)
+    }
+
+    fn cursor_shadow(color: &NSColor, blur_radius: f64) -> Retained<NSShadow> {
+        let shadow = NSShadow::new();
+        shadow.setShadowOffset(NSSize::new(0.0, 0.0));
+        shadow.setShadowBlurRadius(blur_radius);
+        shadow.setShadowColor(Some(color));
+        shadow
+    }
+
+    fn pointer_size_for_scale(scale: f64) -> f64 {
+        POINTER_SIZE * scale
+    }
+
+    fn cursor_scale_for_progress(linear_progress: f64) -> f64 {
+        1.0 + (linear_progress * std::f64::consts::PI).sin() * CURSOR_FLIGHT_SCALE_AMPLITUDE
+    }
+
+    fn cursor_shadow_blur_radius(scale: f64) -> f64 {
+        CURSOR_SHADOW_BLUR_RADIUS
+            + ((scale - 1.0).max(0.0) * CURSOR_SHADOW_SCALE_MULTIPLIER)
+    }
+
     fn label_width_for_text(text: &str) -> f64 {
-        let approx = (text.chars().count() as f64 * 7.2) + (LABEL_BOX_PADDING_X * 2.0);
-        approx.clamp(72.0, LABEL_WIDTH)
+        let approx = (text.chars().count() as f64 * 6.4) + (LABEL_BOX_PADDING_X * 2.0);
+        approx.clamp(44.0, 160.0)
     }
 
     fn destroy_all_pointer_overlay_windows_on_main() {
@@ -913,6 +1269,7 @@ mod native_macos {
         }
         if let Ok(mut state) = native_pointer_cursor_state().lock() {
             state.current_point = None;
+            state.visible_session_id = None;
         }
 
         super::super::diagnostics::write(
@@ -962,19 +1319,71 @@ mod native_macos {
         panel
     }
 
-    fn build_ring_view(mtm: MainThreadMarker) -> Retained<NSBox> {
-        let ring = NSBox::initWithFrame(
+    fn build_glow_view(mtm: MainThreadMarker) -> Retained<NSBox> {
+        let glow = NSBox::initWithFrame(
             NSBox::alloc(mtm),
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(POINTER_SIZE, POINTER_SIZE)),
+            NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(POINTER_GLOW_SIZE, POINTER_GLOW_SIZE),
+            ),
         );
-        ring.setBoxType(NSBoxType::Custom);
-        ring.setBorderWidth(2.0);
-        ring.setCornerRadius(POINTER_SIZE / 2.0);
-        ring.setBorderColor(&NSColor::controlAccentColor());
-        ring.setFillColor(&NSColor::clearColor());
-        ring.setTransparent(false);
-        ring.setContentViewMargins(NSSize::new(0.0, 0.0));
-        ring
+        glow.setBoxType(NSBoxType::Custom);
+        glow.setBorderWidth(0.0);
+        glow.setCornerRadius(POINTER_GLOW_SIZE / 2.0);
+        glow.setBorderColor(&NSColor::clearColor());
+        glow.setFillColor(&NSColor::clearColor());
+        glow.setAlphaValue(0.0);
+        glow.setTransparent(false);
+        glow.setContentViewMargins(NSSize::new(0.0, 0.0));
+        glow
+    }
+
+    fn build_cursor_view(mtm: MainThreadMarker) -> Result<Retained<NSImageView>, String> {
+        let image = cursor_image_for_rotation(appkit_cursor_rotation_degrees(
+            POINTER_IDLE_ROTATION_DEGREES,
+        ))
+        .ok_or_else(|| "failed to render cursor image".to_string())?;
+        image.setTemplate(true);
+        let view = NSImageView::imageViewWithImage(&image, mtm);
+        view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+        view.setContentTintColor(Some(&overlay_blue(1.0)));
+        view.setAlphaValue(1.0);
+        let shadow = cursor_shadow(&overlay_blue(1.0), CURSOR_SHADOW_BLUR_RADIUS);
+        view.setShadow(Some(&shadow));
+        Ok(view)
+    }
+
+    fn cursor_image_for_rotation(rotation_degrees: f64) -> Option<Retained<NSImage>> {
+        let draw_cursor = RcBlock::new(move |_rect: NSRect| -> Bool {
+            let center = NSPoint::new(POINTER_SIZE / 2.0, POINTER_SIZE / 2.0);
+            let transform = NSAffineTransform::transform();
+            transform.translateXBy_yBy(center.x, center.y);
+            transform.rotateByDegrees(rotation_degrees);
+            transform.translateXBy_yBy(-center.x, -center.y);
+            transform.concat();
+
+            let context = NSGraphicsContext::currentContext();
+            if let Some(context) = context.as_ref() {
+                context.setImageInterpolation(NSImageInterpolation::High);
+            }
+
+            let path = NSBezierPath::bezierPath();
+            path.moveToPoint(cursor_tip_local_point());
+            path.lineToPoint(cursor_base_left_local_point());
+            path.lineToPoint(cursor_base_right_local_point());
+            path.closePath();
+
+            NSColor::whiteColor().setFill();
+            path.fill();
+            Bool::YES
+        });
+        let image = NSImage::imageWithSize_flipped_drawingHandler(
+            NSSize::new(POINTER_SIZE, POINTER_SIZE),
+            false,
+            &draw_cursor,
+        );
+        image.setTemplate(true);
+        Some(image)
     }
 
     fn build_pulse_view(mtm: MainThreadMarker) -> Retained<NSBox> {
@@ -983,27 +1392,14 @@ mod native_macos {
             NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(PULSE_SIZE, PULSE_SIZE)),
         );
         pulse.setBoxType(NSBoxType::Custom);
-        pulse.setBorderWidth(1.6);
+        pulse.setBorderWidth(0.9);
         pulse.setCornerRadius(PULSE_SIZE / 2.0);
-        pulse.setBorderColor(&NSColor::controlAccentColor().colorWithAlphaComponent(0.52));
-        pulse.setFillColor(&NSColor::clearColor());
+        pulse.setBorderColor(&overlay_blue(0.24));
+        pulse.setFillColor(&overlay_blue(0.10));
+        pulse.setAlphaValue(0.88);
         pulse.setTransparent(false);
         pulse.setContentViewMargins(NSSize::new(0.0, 0.0));
         pulse
-    }
-
-    fn build_dot_view(mtm: MainThreadMarker) -> Retained<NSBox> {
-        let dot = NSBox::initWithFrame(
-            NSBox::alloc(mtm),
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(DOT_SIZE, DOT_SIZE)),
-        );
-        dot.setBoxType(NSBoxType::Custom);
-        dot.setBorderWidth(0.0);
-        dot.setCornerRadius(DOT_SIZE / 2.0);
-        dot.setFillColor(&NSColor::controlAccentColor());
-        dot.setTransparent(false);
-        dot.setContentViewMargins(NSSize::new(0.0, 0.0));
-        dot
     }
 
     fn build_label_box_view(mtm: MainThreadMarker) -> Retained<NSBox> {
@@ -1012,10 +1408,13 @@ mod native_macos {
             NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(96.0, LABEL_BOX_HEIGHT)),
         );
         box_view.setBoxType(NSBoxType::Custom);
-        box_view.setBorderWidth(1.0);
-        box_view.setCornerRadius(LABEL_BOX_HEIGHT / 2.0);
-        box_view.setBorderColor(&NSColor::controlAccentColor().colorWithAlphaComponent(0.34));
-        box_view.setFillColor(&NSColor::blackColor().colorWithAlphaComponent(0.78));
+        box_view.setBorderWidth(0.0);
+        box_view.setCornerRadius(6.0);
+        box_view.setBorderColor(&NSColor::clearColor());
+        box_view.setFillColor(&overlay_blue(1.0));
+        let shadow = cursor_shadow(&overlay_blue(0.82), 6.0);
+        box_view.setShadow(Some(&shadow));
+        box_view.setAlphaValue(0.98);
         box_view.setTransparent(false);
         box_view.setContentViewMargins(NSSize::new(0.0, 0.0));
         box_view
@@ -1024,7 +1423,8 @@ mod native_macos {
     fn build_label_view(mtm: MainThreadMarker) -> Retained<NSTextField> {
         let label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
         label.setTextColor(Some(&NSColor::whiteColor()));
-        label.setFont(Some(&NSFont::systemFontOfSize_weight(12.0, 0.45)));
+        label.setFont(Some(&NSFont::systemFontOfSize_weight(11.0, 0.50)));
+        label.setAlignment(NSTextAlignment::Center);
         label.setUsesSingleLineMode(true);
         label.setBezeled(false);
         label.setBordered(false);

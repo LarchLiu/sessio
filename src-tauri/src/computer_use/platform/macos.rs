@@ -1309,6 +1309,7 @@ fn screenshot_ref_from_path(
         default_coordinate_space: CoordinateSpace::Screenshot,
         capture_kind,
         screen_bounds,
+        click_marker: None,
     })
 }
 
@@ -2109,6 +2110,7 @@ fn execute_click_intent(
                 return Ok(ClickExecutionResult {
                     route: click_execution_route(route),
                     outcome: click_execution_outcome(route, outcome),
+                    next_dispatch_route: None,
                 });
             }
             ClickAttemptOutcome::Failed => {}
@@ -2415,6 +2417,7 @@ fn action_execution_result(
         kind,
         route: action_execution_route(route),
         outcome: action_execution_outcome(outcome),
+        next_dispatch_route: None,
     }
 }
 
@@ -2645,6 +2648,7 @@ fn secondary_ax_element(
                 kind: ActionExecutionKind::SecondaryClick,
                 route: ActionExecutionRoute::Ax,
                 outcome: ActionExecutionOutcome::SemanticSuccess,
+                next_dispatch_route: None,
             });
         }
     }
@@ -2718,6 +2722,7 @@ fn scroll_ax_element(
                 kind: ActionExecutionKind::Scroll,
                 route: ActionExecutionRoute::Ax,
                 outcome: ActionExecutionOutcome::SemanticSuccess,
+                next_dispatch_route: None,
             });
         }
         let visible = perform_ax_action_for_id(pid, element_id, ax::SCROLL_TO_VISIBLE_ACTION)?;
@@ -2726,6 +2731,7 @@ fn scroll_ax_element(
                 kind: ActionExecutionKind::Scroll,
                 route: ActionExecutionRoute::Ax,
                 outcome: ActionExecutionOutcome::SemanticSuccess,
+                next_dispatch_route: None,
             });
         }
     }
@@ -2777,16 +2783,19 @@ fn set_ax_value_for_id(
             kind: ActionExecutionKind::SetValue,
             route: ActionExecutionRoute::Ax,
             outcome: ActionExecutionOutcome::SemanticSuccess,
+            next_dispatch_route: None,
         }),
         (ax::kAXErrorSuccess, Some(_)) => Ok(ActionExecutionResult {
             kind: ActionExecutionKind::SetValue,
             route: ActionExecutionRoute::Ax,
             outcome: ActionExecutionOutcome::NoEffect,
+            next_dispatch_route: None,
         }),
         (ax::kAXErrorSuccess, None) => Ok(ActionExecutionResult {
             kind: ActionExecutionKind::SetValue,
             route: ActionExecutionRoute::Ax,
             outcome: ActionExecutionOutcome::Uncertain,
+            next_dispatch_route: None,
         }),
         err => Err(ProviderError::Failed(format!(
             "set AXValue failed for {element_id}: AXError {}",
@@ -3620,6 +3629,7 @@ mod tests {
                 width: 4.0,
                 height: 4.0,
             },
+            click_marker: None,
         };
 
         let fingerprint =

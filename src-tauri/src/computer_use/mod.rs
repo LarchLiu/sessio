@@ -24,6 +24,7 @@ pub mod pi_extension;
 pub mod platform;
 pub mod pointer_overlay;
 pub mod provider;
+pub mod screenshot_overlay;
 pub mod settings;
 pub mod skill_resource;
 

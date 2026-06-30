@@ -3,6 +3,57 @@
 //! Host-side policy for enabling computer use.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+use super::provider::ClickDispatchRoute;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationRoutePreference {
+    Ax,
+    TargetPid,
+    Hid,
+}
+
+impl OperationRoutePreference {
+    pub fn to_dispatch_route(&self) -> ClickDispatchRoute {
+        match self {
+            OperationRoutePreference::Ax => ClickDispatchRoute::Ax,
+            OperationRoutePreference::TargetPid => ClickDispatchRoute::TargetPid,
+            OperationRoutePreference::Hid => ClickDispatchRoute::Hid,
+        }
+    }
+
+    pub fn from_click_route(route: ClickDispatchRoute) -> Option<Self> {
+        match route {
+            ClickDispatchRoute::Auto => None,
+            ClickDispatchRoute::Ax => Some(Self::Ax),
+            ClickDispatchRoute::TargetPid => Some(Self::TargetPid),
+            ClickDispatchRoute::Hid => Some(Self::Hid),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppRoutePreferences {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_element: Option<OperationRoutePreference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_at: Option<OperationRoutePreference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_click_element: Option<OperationRoutePreference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_click_at: Option<OperationRoutePreference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub double_click: Option<OperationRoutePreference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drag: Option<OperationRoutePreference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll_element: Option<OperationRoutePreference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll: Option<OperationRoutePreference>,
+}
 
 /// Tunable host policy for computer use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,6 +66,10 @@ pub struct ComputerUseSettings {
     /// control. Session approval is still required separately.
     #[serde(default)]
     pub approved_apps: Vec<String>,
+    /// Sticky per-app preferred dispatch routes learned from successful auto
+    /// actions, so future auto actions can start with the known-good path.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub app_route_preferences: BTreeMap<String, AppRoutePreferences>,
 }
 
 impl Default for ComputerUseSettings {
@@ -22,6 +77,7 @@ impl Default for ComputerUseSettings {
         Self {
             enabled: false,
             approved_apps: Vec::new(),
+            app_route_preferences: BTreeMap::new(),
         }
     }
 }
@@ -33,6 +89,7 @@ impl ComputerUseSettings {
         Self {
             enabled: true,
             approved_apps: Vec::new(),
+            app_route_preferences: BTreeMap::new(),
         }
     }
 
@@ -69,6 +126,13 @@ mod tests {
         let s = ComputerUseSettings {
             enabled: true,
             approved_apps: vec!["com.example.app".into()],
+            app_route_preferences: BTreeMap::from([(
+                "com.example.app".into(),
+                AppRoutePreferences {
+                    click_at: Some(OperationRoutePreference::Hid),
+                    ..AppRoutePreferences::default()
+                },
+            )]),
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: ComputerUseSettings = serde_json::from_str(&json).unwrap();

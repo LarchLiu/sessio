@@ -1148,6 +1148,22 @@ export function AcpTranscriptPanel({
   }, [activeTurnId]);
 
   useEffect(() => {
+    if (activeTurnId || !sessionComputerUseAttached) return;
+    setComputerUseStatus((current) => {
+      if (!current) return current;
+      if (!current.foregroundActive && !current.hasLease && !current.activeAppId) {
+        return current;
+      }
+      return {
+        ...current,
+        foregroundActive: false,
+        hasLease: false,
+        activeAppId: null,
+      };
+    });
+  }, [activeTurnId, sessionComputerUseAttached]);
+
+  useEffect(() => {
     const runtimeAgent = runtimeAgents.find((item) => item.agent === agent) ?? null;
     setComposerAgent(agent);
     setComposerModel(initialRuntimeModel(runtimeAgent));
@@ -1555,7 +1571,14 @@ export function AcpTranscriptPanel({
         await cancelAgentTurn(runtimeSessionId, turnId).catch(() => {});
       }
       setComputerUseStatus((current) =>
-        current ? { ...current, foregroundActive: false, hasLease: false } : current,
+        current
+          ? {
+              ...current,
+              foregroundActive: false,
+              hasLease: false,
+              activeAppId: null,
+            }
+          : current,
       );
     } catch (err) {
       setComposerError(String(err));

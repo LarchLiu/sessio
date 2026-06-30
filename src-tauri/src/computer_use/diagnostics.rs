@@ -5,6 +5,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::cell::RefCell;
 
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
@@ -13,6 +14,10 @@ use serde_json::{Map, Value};
 const COMPUTER_USE_DIR: &str = "computer-use";
 const DIAGNOSTICS_LOG_FILE: &str = "diagnostics.log";
 const TEST_DIAGNOSTICS_DIR: &str = "sessio-computer-use";
+
+thread_local! {
+    static SCOPED_SESSION_ID: RefCell<Option<String>> = const { RefCell::new(None) };
+}
 
 /// Best-effort append of one JSONL diagnostics record.
 pub fn write(event: &str, payload: Value) {
@@ -25,6 +30,15 @@ pub fn diagnostics_log_path() -> Result<PathBuf> {
     diagnostics_log_path_for_session(None)
 }
 
+pub fn with_session_scope<T>(session_id: Option<&str>, f: impl FnOnce() -> T) -> T {
+    let previous = SCOPED_SESSION_ID.with(|slot| slot.replace(session_id.map(str::to_string)));
+    let result = f();
+    SCOPED_SESSION_ID.with(|slot| {
+        slot.replace(previous);
+    });
+    result
+}
+
 pub fn diagnostics_log_path_for_session(session_id: Option<&str>) -> Result<PathBuf> {
     let dir = if cfg!(test) {
         std::env::temp_dir().join(TEST_DIAGNOSTICS_DIR)
@@ -35,10 +49,12 @@ pub fn diagnostics_log_path_for_session(session_id: Option<&str>) -> Result<Path
 }
 
 fn write_inner(event: &str, payload: Value) -> Result<()> {
-    let session_id = payload
+    let payload_session_id = payload
         .as_object()
         .and_then(|map| map.get("sessionId"))
         .and_then(Value::as_str);
+    let scoped_session_id = SCOPED_SESSION_ID.with(|slot| slot.borrow().clone());
+    let session_id = payload_session_id.or(scoped_session_id.as_deref());
     let path = diagnostics_log_path_for_session(session_id)?;
     let parent = path
         .parent()
@@ -123,5 +139,18 @@ mod tests {
 
         let fallback = diagnostics_log_path_for_session(None).unwrap();
         assert_eq!(fallback.file_name().and_then(|name| name.to_str()), Some("diagnostics.log"));
+    }
+
+    #[test]
+    fn scoped_session_id_is_used_when_payload_omits_session_id() {
+        let path = diagnostics_log_path_for_session(Some("scoped-session")).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        with_session_scope(Some("scoped-session"), || {
+            write("scoped_test", serde_json::json!({ "value": 1 }));
+        });
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("\"event\":\"scoped_test\""));
     }
 }

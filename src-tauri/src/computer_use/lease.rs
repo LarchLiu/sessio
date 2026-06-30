@@ -219,6 +219,7 @@ mod tests {
                 width: 50.0,
                 height: 25.0,
             },
+            click_marker: None,
         }
     }
 

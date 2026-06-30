@@ -127,7 +127,8 @@ After a primary click, read the returned post-action `AppState` in this order:
 3. Only retry immediately when the screenshot still looks wrong and
    `lastClickResult.outcome` is `no_effect`.
 4. When retrying a primary click after `no_effect`, prefer an explicit
-   `dispatchRoute` that advances one step beyond the route you just tried.
+   `dispatchRoute` from `lastClickResult.nextDispatchRoute` when present,
+   rather than guessing or repeating `auto`.
 
 If `lastClickResult.outcome` is `uncertain`, do not reflexively click again.
 Treat it as "the click dispatched, but success must be judged from the new UI".
@@ -242,10 +243,12 @@ and extended for Chinese apps:
   output is text only — use `sessio cu get-app-state` for a visual after an
   action and `Read` the JPG path.
 - **Primary clicks return a provider-side result hint.** Post-click `AppState`
-  now includes `lastClickResult { route, outcome }` for
+  now includes `lastClickResult { route, outcome, nextDispatchRoute? }` for
   `computer_click` / `computer_click_element` / `computer_click_at`.
   Treat `semantic_success` and `observed_effect` as strong positive signals.
   Treat `uncertain` as "stop and inspect" rather than "click again now".
+  Treat `nextDispatchRoute` as the recommended explicit retry route when
+  `outcome` is `no_effect`.
 - **Primary clicks also accept explicit routing hints.**
   `computer_click_element` supports `dispatchRoute: auto|ax|target_pid|hid`.
   `computer_click_at` supports `dispatchRoute: auto|target_pid|hid`.

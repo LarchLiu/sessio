@@ -1326,6 +1326,9 @@ impl RuntimeManager {
             }
         };
         if should_emit {
+            if let Some(runtime) = self.inner.computer_use.get() {
+                runtime.host().stop(sessio_runtime_session_id);
+            }
             self.emit(AgentRuntimeEventPayload::TurnCompleted {
                 sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
                 turn_id: turn_id.to_string(),
@@ -1362,6 +1365,9 @@ impl RuntimeManager {
             }
         };
         if should_emit {
+            if let Some(runtime) = self.inner.computer_use.get() {
+                runtime.host().stop(sessio_runtime_session_id);
+            }
             self.emit(AgentRuntimeEventPayload::TurnCancelled {
                 sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
                 turn_id: turn_id.to_string(),
@@ -1389,6 +1395,9 @@ impl RuntimeManager {
                     state.handle.status = RuntimeSessionStatus::Errored;
                 }
             }
+        }
+        if let Some(runtime) = self.inner.computer_use.get() {
+            runtime.host().stop(sessio_runtime_session_id);
         }
         self.emit(AgentRuntimeEventPayload::TurnError {
             sessio_runtime_session_id: sessio_runtime_session_id.to_string(),

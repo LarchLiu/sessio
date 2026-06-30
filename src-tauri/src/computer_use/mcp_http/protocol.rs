@@ -9,6 +9,9 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::computer_use::provider::Point;
+use crate::computer_use::screenshot_overlay::render_reference_overlay_png;
+
 /// A parsed MCP JSON-RPC request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpRequest {
@@ -284,12 +287,12 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "computer_click",
-            description: "Click using the requested dispatchRoute from the latest snapshot. Default dispatchRoute is auto: element refs try AX before pid/hid; x/y screenshot pixels try pid before hid. Returns a post-action AppState plus lastClickResult { route, outcome } for provider-side click observation.",
+            description: "Click using the requested dispatchRoute from the latest snapshot. Default dispatchRoute is auto: element refs try AX before pid/hid; x/y screenshot pixels try pid before hid. Returns a post-action AppState plus lastClickResult { route, outcome, nextDispatchRoute? }. If outcome=no_effect and nextDispatchRoute is present, retry with that explicit route after inspecting the updated screenshot.",
             input_schema: click_arg.clone(),
         },
         ToolDefinition {
             name: "computer_click_element",
-            description: "Click an accessibility element from the latest snapshot. dispatchRoute supports auto|ax|target_pid|hid; default auto tries AX first, then pid, then hid. Returns a post-action AppState plus lastClickResult { route, outcome }.",
+            description: "Click an accessibility element from the latest snapshot. dispatchRoute supports auto|ax|target_pid|hid; default auto tries AX first, then pid, then hid. Returns a post-action AppState plus lastClickResult { route, outcome, nextDispatchRoute? }. If outcome=no_effect and nextDispatchRoute is present, retry with that explicit route after inspecting the updated screenshot.",
             input_schema: snapshot_arg(json!({
                 "elementId": { "type": "string" },
                 "ref": { "type": "string" },
@@ -299,7 +302,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "computer_click_at",
-            description: "Click by screenshot pixel from the latest snapshot. dispatchRoute supports auto|target_pid|hid; default auto tries target_pid first, then hid. Returns a post-action AppState plus lastClickResult { route, outcome }.",
+            description: "Click by screenshot pixel from the latest snapshot. dispatchRoute supports auto|target_pid|hid; default auto tries target_pid first, then hid. Returns a post-action AppState plus lastClickResult { route, outcome, nextDispatchRoute? }. If outcome=no_effect and nextDispatchRoute is present, retry with that explicit route after inspecting the updated screenshot.",
             input_schema: point_action_arg.clone(),
         },
         ToolDefinition {
@@ -427,8 +430,14 @@ pub fn tool_json_result(value: Value) -> Value {
 /// when the screenshot handle points at a readable local file.
 pub fn tool_app_state_result(value: Value) -> Value {
     let mut content = vec![json!({ "type": "text", "text": value.to_string() })];
+    if let Some(instructions) = screenshot_instruction_text(&value) {
+        content.push(json!({ "type": "text", "text": instructions }));
+    }
     if let Some(image) = screenshot_image_content(&value) {
         content.push(image);
+    }
+    if let Some(reference) = screenshot_reference_image_content(&value) {
+        content.push(reference);
     }
     json!({
         "content": content,
@@ -438,25 +447,81 @@ pub fn tool_app_state_result(value: Value) -> Value {
 
 fn screenshot_image_content(value: &Value) -> Option<Value> {
     let screenshot = value.get("screenshot")?;
-    let handle = screenshot.get("handle")?.as_str()?;
-    let format = screenshot
-        .get("format")
-        .and_then(|value| value.as_str())
-        .unwrap_or("png");
-    let mime_type = match format.to_ascii_lowercase().as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        _ => return None,
-    };
+    let handle = screenshot_handle(screenshot)?;
+    let format = screenshot_format(screenshot)?;
+    let mime_type = image_mime_type_for_format(format)?;
     let bytes = std::fs::read(handle).ok()?;
     let data = base64::engine::general_purpose::STANDARD.encode(bytes);
     Some(json!({
         "type": "image",
         "data": data,
         "mimeType": mime_type,
+        "detail": "original",
     }))
+}
+
+fn screenshot_reference_image_content(value: &Value) -> Option<Value> {
+    let screenshot = value.get("screenshot")?;
+    let handle = screenshot_handle(screenshot)?;
+    let marker = screenshot_click_marker(screenshot);
+    let bytes = render_reference_overlay_png(std::path::Path::new(handle), marker).ok()?;
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Some(json!({
+        "type": "image",
+        "data": data,
+        "mimeType": "image/png",
+        "detail": "original",
+    }))
+}
+
+fn screenshot_instruction_text(value: &Value) -> Option<String> {
+    let screenshot = value.get("screenshot")?;
+    let width = screenshot.get("width")?.as_u64()?;
+    let height = screenshot.get("height")?.as_u64()?;
+    let marker = screenshot_click_marker(screenshot).map(|point| {
+        format!(
+            "Last click marker is centered at approximately ({:.0}, {:.0}) in that same pixel space.",
+            point.x, point.y
+        )
+    });
+    let mut lines = vec![
+        format!("This screenshot is {width}x{height} pixels."),
+        "All click coordinates must be in this original pixel space.".to_string(),
+        "A second image is included with a 50px grid/ruler overlay in the same coordinate space.".to_string(),
+    ];
+    if let Some(marker_line) = marker {
+        lines.push(marker_line);
+    }
+    Some(lines.join("\n"))
+}
+
+fn screenshot_handle(screenshot: &Value) -> Option<&str> {
+    screenshot.get("handle")?.as_str()
+}
+
+fn screenshot_format(screenshot: &Value) -> Option<&str> {
+    screenshot
+        .get("format")
+        .and_then(|value| value.as_str())
+        .or(Some("png"))
+}
+
+fn image_mime_type_for_format(format: &str) -> Option<&'static str> {
+    match format.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+fn screenshot_click_marker(screenshot: &Value) -> Option<Point> {
+    let marker = screenshot.get("clickMarker")?;
+    Some(Point {
+        x: marker.get("x")?.as_f64()? as f32,
+        y: marker.get("y")?.as_f64()? as f32,
+    })
 }
 
 /// Wrap a tool error into the MCP `tools/call` error-content shape (isError).
@@ -552,20 +617,55 @@ mod tests {
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        std::fs::write(&path, [1_u8, 2, 3]).unwrap();
+        let image =
+            image::RgbaImage::from_pixel(120, 80, image::Rgba([20_u8, 20_u8, 20_u8, 255_u8]));
+        image.save(&path).unwrap();
         let result = tool_app_state_result(json!({
             "snapshotId": "snap-1",
             "screenshot": {
                 "handle": path.to_string_lossy(),
-                "format": "png"
+                "format": "png",
+                "width": 120,
+                "height": 80
             }
         }));
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(result["content"][0]["type"], "text");
-        assert_eq!(result["content"][1]["type"], "image");
-        assert_eq!(result["content"][1]["mimeType"], "image/png");
-        assert_eq!(result["content"][1]["data"], "AQID");
+        assert_eq!(result["content"][1]["type"], "text");
+        assert!(result["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("This screenshot is 120x80 pixels."));
+        assert_eq!(result["content"][2]["type"], "image");
+        assert_eq!(result["content"][2]["mimeType"], "image/png");
+        assert_eq!(result["content"][2]["detail"], "original");
+        assert_eq!(result["content"][3]["type"], "image");
+        assert_eq!(result["content"][3]["mimeType"], "image/png");
+        assert_eq!(result["content"][3]["detail"], "original");
+    }
+
+    #[test]
+    fn app_state_result_includes_click_marker_in_instruction_text() {
+        let result = tool_app_state_result(json!({
+            "snapshotId": "snap-1",
+            "screenshot": {
+                "handle": "/does/not/exist.png",
+                "format": "png",
+                "width": 1056,
+                "height": 880,
+                "clickMarker": {
+                    "x": 383.0,
+                    "y": 395.0
+                }
+            }
+        }));
+
+        let text = result["content"][1]["text"].as_str().unwrap();
+        assert!(text.contains("This screenshot is 1056x880 pixels."));
+        assert!(text.contains("All click coordinates must be in this original pixel space."));
+        assert!(text.contains("50px grid/ruler overlay"));
+        assert!(text.contains("(383, 395)"));
     }
 
     #[test]
@@ -574,7 +674,8 @@ mod tests {
             "snapshotId": "snap-1",
             "lastClickResult": {
                 "route": "hid",
-                "outcome": "uncertain"
+                "outcome": "no_effect",
+                "nextDispatchRoute": "hid"
             },
             "screenshot": {
                 "handle": "/does/not/exist.png",
@@ -585,11 +686,16 @@ mod tests {
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("\"lastClickResult\""));
         assert!(text.contains("\"route\":\"hid\""));
-        assert!(text.contains("\"outcome\":\"uncertain\""));
+        assert!(text.contains("\"outcome\":\"no_effect\""));
+        assert!(text.contains("\"nextDispatchRoute\":\"hid\""));
         assert_eq!(result["structuredContent"]["lastClickResult"]["route"], "hid");
         assert_eq!(
             result["structuredContent"]["lastClickResult"]["outcome"],
-            "uncertain"
+            "no_effect"
+        );
+        assert_eq!(
+            result["structuredContent"]["lastClickResult"]["nextDispatchRoute"],
+            "hid"
         );
     }
 

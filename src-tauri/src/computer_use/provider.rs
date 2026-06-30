@@ -197,6 +197,9 @@ pub struct ScreenshotRef {
     /// The display-space rectangle, in screen points, represented by the whole
     /// screenshot image. Screenshot pixels map linearly into this rect.
     pub screen_bounds: Rect,
+    /// Best-effort click replay point in this screenshot's pixel space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_marker: Option<Point>,
 }
 
 impl ScreenshotRef {
@@ -236,6 +239,38 @@ impl ScreenshotRef {
         Ok(Point {
             x: screen_x,
             y: screen_y,
+        })
+    }
+
+    pub fn screen_point_to_screenshot_point(&self, point: Point) -> Result<Point, String> {
+        if self.width == 0 || self.height == 0 {
+            return Err("screenshot has empty dimensions".into());
+        }
+        if self.screen_bounds.width <= 0.0 || self.screen_bounds.height <= 0.0 {
+            return Err("screenshot has empty screen bounds".into());
+        }
+
+        let screenshot_x =
+            ((point.x - self.screen_bounds.x) / self.screen_bounds.width) * self.width as f32;
+        let screenshot_y =
+            ((point.y - self.screen_bounds.y) / self.screen_bounds.height) * self.height as f32;
+        if !screenshot_x.is_finite() || !screenshot_y.is_finite() {
+            return Err("screen point could not be projected into screenshot space".into());
+        }
+        if screenshot_x < 0.0
+            || screenshot_y < 0.0
+            || screenshot_x > self.width as f32
+            || screenshot_y > self.height as f32
+        {
+            return Err(format!(
+                "screen point out of screenshot bounds: ({}, {}) outside {}x{}",
+                screenshot_x, screenshot_y, self.width, self.height
+            ));
+        }
+
+        Ok(Point {
+            x: screenshot_x,
+            y: screenshot_y,
         })
     }
 }
@@ -311,6 +346,8 @@ pub enum ClickExecutionOutcome {
 pub struct ClickExecutionResult {
     pub route: ClickExecutionRoute,
     pub outcome: ClickExecutionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_dispatch_route: Option<ClickDispatchRoute>,
 }
 
 /// Provider-reported non-click action category.
@@ -355,6 +392,8 @@ pub struct ActionExecutionResult {
     pub kind: ActionExecutionKind,
     pub route: ActionExecutionRoute,
     pub outcome: ActionExecutionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_dispatch_route: Option<ClickDispatchRoute>,
 }
 
 /// Scroll direction for [`ComputerUseProvider::scroll`].
@@ -473,6 +512,24 @@ pub use fake::FakeProvider;
 mod fake {
     use super::*;
     use std::sync::Mutex;
+
+    fn fake_click_route(route_hint: ClickDispatchRoute, default: ClickExecutionRoute) -> ClickExecutionRoute {
+        match route_hint {
+            ClickDispatchRoute::Auto => default,
+            ClickDispatchRoute::Ax => ClickExecutionRoute::Ax,
+            ClickDispatchRoute::TargetPid => ClickExecutionRoute::TargetPid,
+            ClickDispatchRoute::Hid => ClickExecutionRoute::Hid,
+        }
+    }
+
+    fn fake_action_route(route_hint: ClickDispatchRoute, default: ActionExecutionRoute) -> ActionExecutionRoute {
+        match route_hint {
+            ClickDispatchRoute::Auto => default,
+            ClickDispatchRoute::Ax => ActionExecutionRoute::Ax,
+            ClickDispatchRoute::TargetPid => ActionExecutionRoute::TargetPid,
+            ClickDispatchRoute::Hid => ActionExecutionRoute::Hid,
+        }
+    }
 
     /// Deterministic in-memory provider for host tests. Records actions so tests
     /// can assert orchestration without touching the OS.
@@ -631,6 +688,7 @@ mod fake {
                         width: 360.0,
                         height: 225.0,
                     },
+                    click_marker: None,
                 },
                 elements: self.elements.clone(),
             })
@@ -650,8 +708,9 @@ mod fake {
                 target.app_id, element
             ));
             Ok(ClickExecutionResult {
-                route: ClickExecutionRoute::Ax,
+                route: fake_click_route(route_hint, ClickExecutionRoute::Ax),
                 outcome: ClickExecutionOutcome::SemanticSuccess,
+                next_dispatch_route: None,
             })
         }
         fn click_point(
@@ -666,8 +725,9 @@ mod fake {
                 point_label(point)
             ));
             Ok(ClickExecutionResult {
-                route: ClickExecutionRoute::Native,
+                route: fake_click_route(route_hint, ClickExecutionRoute::Native),
                 outcome: ClickExecutionOutcome::ObservedEffect,
+                next_dispatch_route: None,
             })
         }
         fn secondary_click(
@@ -691,8 +751,9 @@ mod fake {
             }
             Ok(ActionExecutionResult {
                 kind: ActionExecutionKind::SecondaryClick,
-                route: ActionExecutionRoute::TargetPid,
+                route: fake_action_route(route_hint, ActionExecutionRoute::TargetPid),
                 outcome: ActionExecutionOutcome::Dispatched,
+                next_dispatch_route: None,
             })
         }
         fn secondary_click_element(
@@ -717,8 +778,9 @@ mod fake {
             }
             Ok(ActionExecutionResult {
                 kind: ActionExecutionKind::SecondaryClick,
-                route: ActionExecutionRoute::Ax,
+                route: fake_action_route(route_hint, ActionExecutionRoute::Ax),
                 outcome: ActionExecutionOutcome::SemanticSuccess,
+                next_dispatch_route: None,
             })
         }
         fn double_click(
@@ -742,8 +804,9 @@ mod fake {
             }
             Ok(ActionExecutionResult {
                 kind: ActionExecutionKind::DoubleClick,
-                route: ActionExecutionRoute::TargetPid,
+                route: fake_action_route(route_hint, ActionExecutionRoute::TargetPid),
                 outcome: ActionExecutionOutcome::Dispatched,
+                next_dispatch_route: None,
             })
         }
         fn drag(
@@ -770,8 +833,9 @@ mod fake {
             }
             Ok(ActionExecutionResult {
                 kind: ActionExecutionKind::Drag,
-                route: ActionExecutionRoute::TargetPid,
+                route: fake_action_route(route_hint, ActionExecutionRoute::TargetPid),
                 outcome: ActionExecutionOutcome::Dispatched,
+                next_dispatch_route: None,
             })
         }
         fn set_value(
@@ -788,6 +852,7 @@ mod fake {
                 kind: ActionExecutionKind::SetValue,
                 route: ActionExecutionRoute::Ax,
                 outcome: ActionExecutionOutcome::SemanticSuccess,
+                next_dispatch_route: None,
             })
         }
         fn type_text(&self, target: &AppTarget, text: &str) -> ProviderResult<()> {
@@ -818,8 +883,9 @@ mod fake {
             }
             Ok(ActionExecutionResult {
                 kind: ActionExecutionKind::Scroll,
-                route: ActionExecutionRoute::TargetPid,
+                route: fake_action_route(route_hint, ActionExecutionRoute::TargetPid),
                 outcome: ActionExecutionOutcome::Dispatched,
+                next_dispatch_route: None,
             })
         }
         fn scroll_element(
@@ -846,8 +912,9 @@ mod fake {
             }
             Ok(ActionExecutionResult {
                 kind: ActionExecutionKind::Scroll,
-                route: ActionExecutionRoute::Ax,
+                route: fake_action_route(route_hint, ActionExecutionRoute::Ax),
                 outcome: ActionExecutionOutcome::SemanticSuccess,
+                next_dispatch_route: None,
             })
         }
     }
@@ -873,6 +940,7 @@ mod tests {
                 width: 100.0,
                 height: 50.0,
             },
+            click_marker: None,
         };
 
         assert_eq!(
@@ -905,10 +973,38 @@ mod tests {
                 width: 100.0,
                 height: 50.0,
             },
+            click_marker: None,
         };
 
         assert!(screenshot
             .screenshot_point_to_screen_point(Point { x: 201.0, y: 50.0 })
             .is_err());
+    }
+
+    #[test]
+    fn screen_coordinates_map_back_to_screenshot_points() {
+        let screenshot = ScreenshotRef {
+            handle: "snap".into(),
+            format: "png".into(),
+            byte_len: 1,
+            width: 200,
+            height: 100,
+            default_coordinate_space: CoordinateSpace::Screenshot,
+            capture_kind: None,
+            screen_bounds: Rect {
+                x: 50.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0,
+            },
+            click_marker: None,
+        };
+
+        assert_eq!(
+            screenshot
+                .screen_point_to_screenshot_point(Point { x: 100.0, y: 45.0 })
+                .unwrap(),
+            Point { x: 100.0, y: 50.0 }
+        );
     }
 }
