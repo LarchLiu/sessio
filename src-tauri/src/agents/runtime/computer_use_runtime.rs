@@ -171,6 +171,7 @@ impl ComputerUseRuntime {
         }
         self.host.stop(session_id);
         self.host.approvals().revoke_session(session_id);
+        crate::computer_use::pointer_overlay::release_session(session_id);
     }
 }
 

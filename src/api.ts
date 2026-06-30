@@ -1239,10 +1239,6 @@ export interface ScreenshotOverlayWindow {
   label: string;
 }
 
-export interface ComputerUsePointerOverlayReadyRequest {
-  label: string;
-}
-
 export interface ScreenshotOverlayInitialSelection {
   x: number;
   y: number;
@@ -1257,6 +1253,10 @@ export interface ScreenshotOverlaySource {
   mode?: "interactive" | "selection";
   windows: ScreenshotOverlayWindowCandidate[];
   initialSelection?: ScreenshotOverlayInitialSelection | null;
+}
+
+export interface ComputerUsePointerOverlayReadyRequest {
+  label: string;
 }
 
 export interface ScreenshotOverlayWindowCandidate {

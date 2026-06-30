@@ -51,6 +51,25 @@ Tools: `computer_launch_app`, `computer_raise_app`, `computer_list_apps`,
 Call them directly when available — you'll see the target app's state
 update visually after every action.
 
+Primary click tools (`computer_click`, `computer_click_element`,
+`computer_click_at`) also return `lastClickResult` in the post-action
+`AppState`. Use it as a provider-side hint, not as the sole source of truth:
+
+- `semantic_success` means the provider completed a structured semantic click
+  such as AX/UIA press. Usually trust this unless the returned screenshot
+  clearly contradicts it.
+- `observed_effect` means the provider saw local visual evidence that the click
+  changed the target.
+- `uncertain` means the click was dispatched but the provider only saw remote or
+  ambiguous visual change. Do not immediately repeat the click. Inspect the new
+  screenshot first and let your next step depend on the updated UI.
+- `no_effect` means the provider observed no effect for the requested
+  `dispatchRoute`. Re-read the new screenshot before retrying. If the UI still
+  looks wrong, retry with the next explicit route in order instead of repeating
+  `auto` blindly:
+  - element click: `auto` => `ax` => `target_pid` => `hid`
+  - coordinate click: `auto` => `target_pid` => `hid`
+
 ### Fallback: `sessio cu` CLI via Bash
 
 Use this when scripting or when you need deterministic stdout (CI,
@@ -100,6 +119,18 @@ AND a window screenshot in one round trip — refs for AX-reachable
 elements, plus a visual anchor for pixel coordinates when AX is
 incomplete. If the target isn't running, it will be launched in the
 background automatically.
+
+After a primary click, read the returned post-action `AppState` in this order:
+
+1. Check the new screenshot and visible UI state.
+2. Read `lastClickResult` as a provider-side hint.
+3. Only retry immediately when the screenshot still looks wrong and
+   `lastClickResult.outcome` is `no_effect`.
+4. When retrying a primary click after `no_effect`, prefer an explicit
+   `dispatchRoute` that advances one step beyond the route you just tried.
+
+If `lastClickResult.outcome` is `uncertain`, do not reflexively click again.
+Treat it as "the click dispatched, but success must be judged from the new UI".
 
 Via MCP (image returns inline):
 
@@ -210,6 +241,33 @@ and extended for Chinese apps:
   include a `{ type: 'image' }` block with the post-action screenshot. Bash
   output is text only — use `sessio cu get-app-state` for a visual after an
   action and `Read` the JPG path.
+- **Primary clicks return a provider-side result hint.** Post-click `AppState`
+  now includes `lastClickResult { route, outcome }` for
+  `computer_click` / `computer_click_element` / `computer_click_at`.
+  Treat `semantic_success` and `observed_effect` as strong positive signals.
+  Treat `uncertain` as "stop and inspect" rather than "click again now".
+- **Primary clicks also accept explicit routing hints.**
+  `computer_click_element` supports `dispatchRoute: auto|ax|target_pid|hid`.
+  `computer_click_at` supports `dispatchRoute: auto|target_pid|hid`.
+  Use these only when the previous `lastClickResult` and fresh screenshot justify
+  retrying with a lower-level route.
+- **Other mouse actions use the same route vocabulary.**
+  `computer_perform_secondary_action` / `computer_secondary_click`,
+  `computer_double_click`, `computer_drag`, and `computer_scroll` all accept
+  `dispatchRoute: auto` plus explicit lower-level routes. `auto` means:
+  - element secondary click: `ax` (`AXShowMenu`) => `target_pid` => `hid`
+  - element scroll: `ax` scroll => `target_pid` => `hid`
+  - coordinate secondary click / double click / drag / scroll: `target_pid` => `hid`
+  Use an explicit route only when you intentionally want to force the next
+  lower-level dispatch path after inspecting the latest screenshot.
+- **Non-primary mouse actions now return a provider-side execution summary.**
+  Post-action `AppState` includes `lastActionResult { kind, route, outcome }`
+  for secondary click, double click, drag, scroll, type text, and press key.
+  Use it as a routing/execution hint; still judge end-state success from the
+  returned screenshot first.
+- **Set-value now reports execution summary too.**
+  `computer_set_value` also returns `lastActionResult { kind, route, outcome }`.
+  It remains a semantic AX/UIA write, not a `target_pid` / `hid` fallback path.
 - **Two dispatch paths.** AX for refs, CGEvent for pixels. Both routed
   through `CGEventPostToPid` when a pid is available — events go straight
   into the target app's queue, bypassing global focus steal.
@@ -259,6 +317,6 @@ and extended for Chinese apps:
 | `app_not_found`                            | App isn't running. `get_app_state` auto-launches in the background; for explicit control use `sessio cu launch-app --bundle <bundle>` / `computer_launch_app`. **Never** use `open -b` — it activates the app and steals focus. |
 | `no_visible_window` / `no visible window found for application` | The app is running but hidden/minimized or has no on-screen window. Use `computer_raise_app` / `sessio cu raise --bundle <bundle>`, then re-run `get_app_state`. Do not switch to `open -a` or AppleScript; those can exit 0 without restoring Dock-minimized windows. |
 | `ref_stale` / `element_not_found`          | Re-run `get_app_state`.                                                |
-| `action_unsupported`                       | Element has no AXPress. `strategy: "physical"` routes via CGEvent.     |
+| `action_unsupported`                       | Element has no AXPress. Re-run with `dispatchRoute: "target_pid"` or `dispatchRoute: "hid"` if a physical click is appropriate. |
 | Element snap looks empty on Slack / VS Code / Electron | Re-run `get_app_state` once; `AXEnhancedUserInterface` takes a snap to take effect. |
 | `computer_*` tools not listed              | Restart Sessio to pick up the MCP runtime injection.                   |

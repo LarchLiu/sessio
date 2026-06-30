@@ -13,7 +13,8 @@ use crate::computer_use::lease::SnapshotId;
 use crate::computer_use::onboarding::{self, PermissionKind};
 use crate::computer_use::permissions::PermissionDenied;
 use crate::computer_use::provider::{
-    AppListOptions, AppTarget, CoordinateSpace, Point, ProviderError, ScrollDirection,
+    AppListOptions, AppTarget, ClickDispatchRoute, CoordinateSpace, Point, ProviderError,
+    ScrollDirection,
 };
 use crate::desktop_control::DesktopControlPermissionStatus;
 
@@ -141,12 +142,13 @@ fn run_tool(
         }
         "computer_click" => {
             let snapshot = parse_snapshot(args)?;
+            let route_hint = parse_click_dispatch_route(args)?;
             let state = if let Some(element) = optional_element_ref(args) {
-                host.click_element(session_id, &snapshot, &element, perm)
+                host.click_element(session_id, &snapshot, &element, route_hint, perm)
             } else {
                 let point = parse_point(args, "x", "y")?;
                 let coord_space = parse_coordinate_space(args)?;
-                host.click_at(session_id, &snapshot, point, coord_space, perm)
+                host.click_at(session_id, &snapshot, point, coord_space, route_hint, perm)
             }
             .map_err(host_error_message)?;
             Ok(tool_app_state_result(
@@ -156,8 +158,9 @@ fn run_tool(
         "computer_click_element" => {
             let snapshot = parse_snapshot(args)?;
             let element = arg_element_ref(args)?;
+            let route_hint = parse_click_dispatch_route(args)?;
             let state = host
-                .click_element(session_id, &snapshot, &element, perm)
+                .click_element(session_id, &snapshot, &element, route_hint, perm)
                 .map_err(host_error_message)?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
@@ -167,8 +170,9 @@ fn run_tool(
             let snapshot = parse_snapshot(args)?;
             let point = parse_point(args, "x", "y")?;
             let coord_space = parse_coordinate_space(args)?;
+            let route_hint = parse_click_dispatch_route(args)?;
             let state = host
-                .click_at(session_id, &snapshot, point, coord_space, perm)
+                .click_at(session_id, &snapshot, point, coord_space, route_hint, perm)
                 .map_err(host_error_message)?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
@@ -176,12 +180,13 @@ fn run_tool(
         }
         "computer_secondary_click" | "computer_perform_secondary_action" => {
             let snapshot = parse_snapshot(args)?;
+            let route_hint = parse_click_dispatch_route(args)?;
             let state = if let Some(element) = optional_element_ref(args) {
-                host.secondary_click_element(session_id, &snapshot, &element, perm)
+                host.secondary_click_element(session_id, &snapshot, &element, route_hint, perm)
             } else {
                 let point = parse_point(args, "x", "y")?;
                 let coord_space = parse_coordinate_space(args)?;
-                host.secondary_click(session_id, &snapshot, point, coord_space, perm)
+                host.secondary_click(session_id, &snapshot, point, coord_space, route_hint, perm)
             }
             .map_err(host_error_message)?;
             Ok(tool_app_state_result(
@@ -192,8 +197,9 @@ fn run_tool(
             let snapshot = parse_snapshot(args)?;
             let point = parse_point(args, "x", "y")?;
             let coord_space = parse_coordinate_space(args)?;
+            let route_hint = parse_click_dispatch_route(args)?;
             let state = host
-                .double_click(session_id, &snapshot, point, coord_space, perm)
+                .double_click(session_id, &snapshot, point, coord_space, route_hint, perm)
                 .map_err(host_error_message)?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
@@ -204,8 +210,9 @@ fn run_tool(
             let from = parse_point(args, "fromX", "fromY")?;
             let to = parse_point(args, "toX", "toY")?;
             let coord_space = parse_coordinate_space(args)?;
+            let route_hint = parse_click_dispatch_route(args)?;
             let state = host
-                .drag(session_id, &snapshot, from, to, coord_space, perm)
+                .drag(session_id, &snapshot, from, to, coord_space, route_hint, perm)
                 .map_err(host_error_message)?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
@@ -246,10 +253,19 @@ fn run_tool(
             let snapshot = parse_snapshot(args)?;
             let direction = parse_direction(args)?;
             let amount = args.get("amount").and_then(|a| a.as_i64()).unwrap_or(0) as i32;
+            let route_hint = parse_click_dispatch_route(args)?;
             let state = if let Some(element) = optional_element_ref(args) {
-                host.scroll_element(session_id, &snapshot, &element, direction, amount, perm)
+                host.scroll_element(
+                    session_id,
+                    &snapshot,
+                    &element,
+                    direction,
+                    amount,
+                    route_hint,
+                    perm,
+                )
             } else {
-                host.scroll(session_id, &snapshot, direction, amount, perm)
+                host.scroll(session_id, &snapshot, direction, amount, route_hint, perm)
             }
             .map_err(host_error_message)?;
             Ok(tool_app_state_result(
@@ -341,6 +357,21 @@ fn parse_coordinate_space(args: &Value) -> Result<CoordinateSpace, String> {
         "screenshot" => Ok(CoordinateSpace::Screenshot),
         "screen" => Ok(CoordinateSpace::Screen),
         other => Err(format!("invalid coordSpace: {other}")),
+    }
+}
+
+fn parse_click_dispatch_route(args: &Value) -> Result<ClickDispatchRoute, String> {
+    match args
+        .get("dispatchRoute")
+        .or_else(|| args.get("dispatch_route"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto")
+    {
+        "auto" => Ok(ClickDispatchRoute::Auto),
+        "ax" => Ok(ClickDispatchRoute::Ax),
+        "target_pid" => Ok(ClickDispatchRoute::TargetPid),
+        "hid" => Ok(ClickDispatchRoute::Hid),
+        other => Err(format!("invalid dispatchRoute: {other}")),
     }
 }
 
@@ -671,7 +702,7 @@ mod tests {
                 );
                 assert_eq!(
                     provider.actions(),
-                    vec!["click:com.example.app:el-1".to_string()]
+                    vec!["click:com.example.app:el-1:Auto".to_string()]
                 );
             }
             _ => panic!("expected result"),
@@ -720,7 +751,7 @@ mod tests {
                 );
                 assert_eq!(
                     provider.actions(),
-                    vec!["click:com.example.app:el-1".to_string()]
+                    vec!["click:com.example.app:el-1:Auto".to_string()]
                 );
             }
             _ => panic!("expected result"),
@@ -814,7 +845,7 @@ mod tests {
                 );
                 assert_eq!(
                     provider.actions(),
-                    vec!["click_at:com.example.app:190.0,132.5".to_string()]
+                    vec!["click_at:com.example.app:190.0,132.5:Auto".to_string()]
                 );
                 assert!(result["structuredContent"]["snapshotId"].is_string());
             }
@@ -858,11 +889,318 @@ mod tests {
                 );
                 assert_eq!(
                     provider.actions(),
-                    vec!["click_at:com.example.app:360.0,225.0".to_string()]
+                    vec!["click_at:com.example.app:360.0,225.0:Auto".to_string()]
                 );
             }
             _ => panic!("expected result"),
         }
+    }
+
+    #[test]
+    fn click_element_accepts_explicit_dispatch_route() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        let p = perm();
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&"com.example.app".to_string());
+        h.start(
+            "s1",
+            AppTarget {
+                app_id: "com.example.app".into(),
+                window_id: None,
+            },
+            &p,
+        )
+        .unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let click = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({
+                    "name": "computer_click_element",
+                    "arguments": {
+                        "snapshotId": state.snapshot_id,
+                        "elementId": "el-1",
+                        "dispatchRoute": "hid"
+                    }
+                }),
+            ),
+        );
+
+        match click {
+            McpResponse::Result { result, .. } => {
+                assert!(result.get("isError").is_none(), "click should succeed: {result}");
+                assert_eq!(
+                    provider.actions(),
+                    vec!["click:com.example.app:el-1:Hid".to_string()]
+                );
+            }
+            _ => panic!("expected result"),
+        }
+    }
+
+    #[test]
+    fn click_at_rejects_ax_dispatch_route() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
+        let p = perm();
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&"com.example.app".to_string());
+        h.start(
+            "s1",
+            AppTarget {
+                app_id: "com.example.app".into(),
+                window_id: None,
+            },
+            &p,
+        )
+        .unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let click = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({
+                    "name": "computer_click_at",
+                    "arguments": {
+                        "snapshotId": state.snapshot_id,
+                        "x": 360,
+                        "y": 225,
+                        "dispatchRoute": "ax"
+                    }
+                }),
+            ),
+        );
+
+        match click {
+            McpResponse::Result { result, .. } => {
+                assert_eq!(result["isError"], true);
+                let text = result["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(text.contains("dispatchRoute=ax is only valid"));
+            }
+            _ => panic!("expected result"),
+        }
+    }
+
+    #[test]
+    fn perform_secondary_action_accepts_explicit_dispatch_route() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        let p = perm();
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&"com.example.app".to_string());
+        h.start(
+            "s1",
+            AppTarget {
+                app_id: "com.example.app".into(),
+                window_id: None,
+            },
+            &p,
+        )
+        .unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let click = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({
+                    "name": "computer_perform_secondary_action",
+                    "arguments": {
+                        "snapshotId": state.snapshot_id,
+                        "elementId": "el-1",
+                        "dispatchRoute": "hid"
+                    }
+                }),
+            ),
+        );
+
+        match click {
+            McpResponse::Result { result, .. } => {
+                assert!(
+                    result.get("isError").is_none(),
+                    "secondary action should succeed: {result}"
+                );
+                assert_eq!(
+                    provider.actions(),
+                    vec!["secondary_click_element:com.example.app:el-1:Hid".to_string()]
+                );
+            }
+            _ => panic!("expected result"),
+        }
+    }
+
+    #[test]
+    fn perform_secondary_action_returns_last_action_result() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
+        let p = perm();
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&"com.example.app".to_string());
+        h.start(
+            "s1",
+            AppTarget {
+                app_id: "com.example.app".into(),
+                window_id: None,
+            },
+            &p,
+        )
+        .unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let click = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({
+                    "name": "computer_perform_secondary_action",
+                    "arguments": {
+                        "snapshotId": state.snapshot_id,
+                        "elementId": "el-1"
+                    }
+                }),
+            ),
+        );
+
+        match click {
+            McpResponse::Result { result, .. } => {
+                assert!(
+                    result.get("isError").is_none(),
+                    "secondary action should succeed: {result}"
+                );
+                assert_eq!(
+                    result["structuredContent"]["lastActionResult"]["kind"],
+                    "secondary_click"
+                );
+                assert_eq!(
+                    result["structuredContent"]["lastActionResult"]["route"],
+                    "ax"
+                );
+                assert_eq!(
+                    result["structuredContent"]["lastActionResult"]["outcome"],
+                    "semantic_success"
+                );
+            }
+            _ => panic!("expected result"),
+        }
+    }
+
+    #[test]
+    fn coordinate_mouse_tools_accept_explicit_dispatch_route() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        let p = perm();
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&"com.example.app".to_string());
+        h.start(
+            "s1",
+            AppTarget {
+                app_id: "com.example.app".into(),
+                window_id: None,
+            },
+            &p,
+        )
+        .unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let double_click = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({
+                    "name": "computer_double_click",
+                    "arguments": {
+                        "snapshotId": state.snapshot_id,
+                        "x": 360,
+                        "y": 225,
+                        "dispatchRoute": "hid"
+                    }
+                }),
+            ),
+        );
+        match double_click {
+            McpResponse::Result { result, .. } => {
+                assert!(
+                    result.get("isError").is_none(),
+                    "double click should succeed: {result}"
+                );
+            }
+            _ => panic!("expected result"),
+        }
+
+        let post_double = h.get_app_state("s1", &p).unwrap();
+        let drag = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({
+                    "name": "computer_drag",
+                    "arguments": {
+                        "snapshotId": post_double.snapshot_id,
+                        "fromX": 0,
+                        "fromY": 0,
+                        "toX": 720,
+                        "toY": 450,
+                        "dispatchRoute": "target_pid"
+                    }
+                }),
+            ),
+        );
+        match drag {
+            McpResponse::Result { result, .. } => {
+                assert!(result.get("isError").is_none(), "drag should succeed: {result}");
+            }
+            _ => panic!("expected result"),
+        }
+
+        let post_drag = h.get_app_state("s1", &p).unwrap();
+        let scroll = dispatch(
+            &h,
+            "s1",
+            &p,
+            &call(
+                "tools/call",
+                json!({
+                    "name": "computer_scroll",
+                    "arguments": {
+                        "snapshotId": post_drag.snapshot_id,
+                        "direction": "down",
+                        "amount": 300,
+                        "dispatchRoute": "hid"
+                    }
+                }),
+            ),
+        );
+        match scroll {
+            McpResponse::Result { result, .. } => {
+                assert!(result.get("isError").is_none(), "scroll should succeed: {result}");
+            }
+            _ => panic!("expected result"),
+        }
+
+        assert_eq!(
+            provider.actions(),
+            vec![
+                "double_click:com.example.app:190.0,132.5:Hid".to_string(),
+                "drag:com.example.app:10.0,20.0->370.0,245.0:TargetPid".to_string(),
+                "scroll:com.example.app:Down:300:Hid".to_string(),
+            ]
+        );
     }
 
     #[test]

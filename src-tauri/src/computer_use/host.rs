@@ -12,6 +12,7 @@
 //! privileged work (Phase 3); the host owns the policy.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -25,9 +26,10 @@ use super::lease::{LeaseError, LeaseRegistry, SnapshotError, SnapshotId};
 use super::permissions::{self, PermissionDenied, RequiredCapability};
 use super::pointer_overlay::{ComputerUsePointerAction, ComputerUsePointerEvent, PointerEventSink};
 use super::provider::{
+    ActionExecutionKind, ActionExecutionOutcome, ActionExecutionResult, ActionExecutionRoute,
     AllowedAction, AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppState, AppTarget,
-    ComputerUseProvider, CoordinateSpace, InstalledApp, Point, ProviderError, RawAppState,
-    ScreenshotRef, ScrollDirection, UiElement,
+    ClickDispatchRoute, ClickExecutionResult, ComputerUseProvider, CoordinateSpace,
+    InstalledApp, Point, ProviderError, RawAppState, ScreenshotRef, ScrollDirection, UiElement,
 };
 use super::settings::ComputerUseSettings;
 
@@ -52,33 +54,24 @@ pub enum ComputerUseError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PostActionCaptureTiming {
-    initial_delay_ms: u64,
-    poll_interval_ms: u64,
-    total_window_ms: u64,
+    delay_ms: u64,
 }
 
 impl PostActionCaptureTiming {
     #[cfg(not(test))]
-    const DEFAULT: Self = Self {
-        initial_delay_ms: 500,
-        poll_interval_ms: 500,
-        total_window_ms: 2000,
-    };
+    const DEFAULT: Self = Self { delay_ms: 500 };
 
     #[cfg(test)]
-    const DEFAULT: Self = Self {
-        initial_delay_ms: 0,
-        poll_interval_ms: 0,
-        total_window_ms: 0,
-    };
+    const DEFAULT: Self = Self { delay_ms: 0 };
+}
 
-    fn attempt_count(self) -> usize {
-        if self.total_window_ms <= self.initial_delay_ms || self.poll_interval_ms == 0 {
-            1
-        } else {
-            1 + ((self.total_window_ms - self.initial_delay_ms) / self.poll_interval_ms) as usize
-        }
-    }
+#[derive(Clone, Copy)]
+struct ProviderCallContext<'a> {
+    session_id: &'a str,
+    snapshot: Option<&'a SnapshotId>,
+    target: &'a AppTarget,
+    host_action: &'static str,
+    click_id: Option<&'a str>,
 }
 
 /// The host. Cheap to clone (`Arc` internals) so it can be shared across the
@@ -89,6 +82,8 @@ pub struct ComputerUseHost {
     leases: Arc<LeaseRegistry>,
     approvals: Arc<ApprovalRegistry>,
     settings: Arc<RwLock<ComputerUseSettings>>,
+    click_id_counter: Arc<AtomicU64>,
+    provider_call_id_counter: Arc<AtomicU64>,
     /// Sessions whose most recent computer-use action was blocked on app
     /// approval before a lease could be established. This lets the chat overlay
     /// still tell the user which app needs approval.
@@ -102,12 +97,50 @@ pub struct ComputerUseHost {
 }
 
 impl ComputerUseHost {
+    fn validate_click_route_for_element(
+        route_hint: ClickDispatchRoute,
+    ) -> Result<(), ComputerUseError> {
+        match route_hint {
+            ClickDispatchRoute::Auto
+            | ClickDispatchRoute::Ax
+            | ClickDispatchRoute::TargetPid
+            | ClickDispatchRoute::Hid => Ok(()),
+        }
+    }
+
+    fn validate_click_route_for_point(
+        route_hint: ClickDispatchRoute,
+    ) -> Result<(), ComputerUseError> {
+        match route_hint {
+            ClickDispatchRoute::Auto
+            | ClickDispatchRoute::TargetPid
+            | ClickDispatchRoute::Hid => Ok(()),
+            ClickDispatchRoute::Ax => Err(ComputerUseError::Coordinate(
+                "dispatchRoute=ax is only valid for element-targeted actions".into(),
+            )),
+        }
+    }
+
+    fn validate_mouse_route_for_element(
+        route_hint: ClickDispatchRoute,
+    ) -> Result<(), ComputerUseError> {
+        Self::validate_click_route_for_element(route_hint)
+    }
+
+    fn validate_mouse_route_for_point(
+        route_hint: ClickDispatchRoute,
+    ) -> Result<(), ComputerUseError> {
+        Self::validate_click_route_for_point(route_hint)
+    }
+
     pub fn new(provider: Arc<dyn ComputerUseProvider>, settings: ComputerUseSettings) -> Self {
         Self {
             provider,
             leases: Arc::new(LeaseRegistry::new()),
             approvals: Arc::new(ApprovalRegistry::new()),
             settings: Arc::new(RwLock::new(settings)),
+            click_id_counter: Arc::new(AtomicU64::new(1)),
+            provider_call_id_counter: Arc::new(AtomicU64::new(1)),
             pending_app_approvals: Arc::new(Mutex::new(HashMap::new())),
             foreground: Arc::new(Mutex::new(HashSet::new())),
             pointer_events: None,
@@ -260,7 +293,25 @@ impl ComputerUseHost {
         self.require_session_approval(session_id)?;
         self.require_approval(session_id, &target.app_id)?;
         let needs_lease = self.require_compatible_lease(session_id, &target)?;
-        let result = self.provider.launch_app(&target)?;
+        let result = self.invoke_provider(
+            ProviderCallContext {
+                session_id,
+                snapshot: None,
+                target: &target,
+                host_action: "launch_app",
+                click_id: None,
+            },
+            json!({
+                "needsLease": needs_lease,
+            }),
+            |result: &AppLaunchResult| {
+                json!({
+                    "launched": result.launched,
+                    "running": result.running,
+                })
+            },
+            |provider| provider.launch_app(&target),
+        )?;
         if needs_lease {
             self.leases.open(session_id, target)?;
         }
@@ -280,7 +331,27 @@ impl ComputerUseHost {
         self.require_session_approval(session_id)?;
         self.require_approval(session_id, &target.app_id)?;
         let needs_lease = self.require_compatible_lease(session_id, &target)?;
-        let result = self.provider.raise_app(&target)?;
+        let result = self.invoke_provider(
+            ProviderCallContext {
+                session_id,
+                snapshot: None,
+                target: &target,
+                host_action: "raise_app",
+                click_id: None,
+            },
+            json!({
+                "needsLease": needs_lease,
+            }),
+            |result: &AppRaiseResult| {
+                json!({
+                    "launched": result.launched,
+                    "running": result.running,
+                    "activated": result.activated,
+                    "visible": result.visible,
+                })
+            },
+            |provider| provider.raise_app(&target),
+        )?;
         if needs_lease {
             self.leases.open(session_id, target)?;
         }
@@ -341,7 +412,7 @@ impl ComputerUseHost {
         let snapshot =
             self.next_snapshot(session_id, raw.screenshot.clone(), raw.elements.clone())?;
 
-        Ok(self.app_state_from_raw(snapshot, raw, perm, launched))
+        Ok(self.app_state_from_raw(snapshot, raw, perm, launched, None, None))
     }
 
     fn next_snapshot(
@@ -355,88 +426,70 @@ impl ComputerUseHost {
         })?)
     }
 
-    fn capture_post_action_state(
-        &self,
-        session_id: &str,
-        target: &AppTarget,
-        perm: &DesktopControlPermissionStatus,
-    ) -> Result<AppState, ComputerUseError> {
-        self.capture_post_action_state_with_timing(
-            session_id,
-            target,
-            perm,
-            PostActionCaptureTiming::DEFAULT,
-        )
-    }
-
     fn capture_post_action_state_with_timing(
         &self,
         session_id: &str,
         target: &AppTarget,
         perm: &DesktopControlPermissionStatus,
         timing: PostActionCaptureTiming,
+        click_id: Option<&str>,
+        last_click_result: Option<ClickExecutionResult>,
+        last_action_result: Option<ActionExecutionResult>,
     ) -> Result<AppState, ComputerUseError> {
         let started = Instant::now();
-        let attempts_total = timing.attempt_count();
         super::diagnostics::write(
             "post_action_capture_start",
             json!({
                 "sessionId": session_id,
                 "target": target,
-                "initialDelayMs": timing.initial_delay_ms,
-                "pollIntervalMs": timing.poll_interval_ms,
-                "totalWindowMs": timing.total_window_ms,
-                "attemptsTotal": attempts_total,
+                "delayMs": timing.delay_ms,
+                "clickId": click_id,
+                "lastClickResult": last_click_result,
+                "lastActionResult": last_action_result,
             }),
         );
 
-        if timing.initial_delay_ms > 0 {
-            thread::sleep(Duration::from_millis(timing.initial_delay_ms));
+        if timing.delay_ms > 0 {
+            thread::sleep(Duration::from_millis(timing.delay_ms));
         }
 
-        let mut last_raw = None;
-        for attempt_index in 0..attempts_total {
-            if attempt_index > 0 && timing.poll_interval_ms > 0 {
-                thread::sleep(Duration::from_millis(timing.poll_interval_ms));
+        let mut raw = match self.provider.capture_app_state(target) {
+            Ok(raw) => raw,
+            Err(error) => {
+                super::diagnostics::write(
+                    "post_action_capture_failed",
+                    json!({
+                        "sessionId": session_id,
+                        "target": target,
+                        "elapsedMs": started.elapsed().as_millis() as u64,
+                        "clickId": click_id,
+                        "lastClickResult": last_click_result,
+                        "lastActionResult": last_action_result,
+                        "error": error.to_string(),
+                    }),
+                );
+                return Err(error.into());
             }
+        };
 
-            let raw = match self.provider.capture_app_state(target) {
-                Ok(raw) => raw,
-                Err(error) => {
-                    super::diagnostics::write(
-                        "post_action_capture_failed",
-                        json!({
-                            "sessionId": session_id,
-                            "target": target,
-                            "attempt": attempt_index + 1,
-                            "attemptsTotal": attempts_total,
-                            "elapsedMs": started.elapsed().as_millis() as u64,
-                            "error": error.to_string(),
-                        }),
-                    );
-                    return Err(error.into());
-                }
-            };
+        super::diagnostics::write(
+            "post_action_capture_attempt",
+            json!({
+                "sessionId": session_id,
+                "target": target,
+                "attempt": 1,
+                "attemptsTotal": 1,
+                "elapsedMs": started.elapsed().as_millis() as u64,
+                "clickId": click_id,
+                "lastClickResult": last_click_result,
+                "lastActionResult": last_action_result,
+                "screenshotHandle": raw.screenshot.handle.as_str(),
+                "screenshotWidth": raw.screenshot.width,
+                "screenshotHeight": raw.screenshot.height,
+                "screenshotByteLen": raw.screenshot.byte_len,
+            }),
+        );
 
-            super::diagnostics::write(
-                "post_action_capture_attempt",
-                json!({
-                    "sessionId": session_id,
-                    "target": target,
-                    "attempt": attempt_index + 1,
-                    "attemptsTotal": attempts_total,
-                    "elapsedMs": started.elapsed().as_millis() as u64,
-                    "screenshotHandle": raw.screenshot.handle.as_str(),
-                    "screenshotWidth": raw.screenshot.width,
-                    "screenshotHeight": raw.screenshot.height,
-                    "screenshotByteLen": raw.screenshot.byte_len,
-                }),
-            );
-
-            last_raw = Some(raw);
-        }
-
-        let mut raw = last_raw.expect("post-action capture should run at least once");
         self.filter_elements_for_permissions(&mut raw, perm);
         let snapshot =
             self.next_snapshot(session_id, raw.screenshot.clone(), raw.elements.clone())?;
@@ -445,8 +498,11 @@ impl ComputerUseHost {
             json!({
                 "sessionId": session_id,
                 "target": target,
-                "attemptsTotal": attempts_total,
+                "attemptsTotal": 1,
                 "elapsedMs": started.elapsed().as_millis() as u64,
+                "clickId": click_id,
+                "lastClickResult": last_click_result,
+                "lastActionResult": last_action_result,
                 "snapshotId": snapshot.0.as_str(),
                 "screenshotHandle": raw.screenshot.handle.as_str(),
                 "screenshotWidth": raw.screenshot.width,
@@ -454,7 +510,14 @@ impl ComputerUseHost {
                 "screenshotByteLen": raw.screenshot.byte_len,
             }),
         );
-        Ok(self.app_state_from_raw(snapshot, raw, perm, false))
+        Ok(self.app_state_from_raw(
+            snapshot,
+            raw,
+            perm,
+            false,
+            last_click_result,
+            last_action_result,
+        ))
     }
 
     fn filter_elements_for_permissions(
@@ -475,6 +538,8 @@ impl ComputerUseHost {
         raw: RawAppState,
         perm: &DesktopControlPermissionStatus,
         launched: bool,
+        last_click_result: Option<ClickExecutionResult>,
+        last_action_result: Option<ActionExecutionResult>,
     ) -> AppState {
         let can_inspect = perm.can_inspect;
         let allowed_actions = self.allowed_actions(perm, can_inspect);
@@ -486,6 +551,8 @@ impl ComputerUseHost {
             display: raw.display,
             screenshot: raw.screenshot,
             elements: raw.elements,
+            last_click_result,
+            last_action_result,
             allowed_actions,
         }
     }
@@ -582,6 +649,8 @@ impl ComputerUseHost {
         session_id: &str,
         snapshot: &SnapshotId,
         target: &AppTarget,
+        click_id: Option<&str>,
+        dispatch_route: Option<ClickDispatchRoute>,
         point: Point,
         coordinate_space: CoordinateSpace,
         screen_point: Point,
@@ -593,6 +662,8 @@ impl ComputerUseHost {
                 "sessionId": session_id,
                 "snapshotId": snapshot.0.as_str(),
                 "target": target,
+                "clickId": click_id,
+                "requestedDispatchRoute": dispatch_route,
                 "inputPoint": point,
                 "coordinateSpace": coordinate_space,
                 "resolvedScreenPoint": screen_point,
@@ -601,10 +672,158 @@ impl ComputerUseHost {
         );
     }
 
+    fn write_primary_click_result_record(
+        event: &str,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        target: &AppTarget,
+        click_id: &str,
+        click_result: ClickExecutionResult,
+    ) {
+        super::diagnostics::write(
+            event,
+            json!({
+                "sessionId": session_id,
+                "snapshotId": snapshot.0.as_str(),
+                "target": target,
+                "clickId": click_id,
+                "route": click_result.route,
+                "outcome": click_result.outcome,
+            }),
+        );
+    }
+
+    fn write_element_click_dispatch_record(
+        session_id: &str,
+        snapshot: &SnapshotId,
+        target: &AppTarget,
+        click_id: &str,
+        dispatch_route: ClickDispatchRoute,
+        element: Option<&UiElement>,
+        resolved_screen_point: Option<Point>,
+    ) {
+        super::diagnostics::write(
+            "click_element_dispatch",
+            json!({
+                "sessionId": session_id,
+                "snapshotId": snapshot.0.as_str(),
+                "target": target,
+                "clickId": click_id,
+                "requestedDispatchRoute": dispatch_route,
+                "elementId": element.map(|entry| entry.id.as_str()),
+                "elementRole": element.map(|entry| entry.role.as_str()),
+                "elementLabel": element.and_then(|entry| entry.label.as_deref()),
+                "elementActionable": element.map(|entry| entry.actionable),
+                "elementBounds": element.and_then(|entry| entry.bounds),
+                "elementBoundsCoordinateSpace": element.and_then(|entry| entry.bounds_coordinate_space),
+                "resolvedScreenPoint": resolved_screen_point,
+            }),
+        );
+    }
+
+    fn next_click_id(&self) -> String {
+        let id = self.click_id_counter.fetch_add(1, Ordering::Relaxed);
+        format!("click-{id}")
+    }
+
+    fn next_provider_call_id(&self) -> String {
+        let id = self.provider_call_id_counter.fetch_add(1, Ordering::Relaxed);
+        format!("call-{id}")
+    }
+
+    fn write_provider_call_start_record(
+        call_id: &str,
+        context: ProviderCallContext<'_>,
+        payload: serde_json::Value,
+    ) {
+        super::diagnostics::write(
+            "provider_call_start",
+            json!({
+                "sessionId": context.session_id,
+                "snapshotId": context.snapshot.map(|snapshot| snapshot.0.as_str()),
+                "target": context.target,
+                "hostAction": context.host_action,
+                "callId": call_id,
+                "clickId": context.click_id,
+                "payload": payload,
+            }),
+        );
+    }
+
+    fn write_provider_call_complete_record(
+        call_id: &str,
+        context: ProviderCallContext<'_>,
+        started: Instant,
+        payload: serde_json::Value,
+    ) {
+        super::diagnostics::write(
+            "provider_call_complete",
+            json!({
+                "sessionId": context.session_id,
+                "snapshotId": context.snapshot.map(|snapshot| snapshot.0.as_str()),
+                "target": context.target,
+                "hostAction": context.host_action,
+                "callId": call_id,
+                "clickId": context.click_id,
+                "elapsedMs": started.elapsed().as_millis() as u64,
+                "payload": payload,
+            }),
+        );
+    }
+
+    fn write_provider_call_failed_record(
+        call_id: &str,
+        context: ProviderCallContext<'_>,
+        started: Instant,
+        error: &ProviderError,
+    ) {
+        super::diagnostics::write(
+            "provider_call_failed",
+            json!({
+                "sessionId": context.session_id,
+                "snapshotId": context.snapshot.map(|snapshot| snapshot.0.as_str()),
+                "target": context.target,
+                "hostAction": context.host_action,
+                "callId": call_id,
+                "clickId": context.click_id,
+                "elapsedMs": started.elapsed().as_millis() as u64,
+                "error": error.to_string(),
+            }),
+        );
+    }
+
+    fn invoke_provider<T>(
+        &self,
+        context: ProviderCallContext<'_>,
+        payload: serde_json::Value,
+        complete_payload: impl Fn(&T) -> serde_json::Value,
+        f: impl FnOnce(&dyn ComputerUseProvider) -> Result<T, ProviderError>,
+    ) -> Result<T, ComputerUseError> {
+        let call_id = self.next_provider_call_id();
+        let started = Instant::now();
+        Self::write_provider_call_start_record(&call_id, context, payload);
+        match f(self.provider.as_ref()) {
+            Ok(value) => {
+                Self::write_provider_call_complete_record(
+                    &call_id,
+                    context,
+                    started,
+                    complete_payload(&value),
+                );
+                Ok(value)
+            }
+            Err(error) => {
+                Self::write_provider_call_failed_record(&call_id, context, started, &error);
+                Err(error.into())
+            }
+        }
+    }
+
     fn write_drag_action_record(
         session_id: &str,
         snapshot: &SnapshotId,
         target: &AppTarget,
+        dispatch_route: ClickDispatchRoute,
         from: Point,
         to: Point,
         coordinate_space: CoordinateSpace,
@@ -618,6 +837,7 @@ impl ComputerUseHost {
                 "sessionId": session_id,
                 "snapshotId": snapshot.0.as_str(),
                 "target": target,
+                "requestedDispatchRoute": dispatch_route,
                 "from": from,
                 "to": to,
                 "coordinateSpace": coordinate_space,
@@ -740,6 +960,17 @@ impl ComputerUseHost {
         Ok(())
     }
 
+    fn snapshot_element(
+        &self,
+        session_id: &str,
+        snapshot: &SnapshotId,
+        element_id: &str,
+    ) -> Result<Option<UiElement>, ComputerUseError> {
+        Ok(self.leases.with_lease(session_id, |lease| {
+            lease.element_for_snapshot(snapshot, element_id)
+        })??)
+    }
+
     fn require_control(
         &self,
         session_id: &str,
@@ -776,10 +1007,14 @@ impl ComputerUseHost {
         session_id: &str,
         snapshot: &SnapshotId,
         element_id: &str,
+        route_hint: ClickDispatchRoute,
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
+        Self::validate_click_route_for_element(route_hint)?;
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
+        let element = self.snapshot_element(session_id, snapshot, element_id)?;
+        let resolved_screen_point = self.element_center_for_snapshot(session_id, snapshot, element_id)?;
         self.emit_element_pointer_event(
             session_id,
             snapshot,
@@ -787,9 +1022,54 @@ impl ComputerUseHost {
             ComputerUsePointerAction::Click,
             "click element",
         )?;
-        self.provider
-            .click_element(&target, &element_id.to_string())?;
-        self.capture_post_action_state(session_id, &target, perm)
+        let click_id = self.next_click_id();
+        Self::write_element_click_dispatch_record(
+            session_id,
+            snapshot,
+            &target,
+            &click_id,
+            route_hint,
+            element.as_ref(),
+            resolved_screen_point,
+        );
+        let click_result = self.invoke_provider(
+            ProviderCallContext {
+                session_id,
+                snapshot: Some(snapshot),
+                target: &target,
+                host_action: "click_element",
+                click_id: Some(&click_id),
+            },
+            json!({
+                "elementId": element_id,
+                "resolvedScreenPoint": resolved_screen_point,
+                "dispatchRoute": route_hint,
+            }),
+            |result: &ClickExecutionResult| {
+                json!({
+                    "route": result.route,
+                    "outcome": result.outcome,
+                })
+            },
+            |provider| provider.click_element(&target, &element_id.to_string(), route_hint),
+        )?;
+        Self::write_primary_click_result_record(
+            "primary_click_result",
+            session_id,
+            snapshot,
+            &target,
+            &click_id,
+            click_result,
+        );
+        self.capture_post_action_state_with_timing(
+            session_id,
+            &target,
+            perm,
+            PostActionCaptureTiming::DEFAULT,
+            Some(&click_id),
+            Some(click_result),
+            None,
+        )
     }
 
     /// `computer_click_at` — click a point in the latest snapshot's screenshot
@@ -800,8 +1080,10 @@ impl ComputerUseHost {
         snapshot: &SnapshotId,
         point: Point,
         coordinate_space: CoordinateSpace,
+        route_hint: ClickDispatchRoute,
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
+        Self::validate_click_route_for_point(route_hint)?;
         let (target, screen_point) = self.resolve_coordinate_action_point(
             session_id,
             snapshot,
@@ -810,11 +1092,14 @@ impl ComputerUseHost {
             perm,
         )?;
         let screenshot = self.snapshot_screenshot(session_id, snapshot).ok();
+        let click_id = self.next_click_id();
         Self::write_point_action_record(
             "click_at_dispatch",
             session_id,
             snapshot,
             &target,
+            Some(&click_id),
+            Some(route_hint),
             point,
             coordinate_space,
             screen_point,
@@ -825,8 +1110,44 @@ impl ComputerUseHost {
             ComputerUsePointerAction::Click,
             screen_point,
         ));
-        self.provider.click_point(&target, screen_point)?;
-        self.capture_post_action_state(session_id, &target, perm)
+        let click_result = self.invoke_provider(
+            ProviderCallContext {
+                session_id,
+                snapshot: Some(snapshot),
+                target: &target,
+                host_action: "click_at",
+                click_id: Some(&click_id),
+            },
+            json!({
+                "screenPoint": screen_point,
+                "coordinateSpace": coordinate_space,
+                "dispatchRoute": route_hint,
+            }),
+            |result: &ClickExecutionResult| {
+                json!({
+                    "route": result.route,
+                    "outcome": result.outcome,
+                })
+            },
+            |provider| provider.click_point(&target, screen_point, route_hint),
+        )?;
+        Self::write_primary_click_result_record(
+            "primary_click_result",
+            session_id,
+            snapshot,
+            &target,
+            &click_id,
+            click_result,
+        );
+        self.capture_post_action_state_with_timing(
+            session_id,
+            &target,
+            perm,
+            PostActionCaptureTiming::DEFAULT,
+            Some(&click_id),
+            Some(click_result),
+            None,
+        )
     }
 
     /// `computer_secondary_click` — right/secondary click a point in the latest
@@ -837,8 +1158,10 @@ impl ComputerUseHost {
         snapshot: &SnapshotId,
         point: Point,
         coordinate_space: CoordinateSpace,
+        route_hint: ClickDispatchRoute,
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
+        Self::validate_mouse_route_for_point(route_hint)?;
         let (target, screen_point) = self.resolve_coordinate_action_point(
             session_id,
             snapshot,
@@ -852,6 +1175,8 @@ impl ComputerUseHost {
             session_id,
             snapshot,
             &target,
+            None,
+            Some(route_hint),
             point,
             coordinate_space,
             screen_point,
@@ -862,8 +1187,30 @@ impl ComputerUseHost {
             ComputerUsePointerAction::SecondaryClick,
             screen_point,
         ));
-        self.provider.secondary_click(&target, screen_point)?;
-        self.capture_post_action_state(session_id, &target, perm)
+        let action_result = self.invoke_provider(
+            ProviderCallContext {
+                session_id,
+                snapshot: Some(snapshot),
+                target: &target,
+                host_action: "secondary_click",
+                click_id: None,
+            },
+            json!({
+                "screenPoint": screen_point,
+                "dispatchRoute": route_hint,
+            }),
+            |_| json!({}),
+            |provider| provider.secondary_click(&target, screen_point, route_hint),
+        )?;
+        self.capture_post_action_state_with_timing(
+            session_id,
+            &target,
+            perm,
+            PostActionCaptureTiming::DEFAULT,
+            None,
+            None,
+            Some(action_result),
+        )
     }
 
     /// `computer_perform_secondary_action` / ref-targeted secondary click —
@@ -873,8 +1220,10 @@ impl ComputerUseHost {
         session_id: &str,
         snapshot: &SnapshotId,
         element_id: &str,
+        route_hint: ClickDispatchRoute,
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
+        Self::validate_mouse_route_for_element(route_hint)?;
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
         self.emit_element_pointer_event(
@@ -884,9 +1233,34 @@ impl ComputerUseHost {
             ComputerUsePointerAction::SecondaryClick,
             "secondary action",
         )?;
-        self.provider
-            .secondary_click_element(&target, &element_id.to_string())?;
-        self.capture_post_action_state(session_id, &target, perm)
+        let action_result = self.invoke_provider(
+            ProviderCallContext {
+                session_id,
+                snapshot: Some(snapshot),
+                target: &target,
+                host_action: "secondary_click_element",
+                click_id: None,
+            },
+            json!({
+                "elementId": element_id,
+                "dispatchRoute": route_hint,
+            }),
+            |_| json!({}),
+            |provider| provider.secondary_click_element(
+                &target,
+                &element_id.to_string(),
+                route_hint,
+            ),
+        )?;
+        self.capture_post_action_state_with_timing(
+            session_id,
+            &target,
+            perm,
+            PostActionCaptureTiming::DEFAULT,
+            None,
+            None,
+            Some(action_result),
+        )
     }
 
     /// `computer_double_click` — double click a point in the latest snapshot's
@@ -897,8 +1271,10 @@ impl ComputerUseHost {
         snapshot: &SnapshotId,
         point: Point,
         coordinate_space: CoordinateSpace,
+        route_hint: ClickDispatchRoute,
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
+        Self::validate_mouse_route_for_point(route_hint)?;
         let (target, screen_point) = self.resolve_coordinate_action_point(
             session_id,
             snapshot,
@@ -912,6 +1288,8 @@ impl ComputerUseHost {
             session_id,
             snapshot,
             &target,
+            None,
+            Some(route_hint),
             point,
             coordinate_space,
             screen_point,
@@ -922,8 +1300,30 @@ impl ComputerUseHost {
             ComputerUsePointerAction::DoubleClick,
             screen_point,
         ));
-        self.provider.double_click(&target, screen_point)?;
-        self.capture_post_action_state(session_id, &target, perm)
+        let action_result = self.invoke_provider(
+            ProviderCallContext {
+                session_id,
+                snapshot: Some(snapshot),
+                target: &target,
+                host_action: "double_click",
+                click_id: None,
+            },
+            json!({
+                "screenPoint": screen_point,
+                "dispatchRoute": route_hint,
+            }),
+            |_| json!({}),
+            |provider| provider.double_click(&target, screen_point, route_hint),
+        )?;
+        self.capture_post_action_state_with_timing(
+            session_id,
+            &target,
+            perm,
+            PostActionCaptureTiming::DEFAULT,
+            None,
+            None,
+            Some(action_result),
+        )
     }
 
     /// `computer_drag` — drag between two points in the latest snapshot's
@@ -935,8 +1335,10 @@ impl ComputerUseHost {
         from: Point,
         to: Point,
         coordinate_space: CoordinateSpace,
+        route_hint: ClickDispatchRoute,
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
+        Self::validate_mouse_route_for_point(route_hint)?;
         let target = self.require_control_target(session_id, snapshot, perm)?;
         let screen_from =
             self.resolve_point_for_snapshot(session_id, snapshot, from, coordinate_space)?;
@@ -947,6 +1349,7 @@ impl ComputerUseHost {
             session_id,
             snapshot,
             &target,
+            route_hint,
             from,
             to,
             coordinate_space,
@@ -960,8 +1363,31 @@ impl ComputerUseHost {
             screen_from,
             screen_to,
         ));
-        self.provider.drag(&target, screen_from, screen_to)?;
-        self.capture_post_action_state(session_id, &target, perm)
+        let action_result = self.invoke_provider(
+            ProviderCallContext {
+                session_id,
+                snapshot: Some(snapshot),
+                target: &target,
+                host_action: "drag",
+                click_id: None,
+            },
+            json!({
+                "screenFrom": screen_from,
+                "screenTo": screen_to,
+                "dispatchRoute": route_hint,
+            }),
+            |_| json!({}),
+            |provider| provider.drag(&target, screen_from, screen_to, route_hint),
+        )?;
+        self.capture_post_action_state_with_timing(
+            session_id,
+            &target,
+            perm,
+            PostActionCaptureTiming::DEFAULT,
+            None,
+            None,
+            Some(action_result),
+        )
     }
 
     /// `computer_set_value` — set an inspected element's value directly.
@@ -982,9 +1408,30 @@ impl ComputerUseHost {
             ComputerUsePointerAction::Semantic,
             "set value",
         )?;
-        self.provider
-            .set_value(&target, &element_id.to_string(), value)?;
-        self.capture_post_action_state(session_id, &target, perm)
+        let action_result = self.invoke_provider(
+            ProviderCallContext {
+                session_id,
+                snapshot: Some(snapshot),
+                target: &target,
+                host_action: "set_value",
+                click_id: None,
+            },
+            json!({
+                "elementId": element_id,
+                "valueLen": value.chars().count(),
+            }),
+            |_| json!({}),
+            |provider| provider.set_value(&target, &element_id.to_string(), value),
+        )?;
+        self.capture_post_action_state_with_timing(
+            session_id,
+            &target,
+            perm,
+            PostActionCaptureTiming::DEFAULT,
+            None,
+            None,
+            Some(action_result),
+        )
     }
 
     /// `computer_type_text` — type text into the focused element.
@@ -1005,8 +1452,33 @@ impl ComputerUseHost {
                 "textLen": text.chars().count(),
             }),
         );
-        self.provider.type_text(&target, text)?;
-        self.capture_post_action_state(session_id, &target, perm)
+        self.invoke_provider(
+            ProviderCallContext {
+                session_id,
+                snapshot: Some(snapshot),
+                target: &target,
+                host_action: "type_text",
+                click_id: None,
+            },
+            json!({
+                "textLen": text.chars().count(),
+            }),
+            |_| json!({}),
+            |provider| provider.type_text(&target, text),
+        )?;
+        self.capture_post_action_state_with_timing(
+            session_id,
+            &target,
+            perm,
+            PostActionCaptureTiming::DEFAULT,
+            None,
+            None,
+            Some(ActionExecutionResult {
+                kind: ActionExecutionKind::TypeText,
+                route: ActionExecutionRoute::TargetPid,
+                outcome: ActionExecutionOutcome::Dispatched,
+            }),
+        )
     }
 
     /// `computer_press_key` — press a key / chord.
@@ -1027,8 +1499,33 @@ impl ComputerUseHost {
                 "key": key,
             }),
         );
-        self.provider.press_key(&target, key)?;
-        self.capture_post_action_state(session_id, &target, perm)
+        self.invoke_provider(
+            ProviderCallContext {
+                session_id,
+                snapshot: Some(snapshot),
+                target: &target,
+                host_action: "press_key",
+                click_id: None,
+            },
+            json!({
+                "key": key,
+            }),
+            |_| json!({}),
+            |provider| provider.press_key(&target, key),
+        )?;
+        self.capture_post_action_state_with_timing(
+            session_id,
+            &target,
+            perm,
+            PostActionCaptureTiming::DEFAULT,
+            None,
+            None,
+            Some(ActionExecutionResult {
+                kind: ActionExecutionKind::PressKey,
+                route: ActionExecutionRoute::TargetPid,
+                outcome: ActionExecutionOutcome::Dispatched,
+            }),
+        )
     }
 
     /// `computer_scroll` — scroll the target.
@@ -1038,11 +1535,36 @@ impl ComputerUseHost {
         snapshot: &SnapshotId,
         direction: ScrollDirection,
         amount: i32,
+        route_hint: ClickDispatchRoute,
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
+        Self::validate_mouse_route_for_point(route_hint)?;
         let target = self.require_control(session_id, snapshot, perm)?;
-        self.provider.scroll(&target, direction, amount)?;
-        self.capture_post_action_state(session_id, &target, perm)
+        let action_result = self.invoke_provider(
+            ProviderCallContext {
+                session_id,
+                snapshot: Some(snapshot),
+                target: &target,
+                host_action: "scroll",
+                click_id: None,
+            },
+            json!({
+                "direction": direction,
+                "amount": amount,
+                "dispatchRoute": route_hint,
+            }),
+            |_| json!({}),
+            |provider| provider.scroll(&target, direction, amount, route_hint),
+        )?;
+        self.capture_post_action_state_with_timing(
+            session_id,
+            &target,
+            perm,
+            PostActionCaptureTiming::DEFAULT,
+            None,
+            None,
+            Some(action_result),
+        )
     }
 
     /// Ref-targeted scroll — uses AX scroll actions when available, with the
@@ -1054,8 +1576,10 @@ impl ComputerUseHost {
         element_id: &str,
         direction: ScrollDirection,
         amount: i32,
+        route_hint: ClickDispatchRoute,
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
+        Self::validate_mouse_route_for_element(route_hint)?;
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
         self.emit_element_pointer_event(
@@ -1065,9 +1589,38 @@ impl ComputerUseHost {
             ComputerUsePointerAction::Semantic,
             "scroll element",
         )?;
-        self.provider
-            .scroll_element(&target, &element_id.to_string(), direction, amount)?;
-        self.capture_post_action_state(session_id, &target, perm)
+        let action_result = self.invoke_provider(
+            ProviderCallContext {
+                session_id,
+                snapshot: Some(snapshot),
+                target: &target,
+                host_action: "scroll_element",
+                click_id: None,
+            },
+            json!({
+                "elementId": element_id,
+                "direction": direction,
+                "amount": amount,
+                "dispatchRoute": route_hint,
+            }),
+            |_| json!({}),
+            |provider| provider.scroll_element(
+                &target,
+                &element_id.to_string(),
+                direction,
+                amount,
+                route_hint,
+            ),
+        )?;
+        self.capture_post_action_state_with_timing(
+            session_id,
+            &target,
+            perm,
+            PostActionCaptureTiming::DEFAULT,
+            None,
+            None,
+            Some(action_result),
+        )
     }
 
     /// `computer_stop` — release the session's lease. Idempotent.
@@ -1159,7 +1712,9 @@ pub struct ComputerUseStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::computer_use::provider::FakeProvider;
+    use crate::computer_use::provider::{
+        ClickExecutionOutcome, ClickExecutionResult, ClickExecutionRoute, FakeProvider,
+    };
     use crate::desktop_control::{
         DesktopControlInputs, DesktopControlPermissionStatus, DesktopPlatform, PermissionTier,
     };
@@ -1505,6 +2060,7 @@ mod tests {
             &SnapshotId(state.snapshot_id),
             Point { x: 360.0, y: 225.0 },
             CoordinateSpace::Screenshot,
+            ClickDispatchRoute::Auto,
             &p,
         )
         .unwrap();
@@ -1531,7 +2087,13 @@ mod tests {
         h.start("s1", target(), &p).unwrap();
         let state = h.get_app_state("s1", &p).unwrap();
 
-        h.click_element("s1", &SnapshotId(state.snapshot_id), "el-1", &p)
+        h.click_element(
+            "s1",
+            &SnapshotId(state.snapshot_id),
+            "el-1",
+            ClickDispatchRoute::Auto,
+            &p,
+        )
             .unwrap();
 
         let events = events.lock().unwrap();
@@ -1568,6 +2130,7 @@ mod tests {
             &SnapshotId(post_key.snapshot_id),
             ScrollDirection::Down,
             300,
+            ClickDispatchRoute::Auto,
             &p,
         )
         .unwrap();
@@ -1626,15 +2189,164 @@ mod tests {
         h.start("s1", target(), &p).unwrap();
         let state = h.get_app_state("s1", &p).unwrap();
         let snap = SnapshotId(state.snapshot_id);
-        h.click_element("s1", &snap, "el-1", &p).unwrap();
+        h.click_element("s1", &snap, "el-1", ClickDispatchRoute::Auto, &p)
+            .unwrap();
         assert_eq!(
             provider.actions(),
-            vec!["click:com.example.app:el-1".to_string()]
+            vec!["click:com.example.app:el-1:Auto".to_string()]
         );
     }
 
     #[test]
-    fn post_action_capture_returns_last_polled_capture() {
+    fn primary_click_returns_provider_click_result_in_app_state() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let post_click = h
+            .click_at(
+                "s1",
+                &SnapshotId(state.snapshot_id),
+                Point { x: 360.0, y: 225.0 },
+                CoordinateSpace::Screenshot,
+                ClickDispatchRoute::Auto,
+                &p,
+            )
+            .unwrap();
+
+        assert_eq!(
+            post_click.last_click_result,
+            Some(ClickExecutionResult {
+                route: ClickExecutionRoute::Native,
+                outcome: ClickExecutionOutcome::ObservedEffect,
+            })
+        );
+    }
+
+    #[test]
+    fn primary_click_logs_shared_click_id_across_dispatch_result_and_capture() {
+        let path =
+            crate::computer_use::diagnostics::diagnostics_log_path_for_session(Some("s1"))
+                .unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        h.click_at(
+            "s1",
+            &SnapshotId(state.snapshot_id),
+            Point { x: 360.0, y: 225.0 },
+            CoordinateSpace::Screenshot,
+            ClickDispatchRoute::Auto,
+            &p,
+        )
+        .unwrap();
+
+        let log = std::fs::read_to_string(&path).unwrap();
+        let mut click_at_dispatch_id = None;
+        let mut primary_click_result_id = None;
+        let mut post_action_capture_complete_id = None;
+
+        for line in log.lines() {
+            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+            match record["event"].as_str() {
+                Some("click_at_dispatch") => {
+                    click_at_dispatch_id =
+                        record["clickId"].as_str().map(ToString::to_string);
+                }
+                Some("primary_click_result") => {
+                    primary_click_result_id =
+                        record["clickId"].as_str().map(ToString::to_string);
+                }
+                Some("post_action_capture_complete") => {
+                    post_action_capture_complete_id =
+                        record["clickId"].as_str().map(ToString::to_string);
+                }
+                _ => {}
+            }
+        }
+
+        let click_id = click_at_dispatch_id.expect("click_at_dispatch should include clickId");
+        assert!(click_id.starts_with("click-"));
+        assert_eq!(primary_click_result_id.as_deref(), Some(click_id.as_str()));
+        assert_eq!(
+            post_action_capture_complete_id.as_deref(),
+            Some(click_id.as_str())
+        );
+    }
+
+    #[test]
+    fn element_click_logs_dispatch_metadata_and_shared_click_id() {
+        let path =
+            crate::computer_use::diagnostics::diagnostics_log_path_for_session(Some("s1"))
+                .unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        h.click_element(
+            "s1",
+            &SnapshotId(state.snapshot_id),
+            "el-1",
+            ClickDispatchRoute::Auto,
+            &p,
+        )
+            .unwrap();
+
+        let log = std::fs::read_to_string(&path).unwrap();
+        let mut dispatch_id = None;
+        let mut dispatch_role = None;
+        let mut dispatch_label = None;
+        let mut result_id = None;
+        let mut capture_id = None;
+
+        for line in log.lines() {
+            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+            match record["event"].as_str() {
+                Some("click_element_dispatch") => {
+                    dispatch_id = record["clickId"].as_str().map(ToString::to_string);
+                    dispatch_role = record["elementRole"].as_str().map(ToString::to_string);
+                    dispatch_label = record["elementLabel"].as_str().map(ToString::to_string);
+                    assert_eq!(record["elementId"].as_str(), Some("el-1"));
+                }
+                Some("primary_click_result") => {
+                    if record["clickId"].as_str().is_some() {
+                        result_id = record["clickId"].as_str().map(ToString::to_string);
+                    }
+                }
+                Some("post_action_capture_complete") => {
+                    capture_id = record["clickId"].as_str().map(ToString::to_string);
+                }
+                _ => {}
+            }
+        }
+
+        let click_id = dispatch_id.expect("click_element_dispatch should include clickId");
+        assert!(click_id.starts_with("click-"));
+        assert_eq!(dispatch_role.as_deref(), Some("AXButton"));
+        assert_eq!(dispatch_label.as_deref(), Some("OK"));
+        assert_eq!(result_id.as_deref(), Some(click_id.as_str()));
+        assert_eq!(capture_id.as_deref(), Some(click_id.as_str()));
+    }
+
+    #[test]
+    fn post_action_capture_returns_single_delayed_capture() {
         let provider = Arc::new(FakeProvider::default());
         let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
         h.approvals().approve_session("s1");
@@ -1647,16 +2359,15 @@ mod tests {
                 "s1",
                 &target(),
                 &p,
-                PostActionCaptureTiming {
-                    initial_delay_ms: 0,
-                    poll_interval_ms: 1,
-                    total_window_ms: 2,
-                },
+                PostActionCaptureTiming { delay_ms: 0 },
+                None,
+                None,
+                None,
             )
             .unwrap();
 
-        assert_eq!(provider.capture_count(), 3);
-        assert_eq!(state.screenshot.handle, "snap-3");
+        assert_eq!(provider.capture_count(), 1);
+        assert_eq!(state.screenshot.handle, "snap-1");
     }
 
     #[test]
@@ -1675,6 +2386,7 @@ mod tests {
                 &SnapshotId(state.snapshot_id),
                 Point { x: 360.0, y: 225.0 },
                 CoordinateSpace::Screenshot,
+                ClickDispatchRoute::Auto,
                 &p,
             )
             .unwrap();
@@ -1685,6 +2397,7 @@ mod tests {
             Point { x: 0.0, y: 0.0 },
             Point { x: 720.0, y: 450.0 },
             CoordinateSpace::Screenshot,
+            ClickDispatchRoute::Auto,
             &p,
         )
         .unwrap();
@@ -1692,10 +2405,115 @@ mod tests {
         assert_eq!(
             provider.actions(),
             vec![
-                "click_at:com.example.app:190.0,132.5".to_string(),
+                "click_at:com.example.app:190.0,132.5:Auto".to_string(),
                 "drag:com.example.app:10.0,20.0->370.0,245.0".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn explicit_click_route_is_forwarded_to_provider() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+        let snap = SnapshotId(state.snapshot_id);
+
+        h.click_element("s1", &snap, "el-1", ClickDispatchRoute::Hid, &p)
+            .unwrap();
+
+        assert_eq!(
+            provider.actions(),
+            vec!["click:com.example.app:el-1:Hid".to_string()]
+        );
+    }
+
+    #[test]
+    fn point_click_rejects_ax_dispatch_route() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let error = h
+            .click_at(
+                "s1",
+                &SnapshotId(state.snapshot_id),
+                Point { x: 360.0, y: 225.0 },
+                CoordinateSpace::Screenshot,
+                ClickDispatchRoute::Ax,
+                &p,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, ComputerUseError::Coordinate(_)));
+    }
+
+    #[test]
+    fn mouse_point_actions_reject_ax_dispatch_route() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+        let snap = SnapshotId(state.snapshot_id);
+
+        let secondary_err = h
+            .secondary_click(
+                "s1",
+                &snap,
+                Point { x: 360.0, y: 225.0 },
+                CoordinateSpace::Screenshot,
+                ClickDispatchRoute::Ax,
+                &p,
+            )
+            .unwrap_err();
+        assert!(matches!(secondary_err, ComputerUseError::Coordinate(_)));
+
+        let double_err = h
+            .double_click(
+                "s1",
+                &snap,
+                Point { x: 360.0, y: 225.0 },
+                CoordinateSpace::Screenshot,
+                ClickDispatchRoute::Ax,
+                &p,
+            )
+            .unwrap_err();
+        assert!(matches!(double_err, ComputerUseError::Coordinate(_)));
+
+        let drag_err = h
+            .drag(
+                "s1",
+                &snap,
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 720.0, y: 450.0 },
+                CoordinateSpace::Screenshot,
+                ClickDispatchRoute::Ax,
+                &p,
+            )
+            .unwrap_err();
+        assert!(matches!(drag_err, ComputerUseError::Coordinate(_)));
+
+        let scroll_err = h
+            .scroll(
+                "s1",
+                &snap,
+                ScrollDirection::Down,
+                300,
+                ClickDispatchRoute::Ax,
+                &p,
+            )
+            .unwrap_err();
+        assert!(matches!(scroll_err, ComputerUseError::Coordinate(_)));
     }
 
     #[test]
@@ -1718,6 +2536,30 @@ mod tests {
     }
 
     #[test]
+    fn set_value_returns_last_action_result_in_app_state() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let post_set = h
+            .set_value("s1", &SnapshotId(state.snapshot_id), "el-1", "42", &p)
+            .unwrap();
+
+        assert_eq!(
+            post_set.last_action_result,
+            Some(ActionExecutionResult {
+                kind: ActionExecutionKind::SetValue,
+                route: ActionExecutionRoute::Ax,
+                outcome: ActionExecutionOutcome::SemanticSuccess,
+            })
+        );
+    }
+
+    #[test]
     fn element_secondary_and_scroll_reach_provider() {
         let provider = Arc::new(FakeProvider::default());
         let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
@@ -1728,7 +2570,13 @@ mod tests {
         let state = h.get_app_state("s1", &p).unwrap();
 
         let post_secondary = h
-            .secondary_click_element("s1", &SnapshotId(state.snapshot_id), "el-1", &p)
+            .secondary_click_element(
+                "s1",
+                &SnapshotId(state.snapshot_id),
+                "el-1",
+                ClickDispatchRoute::Auto,
+                &p,
+            )
             .unwrap();
         h.scroll_element(
             "s1",
@@ -1736,6 +2584,7 @@ mod tests {
             "el-1",
             ScrollDirection::Down,
             300,
+            ClickDispatchRoute::Auto,
             &p,
         )
         .unwrap();
@@ -1745,6 +2594,151 @@ mod tests {
             vec![
                 "secondary_click_element:com.example.app:el-1".to_string(),
                 "scroll_element:com.example.app:el-1:Down:300".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn mouse_actions_return_last_action_result_in_app_state() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let post_secondary = h
+            .secondary_click_element(
+                "s1",
+                &SnapshotId(state.snapshot_id),
+                "el-1",
+                ClickDispatchRoute::Auto,
+                &p,
+            )
+            .unwrap();
+        assert_eq!(
+            post_secondary.last_action_result,
+            Some(ActionExecutionResult {
+                kind: ActionExecutionKind::SecondaryClick,
+                route: ActionExecutionRoute::Ax,
+                outcome: ActionExecutionOutcome::SemanticSuccess,
+            })
+        );
+
+        let post_double = h
+            .double_click(
+                "s1",
+                &SnapshotId(post_secondary.snapshot_id),
+                Point { x: 360.0, y: 225.0 },
+                CoordinateSpace::Screenshot,
+                ClickDispatchRoute::Auto,
+                &p,
+            )
+            .unwrap();
+        assert_eq!(
+            post_double.last_action_result,
+            Some(ActionExecutionResult {
+                kind: ActionExecutionKind::DoubleClick,
+                route: ActionExecutionRoute::TargetPid,
+                outcome: ActionExecutionOutcome::Dispatched,
+            })
+        );
+
+        let post_drag = h
+            .drag(
+                "s1",
+                &SnapshotId(post_double.snapshot_id),
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 720.0, y: 450.0 },
+                CoordinateSpace::Screenshot,
+                ClickDispatchRoute::Auto,
+                &p,
+            )
+            .unwrap();
+        assert_eq!(
+            post_drag.last_action_result,
+            Some(ActionExecutionResult {
+                kind: ActionExecutionKind::Drag,
+                route: ActionExecutionRoute::TargetPid,
+                outcome: ActionExecutionOutcome::Dispatched,
+            })
+        );
+
+        let post_scroll = h
+            .scroll_element(
+                "s1",
+                &SnapshotId(post_drag.snapshot_id),
+                "el-1",
+                ScrollDirection::Down,
+                300,
+                ClickDispatchRoute::Auto,
+                &p,
+            )
+            .unwrap();
+        assert_eq!(
+            post_scroll.last_action_result,
+            Some(ActionExecutionResult {
+                kind: ActionExecutionKind::Scroll,
+                route: ActionExecutionRoute::Ax,
+                outcome: ActionExecutionOutcome::SemanticSuccess,
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_mouse_routes_are_forwarded_to_provider() {
+        let provider = Arc::new(FakeProvider::default());
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+        let snap = SnapshotId(state.snapshot_id);
+
+        let post_secondary = h
+            .secondary_click_element("s1", &snap, "el-1", ClickDispatchRoute::Hid, &p)
+            .unwrap();
+        let post_double = h
+            .double_click(
+                "s1",
+                &SnapshotId(post_secondary.snapshot_id),
+                Point { x: 360.0, y: 225.0 },
+                CoordinateSpace::Screenshot,
+                ClickDispatchRoute::Hid,
+                &p,
+            )
+            .unwrap();
+        let post_drag = h
+            .drag(
+                "s1",
+                &SnapshotId(post_double.snapshot_id),
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 720.0, y: 450.0 },
+                CoordinateSpace::Screenshot,
+                ClickDispatchRoute::TargetPid,
+                &p,
+            )
+            .unwrap();
+        h.scroll_element(
+            "s1",
+            &SnapshotId(post_drag.snapshot_id),
+            "el-1",
+            ScrollDirection::Down,
+            300,
+            ClickDispatchRoute::TargetPid,
+            &p,
+        )
+        .unwrap();
+
+        assert_eq!(
+            provider.actions(),
+            vec![
+                "secondary_click_element:com.example.app:el-1:Hid".to_string(),
+                "double_click:com.example.app:190.0,132.5:Hid".to_string(),
+                "drag:com.example.app:10.0,20.0->370.0,245.0:TargetPid".to_string(),
+                "scroll_element:com.example.app:el-1:Down:300:TargetPid".to_string(),
             ]
         );
     }

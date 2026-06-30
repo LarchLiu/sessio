@@ -40,19 +40,23 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
 use foreign_types::ForeignType;
-use image::{imageops::FilterType, ImageFormat, ImageReader};
+use image::{imageops::{crop_imm, FilterType}, ImageFormat, ImageReader};
 use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
 use objc2::{AnyThread, MainThreadMarker, Message};
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSScreen};
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSPoint, NSRect, NSSize};
+use sha2::{Digest, Sha256};
 
 use crate::computer_use::provider::{
-    AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ComputerUseProvider,
+    ActionExecutionKind, ActionExecutionOutcome, ActionExecutionResult, ActionExecutionRoute,
+    AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ClickDispatchRoute,
+    ClickExecutionOutcome, ClickExecutionResult, ClickExecutionRoute, ComputerUseProvider,
     CoordinateSpace, DisplayMetadata, ElementId, InstalledApp, Point, ProviderError,
     ProviderResult, RawAppState, Rect, ScreenshotCaptureKind, ScreenshotRef, ScrollDirection,
     UiElement,
 };
+use crate::computer_use::diagnostics;
 
 #[derive(Clone)]
 struct FrontmostApp {
@@ -83,6 +87,7 @@ struct AppInputSignals {
     has_embedded_web_runtime: bool,
     ax_element_count: usize,
     actionable_ax_element_count: usize,
+    visible_window_actionable_ax_element_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +97,79 @@ struct EventTarget {
     ensure_frontmost: bool,
     restore_frontmost: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClickRouteKind {
+    Ax,
+    TargetPid,
+    Hid,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClickIntent<'a> {
+    Element(&'a ElementId),
+    Point(CGPoint),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClickAttemptOutcome {
+    Succeeded,
+    NoEffect,
+    Uncertain,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowCaptureFingerprint {
+    full_hash: [u8; 32],
+    local_hash: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RoutedActionExecution {
+    route: InputDispatchRoute,
+    outcome: ClickAttemptOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClickEffectProbeOutcome {
+    ObservedEffect,
+    NoEffect,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClickEffectProbeTiming {
+    initial_delay_ms: u64,
+    poll_interval_ms: u64,
+    total_window_ms: u64,
+}
+
+impl ClickEffectProbeTiming {
+    #[cfg(not(test))]
+    const DEFAULT: Self = Self {
+        initial_delay_ms: 500,
+        poll_interval_ms: 500,
+        total_window_ms: 2000,
+    };
+
+    #[cfg(test)]
+    const DEFAULT: Self = Self {
+        initial_delay_ms: 0,
+        poll_interval_ms: 0,
+        total_window_ms: 0,
+    };
+
+    fn attempt_count(self) -> usize {
+        if self.total_window_ms <= self.initial_delay_ms || self.poll_interval_ms == 0 {
+            1
+        } else {
+            1 + ((self.total_window_ms - self.initial_delay_ms) / self.poll_interval_ms) as usize
+        }
+    }
+}
+
+const CLICK_EFFECT_LOCAL_PROBE_RADIUS_PX: u32 = 72;
 
 /// The macOS provider. Stateless: every call re-reads live system state.
 pub struct MacosProvider {
@@ -155,51 +233,165 @@ impl ComputerUseProvider for MacosProvider {
         })
     }
 
-    fn click_element(&self, target: &AppTarget, element: &ElementId) -> ProviderResult<()> {
+    fn click_element(
+        &self,
+        target: &AppTarget,
+        element: &ElementId,
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ClickExecutionResult> {
         let pid = resolve_pid(&target.app_id)?;
-        click_ax_element(target, pid, element)
-    }
-
-    fn click_point(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
-        let pid = resolve_pid(&target.app_id)?;
-        left_click_at(
-            event_target_for(target, pid, InputActionKind::MouseClick),
-            cg_point(point),
+        execute_click_intent(
+            &self.capture_dir,
+            target,
+            pid,
+            ClickIntent::Element(element),
+            route_hint,
         )
     }
 
-    fn secondary_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+    fn click_point(
+        &self,
+        target: &AppTarget,
+        point: Point,
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ClickExecutionResult> {
         let pid = resolve_pid(&target.app_id)?;
-        secondary_click_at(
-            event_target_for(target, pid, InputActionKind::MouseSecondaryClick),
-            cg_point(point),
+        execute_click_intent(
+            &self.capture_dir,
+            target,
+            pid,
+            ClickIntent::Point(cg_point(point)),
+            route_hint,
         )
+    }
+
+    fn secondary_click(
+        &self,
+        target: &AppTarget,
+        point: Point,
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
+        let pid = resolve_pid(&target.app_id)?;
+        execute_routed_action_with_effect_probe(
+            &self.capture_dir,
+            target,
+            pid,
+            InputActionKind::MouseSecondaryClick,
+            Some(cg_point(point)),
+            mouse_route_plan_for_point(route_hint),
+            |route| {
+                secondary_click_at(
+                    event_target_for_route(
+                        target,
+                        pid,
+                        InputActionKind::MouseSecondaryClick,
+                        route,
+                        Some(default_route_reason_for_action(
+                            InputActionKind::MouseSecondaryClick,
+                            route,
+                        )),
+                    ),
+                    cg_point(point),
+                )
+            },
+        )
+        .map(|execution| {
+            action_execution_result(
+                ActionExecutionKind::SecondaryClick,
+                execution.route,
+                execution.outcome,
+            )
+        })
     }
 
     fn secondary_click_element(
         &self,
         target: &AppTarget,
         element: &ElementId,
-    ) -> ProviderResult<()> {
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         let pid = resolve_pid(&target.app_id)?;
-        secondary_ax_element(target, pid, element)
+        secondary_ax_element(&self.capture_dir, target, pid, element, route_hint)
     }
 
-    fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+    fn double_click(
+        &self,
+        target: &AppTarget,
+        point: Point,
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         let pid = resolve_pid(&target.app_id)?;
-        double_click_at(
-            event_target_for(target, pid, InputActionKind::MouseDoubleClick),
-            cg_point(point),
+        execute_routed_action_with_effect_probe(
+            &self.capture_dir,
+            target,
+            pid,
+            InputActionKind::MouseDoubleClick,
+            Some(cg_point(point)),
+            mouse_route_plan_for_point(route_hint),
+            |route| {
+                double_click_at(
+                    event_target_for_route(
+                        target,
+                        pid,
+                        InputActionKind::MouseDoubleClick,
+                        route,
+                        Some(default_route_reason_for_action(
+                            InputActionKind::MouseDoubleClick,
+                            route,
+                        )),
+                    ),
+                    cg_point(point),
+                )
+            },
         )
+        .map(|execution| {
+            action_execution_result(
+                ActionExecutionKind::DoubleClick,
+                execution.route,
+                execution.outcome,
+            )
+        })
     }
 
-    fn drag(&self, target: &AppTarget, from: Point, to: Point) -> ProviderResult<()> {
+    fn drag(
+        &self,
+        target: &AppTarget,
+        from: Point,
+        to: Point,
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         let pid = resolve_pid(&target.app_id)?;
-        drag_between(
-            event_target_for(target, pid, InputActionKind::MouseDrag),
-            cg_point(from),
-            cg_point(to),
+        execute_routed_action_with_effect_probe(
+            &self.capture_dir,
+            target,
+            pid,
+            InputActionKind::MouseDrag,
+            Some(cg_point(to)),
+            mouse_route_plan_for_point(route_hint),
+            |route| {
+                drag_between(
+                    event_target_for_route(
+                        target,
+                        pid,
+                        InputActionKind::MouseDrag,
+                        route,
+                        Some(default_route_reason_for_action(
+                            InputActionKind::MouseDrag,
+                            route,
+                        )),
+                    ),
+                    cg_point(from),
+                    cg_point(to),
+                )
+            },
         )
+        .map(|execution| {
+            action_execution_result(
+                ActionExecutionKind::Drag,
+                execution.route,
+                execution.outcome,
+            )
+        })
     }
 
     fn set_value(
@@ -207,7 +399,7 @@ impl ComputerUseProvider for MacosProvider {
         target: &AppTarget,
         element: &ElementId,
         value: &str,
-    ) -> ProviderResult<()> {
+    ) -> ProviderResult<ActionExecutionResult> {
         let pid = resolve_pid(&target.app_id)?;
         set_ax_value_for_id(pid, element, value)
     }
@@ -236,13 +428,40 @@ impl ComputerUseProvider for MacosProvider {
         target: &AppTarget,
         direction: ScrollDirection,
         amount: i32,
-    ) -> ProviderResult<()> {
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         let pid = resolve_pid(&target.app_id)?;
-        scroll_wheel(
-            event_target_for(target, pid, InputActionKind::Scroll),
-            direction,
-            amount,
+        execute_routed_action_with_effect_probe(
+            &self.capture_dir,
+            target,
+            pid,
+            InputActionKind::Scroll,
+            None,
+            mouse_route_plan_for_point(route_hint),
+            |route| {
+                scroll_wheel(
+                    event_target_for_route(
+                        target,
+                        pid,
+                        InputActionKind::Scroll,
+                        route,
+                        Some(default_route_reason_for_action(
+                            InputActionKind::Scroll,
+                            route,
+                        )),
+                    ),
+                    direction,
+                    amount,
+                )
+            },
         )
+        .map(|execution| {
+            action_execution_result(
+                ActionExecutionKind::Scroll,
+                execution.route,
+                execution.outcome,
+            )
+        })
     }
 
     fn scroll_element(
@@ -251,9 +470,10 @@ impl ComputerUseProvider for MacosProvider {
         element: &ElementId,
         direction: ScrollDirection,
         amount: i32,
-    ) -> ProviderResult<()> {
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         let pid = resolve_pid(&target.app_id)?;
-        scroll_ax_element(target, pid, element, direction, amount)
+        scroll_ax_element(&self.capture_dir, target, pid, element, direction, amount, route_hint)
     }
 }
 
@@ -580,16 +800,13 @@ fn installed_app_url(app_id: &str) -> Option<objc2::rc::Retained<objc2_foundatio
 }
 
 fn event_target_for(target: &AppTarget, pid: i32, action: InputActionKind) -> EventTarget {
-    let has_embedded_web_runtime = bundle_has_embedded_web_runtime_markers(&target.app_id);
+    let route = default_primary_route_for_action(action);
     event_target_for_route(
         target,
         pid,
         action,
-        dispatch_route_for_action(action, has_embedded_web_runtime),
-        Some(default_route_reason_for_action(
-            action,
-            has_embedded_web_runtime,
-        )),
+        route,
+        Some(default_route_reason_for_action(action, route)),
     )
 }
 
@@ -601,12 +818,10 @@ fn event_target_for_route(
     route_reason_override: Option<&'static str>,
 ) -> EventTarget {
     let signals = app_input_signals(target, pid);
-    let has_embedded_web_runtime = signals.has_embedded_web_runtime;
     let ensure_frontmost = matches!(route, InputDispatchRoute::Hid);
     let restore_frontmost = !ensure_frontmost;
-    let route_reason = route_reason_override.unwrap_or_else(|| {
-        default_route_reason_for_action(action, has_embedded_web_runtime)
-    });
+    let route_reason =
+        route_reason_override.unwrap_or_else(|| default_route_reason_for_action(action, route));
 
     crate::computer_use::diagnostics::write(
         "input_dispatch_route",
@@ -631,6 +846,7 @@ fn event_target_for_route(
             "hasEmbeddedWebRuntime": signals.has_embedded_web_runtime,
             "axElementCount": signals.ax_element_count,
             "actionableAxElementCount": signals.actionable_ax_element_count,
+            "visibleWindowActionableAxElementCount": signals.visible_window_actionable_ax_element_count,
         }),
     );
 
@@ -644,7 +860,6 @@ fn event_target_for_route(
 
 fn dispatch_route_for_action(
     action: InputActionKind,
-    has_embedded_web_runtime: bool,
 ) -> InputDispatchRoute {
     match action {
         InputActionKind::KeyboardText | InputActionKind::KeyboardKey => InputDispatchRoute::TargetPid,
@@ -652,19 +867,17 @@ fn dispatch_route_for_action(
         | InputActionKind::MouseSecondaryClick
         | InputActionKind::MouseDoubleClick
         | InputActionKind::MouseDrag
-        | InputActionKind::Scroll => {
-            if has_embedded_web_runtime {
-                InputDispatchRoute::Hid
-            } else {
-                InputDispatchRoute::TargetPid
-            }
-        }
+        | InputActionKind::Scroll => InputDispatchRoute::TargetPid,
     }
+}
+
+fn default_primary_route_for_action(action: InputActionKind) -> InputDispatchRoute {
+    dispatch_route_for_action(action)
 }
 
 fn default_route_reason_for_action(
     action: InputActionKind,
-    has_embedded_web_runtime: bool,
+    route: InputDispatchRoute,
 ) -> &'static str {
     match action {
         InputActionKind::KeyboardText | InputActionKind::KeyboardKey => {
@@ -674,25 +887,11 @@ fn default_route_reason_for_action(
         | InputActionKind::MouseSecondaryClick
         | InputActionKind::MouseDoubleClick
         | InputActionKind::MouseDrag
-        | InputActionKind::Scroll => {
-            if has_embedded_web_runtime {
-                "mouse_actions_web_runtime_require_foreground_hid"
-            } else {
-                "mouse_actions_native_prefer_background_target_pid"
-            }
-        }
+        | InputActionKind::Scroll => match route {
+            InputDispatchRoute::TargetPid => "mouse_actions_default_target_pid",
+            InputDispatchRoute::Hid => "mouse_actions_explicit_hid_fallback",
+        },
     }
-}
-
-fn element_fallback_route(
-    target: &AppTarget,
-    action: InputActionKind,
-) -> (InputDispatchRoute, &'static str) {
-    let has_embedded_web_runtime = bundle_has_embedded_web_runtime_markers(&target.app_id);
-    (
-        dispatch_route_for_action(action, has_embedded_web_runtime),
-        default_route_reason_for_action(action, has_embedded_web_runtime),
-    )
 }
 
 fn app_input_signals(target: &AppTarget, pid: i32) -> AppInputSignals {
@@ -701,6 +900,16 @@ fn app_input_signals(target: &AppTarget, pid: i32) -> AppInputSignals {
         has_embedded_web_runtime: bundle_has_embedded_web_runtime_markers(&target.app_id),
         ax_element_count: elements.len(),
         actionable_ax_element_count: elements.iter().filter(|element| element.actionable).count(),
+        visible_window_actionable_ax_element_count: elements
+            .iter()
+            .filter(|element| {
+                element.actionable
+                    && element
+                        .bounds
+                        .map(|bounds| bounds.width > 1.0 && bounds.height > 1.0 && bounds.y > 30.0)
+                        .unwrap_or(false)
+            })
+            .count(),
     }
 }
 
@@ -1880,48 +2089,542 @@ fn ax_element_center(pid: i32, element_id: &ElementId) -> ProviderResult<Option<
     }
 }
 
-fn click_ax_element(target: &AppTarget, pid: i32, element_id: &ElementId) -> ProviderResult<()> {
-    let (fallback_route, fallback_reason) =
-        element_fallback_route(target, InputActionKind::MouseClick);
-    crate::computer_use::diagnostics::write(
-        "element_action_strategy",
+fn execute_click_intent(
+    capture_dir: &Path,
+    _target: &AppTarget,
+    pid: i32,
+    intent: ClickIntent<'_>,
+    route_hint: ClickDispatchRoute,
+) -> ProviderResult<ClickExecutionResult> {
+    let routes = click_route_plan(intent, route_hint);
+    let probe_point = click_probe_point(pid, intent);
+    let before = capture_window_fingerprint(capture_dir, pid, probe_point).ok();
+
+    for route in routes {
+        let outcome = attempt_click_route(capture_dir, _target, pid, intent, route, before)?;
+        match outcome {
+            ClickAttemptOutcome::Succeeded
+            | ClickAttemptOutcome::NoEffect
+            | ClickAttemptOutcome::Uncertain => {
+                return Ok(ClickExecutionResult {
+                    route: click_execution_route(route),
+                    outcome: click_execution_outcome(route, outcome),
+                });
+            }
+            ClickAttemptOutcome::Failed => {}
+        }
+    }
+
+    Err(ProviderError::Failed("all click routes failed to dispatch".into()))
+}
+
+fn click_route_plan(intent: ClickIntent<'_>, route_hint: ClickDispatchRoute) -> Vec<ClickRouteKind> {
+    let mut routes = Vec::new();
+
+    match route_hint {
+        ClickDispatchRoute::Auto => {
+            if matches!(intent, ClickIntent::Element(_)) {
+                routes.push(ClickRouteKind::Ax);
+            }
+            routes.push(ClickRouteKind::TargetPid);
+            routes.push(ClickRouteKind::Hid);
+        }
+        ClickDispatchRoute::Ax => {
+            if matches!(intent, ClickIntent::Element(_)) {
+                routes.push(ClickRouteKind::Ax);
+            }
+        }
+        ClickDispatchRoute::TargetPid => {
+            routes.push(ClickRouteKind::TargetPid);
+        }
+        ClickDispatchRoute::Hid => {
+            routes.push(ClickRouteKind::Hid);
+        }
+    }
+
+    dedupe_click_routes(&mut routes);
+    routes
+}
+
+fn mouse_route_plan_for_point(route_hint: ClickDispatchRoute) -> Vec<InputDispatchRoute> {
+    match route_hint {
+        ClickDispatchRoute::Auto => vec![InputDispatchRoute::TargetPid, InputDispatchRoute::Hid],
+        ClickDispatchRoute::TargetPid => vec![InputDispatchRoute::TargetPid],
+        ClickDispatchRoute::Hid => vec![InputDispatchRoute::Hid],
+        ClickDispatchRoute::Ax => Vec::new(),
+    }
+}
+
+fn mouse_route_plan_for_element(
+    route_hint: ClickDispatchRoute,
+) -> (bool, Vec<InputDispatchRoute>) {
+    match route_hint {
+        ClickDispatchRoute::Auto => (
+            true,
+            vec![InputDispatchRoute::TargetPid, InputDispatchRoute::Hid],
+        ),
+        ClickDispatchRoute::Ax => (true, Vec::new()),
+        ClickDispatchRoute::TargetPid => (false, vec![InputDispatchRoute::TargetPid]),
+        ClickDispatchRoute::Hid => (false, vec![InputDispatchRoute::Hid]),
+    }
+}
+
+fn click_execution_route(route: ClickRouteKind) -> ClickExecutionRoute {
+    match route {
+        ClickRouteKind::Ax => ClickExecutionRoute::Ax,
+        ClickRouteKind::TargetPid => ClickExecutionRoute::TargetPid,
+        ClickRouteKind::Hid => ClickExecutionRoute::Hid,
+    }
+}
+
+fn click_execution_outcome(
+    route: ClickRouteKind,
+    attempt_outcome: ClickAttemptOutcome,
+) -> ClickExecutionOutcome {
+    match (route, attempt_outcome) {
+        (ClickRouteKind::Ax, ClickAttemptOutcome::Succeeded) => ClickExecutionOutcome::SemanticSuccess,
+        (_, ClickAttemptOutcome::Succeeded) => ClickExecutionOutcome::ObservedEffect,
+        (_, ClickAttemptOutcome::NoEffect) => ClickExecutionOutcome::NoEffect,
+        (_, ClickAttemptOutcome::Uncertain) => ClickExecutionOutcome::Uncertain,
+        (_, ClickAttemptOutcome::Failed) => ClickExecutionOutcome::NoEffect,
+    }
+}
+
+fn dedupe_click_routes(routes: &mut Vec<ClickRouteKind>) {
+    let mut deduped = Vec::with_capacity(routes.len());
+    for route in routes.iter().copied() {
+        if !deduped.contains(&route) {
+            deduped.push(route);
+        }
+    }
+    *routes = deduped;
+}
+
+fn attempt_click_route(
+    capture_dir: &Path,
+    target: &AppTarget,
+    pid: i32,
+    intent: ClickIntent<'_>,
+    route: ClickRouteKind,
+    before: Option<WindowCaptureFingerprint>,
+) -> ProviderResult<ClickAttemptOutcome> {
+    diagnostics::write(
+        "click_route_attempt",
         serde_json::json!({
             "appId": target.app_id,
             "pid": pid,
-            "elementId": element_id,
-            "action": "click",
-            "profile": "operation_based",
-            "usesAxAction": true,
-            "fallbackRoute": fallback_route,
-            "fallbackReason": fallback_reason,
+            "route": match route {
+                ClickRouteKind::Ax => "ax",
+                ClickRouteKind::TargetPid => "target_pid",
+                ClickRouteKind::Hid => "hid",
+            },
+            "intent": match intent {
+                ClickIntent::Element(_) => "element",
+                ClickIntent::Point(_) => "point",
+            },
         }),
     );
+
+    let attempt = match route {
+        ClickRouteKind::Ax => attempt_ax_click(target, pid, intent),
+        ClickRouteKind::TargetPid => attempt_routed_click(
+            target,
+            pid,
+            intent,
+            InputDispatchRoute::TargetPid,
+            capture_dir,
+            before,
+        ),
+        ClickRouteKind::Hid => attempt_routed_click(
+            target,
+            pid,
+            intent,
+            InputDispatchRoute::Hid,
+            capture_dir,
+            before,
+        ),
+    };
+
+    if let Err(error) = &attempt {
+        diagnostics::write(
+            "click_route_attempt_failed",
+            serde_json::json!({
+                "appId": target.app_id,
+                "pid": pid,
+                "route": match route {
+                    ClickRouteKind::Ax => "ax",
+                    ClickRouteKind::TargetPid => "target_pid",
+                    ClickRouteKind::Hid => "hid",
+                },
+                "error": error.to_string(),
+            }),
+        );
+    }
+
+    attempt
+}
+
+fn attempt_ax_click(
+    _target: &AppTarget,
+    pid: i32,
+    intent: ClickIntent<'_>,
+) -> ProviderResult<ClickAttemptOutcome> {
+    let ClickIntent::Element(element_id) = intent else {
+        return Ok(ClickAttemptOutcome::Failed);
+    };
     let action = perform_ax_action_for_id(pid, element_id, ax::PRESS_ACTION)?;
     if action == ax::kAXErrorSuccess {
-        return Ok(());
+        Ok(ClickAttemptOutcome::Succeeded)
+    } else {
+        Ok(ClickAttemptOutcome::Failed)
     }
-    match ax_element_center(pid, element_id)? {
-        Some(center) => left_click_at(
-            event_target_for_route(
-                target,
-                pid,
-                InputActionKind::MouseClick,
-                fallback_route,
-                Some(fallback_reason),
-            ),
-            center,
-        ),
-        None => Err(ProviderError::ElementNotFound(element_id.clone())),
+}
+
+fn attempt_routed_click(
+    target: &AppTarget,
+    pid: i32,
+    intent: ClickIntent<'_>,
+    route: InputDispatchRoute,
+    capture_dir: &Path,
+    before: Option<WindowCaptureFingerprint>,
+) -> ProviderResult<ClickAttemptOutcome> {
+    let point = resolved_click_point(pid, intent)?;
+
+    if let Err(error) = left_click_at(
+        event_target_for_route(target, pid, InputActionKind::MouseClick, route, None),
+        point,
+    ) {
+        diagnostics::write(
+            "click_route_dispatch_failed",
+            serde_json::json!({
+                "appId": target.app_id,
+                "pid": pid,
+                "route": route,
+                "error": error.to_string(),
+            }),
+        );
+        return Ok(ClickAttemptOutcome::Failed);
+    }
+
+    match click_effect_probe(capture_dir, pid, before, Some(point))? {
+        ClickEffectProbeOutcome::ObservedEffect => Ok(ClickAttemptOutcome::Succeeded),
+        ClickEffectProbeOutcome::NoEffect => Ok(ClickAttemptOutcome::NoEffect),
+        ClickEffectProbeOutcome::Uncertain => Ok(ClickAttemptOutcome::Uncertain),
+    }
+}
+
+fn execute_routed_action_with_effect_probe(
+    capture_dir: &Path,
+    target: &AppTarget,
+    pid: i32,
+    action: InputActionKind,
+    probe_point: Option<CGPoint>,
+    routes: Vec<InputDispatchRoute>,
+    mut perform: impl FnMut(InputDispatchRoute) -> ProviderResult<()>,
+) -> ProviderResult<RoutedActionExecution> {
+    let before = capture_window_fingerprint(capture_dir, pid, probe_point).ok();
+    for route in routes {
+        diagnostics::write(
+            "routed_action_attempt",
+            serde_json::json!({
+                "appId": target.app_id,
+                "pid": pid,
+                "action": match action {
+                    InputActionKind::MouseClick => "mouse_click",
+                    InputActionKind::MouseSecondaryClick => "mouse_secondary_click",
+                    InputActionKind::MouseDoubleClick => "mouse_double_click",
+                    InputActionKind::MouseDrag => "mouse_drag",
+                    InputActionKind::Scroll => "scroll",
+                    InputActionKind::KeyboardText => "keyboard_text",
+                    InputActionKind::KeyboardKey => "keyboard_key",
+                },
+                "route": route,
+            }),
+        );
+
+        let attempt = perform(route);
+        if let Err(error) = &attempt {
+            diagnostics::write(
+                "routed_action_attempt_failed",
+                serde_json::json!({
+                    "appId": target.app_id,
+                    "pid": pid,
+                    "action": match action {
+                        InputActionKind::MouseClick => "mouse_click",
+                        InputActionKind::MouseSecondaryClick => "mouse_secondary_click",
+                        InputActionKind::MouseDoubleClick => "mouse_double_click",
+                        InputActionKind::MouseDrag => "mouse_drag",
+                        InputActionKind::Scroll => "scroll",
+                        InputActionKind::KeyboardText => "keyboard_text",
+                        InputActionKind::KeyboardKey => "keyboard_key",
+                    },
+                    "route": route,
+                    "error": error.to_string(),
+                }),
+            );
+            continue;
+        }
+
+        match click_effect_probe(capture_dir, pid, before, probe_point)? {
+            ClickEffectProbeOutcome::ObservedEffect => {
+                return Ok(RoutedActionExecution {
+                    route,
+                    outcome: ClickAttemptOutcome::Succeeded,
+                });
+            }
+            ClickEffectProbeOutcome::NoEffect => {
+                return Ok(RoutedActionExecution {
+                    route,
+                    outcome: ClickAttemptOutcome::NoEffect,
+                });
+            }
+            ClickEffectProbeOutcome::Uncertain => {
+                return Ok(RoutedActionExecution {
+                    route,
+                    outcome: ClickAttemptOutcome::Uncertain,
+                });
+            }
+        }
+    }
+
+    Err(ProviderError::Failed("all routes failed to dispatch".into()))
+}
+
+fn action_execution_route(route: InputDispatchRoute) -> ActionExecutionRoute {
+    match route {
+        InputDispatchRoute::TargetPid => ActionExecutionRoute::TargetPid,
+        InputDispatchRoute::Hid => ActionExecutionRoute::Hid,
+    }
+}
+
+fn action_execution_outcome(outcome: ClickAttemptOutcome) -> ActionExecutionOutcome {
+    match outcome {
+        ClickAttemptOutcome::Succeeded => ActionExecutionOutcome::Dispatched,
+        ClickAttemptOutcome::NoEffect => ActionExecutionOutcome::NoEffect,
+        ClickAttemptOutcome::Uncertain => ActionExecutionOutcome::Uncertain,
+        ClickAttemptOutcome::Failed => ActionExecutionOutcome::NoEffect,
+    }
+}
+
+fn action_execution_result(
+    kind: ActionExecutionKind,
+    route: InputDispatchRoute,
+    outcome: ClickAttemptOutcome,
+) -> ActionExecutionResult {
+    ActionExecutionResult {
+        kind,
+        route: action_execution_route(route),
+        outcome: action_execution_outcome(outcome),
+    }
+}
+
+fn click_effect_probe(
+    capture_dir: &Path,
+    pid: i32,
+    before: Option<WindowCaptureFingerprint>,
+    probe_point: Option<CGPoint>,
+) -> ProviderResult<ClickEffectProbeOutcome> {
+    let Some(before) = before else {
+        diagnostics::write(
+            "click_effect_probe",
+            serde_json::json!({
+                "pid": pid,
+                "outcome": "uncertain",
+                "reason": "missing_before_fingerprint",
+            }),
+        );
+        return Ok(ClickEffectProbeOutcome::Uncertain);
+    };
+    let timing = ClickEffectProbeTiming::DEFAULT;
+    let attempts_total = timing.attempt_count();
+
+    if timing.initial_delay_ms > 0 {
+        thread::sleep(Duration::from_millis(timing.initial_delay_ms));
+    }
+
+    let mut saw_remote_only_change = false;
+    for attempt_index in 0..attempts_total {
+        if attempt_index > 0 && timing.poll_interval_ms > 0 {
+            thread::sleep(Duration::from_millis(timing.poll_interval_ms));
+        }
+
+        let after = match capture_window_fingerprint(capture_dir, pid, probe_point) {
+            Ok(after) => after,
+            Err(error) => {
+                diagnostics::write(
+                    "click_effect_probe_capture_failed",
+                    serde_json::json!({
+                        "pid": pid,
+                        "attempt": attempt_index + 1,
+                        "attemptsTotal": attempts_total,
+                        "error": error.to_string(),
+                    }),
+                );
+                return Ok(ClickEffectProbeOutcome::Uncertain);
+            }
+        };
+
+        let (outcome, local_changed, full_changed) =
+            classify_click_effect_sample(before, after);
+        if matches!(outcome, ClickEffectProbeOutcome::Uncertain) {
+            saw_remote_only_change = true;
+        }
+
+        diagnostics::write(
+            "click_effect_probe_attempt",
+            serde_json::json!({
+                "pid": pid,
+                "attempt": attempt_index + 1,
+                "attemptsTotal": attempts_total,
+                "localHashAvailableBefore": before.local_hash.is_some(),
+                "localHashAvailableAfter": after.local_hash.is_some(),
+                "localChanged": local_changed,
+                "fullChanged": full_changed,
+                "outcome": match outcome {
+                    ClickEffectProbeOutcome::ObservedEffect => "observed_effect",
+                    ClickEffectProbeOutcome::NoEffect => "no_effect",
+                    ClickEffectProbeOutcome::Uncertain => "uncertain",
+                },
+            }),
+        );
+
+        if matches!(outcome, ClickEffectProbeOutcome::ObservedEffect) {
+            return Ok(outcome);
+        }
+    }
+
+    if saw_remote_only_change {
+        Ok(ClickEffectProbeOutcome::Uncertain)
+    } else {
+        Ok(ClickEffectProbeOutcome::NoEffect)
+    }
+}
+
+fn classify_click_effect_sample(
+    before: WindowCaptureFingerprint,
+    after: WindowCaptureFingerprint,
+) -> (ClickEffectProbeOutcome, Option<bool>, bool) {
+    let local_changed = before.local_hash.zip(after.local_hash).map(|(a, b)| a != b);
+    let full_changed = after.full_hash != before.full_hash;
+    let outcome = if local_changed == Some(true) {
+        ClickEffectProbeOutcome::ObservedEffect
+    } else if full_changed {
+        ClickEffectProbeOutcome::Uncertain
+    } else {
+        ClickEffectProbeOutcome::NoEffect
+    };
+    (outcome, local_changed, full_changed)
+}
+
+fn capture_window_fingerprint(
+    capture_dir: &Path,
+    pid: i32,
+    probe_point: Option<CGPoint>,
+) -> ProviderResult<WindowCaptureFingerprint> {
+    let (window_id, bounds) = frontmost_window_for_pid(pid)?;
+    let display = display_metadata_for_window_bounds(bounds);
+    let screen_bounds = bounds.unwrap_or_else(|| display_screen_bounds(&display));
+    let screenshot = capture_window(&capture_dir.to_path_buf(), window_id, screen_bounds)?;
+    window_capture_fingerprint_from_screenshot(&screenshot, probe_point)
+}
+
+fn window_capture_fingerprint_from_screenshot(
+    screenshot: &ScreenshotRef,
+    probe_point: Option<CGPoint>,
+) -> ProviderResult<WindowCaptureFingerprint> {
+    let rgba = ImageReader::open(&screenshot.handle)
+        .map_err(|e| ProviderError::Failed(format!("open capture for fingerprint: {e}")))?
+        .with_guessed_format()
+        .map_err(|e| ProviderError::Failed(format!("guess capture format for fingerprint: {e}")))?
+        .decode()
+        .map_err(|e| ProviderError::Failed(format!("decode capture for fingerprint: {e}")))?
+        .to_rgba8();
+
+    let _ = std::fs::remove_file(&screenshot.handle);
+
+    let full_hash = hash_rgba_image(&rgba);
+    let local_hash = probe_point.and_then(|point| {
+        local_probe_rect(screenshot, point).map(|(x, y, width, height)| {
+            let cropped = crop_imm(&rgba, x, y, width, height).to_image();
+            hash_rgba_image(&cropped)
+        })
+    });
+
+    Ok(WindowCaptureFingerprint {
+        full_hash,
+        local_hash,
+    })
+}
+
+fn hash_rgba_image(image: &image::RgbaImage) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(image.width().to_le_bytes());
+    hasher.update(image.height().to_le_bytes());
+    hasher.update(image.as_raw());
+    hasher.finalize().into()
+}
+
+fn local_probe_rect(
+    screenshot: &ScreenshotRef,
+    probe_point: CGPoint,
+) -> Option<(u32, u32, u32, u32)> {
+    if screenshot.width == 0
+        || screenshot.height == 0
+        || screenshot.screen_bounds.width <= 0.0
+        || screenshot.screen_bounds.height <= 0.0
+    {
+        return None;
+    }
+
+    let relative_x =
+        ((probe_point.x as f32 - screenshot.screen_bounds.x) / screenshot.screen_bounds.width)
+            .clamp(0.0, 1.0);
+    let relative_y =
+        ((probe_point.y as f32 - screenshot.screen_bounds.y) / screenshot.screen_bounds.height)
+            .clamp(0.0, 1.0);
+    let center_x = (relative_x * screenshot.width as f32).round() as i32;
+    let center_y = (relative_y * screenshot.height as f32).round() as i32;
+    let radius = CLICK_EFFECT_LOCAL_PROBE_RADIUS_PX as i32;
+
+    let left = (center_x - radius).clamp(0, screenshot.width as i32);
+    let top = (center_y - radius).clamp(0, screenshot.height as i32);
+    let right = (center_x + radius).clamp(0, screenshot.width as i32);
+    let bottom = (center_y + radius).clamp(0, screenshot.height as i32);
+
+    let width = u32::try_from(right.saturating_sub(left)).ok()?;
+    let height = u32::try_from(bottom.saturating_sub(top)).ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    Some((left as u32, top as u32, width, height))
+}
+
+fn click_probe_point(pid: i32, intent: ClickIntent<'_>) -> Option<CGPoint> {
+    match intent {
+        ClickIntent::Element(element_id) => ax_element_center(pid, element_id).ok().flatten(),
+        ClickIntent::Point(point) => Some(point),
+    }
+}
+
+fn resolved_click_point(pid: i32, intent: ClickIntent<'_>) -> ProviderResult<CGPoint> {
+    match intent {
+        ClickIntent::Element(element_id) => match ax_element_center(pid, element_id)? {
+            Some(point) => Ok(point),
+            None => Err(ProviderError::ElementNotFound(element_id.clone())),
+        },
+        ClickIntent::Point(point) => Ok(point),
     }
 }
 
 fn secondary_ax_element(
+    capture_dir: &Path,
     target: &AppTarget,
     pid: i32,
     element_id: &ElementId,
-) -> ProviderResult<()> {
-    let (fallback_route, fallback_reason) =
-        element_fallback_route(target, InputActionKind::MouseSecondaryClick);
+    route_hint: ClickDispatchRoute,
+) -> ProviderResult<ActionExecutionResult> {
+    let (attempt_ax, fallback_routes) = mouse_route_plan_for_element(route_hint);
     crate::computer_use::diagnostics::write(
         "element_action_strategy",
         serde_json::json!({
@@ -1930,39 +2633,65 @@ fn secondary_ax_element(
             "elementId": element_id,
             "action": "secondary_click",
             "profile": "operation_based",
-            "usesAxAction": true,
-            "fallbackRoute": fallback_route,
-            "fallbackReason": fallback_reason,
+            "usesAxAction": attempt_ax,
+            "requestedDispatchRoute": route_hint,
+            "fallbackRoutes": fallback_routes,
         }),
     );
-    let action = perform_ax_action_for_id(pid, element_id, ax::SHOW_MENU_ACTION)?;
-    if action == ax::kAXErrorSuccess {
-        return Ok(());
+    if attempt_ax {
+        let action = perform_ax_action_for_id(pid, element_id, ax::SHOW_MENU_ACTION)?;
+        if action == ax::kAXErrorSuccess {
+            return Ok(ActionExecutionResult {
+                kind: ActionExecutionKind::SecondaryClick,
+                route: ActionExecutionRoute::Ax,
+                outcome: ActionExecutionOutcome::SemanticSuccess,
+            });
+        }
     }
-    match ax_element_center(pid, element_id)? {
-        Some(center) => secondary_click_at(
-            event_target_for_route(
-                target,
-                pid,
-                InputActionKind::MouseSecondaryClick,
-                fallback_route,
-                Some(fallback_reason),
-            ),
-            center,
-        ),
-        None => Err(ProviderError::ElementNotFound(element_id.clone())),
-    }
+    let center = ax_element_center(pid, element_id)?
+        .ok_or_else(|| ProviderError::ElementNotFound(element_id.clone()))?;
+    execute_routed_action_with_effect_probe(
+        capture_dir,
+        target,
+        pid,
+        InputActionKind::MouseSecondaryClick,
+        Some(center),
+        fallback_routes,
+        |route| {
+            secondary_click_at(
+                event_target_for_route(
+                    target,
+                    pid,
+                    InputActionKind::MouseSecondaryClick,
+                    route,
+                    Some(default_route_reason_for_action(
+                        InputActionKind::MouseSecondaryClick,
+                        route,
+                    )),
+                ),
+                center,
+            )
+        },
+    )
+    .map(|execution| {
+        action_execution_result(
+            ActionExecutionKind::SecondaryClick,
+            execution.route,
+            execution.outcome,
+        )
+    })
 }
 
 fn scroll_ax_element(
+    capture_dir: &Path,
     target: &AppTarget,
     pid: i32,
     element_id: &ElementId,
     direction: ScrollDirection,
     amount: i32,
-) -> ProviderResult<()> {
-    let (fallback_route, fallback_reason) =
-        element_fallback_route(target, InputActionKind::Scroll);
+    route_hint: ClickDispatchRoute,
+) -> ProviderResult<ActionExecutionResult> {
+    let (attempt_ax, fallback_routes) = mouse_route_plan_for_element(route_hint);
     crate::computer_use::diagnostics::write(
         "element_action_strategy",
         serde_json::json!({
@@ -1971,46 +2700,97 @@ fn scroll_ax_element(
             "elementId": element_id,
             "action": "scroll",
             "profile": "operation_based",
-            "usesAxAction": true,
-            "fallbackRoute": fallback_route,
-            "fallbackReason": fallback_reason,
+            "usesAxAction": attempt_ax,
+            "requestedDispatchRoute": route_hint,
+            "fallbackRoutes": fallback_routes,
         }),
     );
-    let action = match direction {
-        ScrollDirection::Up => ax::SCROLL_UP_ACTION,
-        ScrollDirection::Down => ax::SCROLL_DOWN_ACTION,
-        ScrollDirection::Left => ax::SCROLL_LEFT_ACTION,
-        ScrollDirection::Right => ax::SCROLL_RIGHT_ACTION,
-    };
-    let result = perform_ax_action_for_id(pid, element_id, action)?;
-    if result == ax::kAXErrorSuccess {
-        return Ok(());
+    if attempt_ax {
+        let action = match direction {
+            ScrollDirection::Up => ax::SCROLL_UP_ACTION,
+            ScrollDirection::Down => ax::SCROLL_DOWN_ACTION,
+            ScrollDirection::Left => ax::SCROLL_LEFT_ACTION,
+            ScrollDirection::Right => ax::SCROLL_RIGHT_ACTION,
+        };
+        let result = perform_ax_action_for_id(pid, element_id, action)?;
+        if result == ax::kAXErrorSuccess {
+            return Ok(ActionExecutionResult {
+                kind: ActionExecutionKind::Scroll,
+                route: ActionExecutionRoute::Ax,
+                outcome: ActionExecutionOutcome::SemanticSuccess,
+            });
+        }
+        let visible = perform_ax_action_for_id(pid, element_id, ax::SCROLL_TO_VISIBLE_ACTION)?;
+        if visible == ax::kAXErrorSuccess {
+            return Ok(ActionExecutionResult {
+                kind: ActionExecutionKind::Scroll,
+                route: ActionExecutionRoute::Ax,
+                outcome: ActionExecutionOutcome::SemanticSuccess,
+            });
+        }
     }
-    let visible = perform_ax_action_for_id(pid, element_id, ax::SCROLL_TO_VISIBLE_ACTION)?;
-    if visible == ax::kAXErrorSuccess {
-        return Ok(());
-    }
-    scroll_wheel(
-        event_target_for_route(
-            target,
-            pid,
-            InputActionKind::Scroll,
-            fallback_route,
-            Some(fallback_reason),
-        ),
-        direction,
-        amount,
+    execute_routed_action_with_effect_probe(
+        capture_dir,
+        target,
+        pid,
+        InputActionKind::Scroll,
+        None,
+        fallback_routes,
+        |route| {
+            scroll_wheel(
+                event_target_for_route(
+                    target,
+                    pid,
+                    InputActionKind::Scroll,
+                    route,
+                    Some(default_route_reason_for_action(
+                        InputActionKind::Scroll,
+                        route,
+                    )),
+                ),
+                direction,
+                amount,
+            )
+        },
     )
+    .map(|execution| {
+        action_execution_result(
+            ActionExecutionKind::Scroll,
+            execution.route,
+            execution.outcome,
+        )
+    })
 }
 
-fn set_ax_value_for_id(pid: i32, element_id: &ElementId, value: &str) -> ProviderResult<()> {
+fn set_ax_value_for_id(
+    pid: i32,
+    element_id: &ElementId,
+    value: &str,
+) -> ProviderResult<ActionExecutionResult> {
     let result = with_ax_element_by_id(pid, element_id, |element| {
-        Some(ax_set_string_value(element, value))
+        let set_result = ax_set_string_value(element, value);
+        let readback = ax_string_attr(element, ax::VALUE);
+        Some((set_result, readback))
     })?;
     match result {
-        ax::kAXErrorSuccess => Ok(()),
+        (ax::kAXErrorSuccess, Some(current)) if current == value => Ok(ActionExecutionResult {
+            kind: ActionExecutionKind::SetValue,
+            route: ActionExecutionRoute::Ax,
+            outcome: ActionExecutionOutcome::SemanticSuccess,
+        }),
+        (ax::kAXErrorSuccess, Some(_)) => Ok(ActionExecutionResult {
+            kind: ActionExecutionKind::SetValue,
+            route: ActionExecutionRoute::Ax,
+            outcome: ActionExecutionOutcome::NoEffect,
+        }),
+        (ax::kAXErrorSuccess, None) => Ok(ActionExecutionResult {
+            kind: ActionExecutionKind::SetValue,
+            route: ActionExecutionRoute::Ax,
+            outcome: ActionExecutionOutcome::Uncertain,
+        }),
         err => Err(ProviderError::Failed(format!(
-            "set AXValue failed for {element_id}: AXError {err}"
+            "set AXValue failed for {element_id}: AXError {}",
+            err.0
         ))),
     }
 }
@@ -2675,61 +3455,211 @@ mod tests {
     #[test]
     fn operation_based_routing_keeps_keyboard_on_pid() {
         assert_eq!(
-            dispatch_route_for_action(InputActionKind::KeyboardKey, false),
+            dispatch_route_for_action(InputActionKind::KeyboardKey),
             InputDispatchRoute::TargetPid
         );
         assert_eq!(
-            dispatch_route_for_action(InputActionKind::KeyboardText, true),
-            InputDispatchRoute::TargetPid
-        );
-    }
-
-    #[test]
-    fn operation_based_routing_keeps_native_mouse_actions_in_background() {
-        assert_eq!(
-            dispatch_route_for_action(InputActionKind::MouseClick, false),
-            InputDispatchRoute::TargetPid
-        );
-        assert_eq!(
-            dispatch_route_for_action(InputActionKind::MouseSecondaryClick, false),
-            InputDispatchRoute::TargetPid
-        );
-        assert_eq!(
-            dispatch_route_for_action(InputActionKind::MouseDoubleClick, false),
-            InputDispatchRoute::TargetPid
-        );
-        assert_eq!(
-            dispatch_route_for_action(InputActionKind::MouseDrag, false),
-            InputDispatchRoute::TargetPid
-        );
-        assert_eq!(
-            dispatch_route_for_action(InputActionKind::Scroll, false),
+            dispatch_route_for_action(InputActionKind::KeyboardText),
             InputDispatchRoute::TargetPid
         );
     }
 
     #[test]
-    fn operation_based_routing_escalates_web_runtime_mouse_actions_to_hid() {
+    fn operation_based_routing_keeps_mouse_actions_on_target_pid_by_default() {
         assert_eq!(
-            dispatch_route_for_action(InputActionKind::MouseClick, true),
-            InputDispatchRoute::Hid
+            dispatch_route_for_action(InputActionKind::MouseClick),
+            InputDispatchRoute::TargetPid
         );
         assert_eq!(
-            dispatch_route_for_action(InputActionKind::MouseSecondaryClick, true),
-            InputDispatchRoute::Hid
+            dispatch_route_for_action(InputActionKind::MouseSecondaryClick),
+            InputDispatchRoute::TargetPid
         );
         assert_eq!(
-            dispatch_route_for_action(InputActionKind::MouseDoubleClick, true),
-            InputDispatchRoute::Hid
+            dispatch_route_for_action(InputActionKind::MouseDoubleClick),
+            InputDispatchRoute::TargetPid
         );
         assert_eq!(
-            dispatch_route_for_action(InputActionKind::MouseDrag, true),
-            InputDispatchRoute::Hid
+            dispatch_route_for_action(InputActionKind::MouseDrag),
+            InputDispatchRoute::TargetPid
         );
         assert_eq!(
-            dispatch_route_for_action(InputActionKind::Scroll, true),
-            InputDispatchRoute::Hid
+            dispatch_route_for_action(InputActionKind::Scroll),
+            InputDispatchRoute::TargetPid
         );
+    }
+
+    #[test]
+    fn click_route_plan_prefers_ax_then_pid_then_hid_for_element_intent() {
+        let element_id = "el-1".to_string();
+        assert_eq!(
+            click_route_plan(ClickIntent::Element(&element_id), ClickDispatchRoute::Auto),
+            vec![
+                ClickRouteKind::Ax,
+                ClickRouteKind::TargetPid,
+                ClickRouteKind::Hid,
+            ]
+        );
+    }
+
+    #[test]
+    fn click_route_plan_uses_pid_then_hid_for_point_intent() {
+        assert_eq!(
+            click_route_plan(
+                ClickIntent::Point(CGPoint { x: 10.0, y: 20.0 }),
+                ClickDispatchRoute::Auto
+            ),
+            vec![ClickRouteKind::TargetPid, ClickRouteKind::Hid]
+        );
+    }
+
+    #[test]
+    fn click_route_plan_supports_explicit_dispatch_route() {
+        let element_id = "el-1".to_string();
+        assert_eq!(
+            click_route_plan(ClickIntent::Element(&element_id), ClickDispatchRoute::Ax),
+            vec![ClickRouteKind::Ax]
+        );
+        assert_eq!(
+            click_route_plan(ClickIntent::Element(&element_id), ClickDispatchRoute::Hid),
+            vec![ClickRouteKind::Hid]
+        );
+        assert_eq!(
+            click_route_plan(
+                ClickIntent::Point(CGPoint { x: 10.0, y: 20.0 }),
+                ClickDispatchRoute::TargetPid
+            ),
+            vec![ClickRouteKind::TargetPid]
+        );
+    }
+
+    #[test]
+    fn click_effect_sample_detects_local_change_as_observed_effect() {
+        let before = WindowCaptureFingerprint {
+            full_hash: [1; 32],
+            local_hash: Some([2; 32]),
+        };
+        let after = WindowCaptureFingerprint {
+            full_hash: [3; 32],
+            local_hash: Some([4; 32]),
+        };
+
+        let (outcome, local_changed, full_changed) = classify_click_effect_sample(before, after);
+        assert_eq!(outcome, ClickEffectProbeOutcome::ObservedEffect);
+        assert_eq!(local_changed, Some(true));
+        assert!(full_changed);
+    }
+
+    #[test]
+    fn click_effect_sample_treats_remote_only_change_as_uncertain() {
+        let before = WindowCaptureFingerprint {
+            full_hash: [1; 32],
+            local_hash: Some([2; 32]),
+        };
+        let after = WindowCaptureFingerprint {
+            full_hash: [3; 32],
+            local_hash: Some([2; 32]),
+        };
+
+        let (outcome, local_changed, full_changed) = classify_click_effect_sample(before, after);
+        assert_eq!(outcome, ClickEffectProbeOutcome::Uncertain);
+        assert_eq!(local_changed, Some(false));
+        assert!(full_changed);
+    }
+
+    #[test]
+    fn click_effect_sample_treats_no_change_as_no_effect() {
+        let before = WindowCaptureFingerprint {
+            full_hash: [1; 32],
+            local_hash: Some([2; 32]),
+        };
+        let after = before;
+
+        let (outcome, local_changed, full_changed) = classify_click_effect_sample(before, after);
+        assert_eq!(outcome, ClickEffectProbeOutcome::NoEffect);
+        assert_eq!(local_changed, Some(false));
+        assert!(!full_changed);
+    }
+
+    #[test]
+    fn click_execution_outcome_preserves_no_effect_signal() {
+        assert_eq!(
+            click_execution_outcome(ClickRouteKind::TargetPid, ClickAttemptOutcome::NoEffect),
+            ClickExecutionOutcome::NoEffect
+        );
+        assert_eq!(
+            click_execution_outcome(ClickRouteKind::TargetPid, ClickAttemptOutcome::Uncertain),
+            ClickExecutionOutcome::Uncertain
+        );
+    }
+
+    #[test]
+    fn fingerprint_capture_removes_temp_file_after_hashing() {
+        use image::{ImageBuffer, Rgba};
+
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-cu-fingerprint-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fingerprint.png");
+
+        let image = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(4, 4, Rgba([0, 0, 0, 255]));
+        image.save(&path).unwrap();
+
+        let screenshot = ScreenshotRef {
+            handle: path.to_string_lossy().into_owned(),
+            format: "png".into(),
+            byte_len: std::fs::metadata(&path).unwrap().len(),
+            width: 4,
+            height: 4,
+            default_coordinate_space: CoordinateSpace::Screenshot,
+            capture_kind: None,
+            screen_bounds: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 4.0,
+                height: 4.0,
+            },
+        };
+
+        let fingerprint =
+            window_capture_fingerprint_from_screenshot(&screenshot, Some(CGPoint { x: 2.0, y: 2.0 }))
+                .unwrap();
+
+        assert_ne!(fingerprint.full_hash, [0; 32]);
+        assert!(!Path::new(&screenshot.handle).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn click_effect_sample_treats_missing_local_probe_with_global_change_as_uncertain() {
+        let before = WindowCaptureFingerprint {
+            full_hash: [1; 32],
+            local_hash: None,
+        };
+        let after = WindowCaptureFingerprint {
+            full_hash: [9; 32],
+            local_hash: None,
+        };
+
+        let (outcome, local_changed, full_changed) = classify_click_effect_sample(before, after);
+        assert_eq!(outcome, ClickEffectProbeOutcome::Uncertain);
+        assert_eq!(local_changed, None);
+        assert!(full_changed);
+    }
+
+    #[test]
+    fn click_effect_sample_treats_missing_local_probe_without_global_change_as_no_effect() {
+        let before = WindowCaptureFingerprint {
+            full_hash: [7; 32],
+            local_hash: None,
+        };
+        let after = before;
+
+        let (outcome, local_changed, full_changed) = classify_click_effect_sample(before, after);
+        assert_eq!(outcome, ClickEffectProbeOutcome::NoEffect);
+        assert_eq!(local_changed, None);
+        assert!(!full_changed);
     }
 
     #[test]

@@ -159,6 +159,16 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         "enum": ["screenshot", "screen"],
         "default": "screenshot"
     });
+    let element_dispatch_route = json!({
+        "type": "string",
+        "enum": ["auto", "ax", "target_pid", "hid"],
+        "default": "auto"
+    });
+    let point_dispatch_route = json!({
+        "type": "string",
+        "enum": ["auto", "target_pid", "hid"],
+        "default": "auto"
+    });
     let point_action_arg = json!({
         "type": "object",
         "properties": {
@@ -166,7 +176,9 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             "x": { "type": "number" },
             "y": { "type": "number" },
             "coordSpace": coord_space.clone(),
-            "coord_space": coord_space.clone()
+            "coord_space": coord_space.clone(),
+            "dispatchRoute": point_dispatch_route.clone(),
+            "dispatch_route": point_dispatch_route.clone()
         },
         "required": ["snapshotId", "x", "y"],
         "additionalProperties": false
@@ -180,7 +192,9 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             "x": { "type": "number" },
             "y": { "type": "number" },
             "coordSpace": coord_space.clone(),
-            "coord_space": coord_space.clone()
+            "coord_space": coord_space.clone(),
+            "dispatchRoute": element_dispatch_route.clone(),
+            "dispatch_route": element_dispatch_route.clone()
         },
         "required": ["snapshotId"],
         "anyOf": [
@@ -199,7 +213,9 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             "toX": { "type": "number" },
             "toY": { "type": "number" },
             "coordSpace": coord_space.clone(),
-            "coord_space": coord_space.clone()
+            "coord_space": coord_space.clone(),
+            "dispatchRoute": point_dispatch_route.clone(),
+            "dispatch_route": point_dispatch_route.clone()
         },
         "required": ["snapshotId", "fromX", "fromY", "toX", "toY"],
         "additionalProperties": false
@@ -213,7 +229,9 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             "x": { "type": "number" },
             "y": { "type": "number" },
             "coordSpace": coord_space.clone(),
-            "coord_space": coord_space.clone()
+            "coord_space": coord_space.clone(),
+            "dispatchRoute": element_dispatch_route.clone(),
+            "dispatch_route": element_dispatch_route.clone()
         },
         "required": ["snapshotId"],
         "anyOf": [
@@ -266,42 +284,47 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "computer_click",
-            description: "Click using the most reliable target from the latest snapshot. Prefer elementId from the AX element tree; use x/y screenshot pixels only when no suitable AX element exists.",
+            description: "Click using the requested dispatchRoute from the latest snapshot. Default dispatchRoute is auto: element refs try AX before pid/hid; x/y screenshot pixels try pid before hid. Returns a post-action AppState plus lastClickResult { route, outcome } for provider-side click observation.",
             input_schema: click_arg.clone(),
         },
         ToolDefinition {
             name: "computer_click_element",
-            description: "Click an accessibility element from the latest snapshot. This is AX-first and avoids screenshot coordinate guessing.",
-            input_schema: snapshot_arg(json!({ "elementId": { "type": "string" } })),
+            description: "Click an accessibility element from the latest snapshot. dispatchRoute supports auto|ax|target_pid|hid; default auto tries AX first, then pid, then hid. Returns a post-action AppState plus lastClickResult { route, outcome }.",
+            input_schema: snapshot_arg(json!({
+                "elementId": { "type": "string" },
+                "ref": { "type": "string" },
+                "dispatchRoute": element_dispatch_route.clone(),
+                "dispatch_route": element_dispatch_route.clone()
+            })),
         },
         ToolDefinition {
             name: "computer_click_at",
-            description: "Fallback click by screenshot pixel from the latest snapshot. Prefer computer_click with elementId when an AX element is available.",
+            description: "Click by screenshot pixel from the latest snapshot. dispatchRoute supports auto|target_pid|hid; default auto tries target_pid first, then hid. Returns a post-action AppState plus lastClickResult { route, outcome }.",
             input_schema: point_action_arg.clone(),
         },
         ToolDefinition {
             name: "computer_secondary_click",
-            description: "Secondary/right click or open a context menu. Prefer elementId/ref so AXShowMenu can be used; x/y screenshot pixels are the fallback.",
+            description: "Secondary/right click or open a context menu. dispatchRoute supports auto|ax|target_pid|hid. Default auto uses AXShowMenu->target_pid->hid for element refs and target_pid->hid for coordinates. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
             input_schema: secondary_arg,
         },
         ToolDefinition {
             name: "computer_perform_secondary_action",
-            description: "Skill-compatible alias for computer_secondary_click. Prefer elementId/ref so AXShowMenu can be used; x/y screenshot pixels are the fallback.",
+            description: "Skill-compatible alias for computer_secondary_click. dispatchRoute supports auto|ax|target_pid|hid. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
             input_schema: click_arg.clone(),
         },
         ToolDefinition {
             name: "computer_double_click",
-            description: "Double click a point from the latest snapshot. Coordinates default to screenshot pixels.",
-            input_schema: point_action_arg,
+            description: "Double click a point from the latest snapshot. dispatchRoute supports auto|target_pid|hid; default auto tries target_pid first, then hid. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
+            input_schema: point_action_arg.clone(),
         },
         ToolDefinition {
             name: "computer_drag",
-            description: "Drag between two points from the latest snapshot. Coordinates default to screenshot pixels.",
+            description: "Drag between two points from the latest snapshot. dispatchRoute supports auto|target_pid|hid; default auto tries target_pid first, then hid. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
             input_schema: drag_arg,
         },
         ToolDefinition {
             name: "computer_set_value",
-            description: "Set an accessibility element's value directly from the latest snapshot.",
+            description: "Set an accessibility element's value directly from the latest snapshot. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
             input_schema: snapshot_arg(json!({
                 "elementId": { "type": "string" },
                 "ref": { "type": "string" },
@@ -320,12 +343,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "computer_scroll",
-            description: "Scroll the target in a direction by an amount against the latest snapshot.",
+            description: "Scroll the target in a direction by an amount against the latest snapshot. dispatchRoute supports auto|ax|target_pid|hid for element refs and auto|target_pid|hid otherwise. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
             input_schema: snapshot_arg(json!({
                 "elementId": { "type": "string" },
                 "ref": { "type": "string" },
                 "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
-                "amount": { "type": "integer" }
+                "amount": { "type": "integer" },
+                "dispatchRoute": element_dispatch_route.clone(),
+                "dispatch_route": element_dispatch_route.clone()
             })),
         },
         ToolDefinition {
@@ -541,6 +566,59 @@ mod tests {
         assert_eq!(result["content"][1]["type"], "image");
         assert_eq!(result["content"][1]["mimeType"], "image/png");
         assert_eq!(result["content"][1]["data"], "AQID");
+    }
+
+    #[test]
+    fn app_state_result_text_fallback_preserves_last_click_result() {
+        let result = tool_app_state_result(json!({
+            "snapshotId": "snap-1",
+            "lastClickResult": {
+                "route": "hid",
+                "outcome": "uncertain"
+            },
+            "screenshot": {
+                "handle": "/does/not/exist.png",
+                "format": "png"
+            }
+        }));
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"lastClickResult\""));
+        assert!(text.contains("\"route\":\"hid\""));
+        assert!(text.contains("\"outcome\":\"uncertain\""));
+        assert_eq!(result["structuredContent"]["lastClickResult"]["route"], "hid");
+        assert_eq!(
+            result["structuredContent"]["lastClickResult"]["outcome"],
+            "uncertain"
+        );
+    }
+
+    #[test]
+    fn app_state_result_text_fallback_preserves_last_action_result() {
+        let result = tool_app_state_result(json!({
+            "snapshotId": "snap-1",
+            "lastActionResult": {
+                "kind": "scroll",
+                "route": "ax",
+                "outcome": "semantic_success"
+            },
+            "screenshot": {
+                "handle": "/does/not/exist.png",
+                "format": "png"
+            }
+        }));
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"lastActionResult\""));
+        assert!(text.contains("\"kind\":\"scroll\""));
+        assert!(text.contains("\"route\":\"ax\""));
+        assert!(text.contains("\"outcome\":\"semantic_success\""));
+        assert_eq!(result["structuredContent"]["lastActionResult"]["kind"], "scroll");
+        assert_eq!(result["structuredContent"]["lastActionResult"]["route"], "ax");
+        assert_eq!(
+            result["structuredContent"]["lastActionResult"]["outcome"],
+            "semantic_success"
+        );
     }
 
     #[test]

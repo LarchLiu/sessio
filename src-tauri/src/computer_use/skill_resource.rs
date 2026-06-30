@@ -38,6 +38,8 @@ pub fn computer_use_prompt_block() -> String {
 {note}
 When driving native macOS apps, prefer the injected `computer_*` tools over shell scripts.
 Start with `computer_get_app_state`; use AX refs (`ref`/`elementId`) before screenshot coordinates.
+For primary clicks, inspect the returned post-action screenshot first and use `lastClickResult` only as a hint: `semantic_success` / `observed_effect` are strong positives, `uncertain` means stop and inspect, and `no_effect` is the only immediate-retry signal. When retrying after `no_effect`, prefer the next explicit `dispatchRoute` in order instead of repeating `auto` blindly.
+Secondary click, double click, drag, and scroll also accept `dispatchRoute`; leave them on `auto` unless you intentionally want to force the next lower-level route after inspecting the updated screenshot. Those non-primary actions surface `lastActionResult {{ kind, route, outcome }}` in the returned AppState; use it as a hint, but still judge success from the updated screenshot first.
 Never write or run raw Swift/CoreGraphics/CGEvent, cliclick, AppleScript mouse, or other direct input scripts. They bypass Sessio approvals, snapshot coordinate mapping, post-action screenshots, and the pointer overlay. If `computer_*` tools are unavailable, use `sessio cu` only.
 If the target has no visible window or is Dock-minimized, call `computer_raise_app` for that bundle, then retry `computer_get_app_state`. Do not use `open -a`, AppleScript `activate`/`frontmost`, or Window-menu clicks for this recovery path; those can report success without restoring the window.
 <!-- sessio-computer-use:end nonce="{nonce}" -->"#

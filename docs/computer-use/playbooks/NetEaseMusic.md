@@ -11,6 +11,10 @@ or empty AX tree, so the screenshot is the primary source of truth.
 - Expect `elements` to be empty or incomplete. This is normal for this app.
 - Use screenshot-space coordinates from the returned image for clicks, right
   clicks, and drags.
+- After a primary click, inspect both the new screenshot and
+  `lastClickResult`. `observed_effect` is a strong success hint; `uncertain`
+  means the click dispatched but only remote or ambiguous change was observed,
+  so re-check the new UI before clicking again.
 - Re-snapshot after every navigation or playback state change because the layout
   can shift.
 
@@ -31,5 +35,9 @@ or empty AX tree, so the screenshot is the primary source of truth.
 - Do not wait for reliable AX refs. Treat the screenshot as authoritative.
 - Retina and downsampled screenshots make raw screen points risky. Use the
   default screenshot coordinate space.
-- Some custom controls may ignore synthetic events. If a pixel action appears to
-  do nothing, re-snapshot before retrying at a slightly different visual anchor.
+- Some custom controls may ignore synthetic events. If a pixel action returns
+  `lastClickResult.outcome: "no_effect"` or the screenshot still looks wrong,
+  re-snapshot before retrying at a slightly different visual anchor.
+- Do not immediately retry on `lastClickResult.outcome: "uncertain"`. In
+  NetEase Music, view changes often happen away from the clicked control, so the
+  safer move is to inspect the fresh screenshot first.

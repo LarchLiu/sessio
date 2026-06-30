@@ -14,7 +14,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::computer_use::provider::{
-    AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ComputerUseProvider,
+    ActionExecutionKind, ActionExecutionOutcome, ActionExecutionResult, ActionExecutionRoute,
+    AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ClickExecutionOutcome,
+    ClickDispatchRoute, ClickExecutionResult, ClickExecutionRoute, ComputerUseProvider,
     CoordinateSpace, DisplayMetadata, ElementId, InstalledApp, Point, ProviderError,
     ProviderResult, RawAppState, Rect, ScreenshotCaptureKind, ScreenshotRef, ScrollDirection,
     UiElement,
@@ -136,38 +138,88 @@ impl ComputerUseProvider for WindowsProvider {
         })
     }
 
-    fn click_element(&self, target: &AppTarget, element: &ElementId) -> ProviderResult<()> {
+    fn click_element(
+        &self,
+        target: &AppTarget,
+        element: &ElementId,
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ClickExecutionResult> {
         let window = prepare_target_for_control(target)?;
         let entry = uia_entry_for_id(window.hwnd, element)?;
-        invoke_uia_element(&entry.element)
+        invoke_uia_element(&entry.element)?;
+        Ok(ClickExecutionResult {
+            route: ClickExecutionRoute::Uia,
+            outcome: ClickExecutionOutcome::SemanticSuccess,
+        })
     }
 
-    fn click_point(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+    fn click_point(
+        &self,
+        target: &AppTarget,
+        point: Point,
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ClickExecutionResult> {
         let _ = prepare_target_for_control(target)?;
-        left_click_at(point)
+        left_click_at(point)?;
+        Ok(ClickExecutionResult {
+            route: ClickExecutionRoute::Native,
+            outcome: ClickExecutionOutcome::ObservedEffect,
+        })
     }
 
-    fn secondary_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+    fn secondary_click(
+        &self,
+        target: &AppTarget,
+        point: Point,
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         let _ = prepare_target_for_control(target)?;
-        right_click_at(point)
+        right_click_at(point)?;
+        Ok(ActionExecutionResult {
+            kind: ActionExecutionKind::SecondaryClick,
+            route: ActionExecutionRoute::Native,
+            outcome: ActionExecutionOutcome::Dispatched,
+        })
     }
 
     fn secondary_click_element(
         &self,
         _target: &AppTarget,
         _element: &ElementId,
-    ) -> ProviderResult<()> {
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         Err(ProviderError::Unsupported("secondary_click_element"))
     }
 
-    fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
+    fn double_click(
+        &self,
+        target: &AppTarget,
+        point: Point,
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         let _ = prepare_target_for_control(target)?;
-        double_click_at(point)
+        double_click_at(point)?;
+        Ok(ActionExecutionResult {
+            kind: ActionExecutionKind::DoubleClick,
+            route: ActionExecutionRoute::Native,
+            outcome: ActionExecutionOutcome::Dispatched,
+        })
     }
 
-    fn drag(&self, target: &AppTarget, from: Point, to: Point) -> ProviderResult<()> {
+    fn drag(
+        &self,
+        target: &AppTarget,
+        from: Point,
+        to: Point,
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         let _ = prepare_target_for_control(target)?;
-        drag_between(from, to)
+        drag_between(from, to)?;
+        Ok(ActionExecutionResult {
+            kind: ActionExecutionKind::Drag,
+            route: ActionExecutionRoute::Native,
+            outcome: ActionExecutionOutcome::Dispatched,
+        })
     }
 
     fn set_value(
@@ -175,7 +227,7 @@ impl ComputerUseProvider for WindowsProvider {
         target: &AppTarget,
         element: &ElementId,
         value: &str,
-    ) -> ProviderResult<()> {
+    ) -> ProviderResult<ActionExecutionResult> {
         let window = prepare_target_for_control(target)?;
         let entry = uia_entry_for_id(window.hwnd, element)?;
         set_uia_value(&entry.element, value)
@@ -196,9 +248,15 @@ impl ComputerUseProvider for WindowsProvider {
         target: &AppTarget,
         direction: ScrollDirection,
         amount: i32,
-    ) -> ProviderResult<()> {
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         let _ = prepare_target_for_control(target)?;
-        scroll_wheel(direction, amount)
+        scroll_wheel(direction, amount)?;
+        Ok(ActionExecutionResult {
+            kind: ActionExecutionKind::Scroll,
+            route: ActionExecutionRoute::Native,
+            outcome: ActionExecutionOutcome::Dispatched,
+        })
     }
 
     fn scroll_element(
@@ -207,10 +265,16 @@ impl ComputerUseProvider for WindowsProvider {
         element: &ElementId,
         _direction: ScrollDirection,
         _amount: i32,
-    ) -> ProviderResult<()> {
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         let window = prepare_target_for_control(target)?;
         let entry = uia_entry_for_id(window.hwnd, element)?;
-        scroll_uia_element_into_view(&entry.element)
+        scroll_uia_element_into_view(&entry.element)?;
+        Ok(ActionExecutionResult {
+            kind: ActionExecutionKind::Scroll,
+            route: ActionExecutionRoute::Uia,
+            outcome: ActionExecutionOutcome::SemanticSuccess,
+        })
     }
 }
 
@@ -1192,14 +1256,35 @@ fn invoke_uia_element(element: &IUIAutomationElement) -> ProviderResult<()> {
     Err(ProviderError::Unsupported("click_element"))
 }
 
-fn set_uia_value(element: &IUIAutomationElement, value: &str) -> ProviderResult<()> {
+fn set_uia_value(
+    element: &IUIAutomationElement,
+    value: &str,
+) -> ProviderResult<ActionExecutionResult> {
     unsafe {
         let pattern = element
             .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
             .map_err(|_| ProviderError::Unsupported("set_value"))?;
         pattern
             .SetValue(&BSTR::from(value))
-            .map_err(|e| ProviderError::Failed(format!("UIA ValuePattern failed: {e}")))
+            .map_err(|e| ProviderError::Failed(format!("UIA ValuePattern failed: {e}")))?;
+
+        match pattern.CurrentValue() {
+            Ok(current) if current.to_string() == value => Ok(ActionExecutionResult {
+                kind: ActionExecutionKind::SetValue,
+                route: ActionExecutionRoute::Uia,
+                outcome: ActionExecutionOutcome::SemanticSuccess,
+            }),
+            Ok(_) => Ok(ActionExecutionResult {
+                kind: ActionExecutionKind::SetValue,
+                route: ActionExecutionRoute::Uia,
+                outcome: ActionExecutionOutcome::NoEffect,
+            }),
+            Err(_) => Ok(ActionExecutionResult {
+                kind: ActionExecutionKind::SetValue,
+                route: ActionExecutionRoute::Uia,
+                outcome: ActionExecutionOutcome::Uncertain,
+            }),
+        }
     }
 }
 

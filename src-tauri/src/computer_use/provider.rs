@@ -263,7 +263,98 @@ pub struct AppState {
     pub display: DisplayMetadata,
     pub screenshot: ScreenshotRef,
     pub elements: Vec<UiElement>,
+    /// Best-effort provider-side observation for the click that produced this
+    /// state, when the preceding action was a primary click.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_click_result: Option<ClickExecutionResult>,
+    /// Best-effort provider-side execution summary for the action that
+    /// produced this state, when the host/provider currently surfaces one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_action_result: Option<ActionExecutionResult>,
     pub allowed_actions: Vec<AllowedAction>,
+}
+
+/// Agent-requested primary-click dispatch hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClickDispatchRoute {
+    Auto,
+    Ax,
+    TargetPid,
+    Hid,
+}
+
+/// Provider-reported primary-click dispatch channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClickExecutionRoute {
+    Ax,
+    TargetPid,
+    Hid,
+    Uia,
+    Native,
+}
+
+/// Provider-reported primary-click observation outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClickExecutionOutcome {
+    SemanticSuccess,
+    ObservedEffect,
+    NoEffect,
+    Uncertain,
+}
+
+/// Provider-side execution summary for a primary click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClickExecutionResult {
+    pub route: ClickExecutionRoute,
+    pub outcome: ClickExecutionOutcome,
+}
+
+/// Provider-reported non-click action category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionExecutionKind {
+    RaiseApp,
+    SecondaryClick,
+    DoubleClick,
+    Drag,
+    Scroll,
+    SetValue,
+    TypeText,
+    PressKey,
+}
+
+/// Provider-reported non-click action dispatch channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionExecutionRoute {
+    Ax,
+    TargetPid,
+    Hid,
+    Uia,
+    Native,
+}
+
+/// Provider-reported generic action outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionExecutionOutcome {
+    SemanticSuccess,
+    Dispatched,
+    NoEffect,
+    Uncertain,
+}
+
+/// Provider-side execution summary for a non-click action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionExecutionResult {
+    pub kind: ActionExecutionKind,
+    pub route: ActionExecutionRoute,
+    pub outcome: ActionExecutionOutcome,
 }
 
 /// Scroll direction for [`ComputerUseProvider::scroll`].
@@ -310,24 +401,51 @@ pub trait ComputerUseProvider: Send + Sync {
     /// Capture a fresh screenshot + AX element tree for the target.
     fn capture_app_state(&self, target: &AppTarget) -> ProviderResult<RawAppState>;
 
-    fn click_element(&self, target: &AppTarget, element: &ElementId) -> ProviderResult<()>;
+    fn click_element(
+        &self,
+        target: &AppTarget,
+        element: &ElementId,
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ClickExecutionResult>;
     /// Click a screen-space point resolved by the host from snapshot metadata.
-    fn click_point(&self, target: &AppTarget, point: Point) -> ProviderResult<()>;
+    fn click_point(
+        &self,
+        target: &AppTarget,
+        point: Point,
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ClickExecutionResult>;
     /// Secondary/right click a screen-space point.
-    fn secondary_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()>;
+    fn secondary_click(
+        &self,
+        target: &AppTarget,
+        point: Point,
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult>;
     /// Open an element's secondary/context action when AX exposes one.
     fn secondary_click_element(
         &self,
         target: &AppTarget,
         element: &ElementId,
-    ) -> ProviderResult<()>;
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult>;
     /// Double click a screen-space point.
-    fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()>;
+    fn double_click(
+        &self,
+        target: &AppTarget,
+        point: Point,
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult>;
     /// Drag between two screen-space points.
-    fn drag(&self, target: &AppTarget, from: Point, to: Point) -> ProviderResult<()>;
+    fn drag(
+        &self,
+        target: &AppTarget,
+        from: Point,
+        to: Point,
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult>;
     /// Set an accessibility element's value directly.
     fn set_value(&self, target: &AppTarget, element: &ElementId, value: &str)
-        -> ProviderResult<()>;
+        -> ProviderResult<ActionExecutionResult>;
     fn type_text(&self, target: &AppTarget, text: &str) -> ProviderResult<()>;
     fn press_key(&self, target: &AppTarget, key: &str) -> ProviderResult<()>;
     fn scroll(
@@ -335,7 +453,8 @@ pub trait ComputerUseProvider: Send + Sync {
         target: &AppTarget,
         direction: ScrollDirection,
         amount: i32,
-    ) -> ProviderResult<()>;
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult>;
     /// Scroll an accessibility element when AX exposes a scroll action.
     fn scroll_element(
         &self,
@@ -343,7 +462,8 @@ pub trait ComputerUseProvider: Send + Sync {
         element: &ElementId,
         direction: ScrollDirection,
         amount: i32,
-    ) -> ProviderResult<()>;
+        route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult>;
 }
 
 #[cfg(test)]
@@ -516,67 +636,159 @@ mod fake {
             })
         }
 
-        fn click_element(&self, target: &AppTarget, element: &ElementId) -> ProviderResult<()> {
+        fn click_element(
+            &self,
+            target: &AppTarget,
+            element: &ElementId,
+            route_hint: ClickDispatchRoute,
+        ) -> ProviderResult<ClickExecutionResult> {
             if !self.elements.iter().any(|e| &e.id == element) {
                 return Err(ProviderError::ElementNotFound(element.clone()));
             }
-            self.record(format!("click:{}:{}", target.app_id, element));
-            Ok(())
-        }
-        fn click_point(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
-            self.record(format!("click_at:{}:{}", target.app_id, point_label(point)));
-            Ok(())
-        }
-        fn secondary_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
             self.record(format!(
-                "secondary_click:{}:{}",
+                "click:{}:{}:{route_hint:?}",
+                target.app_id, element
+            ));
+            Ok(ClickExecutionResult {
+                route: ClickExecutionRoute::Ax,
+                outcome: ClickExecutionOutcome::SemanticSuccess,
+            })
+        }
+        fn click_point(
+            &self,
+            target: &AppTarget,
+            point: Point,
+            route_hint: ClickDispatchRoute,
+        ) -> ProviderResult<ClickExecutionResult> {
+            self.record(format!(
+                "click_at:{}:{}:{route_hint:?}",
                 target.app_id,
                 point_label(point)
             ));
-            Ok(())
+            Ok(ClickExecutionResult {
+                route: ClickExecutionRoute::Native,
+                outcome: ClickExecutionOutcome::ObservedEffect,
+            })
+        }
+        fn secondary_click(
+            &self,
+            target: &AppTarget,
+            point: Point,
+            route_hint: ClickDispatchRoute,
+        ) -> ProviderResult<ActionExecutionResult> {
+            if matches!(route_hint, ClickDispatchRoute::Auto) {
+                self.record(format!(
+                    "secondary_click:{}:{}",
+                    target.app_id,
+                    point_label(point)
+                ));
+            } else {
+                self.record(format!(
+                    "secondary_click:{}:{}:{route_hint:?}",
+                    target.app_id,
+                    point_label(point)
+                ));
+            }
+            Ok(ActionExecutionResult {
+                kind: ActionExecutionKind::SecondaryClick,
+                route: ActionExecutionRoute::TargetPid,
+                outcome: ActionExecutionOutcome::Dispatched,
+            })
         }
         fn secondary_click_element(
             &self,
             target: &AppTarget,
             element: &ElementId,
-        ) -> ProviderResult<()> {
+            route_hint: ClickDispatchRoute,
+        ) -> ProviderResult<ActionExecutionResult> {
             if !self.elements.iter().any(|e| &e.id == element) {
                 return Err(ProviderError::ElementNotFound(element.clone()));
             }
-            self.record(format!(
-                "secondary_click_element:{}:{}",
-                target.app_id, element
-            ));
-            Ok(())
+            if matches!(route_hint, ClickDispatchRoute::Auto) {
+                self.record(format!(
+                    "secondary_click_element:{}:{}",
+                    target.app_id, element
+                ));
+            } else {
+                self.record(format!(
+                    "secondary_click_element:{}:{}:{route_hint:?}",
+                    target.app_id, element
+                ));
+            }
+            Ok(ActionExecutionResult {
+                kind: ActionExecutionKind::SecondaryClick,
+                route: ActionExecutionRoute::Ax,
+                outcome: ActionExecutionOutcome::SemanticSuccess,
+            })
         }
-        fn double_click(&self, target: &AppTarget, point: Point) -> ProviderResult<()> {
-            self.record(format!(
-                "double_click:{}:{}",
-                target.app_id,
-                point_label(point)
-            ));
-            Ok(())
+        fn double_click(
+            &self,
+            target: &AppTarget,
+            point: Point,
+            route_hint: ClickDispatchRoute,
+        ) -> ProviderResult<ActionExecutionResult> {
+            if matches!(route_hint, ClickDispatchRoute::Auto) {
+                self.record(format!(
+                    "double_click:{}:{}",
+                    target.app_id,
+                    point_label(point)
+                ));
+            } else {
+                self.record(format!(
+                    "double_click:{}:{}:{route_hint:?}",
+                    target.app_id,
+                    point_label(point)
+                ));
+            }
+            Ok(ActionExecutionResult {
+                kind: ActionExecutionKind::DoubleClick,
+                route: ActionExecutionRoute::TargetPid,
+                outcome: ActionExecutionOutcome::Dispatched,
+            })
         }
-        fn drag(&self, target: &AppTarget, from: Point, to: Point) -> ProviderResult<()> {
-            self.record(format!(
-                "drag:{}:{}->{}",
-                target.app_id,
-                point_label(from),
-                point_label(to)
-            ));
-            Ok(())
+        fn drag(
+            &self,
+            target: &AppTarget,
+            from: Point,
+            to: Point,
+            route_hint: ClickDispatchRoute,
+        ) -> ProviderResult<ActionExecutionResult> {
+            if matches!(route_hint, ClickDispatchRoute::Auto) {
+                self.record(format!(
+                    "drag:{}:{}->{}",
+                    target.app_id,
+                    point_label(from),
+                    point_label(to)
+                ));
+            } else {
+                self.record(format!(
+                    "drag:{}:{}->{}:{route_hint:?}",
+                    target.app_id,
+                    point_label(from),
+                    point_label(to)
+                ));
+            }
+            Ok(ActionExecutionResult {
+                kind: ActionExecutionKind::Drag,
+                route: ActionExecutionRoute::TargetPid,
+                outcome: ActionExecutionOutcome::Dispatched,
+            })
         }
         fn set_value(
             &self,
             target: &AppTarget,
             element: &ElementId,
             value: &str,
-        ) -> ProviderResult<()> {
+        ) -> ProviderResult<ActionExecutionResult> {
             if !self.elements.iter().any(|e| &e.id == element) {
                 return Err(ProviderError::ElementNotFound(element.clone()));
             }
             self.record(format!("set_value:{}:{}:{}", target.app_id, element, value));
-            Ok(())
+            Ok(ActionExecutionResult {
+                kind: ActionExecutionKind::SetValue,
+                route: ActionExecutionRoute::Ax,
+                outcome: ActionExecutionOutcome::SemanticSuccess,
+            })
         }
         fn type_text(&self, target: &AppTarget, text: &str) -> ProviderResult<()> {
             self.record(format!("type:{}:{}", target.app_id, text));
@@ -591,12 +803,24 @@ mod fake {
             target: &AppTarget,
             direction: ScrollDirection,
             amount: i32,
-        ) -> ProviderResult<()> {
-            self.record(format!(
-                "scroll:{}:{:?}:{}",
-                target.app_id, direction, amount
-            ));
-            Ok(())
+            route_hint: ClickDispatchRoute,
+        ) -> ProviderResult<ActionExecutionResult> {
+            if matches!(route_hint, ClickDispatchRoute::Auto) {
+                self.record(format!(
+                    "scroll:{}:{:?}:{}",
+                    target.app_id, direction, amount
+                ));
+            } else {
+                self.record(format!(
+                    "scroll:{}:{:?}:{}:{route_hint:?}",
+                    target.app_id, direction, amount
+                ));
+            }
+            Ok(ActionExecutionResult {
+                kind: ActionExecutionKind::Scroll,
+                route: ActionExecutionRoute::TargetPid,
+                outcome: ActionExecutionOutcome::Dispatched,
+            })
         }
         fn scroll_element(
             &self,
@@ -604,15 +828,27 @@ mod fake {
             element: &ElementId,
             direction: ScrollDirection,
             amount: i32,
-        ) -> ProviderResult<()> {
+            route_hint: ClickDispatchRoute,
+        ) -> ProviderResult<ActionExecutionResult> {
             if !self.elements.iter().any(|e| &e.id == element) {
                 return Err(ProviderError::ElementNotFound(element.clone()));
             }
-            self.record(format!(
-                "scroll_element:{}:{}:{:?}:{}",
-                target.app_id, element, direction, amount
-            ));
-            Ok(())
+            if matches!(route_hint, ClickDispatchRoute::Auto) {
+                self.record(format!(
+                    "scroll_element:{}:{}:{:?}:{}",
+                    target.app_id, element, direction, amount
+                ));
+            } else {
+                self.record(format!(
+                    "scroll_element:{}:{}:{:?}:{}:{route_hint:?}",
+                    target.app_id, element, direction, amount
+                ));
+            }
+            Ok(ActionExecutionResult {
+                kind: ActionExecutionKind::Scroll,
+                route: ActionExecutionRoute::Ax,
+                outcome: ActionExecutionOutcome::SemanticSuccess,
+            })
         }
     }
 }

@@ -22,16 +22,24 @@ pub fn write(event: &str, payload: Value) {
 }
 
 pub fn diagnostics_log_path() -> Result<PathBuf> {
+    diagnostics_log_path_for_session(None)
+}
+
+pub fn diagnostics_log_path_for_session(session_id: Option<&str>) -> Result<PathBuf> {
     let dir = if cfg!(test) {
         std::env::temp_dir().join(TEST_DIAGNOSTICS_DIR)
     } else {
         crate::app_paths::app_home()?.join(COMPUTER_USE_DIR)
     };
-    Ok(dir.join(DIAGNOSTICS_LOG_FILE))
+    Ok(dir.join(diagnostics_log_file_name(session_id)))
 }
 
 fn write_inner(event: &str, payload: Value) -> Result<()> {
-    let path = diagnostics_log_path()?;
+    let session_id = payload
+        .as_object()
+        .and_then(|map| map.get("sessionId"))
+        .and_then(Value::as_str);
+    let path = diagnostics_log_path_for_session(session_id)?;
     let parent = path
         .parent()
         .with_context(|| format!("{} has no parent", path.display()))?;
@@ -78,4 +86,42 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
             .with_context(|| format!("chmod {}", path.display()))?;
     }
     Ok(())
+}
+
+fn diagnostics_log_file_name(session_id: Option<&str>) -> String {
+    match session_id {
+        Some(session_id) if !session_id.is_empty() => {
+            format!("session-{}.log", sanitize_session_id(session_id))
+        }
+        _ => DIAGNOSTICS_LOG_FILE.to_string(),
+    }
+}
+
+fn sanitize_session_id(session_id: &str) -> String {
+    let sanitized: String = session_id
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            _ => '_',
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostics_log_path_uses_session_specific_file_names() {
+        let path = diagnostics_log_path_for_session(Some("sess:1/2")).unwrap();
+        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("session-sess_1_2.log"));
+
+        let fallback = diagnostics_log_path_for_session(None).unwrap();
+        assert_eq!(fallback.file_name().and_then(|name| name.to_str()), Some("diagnostics.log"));
+    }
 }

@@ -5,8 +5,9 @@
 //! cleanly (observation-only or fully disabled) rather than failing to build.
 
 use crate::computer_use::provider::{
-    AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ComputerUseProvider,
-    ElementId, InstalledApp, Point, ProviderError, ProviderResult, RawAppState, ScrollDirection,
+    ActionExecutionResult, AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget,
+    ClickDispatchRoute, ClickExecutionResult, ComputerUseProvider, ElementId, InstalledApp,
+    Point, ProviderError, ProviderResult, RawAppState, ScrollDirection,
 };
 
 pub struct UnsupportedProvider;
@@ -48,15 +49,30 @@ impl ComputerUseProvider for UnsupportedProvider {
         Err(ProviderError::Unsupported("capture_app_state"))
     }
 
-    fn click_element(&self, _target: &AppTarget, _element: &ElementId) -> ProviderResult<()> {
+    fn click_element(
+        &self,
+        _target: &AppTarget,
+        _element: &ElementId,
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ClickExecutionResult> {
         Err(ProviderError::Unsupported("click_element"))
     }
 
-    fn click_point(&self, _target: &AppTarget, _point: Point) -> ProviderResult<()> {
+    fn click_point(
+        &self,
+        _target: &AppTarget,
+        _point: Point,
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ClickExecutionResult> {
         Err(ProviderError::Unsupported("click_point"))
     }
 
-    fn secondary_click(&self, _target: &AppTarget, _point: Point) -> ProviderResult<()> {
+    fn secondary_click(
+        &self,
+        _target: &AppTarget,
+        _point: Point,
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         Err(ProviderError::Unsupported("secondary_click"))
     }
 
@@ -64,15 +80,27 @@ impl ComputerUseProvider for UnsupportedProvider {
         &self,
         _target: &AppTarget,
         _element: &ElementId,
-    ) -> ProviderResult<()> {
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         Err(ProviderError::Unsupported("secondary_click_element"))
     }
 
-    fn double_click(&self, _target: &AppTarget, _point: Point) -> ProviderResult<()> {
+    fn double_click(
+        &self,
+        _target: &AppTarget,
+        _point: Point,
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         Err(ProviderError::Unsupported("double_click"))
     }
 
-    fn drag(&self, _target: &AppTarget, _from: Point, _to: Point) -> ProviderResult<()> {
+    fn drag(
+        &self,
+        _target: &AppTarget,
+        _from: Point,
+        _to: Point,
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         Err(ProviderError::Unsupported("drag"))
     }
 
@@ -81,7 +109,7 @@ impl ComputerUseProvider for UnsupportedProvider {
         _target: &AppTarget,
         _element: &ElementId,
         _value: &str,
-    ) -> ProviderResult<()> {
+    ) -> ProviderResult<ActionExecutionResult> {
         Err(ProviderError::Unsupported("set_value"))
     }
 
@@ -98,7 +126,8 @@ impl ComputerUseProvider for UnsupportedProvider {
         _target: &AppTarget,
         _direction: ScrollDirection,
         _amount: i32,
-    ) -> ProviderResult<()> {
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         Err(ProviderError::Unsupported("scroll"))
     }
 
@@ -108,7 +137,8 @@ impl ComputerUseProvider for UnsupportedProvider {
         _element: &ElementId,
         _direction: ScrollDirection,
         _amount: i32,
-    ) -> ProviderResult<()> {
+        _route_hint: ClickDispatchRoute,
+    ) -> ProviderResult<ActionExecutionResult> {
         Err(ProviderError::Unsupported("scroll_element"))
     }
 }
