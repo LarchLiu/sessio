@@ -27,6 +27,14 @@ pub fn clean_history_user_preview_text(text: &str) -> Option<String> {
     }
 }
 
+pub fn clean_history_preview_candidate_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || starts_with_truncated_hidden_prompt_block(trimmed) {
+        return None;
+    }
+    clean_history_user_preview_text(trimmed)
+}
+
 pub fn file_name_from_uri(uri: &str) -> Option<String> {
     let raw = uri.strip_prefix("file://").unwrap_or(uri);
     let decoded = percent_decode(raw);
@@ -251,6 +259,22 @@ fn collapse_blank_lines(text: &str) -> String {
         .replace("\n\n\n", "\n\n")
 }
 
+fn starts_with_truncated_hidden_prompt_block(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    [
+        (
+            "<!-- sessio-computer-use:start",
+            "<!-- sessio-computer-use:end",
+        ),
+        (
+            "<!-- sessio-thread-prompt:start",
+            "<!-- sessio-thread-prompt:end",
+        ),
+    ]
+    .into_iter()
+    .any(|(start, end)| trimmed.starts_with(start) && !trimmed.contains(end))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +317,25 @@ mod tests {
         assert!(cleaned.contains("sessio-cross-context"), "{cleaned}");
         assert!(cleaned.contains("carry"));
         assert!(cleaned.contains("over"));
+    }
+
+    #[test]
+    fn preview_candidate_drops_truncated_hidden_prompt_block() {
+        let input = "<!-- sessio-computer-use:start nonce=\"abc...";
+        assert_eq!(clean_history_preview_candidate_text(input), None);
+    }
+
+    #[test]
+    fn preview_candidate_keeps_cleaned_user_text_after_hidden_prompt_block() {
+        let input = concat!(
+            "<!-- sessio-computer-use:start nonce=\"abc\" kind=\"computer_use\" -->\n",
+            "Use injected computer tools.\n",
+            "<!-- sessio-computer-use:end nonce=\"abc\" -->\n\n",
+            "使用网易云音乐打开私人雷达然后播放"
+        );
+        assert_eq!(
+            clean_history_preview_candidate_text(input).as_deref(),
+            Some("使用网易云音乐打开私人雷达然后播放")
+        );
     }
 }

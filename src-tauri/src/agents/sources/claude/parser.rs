@@ -5,7 +5,9 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::agents::runtime::types::AcpProtocolMessage;
-use crate::agents::sources::shared::attachment_text::clean_history_user_preview_text;
+use crate::agents::sources::shared::attachment_text::{
+    clean_history_preview_candidate_text, clean_history_user_preview_text,
+};
 use crate::agents::sources::shared::cross_context::cross_context_lineage_from_payload;
 use crate::agents::sources::system_time_to_millis;
 use crate::agents::sources::types::{HistoryAcpMessage, SourceLocation};
@@ -1133,9 +1135,8 @@ fn last_prompt_from_value(v: &serde_json::Value) -> Option<String> {
     }
     v.get("lastPrompt")
         .and_then(|x| x.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(normalize_preview)
+        .and_then(clean_history_preview_candidate_text)
+        .map(|cleaned| normalize_preview(&cleaned))
 }
 
 #[derive(Default)]
@@ -1383,8 +1384,8 @@ fn info_from_index(entry: &IndexEntry, idx: &IndexFile, project_dir: &Path) -> O
     let preview = entry
         .first_prompt
         .as_deref()
-        .and_then(clean_history_user_preview_text)
-        .map(|s| normalize_preview(&s));
+        .and_then(clean_history_preview_candidate_text)
+        .map(|cleaned| normalize_preview(&cleaned));
     let (file_size, available) = if file_path.is_empty() {
         (0, false)
     } else {
@@ -1664,6 +1665,41 @@ mod tests {
         fs::remove_file(ai_title_path).ok();
         fs::remove_file(latest_ai_title_path).ok();
         fs::remove_file(latest_last_prompt_path).ok();
+        fs::remove_dir(dir).ok();
+    }
+
+    #[test]
+    fn parse_session_ignores_truncated_hidden_last_prompt_preview() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-claude-parser-hidden-title-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("truncated-hidden-last-prompt-session.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"user","timestamp":"2026-05-18T05:09:15.000Z","cwd":"/tmp/project","message":{"role":"user","content":"<!-- sessio-computer-use:start nonce=\"abc\" kind=\"computer_use\" -->\nUse injected computer tools.\n<!-- sessio-computer-use:end nonce=\"abc\" -->\n\n使用网易云音乐打开私人雷达然后播放"}}
+{"type":"last-prompt","lastPrompt":"<!-- sessio-computer-use:start nonce=\"abc...","leafUuid":"leaf","sessionId":"truncated-hidden-last-prompt-session"}
+"#,
+        )
+        .unwrap();
+
+        let info = parse_session(&path).unwrap().unwrap();
+        assert_eq!(
+            info.first_user_message.as_deref(),
+            Some("使用网易云音乐打开私人雷达然后播放")
+        );
+        assert_eq!(
+            info.title.as_deref(),
+            Some("使用网易云音乐打开私人雷达然后播放")
+        );
+
+        fs::remove_file(path).ok();
         fs::remove_dir(dir).ok();
     }
 
