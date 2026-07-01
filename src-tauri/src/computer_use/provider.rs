@@ -306,7 +306,95 @@ pub struct AppState {
     /// produced this state, when the host/provider currently surfaces one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_action_result: Option<ActionExecutionResult>,
+    #[serde(default)]
+    pub action_capabilities: ActionCapabilities,
     pub allowed_actions: Vec<AllowedAction>,
+}
+
+/// Action and route capabilities currently available against an app state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionCapabilities {
+    pub click_element_routes: Vec<ClickDispatchRoute>,
+    pub click_at_routes: Vec<ClickDispatchRoute>,
+    pub secondary_click_element_routes: Vec<ClickDispatchRoute>,
+    pub secondary_click_at_routes: Vec<ClickDispatchRoute>,
+    pub double_click_at_routes: Vec<ClickDispatchRoute>,
+    pub drag_routes: Vec<ClickDispatchRoute>,
+    pub scroll_element_routes: Vec<ClickDispatchRoute>,
+    pub scroll_at_routes: Vec<ClickDispatchRoute>,
+    pub supports_set_value: bool,
+    pub supports_type_text: bool,
+    pub supports_press_key: bool,
+}
+
+/// Provider-advertised capability upper bound for a platform/runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCapabilities {
+    pub click_element_routes: Vec<ClickDispatchRoute>,
+    pub click_at_routes: Vec<ClickDispatchRoute>,
+    pub secondary_click_element_routes: Vec<ClickDispatchRoute>,
+    pub secondary_click_at_routes: Vec<ClickDispatchRoute>,
+    pub double_click_at_routes: Vec<ClickDispatchRoute>,
+    pub drag_routes: Vec<ClickDispatchRoute>,
+    pub scroll_element_routes: Vec<ClickDispatchRoute>,
+    pub scroll_at_routes: Vec<ClickDispatchRoute>,
+    pub supports_set_value: bool,
+    pub supports_type_text: bool,
+    pub supports_press_key: bool,
+}
+
+impl ProviderCapabilities {
+    pub fn full() -> Self {
+        Self {
+            click_element_routes: vec![
+                ClickDispatchRoute::Auto,
+                ClickDispatchRoute::Ax,
+                ClickDispatchRoute::TargetPid,
+                ClickDispatchRoute::Hid,
+            ],
+            click_at_routes: vec![
+                ClickDispatchRoute::Auto,
+                ClickDispatchRoute::TargetPid,
+                ClickDispatchRoute::Hid,
+            ],
+            secondary_click_element_routes: vec![
+                ClickDispatchRoute::Auto,
+                ClickDispatchRoute::Ax,
+                ClickDispatchRoute::TargetPid,
+                ClickDispatchRoute::Hid,
+            ],
+            secondary_click_at_routes: vec![
+                ClickDispatchRoute::Auto,
+                ClickDispatchRoute::TargetPid,
+                ClickDispatchRoute::Hid,
+            ],
+            double_click_at_routes: vec![
+                ClickDispatchRoute::Auto,
+                ClickDispatchRoute::TargetPid,
+                ClickDispatchRoute::Hid,
+            ],
+            drag_routes: vec![
+                ClickDispatchRoute::Auto,
+                ClickDispatchRoute::TargetPid,
+                ClickDispatchRoute::Hid,
+            ],
+            scroll_element_routes: vec![
+                ClickDispatchRoute::Auto,
+                ClickDispatchRoute::Ax,
+                ClickDispatchRoute::TargetPid,
+                ClickDispatchRoute::Hid,
+            ],
+            scroll_at_routes: vec![
+                ClickDispatchRoute::Auto,
+                ClickDispatchRoute::TargetPid,
+                ClickDispatchRoute::Hid,
+            ],
+            supports_set_value: true,
+            supports_type_text: true,
+            supports_press_key: true,
+        }
+    }
 }
 
 /// Agent-requested primary-click dispatch hint.
@@ -429,6 +517,10 @@ pub trait ComputerUseProvider: Send + Sync {
     /// Whether this provider can inject input on the current platform/policy.
     fn supports_control(&self) -> bool;
 
+    /// Provider capability upper bound. The host intersects this with runtime
+    /// permission tiers to build actionCapabilities and allowedActions.
+    fn capabilities(&self) -> ProviderCapabilities;
+
     fn list_apps(&self, options: AppListOptions) -> ProviderResult<Vec<InstalledApp>>;
 
     fn is_app_running(&self, app_id: &AppId) -> ProviderResult<bool>;
@@ -483,8 +575,12 @@ pub trait ComputerUseProvider: Send + Sync {
         route_hint: ClickDispatchRoute,
     ) -> ProviderResult<ActionExecutionResult>;
     /// Set an accessibility element's value directly.
-    fn set_value(&self, target: &AppTarget, element: &ElementId, value: &str)
-        -> ProviderResult<ActionExecutionResult>;
+    fn set_value(
+        &self,
+        target: &AppTarget,
+        element: &ElementId,
+        value: &str,
+    ) -> ProviderResult<ActionExecutionResult>;
     fn type_text(&self, target: &AppTarget, text: &str) -> ProviderResult<()>;
     fn press_key(&self, target: &AppTarget, key: &str) -> ProviderResult<()>;
     fn scroll(
@@ -513,7 +609,10 @@ mod fake {
     use super::*;
     use std::sync::Mutex;
 
-    fn fake_click_route(route_hint: ClickDispatchRoute, default: ClickExecutionRoute) -> ClickExecutionRoute {
+    fn fake_click_route(
+        route_hint: ClickDispatchRoute,
+        default: ClickExecutionRoute,
+    ) -> ClickExecutionRoute {
         match route_hint {
             ClickDispatchRoute::Auto => default,
             ClickDispatchRoute::Ax => ClickExecutionRoute::Ax,
@@ -522,7 +621,10 @@ mod fake {
         }
     }
 
-    fn fake_action_route(route_hint: ClickDispatchRoute, default: ActionExecutionRoute) -> ActionExecutionRoute {
+    fn fake_action_route(
+        route_hint: ClickDispatchRoute,
+        default: ActionExecutionRoute,
+    ) -> ActionExecutionRoute {
         match route_hint {
             ClickDispatchRoute::Auto => default,
             ClickDispatchRoute::Ax => ActionExecutionRoute::Ax,
@@ -537,6 +639,7 @@ mod fake {
         pub apps: Mutex<Vec<InstalledApp>>,
         pub elements: Vec<UiElement>,
         pub supports_control: bool,
+        pub capabilities: ProviderCapabilities,
         pub recorded: Mutex<Vec<String>>,
         capture_counter: Mutex<u64>,
     }
@@ -567,6 +670,7 @@ mod fake {
                     actionable: true,
                 }],
                 supports_control: true,
+                capabilities: ProviderCapabilities::full(),
                 recorded: Mutex::new(Vec::new()),
                 capture_counter: Mutex::new(0),
             }
@@ -600,6 +704,10 @@ mod fake {
     impl ComputerUseProvider for FakeProvider {
         fn supports_control(&self) -> bool {
             self.supports_control
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            self.capabilities.clone()
         }
 
         fn list_apps(&self, options: AppListOptions) -> ProviderResult<Vec<InstalledApp>> {
@@ -1006,5 +1114,59 @@ mod tests {
                 .unwrap(),
             Point { x: 100.0, y: 50.0 }
         );
+    }
+
+    #[test]
+    fn provider_capabilities_full_exposes_phase_three_routes() {
+        let caps = ProviderCapabilities::full();
+        assert_eq!(
+            caps.click_element_routes,
+            vec![
+                ClickDispatchRoute::Auto,
+                ClickDispatchRoute::Ax,
+                ClickDispatchRoute::TargetPid,
+                ClickDispatchRoute::Hid
+            ]
+        );
+        assert!(caps.supports_set_value);
+        assert!(caps.supports_type_text);
+        assert!(caps.supports_press_key);
+    }
+
+    #[test]
+    fn app_state_deserialization_defaults_missing_action_capabilities() {
+        let state: AppState = serde_json::from_value(serde_json::json!({
+            "snapshotId": "snap-1",
+            "target": {
+                "appId": "com.example.app"
+            },
+            "launched": false,
+            "display": {
+                "width": 1440,
+                "height": 900,
+                "scale": 2.0
+            },
+            "screenshot": {
+                "handle": "/tmp/snap.png",
+                "format": "png",
+                "byteLen": 1,
+                "width": 100,
+                "height": 50,
+                "defaultCoordinateSpace": "screenshot",
+                "screenBounds": {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "width": 100.0,
+                    "height": 50.0
+                }
+            },
+            "elements": [],
+            "allowedActions": ["click_at"]
+        }))
+        .unwrap();
+
+        assert_eq!(state.snapshot_id, "snap-1");
+        assert_eq!(state.allowed_actions, vec![AllowedAction::ClickAt]);
+        assert_eq!(state.action_capabilities, ActionCapabilities::default());
     }
 }

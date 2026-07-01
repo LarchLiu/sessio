@@ -2805,7 +2805,7 @@ Usage:
 Notes:
   --json emits stable machine-readable output for skills and agents.
   cu auto-discovers a running Sessio desktop computer-use broker and attaches a scoped external session token on demand. SESSIO_CU_URL/SESSIO_CU_TOKEN and --url/--token remain available as advanced overrides.
-  cu raise is the reliable recovery path for hidden or Dock-minimized app windows. Do not substitute open -a or AppleScript activate/frontmost/window-menu clicks; those can exit 0 while leaving the window minimized.
+  cu raise is the reliable recovery path for hidden or minimized app windows. If get-app-state reports no visible window, use raise and then retry; do not rely on generic launcher/activation shortcuts for this recovery path.
   sessions list reads from the Sessio index DB by default and falls back to a filesystem scan when the index is empty/unreadable; a stderr warning is printed when the fallback fires.
   memory search omits qmd's raw payload by default; pass --include-raw for debugging.
   memory resolve omits raw JSONL excerpts by default; pass --include-source-excerpt to attach the byte/line range each source points at.

@@ -1,8 +1,8 @@
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
 
 use crate::app_paths;
 use crate::computer_use::settings::ComputerUseSettings;
@@ -121,7 +121,9 @@ struct RawAppshotConfig {
 struct RawComputerUseConfig {
     enabled: Option<bool>,
     approved_apps: Option<Vec<String>>,
-    app_route_preferences: Option<std::collections::BTreeMap<String, crate::computer_use::settings::AppRoutePreferences>>,
+    app_route_preferences: Option<
+        std::collections::BTreeMap<String, crate::computer_use::settings::AppRoutePreferences>,
+    >,
     allow_input_injection: Option<bool>,
     allow_foreground_takeover: Option<bool>,
 }
@@ -215,7 +217,11 @@ fn load_config_from_path(path: &Path) -> Result<AppConfig> {
     finalize_loaded_config(path, Some(contents.as_str()), raw)
 }
 
-fn finalize_loaded_config(path: &Path, contents: Option<&str>, raw: RawConfig) -> Result<AppConfig> {
+fn finalize_loaded_config(
+    path: &Path,
+    contents: Option<&str>,
+    raw: RawConfig,
+) -> Result<AppConfig> {
     let (raw, added_defaults) = raw_config_with_defaults(raw)?;
     let config = match resolve_app_config(raw.clone(), true) {
         Ok(config) => config,
@@ -230,7 +236,11 @@ fn finalize_loaded_config(path: &Path, contents: Option<&str>, raw: RawConfig) -
     Ok(config)
 }
 
-fn recover_invalid_config(path: &Path, contents: Option<&str>, error: &anyhow::Error) -> Result<AppConfig> {
+fn recover_invalid_config(
+    path: &Path,
+    contents: Option<&str>,
+    error: &anyhow::Error,
+) -> Result<AppConfig> {
     let default = default_app_config()?;
     let error_text = format!("{error:#}");
     let line_number = extract_line_number(&error_text);
@@ -309,7 +319,8 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
             bail!("line {line_number}: invalid config line: {line}");
         };
         let key = key.trim();
-        let value = parse_value(value.trim()).with_context(|| line_context(line_number, raw_line))?;
+        let value =
+            parse_value(value.trim()).with_context(|| line_context(line_number, raw_line))?;
         match section {
             Section::Memory => match key {
                 "backend" => {
@@ -392,8 +403,7 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                         .with_context(|| line_context(line_number, raw_line))?
                 }
                 "approved_apps" => {
-                    raw.computer_use.approved_apps =
-                        value
+                    raw.computer_use.approved_apps = value
                         .map(|value| parse_string_array(&value))
                         .transpose()
                         .with_context(|| line_context(line_number, raw_line))?
@@ -401,8 +411,13 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 "app_route_preferences" => {
                     raw.computer_use.app_route_preferences = value
                         .map(|value| {
-                            serde_json::from_str::<std::collections::BTreeMap<String, crate::computer_use::settings::AppRoutePreferences>>(&value)
-                                .map_err(anyhow::Error::from)
+                            serde_json::from_str::<
+                                std::collections::BTreeMap<
+                                    String,
+                                    crate::computer_use::settings::AppRoutePreferences,
+                                >,
+                            >(&value)
+                            .map_err(anyhow::Error::from)
                         })
                         .transpose()
                         .with_context(|| line_context(line_number, raw_line))?
@@ -414,10 +429,11 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                         .with_context(|| line_context(line_number, raw_line))?
                 }
                 "allow_foreground_takeover" => {
-                    raw.computer_use.allow_foreground_takeover = value
-                        .map(parse_bool)
-                        .transpose()
-                        .with_context(|| line_context(line_number, raw_line))?
+                    raw.computer_use.allow_foreground_takeover =
+                        value
+                            .map(parse_bool)
+                            .transpose()
+                            .with_context(|| line_context(line_number, raw_line))?
                 }
                 other => bail!("line {line_number}: unknown key in [computer_use]: {other}"),
             },
@@ -651,10 +667,7 @@ fn resolve_computer_use_config(raw: RawConfig) -> ComputerUseSettings {
     ComputerUseSettings {
         enabled: raw.computer_use.enabled.unwrap_or(defaults.enabled),
         approved_apps: normalized_string_list(raw.computer_use.approved_apps.unwrap_or_default()),
-        app_route_preferences: raw
-            .computer_use
-            .app_route_preferences
-            .unwrap_or_default(),
+        app_route_preferences: raw.computer_use.app_route_preferences.unwrap_or_default(),
     }
 }
 

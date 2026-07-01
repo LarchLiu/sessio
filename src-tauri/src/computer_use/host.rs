@@ -28,11 +28,11 @@ use super::pointer_overlay::{
     self, ComputerUsePointerAction, ComputerUsePointerEvent, PointerEventSink,
 };
 use super::provider::{
-    ActionExecutionKind, ActionExecutionOutcome, ActionExecutionResult, ActionExecutionRoute,
-    AllowedAction, AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppState, AppTarget,
-    ClickDispatchRoute, ClickExecutionOutcome, ClickExecutionResult, ClickExecutionRoute,
-    ComputerUseProvider, CoordinateSpace, InstalledApp, Point, ProviderError, RawAppState,
-    ScreenshotRef, ScrollDirection, UiElement,
+    ActionCapabilities, ActionExecutionKind, ActionExecutionOutcome, ActionExecutionResult,
+    ActionExecutionRoute, AllowedAction, AppId, AppLaunchResult, AppListOptions, AppRaiseResult,
+    AppState, AppTarget, ClickDispatchRoute, ClickExecutionOutcome, ClickExecutionResult,
+    ClickExecutionRoute, ComputerUseProvider, CoordinateSpace, InstalledApp, Point,
+    ProviderCapabilities, ProviderError, RawAppState, ScreenshotRef, ScrollDirection, UiElement,
 };
 use super::settings::{AppRoutePreferences, ComputerUseSettings, OperationRoutePreference};
 
@@ -63,6 +63,8 @@ pub enum ComputerUseError {
     Snapshot(#[from] SnapshotError),
     #[error("coordinate error: {0}")]
     Coordinate(String),
+    #[error("unsupported dispatch route for this action: {0}")]
+    UnsupportedRoute(String),
     #[error("provider error: {0}")]
     Provider(#[from] ProviderError),
 }
@@ -112,6 +114,100 @@ pub struct ComputerUseHost {
 }
 
 impl ComputerUseHost {
+    fn provider_capabilities(&self) -> ProviderCapabilities {
+        self.provider.capabilities()
+    }
+
+    fn runtime_action_capabilities(
+        &self,
+        perm: &DesktopControlPermissionStatus,
+        can_inspect: bool,
+    ) -> ActionCapabilities {
+        let provider = self.provider_capabilities();
+        let control_ready = perm.can_control && self.provider.supports_control();
+        if !control_ready {
+            return ActionCapabilities {
+                click_element_routes: Vec::new(),
+                click_at_routes: Vec::new(),
+                secondary_click_element_routes: Vec::new(),
+                secondary_click_at_routes: Vec::new(),
+                double_click_at_routes: Vec::new(),
+                drag_routes: Vec::new(),
+                scroll_element_routes: Vec::new(),
+                scroll_at_routes: Vec::new(),
+                supports_set_value: false,
+                supports_type_text: false,
+                supports_press_key: false,
+            };
+        }
+
+        ActionCapabilities {
+            click_element_routes: if can_inspect {
+                provider.click_element_routes
+            } else {
+                Vec::new()
+            },
+            click_at_routes: provider.click_at_routes,
+            secondary_click_element_routes: if can_inspect {
+                provider.secondary_click_element_routes
+            } else {
+                Vec::new()
+            },
+            secondary_click_at_routes: provider.secondary_click_at_routes,
+            double_click_at_routes: provider.double_click_at_routes,
+            drag_routes: provider.drag_routes,
+            scroll_element_routes: if can_inspect {
+                provider.scroll_element_routes
+            } else {
+                Vec::new()
+            },
+            scroll_at_routes: provider.scroll_at_routes,
+            supports_set_value: can_inspect && provider.supports_set_value,
+            supports_type_text: provider.supports_type_text,
+            supports_press_key: provider.supports_press_key,
+        }
+    }
+
+    fn supports_any_secondary_click(action_capabilities: &ActionCapabilities) -> bool {
+        !action_capabilities
+            .secondary_click_element_routes
+            .is_empty()
+            || !action_capabilities.secondary_click_at_routes.is_empty()
+    }
+
+    fn supports_any_scroll(action_capabilities: &ActionCapabilities) -> bool {
+        !action_capabilities.scroll_element_routes.is_empty()
+            || !action_capabilities.scroll_at_routes.is_empty()
+    }
+
+    fn route_supported(
+        supported_routes: &[ClickDispatchRoute],
+        requested_route: ClickDispatchRoute,
+    ) -> bool {
+        supported_routes.contains(&requested_route)
+    }
+
+    fn require_supported_route(
+        action: &str,
+        supported_routes: &[ClickDispatchRoute],
+        requested_route: ClickDispatchRoute,
+    ) -> Result<(), ComputerUseError> {
+        if Self::route_supported(supported_routes, requested_route) {
+            Ok(())
+        } else {
+            Err(ComputerUseError::UnsupportedRoute(format!(
+                "{action} does not support dispatchRoute={requested_route:?}; check AppState.actionCapabilities"
+            )))
+        }
+    }
+
+    fn maybe_supported_retry_route(
+        supported_routes: &[ClickDispatchRoute],
+        candidate: Option<ClickDispatchRoute>,
+    ) -> Option<ClickDispatchRoute> {
+        candidate.filter(|route| supported_routes.contains(route))
+    }
+
     fn preferred_route_for_app(
         &self,
         app_id: &str,
@@ -137,11 +233,13 @@ impl ComputerUseHost {
         target: &AppTarget,
         requested: ClickDispatchRoute,
         key: RoutePreferenceKey,
+        supported_routes: &[ClickDispatchRoute],
     ) -> ClickDispatchRoute {
         if requested != ClickDispatchRoute::Auto {
             return requested;
         }
         self.preferred_route_for_app(&target.app_id, key)
+            .filter(|route| supported_routes.contains(route))
             .unwrap_or(ClickDispatchRoute::Auto)
     }
 
@@ -282,21 +380,28 @@ impl ComputerUseHost {
     fn annotate_click_result(
         mut result: ClickExecutionResult,
         element_targeted: bool,
+        supported_routes: &[ClickDispatchRoute],
     ) -> ClickExecutionResult {
-        result.next_dispatch_route =
-            Self::next_click_retry_route(result.route, result.outcome, element_targeted);
+        result.next_dispatch_route = Self::maybe_supported_retry_route(
+            supported_routes,
+            Self::next_click_retry_route(result.route, result.outcome, element_targeted),
+        );
         result
     }
 
     fn annotate_action_result(
         mut result: ActionExecutionResult,
         element_targeted: bool,
+        supported_routes: &[ClickDispatchRoute],
     ) -> ActionExecutionResult {
-        result.next_dispatch_route = Self::next_action_retry_route(
-            result.kind,
-            result.route,
-            result.outcome,
-            element_targeted,
+        result.next_dispatch_route = Self::maybe_supported_retry_route(
+            supported_routes,
+            Self::next_action_retry_route(
+                result.kind,
+                result.route,
+                result.outcome,
+                element_targeted,
+            ),
         );
         result
     }
@@ -316,9 +421,9 @@ impl ComputerUseHost {
         route_hint: ClickDispatchRoute,
     ) -> Result<(), ComputerUseError> {
         match route_hint {
-            ClickDispatchRoute::Auto
-            | ClickDispatchRoute::TargetPid
-            | ClickDispatchRoute::Hid => Ok(()),
+            ClickDispatchRoute::Auto | ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
+                Ok(())
+            }
             ClickDispatchRoute::Ax => Err(ComputerUseError::Coordinate(
                 "dispatchRoute=ax is only valid for element-targeted actions".into(),
             )),
@@ -774,7 +879,8 @@ impl ComputerUseHost {
         last_action_result: Option<ActionExecutionResult>,
     ) -> AppState {
         let can_inspect = perm.can_inspect;
-        let allowed_actions = self.allowed_actions(perm, can_inspect);
+        let action_capabilities = self.runtime_action_capabilities(perm, can_inspect);
+        let allowed_actions = self.allowed_actions(&action_capabilities);
 
         AppState {
             snapshot_id: snapshot.0,
@@ -785,27 +891,41 @@ impl ComputerUseHost {
             elements: raw.elements,
             last_click_result,
             last_action_result,
+            action_capabilities,
             allowed_actions,
         }
     }
 
-    fn allowed_actions(
-        &self,
-        perm: &DesktopControlPermissionStatus,
-        can_inspect: bool,
-    ) -> Vec<AllowedAction> {
-        let control_ready = perm.can_control && self.provider.supports_control();
-        if !control_ready {
-            return Vec::new();
+    fn allowed_actions(&self, action_capabilities: &ActionCapabilities) -> Vec<AllowedAction> {
+        let mut out = Vec::new();
+        if !action_capabilities.click_element_routes.is_empty() {
+            out.push(AllowedAction::ClickElement);
         }
-        AllowedAction::ALL
-            .into_iter()
-            .filter(|action| match action {
-                // Element-targeted actions require an inspected element tree.
-                AllowedAction::ClickElement | AllowedAction::SetValue => can_inspect,
-                _ => true,
-            })
-            .collect()
+        if !action_capabilities.click_at_routes.is_empty() {
+            out.push(AllowedAction::ClickAt);
+        }
+        if Self::supports_any_secondary_click(action_capabilities) {
+            out.push(AllowedAction::SecondaryClick);
+        }
+        if !action_capabilities.double_click_at_routes.is_empty() {
+            out.push(AllowedAction::DoubleClick);
+        }
+        if !action_capabilities.drag_routes.is_empty() {
+            out.push(AllowedAction::Drag);
+        }
+        if action_capabilities.supports_set_value {
+            out.push(AllowedAction::SetValue);
+        }
+        if action_capabilities.supports_type_text {
+            out.push(AllowedAction::TypeText);
+        }
+        if action_capabilities.supports_press_key {
+            out.push(AllowedAction::PressKey);
+        }
+        if Self::supports_any_scroll(action_capabilities) {
+            out.push(AllowedAction::Scroll);
+        }
+        out
     }
 
     fn require_compatible_lease(
@@ -959,7 +1079,9 @@ impl ComputerUseHost {
     }
 
     fn next_provider_call_id(&self) -> String {
-        let id = self.provider_call_id_counter.fetch_add(1, Ordering::Relaxed);
+        let id = self
+            .provider_call_id_counter
+            .fetch_add(1, Ordering::Relaxed);
         format!("call-{id}")
     }
 
@@ -1248,12 +1370,16 @@ impl ComputerUseHost {
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
         let element = self.snapshot_element(session_id, snapshot, element_id)?;
-        let resolved_screen_point = self.element_center_for_snapshot(session_id, snapshot, element_id)?;
+        let resolved_screen_point =
+            self.element_center_for_snapshot(session_id, snapshot, element_id)?;
+        let routes = self.provider_capabilities().click_element_routes;
         let effective_route = self.effective_route_for_auto(
             &target,
             route_hint,
             RoutePreferenceKey::ClickElement,
+            &routes,
         );
+        Self::require_supported_route("click_element", &routes, effective_route)?;
         self.emit_element_pointer_event(
             session_id,
             snapshot,
@@ -1294,7 +1420,7 @@ impl ComputerUseHost {
             },
             |provider| provider.click_element(&target, &element_id.to_string(), effective_route),
         )?;
-        let click_result = Self::annotate_click_result(click_result, true);
+        let click_result = Self::annotate_click_result(click_result, true, &routes);
         self.remember_primary_click_route(
             &target,
             route_hint,
@@ -1340,8 +1466,14 @@ impl ComputerUseHost {
             coordinate_space,
             perm,
         )?;
-        let effective_route =
-            self.effective_route_for_auto(&target, route_hint, RoutePreferenceKey::ClickAt);
+        let routes = self.provider_capabilities().click_at_routes;
+        let effective_route = self.effective_route_for_auto(
+            &target,
+            route_hint,
+            RoutePreferenceKey::ClickAt,
+            &routes,
+        );
+        Self::require_supported_route("click_at", &routes, effective_route)?;
         let screenshot = self.snapshot_screenshot(session_id, snapshot).ok();
         let click_id = self.next_click_id();
         Self::write_point_action_record(
@@ -1384,7 +1516,7 @@ impl ComputerUseHost {
             },
             |provider| provider.click_point(&target, screen_point, effective_route),
         )?;
-        let click_result = Self::annotate_click_result(click_result, false);
+        let click_result = Self::annotate_click_result(click_result, false, &routes);
         self.remember_primary_click_route(
             &target,
             route_hint,
@@ -1430,11 +1562,14 @@ impl ComputerUseHost {
             coordinate_space,
             perm,
         )?;
+        let routes = self.provider_capabilities().secondary_click_at_routes;
         let effective_route = self.effective_route_for_auto(
             &target,
             route_hint,
             RoutePreferenceKey::SecondaryClickAt,
+            &routes,
         );
+        Self::require_supported_route("secondary_click", &routes, effective_route)?;
         let screenshot = self.snapshot_screenshot(session_id, snapshot).ok();
         Self::write_point_action_record(
             "secondary_click_dispatch",
@@ -1469,7 +1604,7 @@ impl ComputerUseHost {
             |_| json!({}),
             |provider| provider.secondary_click(&target, screen_point, effective_route),
         )?;
-        let action_result = Self::annotate_action_result(action_result, false);
+        let action_result = Self::annotate_action_result(action_result, false, &routes);
         self.remember_action_route(
             &target,
             route_hint,
@@ -1501,11 +1636,14 @@ impl ComputerUseHost {
         Self::validate_mouse_route_for_element(route_hint)?;
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
+        let routes = self.provider_capabilities().secondary_click_element_routes;
         let effective_route = self.effective_route_for_auto(
             &target,
             route_hint,
             RoutePreferenceKey::SecondaryClickElement,
+            &routes,
         );
+        Self::require_supported_route("secondary_click_element", &routes, effective_route)?;
         self.emit_element_pointer_event(
             session_id,
             snapshot,
@@ -1527,13 +1665,11 @@ impl ComputerUseHost {
                 "requestedDispatchRoute": route_hint,
             }),
             |_| json!({}),
-            |provider| provider.secondary_click_element(
-                &target,
-                &element_id.to_string(),
-                effective_route,
-            ),
+            |provider| {
+                provider.secondary_click_element(&target, &element_id.to_string(), effective_route)
+            },
         )?;
-        let action_result = Self::annotate_action_result(action_result, true);
+        let action_result = Self::annotate_action_result(action_result, true, &routes);
         self.remember_action_route(
             &target,
             route_hint,
@@ -1571,8 +1707,14 @@ impl ComputerUseHost {
             coordinate_space,
             perm,
         )?;
-        let effective_route =
-            self.effective_route_for_auto(&target, route_hint, RoutePreferenceKey::DoubleClick);
+        let routes = self.provider_capabilities().double_click_at_routes;
+        let effective_route = self.effective_route_for_auto(
+            &target,
+            route_hint,
+            RoutePreferenceKey::DoubleClick,
+            &routes,
+        );
+        Self::require_supported_route("double_click", &routes, effective_route)?;
         let screenshot = self.snapshot_screenshot(session_id, snapshot).ok();
         Self::write_point_action_record(
             "double_click_dispatch",
@@ -1607,7 +1749,7 @@ impl ComputerUseHost {
             |_| json!({}),
             |provider| provider.double_click(&target, screen_point, effective_route),
         )?;
-        let action_result = Self::annotate_action_result(action_result, false);
+        let action_result = Self::annotate_action_result(action_result, false, &routes);
         self.remember_action_route(
             &target,
             route_hint,
@@ -1644,8 +1786,10 @@ impl ComputerUseHost {
             self.resolve_point_for_snapshot(session_id, snapshot, from, coordinate_space)?;
         let screen_to =
             self.resolve_point_for_snapshot(session_id, snapshot, to, coordinate_space)?;
+        let routes = self.provider_capabilities().drag_routes;
         let effective_route =
-            self.effective_route_for_auto(&target, route_hint, RoutePreferenceKey::Drag);
+            self.effective_route_for_auto(&target, route_hint, RoutePreferenceKey::Drag, &routes);
+        Self::require_supported_route("drag", &routes, effective_route)?;
         let screenshot = self.snapshot_screenshot(session_id, snapshot).ok();
         Self::write_drag_action_record(
             session_id,
@@ -1682,13 +1826,8 @@ impl ComputerUseHost {
             |_| json!({}),
             |provider| provider.drag(&target, screen_from, screen_to, effective_route),
         )?;
-        let action_result = Self::annotate_action_result(action_result, false);
-        self.remember_action_route(
-            &target,
-            route_hint,
-            RoutePreferenceKey::Drag,
-            action_result,
-        );
+        let action_result = Self::annotate_action_result(action_result, false, &routes);
+        self.remember_action_route(&target, route_hint, RoutePreferenceKey::Drag, action_result);
         self.capture_post_action_state_with_timing(
             session_id,
             &target,
@@ -1712,6 +1851,12 @@ impl ComputerUseHost {
     ) -> Result<AppState, ComputerUseError> {
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
+        if !self.provider_capabilities().supports_set_value {
+            return Err(ComputerUseError::UnsupportedRoute(
+                "set_value is not supported for this AppState; check AppState.actionCapabilities"
+                    .into(),
+            ));
+        }
         self.emit_element_pointer_event(
             session_id,
             snapshot,
@@ -1734,7 +1879,6 @@ impl ComputerUseHost {
             |_| json!({}),
             |provider| provider.set_value(&target, &element_id.to_string(), value),
         )?;
-        let action_result = Self::annotate_action_result(action_result, true);
         self.capture_post_action_state_with_timing(
             session_id,
             &target,
@@ -1756,6 +1900,12 @@ impl ComputerUseHost {
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
         let target = self.require_control(session_id, snapshot, perm)?;
+        if !self.provider_capabilities().supports_type_text {
+            return Err(ComputerUseError::UnsupportedRoute(
+                "type_text is not supported for this AppState; check AppState.actionCapabilities"
+                    .into(),
+            ));
+        }
         Self::write_keyboard_action_record(
             "type_text_dispatch",
             session_id,
@@ -1805,6 +1955,12 @@ impl ComputerUseHost {
         perm: &DesktopControlPermissionStatus,
     ) -> Result<AppState, ComputerUseError> {
         let target = self.require_control(session_id, snapshot, perm)?;
+        if !self.provider_capabilities().supports_press_key {
+            return Err(ComputerUseError::UnsupportedRoute(
+                "press_key is not supported for this AppState; check AppState.actionCapabilities"
+                    .into(),
+            ));
+        }
         Self::write_keyboard_action_record(
             "press_key_dispatch",
             session_id,
@@ -1857,8 +2013,10 @@ impl ComputerUseHost {
     ) -> Result<AppState, ComputerUseError> {
         Self::validate_mouse_route_for_point(route_hint)?;
         let target = self.require_control(session_id, snapshot, perm)?;
+        let routes = self.provider_capabilities().scroll_at_routes;
         let effective_route =
-            self.effective_route_for_auto(&target, route_hint, RoutePreferenceKey::Scroll);
+            self.effective_route_for_auto(&target, route_hint, RoutePreferenceKey::Scroll, &routes);
+        Self::require_supported_route("scroll", &routes, effective_route)?;
         let action_result = self.invoke_provider(
             ProviderCallContext {
                 session_id,
@@ -1876,7 +2034,7 @@ impl ComputerUseHost {
             |_| json!({}),
             |provider| provider.scroll(&target, direction, amount, effective_route),
         )?;
-        let action_result = Self::annotate_action_result(action_result, false);
+        let action_result = Self::annotate_action_result(action_result, false, &routes);
         self.remember_action_route(
             &target,
             route_hint,
@@ -1910,11 +2068,14 @@ impl ComputerUseHost {
         Self::validate_mouse_route_for_element(route_hint)?;
         self.require_permission(perm, RequiredCapability::Inspect)?;
         let target = self.require_control(session_id, snapshot, perm)?;
+        let routes = self.provider_capabilities().scroll_element_routes;
         let effective_route = self.effective_route_for_auto(
             &target,
             route_hint,
             RoutePreferenceKey::ScrollElement,
+            &routes,
         );
+        Self::require_supported_route("scroll_element", &routes, effective_route)?;
         self.emit_element_pointer_event(
             session_id,
             snapshot,
@@ -1938,15 +2099,17 @@ impl ComputerUseHost {
                 "requestedDispatchRoute": route_hint,
             }),
             |_| json!({}),
-            |provider| provider.scroll_element(
-                &target,
-                &element_id.to_string(),
-                direction,
-                amount,
-                effective_route,
-            ),
+            |provider| {
+                provider.scroll_element(
+                    &target,
+                    &element_id.to_string(),
+                    direction,
+                    amount,
+                    effective_route,
+                )
+            },
         )?;
-        let action_result = Self::annotate_action_result(action_result, true);
+        let action_result = Self::annotate_action_result(action_result, true, &routes);
         self.remember_action_route(
             &target,
             route_hint,
@@ -2057,7 +2220,8 @@ pub struct ComputerUseStatus {
 mod tests {
     use super::*;
     use crate::computer_use::provider::{
-        ClickExecutionOutcome, ClickExecutionResult, ClickExecutionRoute, FakeProvider,
+        ClickDispatchRoute, ClickExecutionOutcome, ClickExecutionResult, ClickExecutionRoute,
+        FakeProvider, ProviderCapabilities,
     };
     use crate::desktop_control::{
         DesktopControlInputs, DesktopControlPermissionStatus, DesktopPlatform, PermissionTier,
@@ -2090,6 +2254,21 @@ mod tests {
             ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled()),
             provider,
         )
+    }
+
+    fn read_diagnostics_log_when(
+        path: &std::path::Path,
+        predicate: impl Fn(&str) -> bool,
+    ) -> String {
+        for _ in 0..20 {
+            if let Ok(log) = std::fs::read_to_string(path) {
+                if predicate(&log) {
+                    return log;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::fs::read_to_string(path).unwrap()
     }
 
     fn installed_app(running: bool) -> InstalledApp {
@@ -2291,6 +2470,8 @@ mod tests {
             state.allowed_actions.is_empty(),
             "no control actions without accessibility"
         );
+        assert!(state.action_capabilities.click_element_routes.is_empty());
+        assert!(state.action_capabilities.click_at_routes.is_empty());
     }
 
     #[test]
@@ -2313,6 +2494,90 @@ mod tests {
         let state = h.get_app_state("s1", &p).unwrap();
         assert!(!state.elements.is_empty());
         assert_eq!(state.allowed_actions.len(), AllowedAction::ALL.len());
+        assert_eq!(
+            state.action_capabilities.click_element_routes,
+            vec![
+                ClickDispatchRoute::Auto,
+                ClickDispatchRoute::Ax,
+                ClickDispatchRoute::TargetPid,
+                ClickDispatchRoute::Hid
+            ]
+        );
+        assert!(state.action_capabilities.supports_set_value);
+    }
+
+    #[test]
+    fn allowed_actions_follow_provider_capabilities_not_just_control() {
+        let mut fake = FakeProvider::default();
+        fake.capabilities = ProviderCapabilities {
+            click_element_routes: Vec::new(),
+            click_at_routes: vec![ClickDispatchRoute::Auto],
+            secondary_click_element_routes: Vec::new(),
+            secondary_click_at_routes: vec![ClickDispatchRoute::Auto],
+            double_click_at_routes: vec![ClickDispatchRoute::Auto],
+            drag_routes: vec![ClickDispatchRoute::Auto],
+            scroll_element_routes: Vec::new(),
+            scroll_at_routes: vec![ClickDispatchRoute::Auto],
+            supports_set_value: false,
+            supports_type_text: true,
+            supports_press_key: true,
+        };
+        let provider = Arc::new(fake);
+        let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+
+        let state = h.get_app_state("s1", &p).unwrap();
+        assert!(!state.allowed_actions.contains(&AllowedAction::ClickElement));
+        assert!(!state.allowed_actions.contains(&AllowedAction::SetValue));
+        assert!(state.allowed_actions.contains(&AllowedAction::ClickAt));
+        assert!(state.allowed_actions.contains(&AllowedAction::Scroll));
+        assert!(state
+            .action_capabilities
+            .secondary_click_element_routes
+            .is_empty());
+        assert!(state.action_capabilities.scroll_element_routes.is_empty());
+    }
+
+    #[test]
+    fn unsupported_dispatch_route_is_rejected_before_provider_call() {
+        let mut fake = FakeProvider::default();
+        fake.capabilities = ProviderCapabilities {
+            click_element_routes: vec![ClickDispatchRoute::Auto],
+            click_at_routes: vec![ClickDispatchRoute::Auto],
+            secondary_click_element_routes: Vec::new(),
+            secondary_click_at_routes: vec![ClickDispatchRoute::Auto],
+            double_click_at_routes: vec![ClickDispatchRoute::Auto],
+            drag_routes: vec![ClickDispatchRoute::Auto],
+            scroll_element_routes: Vec::new(),
+            scroll_at_routes: vec![ClickDispatchRoute::Auto],
+            supports_set_value: true,
+            supports_type_text: true,
+            supports_press_key: true,
+        };
+        let provider = Arc::new(fake);
+        let h = ComputerUseHost::new(provider.clone(), ComputerUseSettings::enabled());
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        let error = h
+            .click_at(
+                "s1",
+                &SnapshotId(state.snapshot_id),
+                Point { x: 360.0, y: 225.0 },
+                CoordinateSpace::Screenshot,
+                ClickDispatchRoute::Hid,
+                &p,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, ComputerUseError::UnsupportedRoute(_)));
+        assert!(provider.actions().is_empty());
     }
 
     #[test]
@@ -2438,7 +2703,7 @@ mod tests {
             ClickDispatchRoute::Auto,
             &p,
         )
-            .unwrap();
+        .unwrap();
 
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -2581,6 +2846,7 @@ mod tests {
                 next_dispatch_route: None,
             },
             false,
+            &[ClickDispatchRoute::Auto, ClickDispatchRoute::Hid],
         );
 
         assert_eq!(result.next_dispatch_route, Some(ClickDispatchRoute::Hid));
@@ -2595,28 +2861,38 @@ mod tests {
                 next_dispatch_route: None,
             },
             true,
+            &[
+                ClickDispatchRoute::Auto,
+                ClickDispatchRoute::TargetPid,
+                ClickDispatchRoute::Hid,
+            ],
         );
 
-        assert_eq!(result.next_dispatch_route, Some(ClickDispatchRoute::TargetPid));
+        assert_eq!(
+            result.next_dispatch_route,
+            Some(ClickDispatchRoute::TargetPid)
+        );
     }
 
     #[test]
     fn primary_click_logs_shared_click_id_across_dispatch_result_and_capture() {
-        let path =
-            crate::computer_use::diagnostics::diagnostics_log_path_for_session(Some("s1"))
-                .unwrap();
+        let session_id = format!("diag-click-{}", uuid::Uuid::new_v4());
+        let path = crate::computer_use::diagnostics::diagnostics_log_path_for_session(Some(
+            session_id.as_str(),
+        ))
+        .unwrap();
         let _ = std::fs::remove_file(&path);
 
         let provider = Arc::new(FakeProvider::default());
         let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
-        h.approvals().approve_session("s1");
+        h.approvals().approve_session(&session_id);
         h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, true);
-        h.start("s1", target(), &p).unwrap();
-        let state = h.get_app_state("s1", &p).unwrap();
+        h.start(&session_id, target(), &p).unwrap();
+        let state = h.get_app_state(&session_id, &p).unwrap();
 
         h.click_at(
-            "s1",
+            &session_id,
             &SnapshotId(state.snapshot_id),
             Point { x: 360.0, y: 225.0 },
             CoordinateSpace::Screenshot,
@@ -2625,7 +2901,11 @@ mod tests {
         )
         .unwrap();
 
-        let log = std::fs::read_to_string(&path).unwrap();
+        let log = read_diagnostics_log_when(&path, |text| {
+            text.contains("\"event\":\"click_at_dispatch\"")
+                && text.contains("\"event\":\"primary_click_result\"")
+                && text.contains("\"event\":\"post_action_capture_complete\"")
+        });
         let mut click_at_dispatch_id = None;
         let mut primary_click_result_id = None;
         let mut post_action_capture_complete_id = None;
@@ -2634,12 +2914,10 @@ mod tests {
             let record: serde_json::Value = serde_json::from_str(line).unwrap();
             match record["event"].as_str() {
                 Some("click_at_dispatch") => {
-                    click_at_dispatch_id =
-                        record["clickId"].as_str().map(ToString::to_string);
+                    click_at_dispatch_id = record["clickId"].as_str().map(ToString::to_string);
                 }
                 Some("primary_click_result") => {
-                    primary_click_result_id =
-                        record["clickId"].as_str().map(ToString::to_string);
+                    primary_click_result_id = record["clickId"].as_str().map(ToString::to_string);
                 }
                 Some("post_action_capture_complete") => {
                     post_action_capture_complete_id =
@@ -2660,21 +2938,23 @@ mod tests {
 
     #[test]
     fn element_click_logs_dispatch_metadata_and_shared_click_id() {
-        let path =
-            crate::computer_use::diagnostics::diagnostics_log_path_for_session(Some("s1"))
-                .unwrap();
+        let session_id = format!("diag-element-{}", uuid::Uuid::new_v4());
+        let path = crate::computer_use::diagnostics::diagnostics_log_path_for_session(Some(
+            session_id.as_str(),
+        ))
+        .unwrap();
         let _ = std::fs::remove_file(&path);
 
         let provider = Arc::new(FakeProvider::default());
         let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
-        h.approvals().approve_session("s1");
+        h.approvals().approve_session(&session_id);
         h.approvals().approve_app(&target().app_id);
         let p = perm(true, true, true);
-        h.start("s1", target(), &p).unwrap();
-        let state = h.get_app_state("s1", &p).unwrap();
+        h.start(&session_id, target(), &p).unwrap();
+        let state = h.get_app_state(&session_id, &p).unwrap();
 
         h.click_element(
-            "s1",
+            &session_id,
             &SnapshotId(state.snapshot_id),
             "el-1",
             ClickDispatchRoute::Auto,
@@ -2682,12 +2962,11 @@ mod tests {
         )
         .unwrap();
 
-        let log = std::fs::read_to_string(&path)
-            .or_else(|_| {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                std::fs::read_to_string(&path)
-            })
-            .unwrap();
+        let log = read_diagnostics_log_when(&path, |text| {
+            text.contains("\"event\":\"click_element_dispatch\"")
+                && text.contains("\"event\":\"primary_click_result\"")
+                && text.contains("\"event\":\"post_action_capture_complete\"")
+        });
         let mut dispatch_id = None;
         let mut dispatch_role = None;
         let mut dispatch_label = None;
@@ -2841,6 +3120,54 @@ mod tests {
         assert_eq!(
             provider.actions(),
             vec!["click_at:com.example.app:190.0,132.5:Hid".to_string()]
+        );
+    }
+
+    #[test]
+    fn auto_click_ignores_saved_route_preference_when_capability_no_longer_supports_it() {
+        let mut fake = FakeProvider::default();
+        fake.capabilities = ProviderCapabilities {
+            click_element_routes: vec![ClickDispatchRoute::Auto],
+            click_at_routes: vec![ClickDispatchRoute::Auto],
+            secondary_click_element_routes: Vec::new(),
+            secondary_click_at_routes: vec![ClickDispatchRoute::Auto],
+            double_click_at_routes: vec![ClickDispatchRoute::Auto],
+            drag_routes: vec![ClickDispatchRoute::Auto],
+            scroll_element_routes: Vec::new(),
+            scroll_at_routes: vec![ClickDispatchRoute::Auto],
+            supports_set_value: true,
+            supports_type_text: true,
+            supports_press_key: true,
+        };
+        let provider = Arc::new(fake);
+        let mut settings = ComputerUseSettings::enabled();
+        settings.app_route_preferences.insert(
+            "com.example.app".to_string(),
+            AppRoutePreferences {
+                click_at: Some(OperationRoutePreference::Hid),
+                ..AppRoutePreferences::default()
+            },
+        );
+        let h = ComputerUseHost::new(provider.clone(), settings);
+        h.approvals().approve_session("s1");
+        h.approvals().approve_app(&target().app_id);
+        let p = perm(true, true, true);
+        h.start("s1", target(), &p).unwrap();
+        let state = h.get_app_state("s1", &p).unwrap();
+
+        h.click_at(
+            "s1",
+            &SnapshotId(state.snapshot_id),
+            Point { x: 360.0, y: 225.0 },
+            CoordinateSpace::Screenshot,
+            ClickDispatchRoute::Auto,
+            &p,
+        )
+        .unwrap();
+
+        assert_eq!(
+            provider.actions(),
+            vec!["click_at:com.example.app:190.0,132.5:Auto".to_string()]
         );
     }
 

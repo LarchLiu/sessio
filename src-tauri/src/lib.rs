@@ -3303,8 +3303,8 @@ fn write_cg_image_png_to_path(
     path: &Path,
 ) -> Result<SavedPastedAttachment, String> {
     use foreign_types::ForeignType;
-    use objc2::AnyThread;
     use objc2::runtime::AnyObject;
+    use objc2::AnyThread;
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
     use objc2_core_graphics::CGImage;
     use objc2_foundation::NSDictionary;
@@ -3364,7 +3364,10 @@ fn cg_image_for_screen_rect(
 }
 
 #[cfg(target_os = "macos")]
-fn cg_image_for_window(window_id: u32, bounds: core_graphics::geometry::CGRect) -> Result<core_graphics::image::CGImage, String> {
+fn cg_image_for_window(
+    window_id: u32,
+    bounds: core_graphics::geometry::CGRect,
+) -> Result<core_graphics::image::CGImage, String> {
     use core_graphics::display::CGDisplay;
     use core_graphics::window::{
         kCGWindowImageBestResolution, kCGWindowImageBoundsIgnoreFraming,

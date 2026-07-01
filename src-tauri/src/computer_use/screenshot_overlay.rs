@@ -34,7 +34,11 @@ fn draw_grid(image: &mut RgbaImage) {
 
     let mut x = 0;
     while x < width {
-        let color = if x % (GRID_SPACING * 2) == 0 { major } else { minor };
+        let color = if x % (GRID_SPACING * 2) == 0 {
+            major
+        } else {
+            minor
+        };
         for y in 0..height {
             blend_pixel(image, x, y, color);
         }
@@ -43,7 +47,11 @@ fn draw_grid(image: &mut RgbaImage) {
 
     let mut y = 0;
     while y < height {
-        let color = if y % (GRID_SPACING * 2) == 0 { major } else { minor };
+        let color = if y % (GRID_SPACING * 2) == 0 {
+            major
+        } else {
+            minor
+        };
         for x in 0..width {
             blend_pixel(image, x, y, color);
         }
@@ -186,23 +194,15 @@ mod tests {
 
     #[test]
     fn overlay_render_returns_png_bytes() {
-        let dir = std::env::temp_dir().join(format!(
-            "sessio-cu-overlay-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("sessio-cu-overlay-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("source.png");
         let image = RgbaImage::from_pixel(120, 80, Rgba([30, 30, 30, 255]));
         image.save(&path).unwrap();
 
-        let overlay = render_reference_overlay_png(
-            &path,
-            Some(Point {
-                x: 40.0,
-                y: 35.0,
-            }),
-        )
-        .unwrap();
+        let overlay =
+            render_reference_overlay_png(&path, Some(Point { x: 40.0, y: 35.0 })).unwrap();
 
         assert!(!overlay.is_empty());
         assert_eq!(&overlay[..8], b"\x89PNG\r\n\x1a\n");

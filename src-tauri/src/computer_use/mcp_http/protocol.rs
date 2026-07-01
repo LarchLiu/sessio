@@ -272,27 +272,27 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "computer_launch_app",
-            description: "Launch a chosen application without activating it. Use for cold/background launch only; this does not restore Dock-minimized windows. Requires target-app approval and opens a lease for the app.",
+            description: "Launch a chosen application without activating it. Use for cold/background launch only; this does not reliably restore hidden or minimized windows. Requires target-app approval and opens a lease for the app.",
             input_schema: app_arg.clone(),
         },
         ToolDefinition {
             name: "computer_raise_app",
-            description: "Foreground-recovery tool for hidden or Dock-minimized apps. Use this after computer_get_app_state reports no visible window, or before trying screenshots/clicks on a minimized target. Do not substitute open -a, AppleScript activate/frontmost, or Window-menu clicks; those can return success while leaving the window minimized.",
+            description: "Foreground-recovery tool for hidden or minimized apps. Use this after computer_get_app_state reports no visible window, or before trying screenshots/clicks on a hidden target. Platform-specific fallback guidance is surfaced in tool errors; do not substitute shell/app-launcher shortcuts for this recovery path.",
             input_schema: app_arg,
         },
         ToolDefinition {
             name: "computer_get_app_state",
-            description: "Capture the target's screenshot, display metadata, accessibility elements, a fresh snapshot id, and the actions currently allowed. If appId is provided and the app is not running, launch it after target-app approval. If this reports no visible window, call computer_raise_app for the same bundle, then retry this tool.",
+            description: "Capture the target's screenshot, display metadata, accessibility elements, a fresh snapshot id, and the actions currently allowed. If appId is provided and the app is not running, launch it after target-app approval. If this reports no visible window, call computer_raise_app for the same app target, then retry this tool.",
             input_schema: optional_app_arg,
         },
         ToolDefinition {
             name: "computer_click",
-            description: "Click using the requested dispatchRoute from the latest snapshot. Default dispatchRoute is auto: element refs try AX before pid/hid; x/y screenshot pixels try pid before hid. Returns a post-action AppState plus lastClickResult { route, outcome, nextDispatchRoute? }. If outcome=no_effect and nextDispatchRoute is present, retry with that explicit route after inspecting the updated screenshot.",
+            description: "Click using the requested dispatchRoute from the latest snapshot. Supported action modes and routes vary by platform/provider; inspect AppState.actionCapabilities before choosing element vs point and dispatchRoute. Returns a post-action AppState plus lastClickResult { route, outcome, nextDispatchRoute? }.",
             input_schema: click_arg.clone(),
         },
         ToolDefinition {
             name: "computer_click_element",
-            description: "Click an accessibility element from the latest snapshot. dispatchRoute supports auto|ax|target_pid|hid; default auto tries AX first, then pid, then hid. Returns a post-action AppState plus lastClickResult { route, outcome, nextDispatchRoute? }. If outcome=no_effect and nextDispatchRoute is present, retry with that explicit route after inspecting the updated screenshot.",
+            description: "Click an accessibility element from the latest snapshot. Treat the schema routes as the global upper bound; the currently supported subset is reported in AppState.actionCapabilities.clickElementRoutes. Returns a post-action AppState plus lastClickResult { route, outcome, nextDispatchRoute? }.",
             input_schema: snapshot_arg(json!({
                 "elementId": { "type": "string" },
                 "ref": { "type": "string" },
@@ -302,32 +302,32 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "computer_click_at",
-            description: "Click by screenshot pixel from the latest snapshot. dispatchRoute supports auto|target_pid|hid; default auto tries target_pid first, then hid. Returns a post-action AppState plus lastClickResult { route, outcome, nextDispatchRoute? }. If outcome=no_effect and nextDispatchRoute is present, retry with that explicit route after inspecting the updated screenshot.",
+            description: "Click by screenshot pixel from the latest snapshot. Treat the schema routes as the global upper bound; the currently supported subset is reported in AppState.actionCapabilities.clickAtRoutes. Returns a post-action AppState plus lastClickResult { route, outcome, nextDispatchRoute? }.",
             input_schema: point_action_arg.clone(),
         },
         ToolDefinition {
             name: "computer_secondary_click",
-            description: "Secondary/right click or open a context menu. dispatchRoute supports auto|ax|target_pid|hid. Default auto uses AXShowMenu->target_pid->hid for element refs and target_pid->hid for coordinates. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
+            description: "Secondary/right click or open a context menu. The schema routes are the global upper bound; inspect AppState.actionCapabilities.secondaryClickElementRoutes and secondaryClickAtRoutes for the currently supported subset. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
             input_schema: secondary_arg,
         },
         ToolDefinition {
             name: "computer_perform_secondary_action",
-            description: "Skill-compatible alias for computer_secondary_click. dispatchRoute supports auto|ax|target_pid|hid. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
+            description: "Skill-compatible alias for computer_secondary_click. Use AppState.actionCapabilities to choose a supported element or point route before calling it.",
             input_schema: click_arg.clone(),
         },
         ToolDefinition {
             name: "computer_double_click",
-            description: "Double click a point from the latest snapshot. dispatchRoute supports auto|target_pid|hid; default auto tries target_pid first, then hid. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
+            description: "Double click a point from the latest snapshot. Treat the schema routes as the global upper bound; the currently supported subset is reported in AppState.actionCapabilities.doubleClickAtRoutes. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
             input_schema: point_action_arg.clone(),
         },
         ToolDefinition {
             name: "computer_drag",
-            description: "Drag between two points from the latest snapshot. dispatchRoute supports auto|target_pid|hid; default auto tries target_pid first, then hid. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
+            description: "Drag between two points from the latest snapshot. Treat the schema routes as the global upper bound; the currently supported subset is reported in AppState.actionCapabilities.dragRoutes. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
             input_schema: drag_arg,
         },
         ToolDefinition {
             name: "computer_set_value",
-            description: "Set an accessibility element's value directly from the latest snapshot. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
+            description: "Set an accessibility element's value directly from the latest snapshot. Check AppState.actionCapabilities.supportsSetValue before calling. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
             input_schema: snapshot_arg(json!({
                 "elementId": { "type": "string" },
                 "ref": { "type": "string" },
@@ -336,17 +336,17 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "computer_type_text",
-            description: "Type text into the focused element of the latest snapshot.",
+            description: "Type text into the focused element of the latest snapshot. Check AppState.actionCapabilities.supportsTypeText before calling.",
             input_schema: snapshot_arg(json!({ "text": { "type": "string" } })),
         },
         ToolDefinition {
             name: "computer_press_key",
-            description: "Press a named key or chord against the latest snapshot.",
+            description: "Press a named key or chord against the latest snapshot. Check AppState.actionCapabilities.supportsPressKey before calling.",
             input_schema: snapshot_arg(json!({ "key": { "type": "string" } })),
         },
         ToolDefinition {
             name: "computer_scroll",
-            description: "Scroll the target in a direction by an amount against the latest snapshot. dispatchRoute supports auto|ax|target_pid|hid for element refs and auto|target_pid|hid otherwise. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
+            description: "Scroll the target in a direction by an amount against the latest snapshot. The schema routes are the global upper bound; inspect AppState.actionCapabilities.scrollElementRoutes and scrollAtRoutes for the currently supported subset. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
             input_schema: snapshot_arg(json!({
                 "elementId": { "type": "string" },
                 "ref": { "type": "string" },
@@ -487,7 +487,8 @@ fn screenshot_instruction_text(value: &Value) -> Option<String> {
     let mut lines = vec![
         format!("This screenshot is {width}x{height} pixels."),
         "All click coordinates must be in this original pixel space.".to_string(),
-        "A second image is included with a 50px grid/ruler overlay in the same coordinate space.".to_string(),
+        "A second image is included with a 50px grid/ruler overlay in the same coordinate space."
+            .to_string(),
     ];
     if let Some(marker_line) = marker {
         lines.push(marker_line);
@@ -582,10 +583,32 @@ mod tests {
             .find(|tool| tool["name"] == "computer_raise_app")
             .expect("raise tool");
         let description = raise["description"].as_str().unwrap();
-        assert!(description.contains("Dock-minimized"));
+        assert!(description.contains("hidden or minimized"));
         assert!(description.contains("computer_get_app_state"));
-        assert!(description.contains("open -a"));
-        assert!(description.contains("AppleScript"));
+        assert!(description.contains("tool errors"));
+        assert!(!description.contains("open -a"));
+    }
+
+    #[test]
+    fn click_tool_descriptions_point_to_action_capabilities() {
+        let result = tools_list_result();
+        let tools = result["tools"].as_array().unwrap();
+        let click = tools
+            .iter()
+            .find(|tool| tool["name"] == "computer_click")
+            .expect("click tool");
+        let scroll = tools
+            .iter()
+            .find(|tool| tool["name"] == "computer_scroll")
+            .expect("scroll tool");
+        assert!(click["description"]
+            .as_str()
+            .unwrap()
+            .contains("AppState.actionCapabilities"));
+        assert!(scroll["description"]
+            .as_str()
+            .unwrap()
+            .contains("AppState.actionCapabilities"));
     }
 
     #[test]
@@ -688,7 +711,10 @@ mod tests {
         assert!(text.contains("\"route\":\"hid\""));
         assert!(text.contains("\"outcome\":\"no_effect\""));
         assert!(text.contains("\"nextDispatchRoute\":\"hid\""));
-        assert_eq!(result["structuredContent"]["lastClickResult"]["route"], "hid");
+        assert_eq!(
+            result["structuredContent"]["lastClickResult"]["route"],
+            "hid"
+        );
         assert_eq!(
             result["structuredContent"]["lastClickResult"]["outcome"],
             "no_effect"
@@ -719,11 +745,49 @@ mod tests {
         assert!(text.contains("\"kind\":\"scroll\""));
         assert!(text.contains("\"route\":\"ax\""));
         assert!(text.contains("\"outcome\":\"semantic_success\""));
-        assert_eq!(result["structuredContent"]["lastActionResult"]["kind"], "scroll");
-        assert_eq!(result["structuredContent"]["lastActionResult"]["route"], "ax");
+        assert_eq!(
+            result["structuredContent"]["lastActionResult"]["kind"],
+            "scroll"
+        );
+        assert_eq!(
+            result["structuredContent"]["lastActionResult"]["route"],
+            "ax"
+        );
         assert_eq!(
             result["structuredContent"]["lastActionResult"]["outcome"],
             "semantic_success"
+        );
+    }
+
+    #[test]
+    fn app_state_result_text_fallback_preserves_action_capabilities() {
+        let result = tool_app_state_result(json!({
+            "snapshotId": "snap-1",
+            "actionCapabilities": {
+                "clickElementRoutes": ["auto"],
+                "clickAtRoutes": ["auto"],
+                "secondaryClickElementRoutes": [],
+                "secondaryClickAtRoutes": ["auto"],
+                "doubleClickAtRoutes": ["auto"],
+                "dragRoutes": ["auto"],
+                "scrollElementRoutes": [],
+                "scrollAtRoutes": ["auto"],
+                "supportsSetValue": true,
+                "supportsTypeText": true,
+                "supportsPressKey": true
+            },
+            "screenshot": {
+                "handle": "/does/not/exist.png",
+                "format": "png"
+            }
+        }));
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"actionCapabilities\""));
+        assert!(text.contains("\"clickElementRoutes\":[\"auto\"]"));
+        assert_eq!(
+            result["structuredContent"]["actionCapabilities"]["scrollElementRoutes"],
+            json!([])
         );
     }
 

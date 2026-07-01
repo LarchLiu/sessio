@@ -40,7 +40,10 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
 use foreign_types::ForeignType;
-use image::{imageops::{crop_imm, FilterType}, ImageFormat, ImageReader};
+use image::{
+    imageops::{crop_imm, FilterType},
+    ImageFormat, ImageReader,
+};
 use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
 use objc2::{AnyThread, MainThreadMarker, Message};
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSScreen};
@@ -48,15 +51,15 @@ use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSPoint, NSRect, NSSize};
 use sha2::{Digest, Sha256};
 
+use crate::computer_use::diagnostics;
 use crate::computer_use::provider::{
     ActionExecutionKind, ActionExecutionOutcome, ActionExecutionResult, ActionExecutionRoute,
     AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ClickDispatchRoute,
     ClickExecutionOutcome, ClickExecutionResult, ClickExecutionRoute, ComputerUseProvider,
-    CoordinateSpace, DisplayMetadata, ElementId, InstalledApp, Point, ProviderError,
-    ProviderResult, RawAppState, Rect, ScreenshotCaptureKind, ScreenshotRef, ScrollDirection,
-    UiElement,
+    CoordinateSpace, DisplayMetadata, ElementId, InstalledApp, Point, ProviderCapabilities,
+    ProviderError, ProviderResult, RawAppState, Rect, ScreenshotCaptureKind, ScreenshotRef,
+    ScrollDirection, UiElement,
 };
-use crate::computer_use::diagnostics;
 
 #[derive(Clone)]
 struct FrontmostApp {
@@ -196,6 +199,10 @@ impl ComputerUseProvider for MacosProvider {
         // CGEvent injection is available on macOS; the host still gates it on
         // accessibility trust + settings before calling control methods.
         true
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::full()
     }
 
     fn list_apps(&self, options: AppListOptions) -> ProviderResult<Vec<InstalledApp>> {
@@ -473,7 +480,15 @@ impl ComputerUseProvider for MacosProvider {
         route_hint: ClickDispatchRoute,
     ) -> ProviderResult<ActionExecutionResult> {
         let pid = resolve_pid(&target.app_id)?;
-        scroll_ax_element(&self.capture_dir, target, pid, element, direction, amount, route_hint)
+        scroll_ax_element(
+            &self.capture_dir,
+            target,
+            pid,
+            element,
+            direction,
+            amount,
+            route_hint,
+        )
     }
 }
 
@@ -858,11 +873,11 @@ fn event_target_for_route(
     }
 }
 
-fn dispatch_route_for_action(
-    action: InputActionKind,
-) -> InputDispatchRoute {
+fn dispatch_route_for_action(action: InputActionKind) -> InputDispatchRoute {
     match action {
-        InputActionKind::KeyboardText | InputActionKind::KeyboardKey => InputDispatchRoute::TargetPid,
+        InputActionKind::KeyboardText | InputActionKind::KeyboardKey => {
+            InputDispatchRoute::TargetPid
+        }
         InputActionKind::MouseClick
         | InputActionKind::MouseSecondaryClick
         | InputActionKind::MouseDoubleClick
@@ -922,13 +937,21 @@ fn bundle_has_embedded_web_runtime_markers(app_id: &str) -> bool {
     };
     let contents = PathBuf::from(path).join("Contents");
     let markers = [
-        contents.join("Frameworks").join("Electron Framework.framework"),
+        contents
+            .join("Frameworks")
+            .join("Electron Framework.framework"),
         contents
             .join("Frameworks")
             .join("Chromium Embedded Framework.framework"),
-        contents.join("Frameworks").join("QtWebEngineCore.framework"),
-        contents.join("Frameworks").join("QtWebEngineWidgets.framework"),
-        contents.join("Frameworks").join("QtWebEngineQuick.framework"),
+        contents
+            .join("Frameworks")
+            .join("QtWebEngineCore.framework"),
+        contents
+            .join("Frameworks")
+            .join("QtWebEngineWidgets.framework"),
+        contents
+            .join("Frameworks")
+            .join("QtWebEngineQuick.framework"),
     ];
     markers.iter().any(|path| path.exists())
 }
@@ -1313,7 +1336,10 @@ fn screenshot_ref_from_path(
     })
 }
 
-fn normalize_capture_image_to_screen_points(path: &Path, screen_bounds: Rect) -> ProviderResult<()> {
+fn normalize_capture_image_to_screen_points(
+    path: &Path,
+    screen_bounds: Rect,
+) -> ProviderResult<()> {
     let (current_width, current_height) = image::image_dimensions(path)
         .map_err(|e| ProviderError::Failed(format!("decode capture dimensions: {e}")))?;
     let Some((target_width, target_height)) =
@@ -1399,9 +1425,7 @@ fn cg_window_image(
     window_id: u32,
     bounds: CGRect,
 ) -> ProviderResult<core_graphics::image::CGImage> {
-    use core_graphics::window::{
-        kCGWindowImageBestResolution, kCGWindowListOptionIncludingWindow,
-    };
+    use core_graphics::window::{kCGWindowImageBestResolution, kCGWindowListOptionIncludingWindow};
 
     CGDisplay::screenshot(
         bounds,
@@ -1549,7 +1573,9 @@ fn sck_stream_configuration(screen_bounds: Rect) -> ProviderResult<Retained<AnyO
 }
 
 fn display_scale_from_capture_bounds(screen_bounds: Rect) -> f32 {
-    display_metadata_for_window_bounds(Some(screen_bounds)).scale.max(1.0)
+    display_metadata_for_window_bounds(Some(screen_bounds))
+        .scale
+        .max(1.0)
 }
 
 fn capture_pixel_size_for_bounds(screen_bounds: Rect, scale: f32) -> (usize, usize) {
@@ -1610,9 +1636,9 @@ fn screen_for_rect(bounds: Option<Rect>) -> Option<Retained<NSScreen>> {
         .find(|screen| ns_rect_contains_point(screen.frame(), center))
         .map(|screen| screen.retain())
         .or_else(|| {
-            screen_for_cg_display_bounds(cg_display_bounds_for_point(center).unwrap_or_else(|| {
-                CGDisplay::main().bounds()
-            }))
+            screen_for_cg_display_bounds(
+                cg_display_bounds_for_point(center).unwrap_or_else(|| CGDisplay::main().bounds()),
+            )
         })
 }
 
@@ -2079,9 +2105,10 @@ fn ax_value_size(element: ax::AXUIElementRef, attr: &str) -> Option<(f32, f32)> 
 fn ax_element_center(pid: i32, element_id: &ElementId) -> ProviderResult<Option<CGPoint>> {
     let elements = ax_elements_for_pid(pid).unwrap_or_default();
     let element = elements.iter().find(|e| &e.id == element_id);
-    match element
-        .and_then(|e| e.bounds.filter(|bounds| bounds.width > 0.0 && bounds.height > 0.0))
-    {
+    match element.and_then(|e| {
+        e.bounds
+            .filter(|bounds| bounds.width > 0.0 && bounds.height > 0.0)
+    }) {
         Some(b) => Ok(Some(CGPoint {
             x: (b.x + b.width / 2.0) as f64,
             y: (b.y + b.height / 2.0) as f64,
@@ -2117,10 +2144,15 @@ fn execute_click_intent(
         }
     }
 
-    Err(ProviderError::Failed("all click routes failed to dispatch".into()))
+    Err(ProviderError::Failed(
+        "all click routes failed to dispatch".into(),
+    ))
 }
 
-fn click_route_plan(intent: ClickIntent<'_>, route_hint: ClickDispatchRoute) -> Vec<ClickRouteKind> {
+fn click_route_plan(
+    intent: ClickIntent<'_>,
+    route_hint: ClickDispatchRoute,
+) -> Vec<ClickRouteKind> {
     let mut routes = Vec::new();
 
     match route_hint {
@@ -2157,9 +2189,7 @@ fn mouse_route_plan_for_point(route_hint: ClickDispatchRoute) -> Vec<InputDispat
     }
 }
 
-fn mouse_route_plan_for_element(
-    route_hint: ClickDispatchRoute,
-) -> (bool, Vec<InputDispatchRoute>) {
+fn mouse_route_plan_for_element(route_hint: ClickDispatchRoute) -> (bool, Vec<InputDispatchRoute>) {
     match route_hint {
         ClickDispatchRoute::Auto => (
             true,
@@ -2184,7 +2214,9 @@ fn click_execution_outcome(
     attempt_outcome: ClickAttemptOutcome,
 ) -> ClickExecutionOutcome {
     match (route, attempt_outcome) {
-        (ClickRouteKind::Ax, ClickAttemptOutcome::Succeeded) => ClickExecutionOutcome::SemanticSuccess,
+        (ClickRouteKind::Ax, ClickAttemptOutcome::Succeeded) => {
+            ClickExecutionOutcome::SemanticSuccess
+        }
         (_, ClickAttemptOutcome::Succeeded) => ClickExecutionOutcome::ObservedEffect,
         (_, ClickAttemptOutcome::NoEffect) => ClickExecutionOutcome::NoEffect,
         (_, ClickAttemptOutcome::Uncertain) => ClickExecutionOutcome::Uncertain,
@@ -2389,7 +2421,9 @@ fn execute_routed_action_with_effect_probe(
         }
     }
 
-    Err(ProviderError::Failed("all routes failed to dispatch".into()))
+    Err(ProviderError::Failed(
+        "all routes failed to dispatch".into(),
+    ))
 }
 
 fn action_execution_route(route: InputDispatchRoute) -> ActionExecutionRoute {
@@ -2467,8 +2501,7 @@ fn click_effect_probe(
             }
         };
 
-        let (outcome, local_changed, full_changed) =
-            classify_click_effect_sample(before, after);
+        let (outcome, local_changed, full_changed) = classify_click_effect_sample(before, after);
         if matches!(outcome, ClickEffectProbeOutcome::Uncertain) {
             saw_remote_only_change = true;
         }
@@ -2579,12 +2612,12 @@ fn local_probe_rect(
         return None;
     }
 
-    let relative_x =
-        ((probe_point.x as f32 - screenshot.screen_bounds.x) / screenshot.screen_bounds.width)
-            .clamp(0.0, 1.0);
-    let relative_y =
-        ((probe_point.y as f32 - screenshot.screen_bounds.y) / screenshot.screen_bounds.height)
-            .clamp(0.0, 1.0);
+    let relative_x = ((probe_point.x as f32 - screenshot.screen_bounds.x)
+        / screenshot.screen_bounds.width)
+        .clamp(0.0, 1.0);
+    let relative_y = ((probe_point.y as f32 - screenshot.screen_bounds.y)
+        / screenshot.screen_bounds.height)
+        .clamp(0.0, 1.0);
     let center_x = (relative_x * screenshot.width as f32).round() as i32;
     let center_y = (relative_y * screenshot.height as f32).round() as i32;
     let radius = CLICK_EFFECT_LOCAL_PROBE_RADIUS_PX as i32;
@@ -2979,13 +3012,9 @@ fn secondary_click_at(target: EventTarget, point: CGPoint) -> ProviderResult<()>
 
 fn move_mouse_to(target: EventTarget, point: CGPoint) -> ProviderResult<()> {
     let source = event_source()?;
-    let moved = CGEvent::new_mouse_event(
-        source,
-        CGEventType::MouseMoved,
-        point,
-        CGMouseButton::Left,
-    )
-    .map_err(|_| ProviderError::Failed("create mouse-moved".into()))?;
+    let moved =
+        CGEvent::new_mouse_event(source, CGEventType::MouseMoved, point, CGMouseButton::Left)
+            .map_err(|_| ProviderError::Failed("create mouse-moved".into()))?;
     post_event_sequence(target, &[&moved]);
     Ok(())
 }
@@ -3094,7 +3123,11 @@ fn press_keycode(target: EventTarget, keycode: u16, flags: CGEventFlags) -> Prov
     Ok(())
 }
 
-fn scroll_wheel(target: EventTarget, direction: ScrollDirection, amount: i32) -> ProviderResult<()> {
+fn scroll_wheel(
+    target: EventTarget,
+    direction: ScrollDirection,
+    amount: i32,
+) -> ProviderResult<()> {
     let source = event_source()?;
     let (dy, dx) = match direction {
         ScrollDirection::Up => (amount, 0),
@@ -3129,8 +3162,8 @@ fn prepare_event_dispatch(target: EventTarget) -> Option<FrontmostApp> {
     let frontmost_before_bundle_id = original_frontmost
         .as_ref()
         .and_then(|app| app_bundle_id(&app.app));
-    let target_bundle_id = running_application_for_pid(target.pid)
-        .and_then(|app| app_bundle_id(&app));
+    let target_bundle_id =
+        running_application_for_pid(target.pid).and_then(|app| app_bundle_id(&app));
     let was_frontmost = frontmost_before_pid == Some(target.pid);
     let activated = if target.ensure_frontmost && !was_frontmost {
         activate_target_pid(target.pid)
@@ -3207,7 +3240,8 @@ fn frontmost_app() -> Option<FrontmostApp> {
 }
 
 fn app_bundle_id(app: &objc2::rc::Retained<objc2_app_kit::NSRunningApplication>) -> Option<String> {
-    app.bundleIdentifier().map(|bundle_id| bundle_id.to_string())
+    app.bundleIdentifier()
+        .map(|bundle_id| bundle_id.to_string())
 }
 
 fn activate_target_pid(pid: i32) -> bool {
@@ -3415,7 +3449,10 @@ mod tests {
             height: 752.0,
         };
 
-        assert_eq!(normalized_capture_size(2114, 1504, bounds), Some((1057, 752)));
+        assert_eq!(
+            normalized_capture_size(2114, 1504, bounds),
+            Some((1057, 752))
+        );
         assert_eq!(normalized_capture_size(1057, 752, bounds), None);
         assert_eq!(normalized_capture_size(1000, 700, bounds), None);
     }
@@ -3632,9 +3669,11 @@ mod tests {
             click_marker: None,
         };
 
-        let fingerprint =
-            window_capture_fingerprint_from_screenshot(&screenshot, Some(CGPoint { x: 2.0, y: 2.0 }))
-                .unwrap();
+        let fingerprint = window_capture_fingerprint_from_screenshot(
+            &screenshot,
+            Some(CGPoint { x: 2.0, y: 2.0 }),
+        )
+        .unwrap();
 
         assert_ne!(fingerprint.full_hash, [0; 32]);
         assert!(!Path::new(&screenshot.handle).exists());

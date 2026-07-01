@@ -209,11 +209,9 @@ mod native_macos {
     use objc2::{rc::Retained, runtime::Bool, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAffineTransformNSAppKitAdditions, NSBackingStoreType, NSBezierPath, NSBox, NSBoxType,
-        NSColor, NSEvent, NSFont, NSGraphicsContext, NSImage, NSImageInterpolation,
-        NSImageScaling, NSImageView, NSPanel, NSScreen, NSScreenSaverWindowLevel, NSShadow,
-        NSStatusWindowLevel, NSTextAlignment, NSTextField, NSView,
-        NSWindowCollectionBehavior,
-        NSWindowStyleMask,
+        NSColor, NSEvent, NSFont, NSGraphicsContext, NSImage, NSImageInterpolation, NSImageScaling,
+        NSImageView, NSPanel, NSScreen, NSScreenSaverWindowLevel, NSShadow, NSStatusWindowLevel,
+        NSTextAlignment, NSTextField, NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
     };
     use objc2_foundation::{NSAffineTransform, NSPoint, NSRect, NSSize, NSString};
     use tauri::AppHandle;
@@ -429,8 +427,8 @@ mod native_macos {
     fn ensure_pointer_overlay_windows_on_main(
         windows: &Arc<Mutex<HashMap<String, NativeOverlayWindow>>>,
     ) -> Result<(), String> {
-        let mtm =
-            MainThreadMarker::new().ok_or_else(|| "Must run pointer overlay on main thread".to_string())?;
+        let mtm = MainThreadMarker::new()
+            .ok_or_else(|| "Must run pointer overlay on main thread".to_string())?;
         let screens = NSScreen::screens(mtm);
         let mut overlays = windows.lock().map_err(|error| error.to_string())?;
 
@@ -552,9 +550,7 @@ mod native_macos {
         }
         let windows = native_pointer_windows();
         let animation_lock = native_pointer_animation_lock();
-        let _animation_guard = animation_lock
-            .lock()
-            .map_err(|error| error.to_string())?;
+        let _animation_guard = animation_lock.lock().map_err(|error| error.to_string())?;
         let overlays = {
             let mut overlays = windows.lock().map_err(|error| error.to_string())?;
             let label = overlay_label_for_event(&overlays, &event)
@@ -681,13 +677,15 @@ mod native_macos {
             .map(|(x, y)| (f64::from(x), f64::from(y)));
         if let Some((x, y)) = point {
             for overlay in overlays.values() {
-                if overlay_contains_quartz_point(overlay, ScreenPoint { x, y })
-                {
+                if overlay_contains_quartz_point(overlay, ScreenPoint { x, y }) {
                     return Some(overlay.label.clone());
                 }
             }
         }
-        overlays.values().next().map(|overlay| overlay.label.clone())
+        overlays
+            .values()
+            .next()
+            .map(|overlay| overlay.label.clone())
     }
 
     fn show_pointer_event_on_main(
@@ -906,10 +904,7 @@ mod native_macos {
                         label_origin.x,
                         label_origin.y + ((scaled_height - label_height) / 2.0).max(0.0),
                     ),
-                    NSSize::new(
-                        scaled_width.max(1.0),
-                        label_height,
-                    ),
+                    NSSize::new(scaled_width.max(1.0), label_height),
                 ));
                 label_box.setAlphaValue(label_alpha);
                 label.setAlphaValue(label_alpha);
@@ -955,10 +950,10 @@ mod native_macos {
         point: NSPoint,
         label_box_width: f64,
     ) -> NSPoint {
-        let max_x =
-            (overlay.appkit_width - label_box_width - OVERLAY_EDGE_PADDING).max(OVERLAY_EDGE_PADDING);
-        let max_y =
-            (overlay.appkit_height - LABEL_BOX_HEIGHT - OVERLAY_EDGE_PADDING).max(OVERLAY_EDGE_PADDING);
+        let max_x = (overlay.appkit_width - label_box_width - OVERLAY_EDGE_PADDING)
+            .max(OVERLAY_EDGE_PADDING);
+        let max_y = (overlay.appkit_height - LABEL_BOX_HEIGHT - OVERLAY_EDGE_PADDING)
+            .max(OVERLAY_EDGE_PADDING);
         NSPoint::new(
             (point.x + LABEL_OFFSET_X).clamp(OVERLAY_EDGE_PADDING, max_x),
             (point.y + LABEL_OFFSET_Y).clamp(OVERLAY_EDGE_PADDING, max_y),
@@ -1055,7 +1050,12 @@ mod native_macos {
             .collect()
     }
 
-    fn quadratic_bezier(start: ScreenPoint, control: ScreenPoint, end: ScreenPoint, t: f64) -> ScreenPoint {
+    fn quadratic_bezier(
+        start: ScreenPoint,
+        control: ScreenPoint,
+        end: ScreenPoint,
+        t: f64,
+    ) -> ScreenPoint {
         let one_minus_t = 1.0 - t;
         ScreenPoint {
             x: (one_minus_t * one_minus_t * start.x)
@@ -1240,8 +1240,7 @@ mod native_macos {
     }
 
     fn cursor_shadow_blur_radius(scale: f64) -> f64 {
-        CURSOR_SHADOW_BLUR_RADIUS
-            + ((scale - 1.0).max(0.0) * CURSOR_SHADOW_SCALE_MULTIPLIER)
+        CURSOR_SHADOW_BLUR_RADIUS + ((scale - 1.0).max(0.0) * CURSOR_SHADOW_SCALE_MULTIPLIER)
     }
 
     fn label_width_for_text(text: &str) -> f64 {
@@ -1255,7 +1254,10 @@ mod native_macos {
             let Ok(mut overlays) = windows.lock() else {
                 return;
             };
-            overlays.drain().map(|(_, overlay)| overlay).collect::<Vec<_>>()
+            overlays
+                .drain()
+                .map(|(_, overlay)| overlay)
+                .collect::<Vec<_>>()
         };
 
         for overlay in overlays {

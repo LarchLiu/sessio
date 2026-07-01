@@ -6,8 +6,8 @@
 
 use crate::computer_use::provider::{
     ActionExecutionResult, AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget,
-    ClickDispatchRoute, ClickExecutionResult, ComputerUseProvider, ElementId, InstalledApp,
-    Point, ProviderError, ProviderResult, RawAppState, ScrollDirection,
+    ClickDispatchRoute, ClickExecutionResult, ComputerUseProvider, ElementId, InstalledApp, Point,
+    ProviderCapabilities, ProviderError, ProviderResult, RawAppState, ScrollDirection,
 };
 
 pub struct UnsupportedProvider;
@@ -27,6 +27,22 @@ impl Default for UnsupportedProvider {
 impl ComputerUseProvider for UnsupportedProvider {
     fn supports_control(&self) -> bool {
         false
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            click_element_routes: Vec::new(),
+            click_at_routes: Vec::new(),
+            secondary_click_element_routes: Vec::new(),
+            secondary_click_at_routes: Vec::new(),
+            double_click_at_routes: Vec::new(),
+            drag_routes: Vec::new(),
+            scroll_element_routes: Vec::new(),
+            scroll_at_routes: Vec::new(),
+            supports_set_value: false,
+            supports_type_text: false,
+            supports_press_key: false,
+        }
     }
 
     fn list_apps(&self, _options: AppListOptions) -> ProviderResult<Vec<InstalledApp>> {

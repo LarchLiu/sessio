@@ -15,11 +15,11 @@ use std::time::Duration;
 
 use crate::computer_use::provider::{
     ActionExecutionKind, ActionExecutionOutcome, ActionExecutionResult, ActionExecutionRoute,
-    AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ClickExecutionOutcome,
-    ClickDispatchRoute, ClickExecutionResult, ClickExecutionRoute, ComputerUseProvider,
-    CoordinateSpace, DisplayMetadata, ElementId, InstalledApp, Point, ProviderError,
-    ProviderResult, RawAppState, Rect, ScreenshotCaptureKind, ScreenshotRef, ScrollDirection,
-    UiElement,
+    AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ClickDispatchRoute,
+    ClickExecutionOutcome, ClickExecutionResult, ClickExecutionRoute, ComputerUseProvider,
+    CoordinateSpace, DisplayMetadata, ElementId, InstalledApp, Point, ProviderCapabilities,
+    ProviderError, ProviderResult, RawAppState, Rect, ScreenshotCaptureKind, ScreenshotRef,
+    ScrollDirection, UiElement,
 };
 
 use windows::core::{w, BOOL, BSTR, PCWSTR};
@@ -34,8 +34,8 @@ use windows::Win32::Security::{
     TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-    COINIT_APARTMENTTHREADED,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+    COINIT_APARTMENTTHREADED, STGM_READ,
 };
 use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
 use windows::Win32::System::Threading::{
@@ -66,7 +66,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME, VK_INSERT, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN,
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::Shell::{CLSID_ShellLink, IShellLinkW, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
     AttachThreadInput, EnumWindows, GetAncestor, GetForegroundWindow, GetSystemMetrics,
     GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
@@ -102,9 +102,25 @@ impl ComputerUseProvider for WindowsProvider {
         true
     }
 
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            click_element_routes: vec![ClickDispatchRoute::Auto],
+            click_at_routes: vec![ClickDispatchRoute::Auto],
+            secondary_click_element_routes: Vec::new(),
+            secondary_click_at_routes: vec![ClickDispatchRoute::Auto],
+            double_click_at_routes: vec![ClickDispatchRoute::Auto],
+            drag_routes: vec![ClickDispatchRoute::Auto],
+            scroll_element_routes: Vec::new(),
+            scroll_at_routes: vec![ClickDispatchRoute::Auto],
+            supports_set_value: true,
+            supports_type_text: true,
+            supports_press_key: true,
+        }
+    }
+
     fn list_apps(&self, options: AppListOptions) -> ProviderResult<Vec<InstalledApp>> {
         let _ = options;
-        Ok(list_running_apps())
+        Ok(list_available_apps())
     }
 
     fn is_app_running(&self, app_id: &AppId) -> ProviderResult<bool> {
@@ -298,6 +314,39 @@ struct WindowInfo {
 
 // --- App/window discovery -------------------------------------------------
 
+fn list_available_apps() -> Vec<InstalledApp> {
+    merge_available_apps(list_installed_apps(), list_running_apps())
+}
+
+fn merge_available_apps(
+    installed: Vec<InstalledApp>,
+    running: Vec<InstalledApp>,
+) -> Vec<InstalledApp> {
+    let mut by_id: HashMap<AppId, InstalledApp> = HashMap::new();
+    for app in installed {
+        by_id.entry(app.id.clone()).or_insert(app);
+    }
+    for app in running {
+        by_id
+            .entry(app.id.clone())
+            .and_modify(|existing| {
+                existing.running = true;
+                existing.pid = app.pid;
+                if existing.name.trim().is_empty() {
+                    existing.name = app.name.clone();
+                }
+            })
+            .or_insert(app);
+    }
+    let mut apps: Vec<_> = by_id.into_values().collect();
+    apps.sort_by(|a, b| {
+        b.running
+            .cmp(&a.running)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    apps
+}
+
 fn list_running_apps() -> Vec<InstalledApp> {
     let mut by_id: HashMap<AppId, InstalledApp> = HashMap::new();
     for window in enumerate_windows() {
@@ -321,6 +370,72 @@ fn list_running_apps() -> Vec<InstalledApp> {
     let mut apps: Vec<_> = by_id.into_values().collect();
     apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     apps
+}
+
+fn list_installed_apps() -> Vec<InstalledApp> {
+    list_installed_apps_from_roots(start_menu_roots(), installed_app_from_shortcut)
+}
+
+fn list_installed_apps_from_roots<F>(
+    roots: Vec<PathBuf>,
+    mut resolve_shortcut: F,
+) -> Vec<InstalledApp>
+where
+    F: FnMut(&Path) -> Option<InstalledApp>,
+{
+    let mut by_id: HashMap<AppId, InstalledApp> = HashMap::new();
+    for root in roots {
+        scan_start_menu_dir_with(&root, &mut by_id, &mut resolve_shortcut);
+    }
+    by_id.into_values().collect()
+}
+
+fn start_menu_roots() -> Vec<PathBuf> {
+    let mut out = vec![PathBuf::from(
+        r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs",
+    )];
+    if let Some(home) = dirs::home_dir() {
+        out.push(home.join(r"AppData\Roaming\Microsoft\Windows\Start Menu\Programs"));
+    }
+    out
+}
+
+fn scan_start_menu_dir(root: &Path, out: &mut HashMap<AppId, InstalledApp>) {
+    let mut resolver = installed_app_from_shortcut;
+    scan_start_menu_dir_with(root, out, &mut resolver);
+}
+
+fn scan_start_menu_dir_with<F>(
+    root: &Path,
+    out: &mut HashMap<AppId, InstalledApp>,
+    resolve_shortcut: &mut F,
+) where
+    F: FnMut(&Path) -> Option<InstalledApp>,
+{
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            scan_start_menu_dir_with(&path, out, resolve_shortcut);
+            continue;
+        }
+        if !is_start_menu_shortcut(&path) {
+            continue;
+        }
+        let Some(app) = resolve_shortcut(&path) else {
+            continue;
+        };
+        out.entry(app.id.clone()).or_insert(app);
+    }
+}
+
+fn is_start_menu_shortcut(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("lnk"))
+        .unwrap_or(false)
 }
 
 fn resolve_process(app_id: &str) -> Option<(AppId, u32)> {
@@ -491,12 +606,74 @@ fn process_exe_path(pid: u32) -> Option<String> {
     }
 }
 
+fn installed_app_from_shortcut(path: &Path) -> Option<InstalledApp> {
+    let target = resolve_shortcut_target(path)?;
+    installed_app_from_shortcut_target(path, &target)
+}
+
+fn installed_app_from_shortcut_target(path: &Path, target: &Path) -> Option<InstalledApp> {
+    if !target.exists() || !target.is_file() {
+        return None;
+    }
+    let target_str = target.to_string_lossy().to_string();
+    if !target_str.to_ascii_lowercase().ends_with(".exe") {
+        return None;
+    }
+    let id = normalize_app_id(&target_str);
+    let name = path
+        .file_stem()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            target
+                .file_stem()
+                .map(|name| name.to_string_lossy().to_string())
+                .filter(|name| !name.trim().is_empty())
+        })
+        .unwrap_or_else(|| id.clone());
+    Some(InstalledApp {
+        id,
+        name,
+        pid: None,
+        running: false,
+        recent_use_count: None,
+        recent_last_used_at: None,
+        recent_source: None,
+    })
+}
+
+fn resolve_shortcut_target(path: &Path) -> Option<PathBuf> {
+    let _apartment = ComApartment::init().ok()?;
+    let shortcut: IShellLinkW =
+        unsafe { CoCreateInstance(&CLSID_ShellLink, None, CLSCTX_INPROC_SERVER) }.ok()?;
+    let persist: IPersistFile = shortcut.cast().ok()?;
+    let wide = wide_null(path.to_string_lossy().as_ref());
+    unsafe {
+        persist.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
+    }
+
+    let mut raw_path = vec![0u16; MAX_PATH as usize];
+    unsafe {
+        shortcut
+            .GetPath(&mut raw_path, std::ptr::null_mut(), 0)
+            .ok()?;
+    }
+    let len = raw_path
+        .iter()
+        .position(|ch| *ch == 0)
+        .unwrap_or(raw_path.len());
+    if len == 0 {
+        return None;
+    }
+    Some(PathBuf::from(String::from_utf16_lossy(&raw_path[..len])))
+}
+
 fn normalize_app_id(path: &str) -> AppId {
     path.trim().to_ascii_lowercase()
 }
 
 fn app_matches_ref(app_id: &str, window: &WindowInfo) -> bool {
-    let wanted = app_id.trim();
+    let wanted = normalize_app_id(app_id);
     if wanted.eq_ignore_ascii_case(&window.app_id) {
         return true;
     }
@@ -509,14 +686,23 @@ fn app_matches_ref(app_id: &str, window: &WindowInfo) -> bool {
 // --- Launch / foreground recovery ----------------------------------------
 
 fn launch_app(target: &AppTarget) -> ProviderResult<AppLaunchResult> {
-    if resolve_process(&target.app_id).is_some() {
+    let normalized = normalize_app_id(&target.app_id);
+    if resolve_process(&normalized).is_some() {
         return Ok(AppLaunchResult {
-            target: target.clone(),
+            target: AppTarget {
+                app_id: normalized,
+                window_id: target.window_id.clone(),
+            },
             launched: false,
             running: true,
         });
     }
-    if !Path::new(&target.app_id).exists() {
+    let path = PathBuf::from(&target.app_id);
+    if !path.is_absolute()
+        || !path.exists()
+        || !path.is_file()
+        || !target.app_id.to_ascii_lowercase().ends_with(".exe")
+    {
         return Err(ProviderError::AppNotFound(target.app_id.clone()));
     }
     let wide = wide_null(&target.app_id);
@@ -536,7 +722,7 @@ fn launch_app(target: &AppTarget) -> ProviderResult<AppLaunchResult> {
             target.app_id, result.0 as isize
         )));
     }
-    let running = wait_for_running(&target.app_id, Duration::from_secs(5));
+    let running = wait_for_running(&normalized, Duration::from_secs(5));
     if !running {
         return Err(ProviderError::Failed(format!(
             "launched {} but no targetable window appeared",
@@ -544,7 +730,10 @@ fn launch_app(target: &AppTarget) -> ProviderResult<AppLaunchResult> {
         )));
     }
     Ok(AppLaunchResult {
-        target: target.clone(),
+        target: AppTarget {
+            app_id: normalized,
+            window_id: target.window_id.clone(),
+        },
         launched: true,
         running: true,
     })
@@ -1307,5 +1496,124 @@ fn scroll_uia_element_into_view(element: &IUIAutomationElement) -> ProviderResul
         pattern
             .ScrollIntoView()
             .map_err(|e| ProviderError::Failed(format!("UIA ScrollItemPattern failed: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn installed_app(id: &str, name: &str) -> InstalledApp {
+        InstalledApp {
+            id: id.into(),
+            name: name.into(),
+            pid: None,
+            running: false,
+            recent_use_count: None,
+            recent_last_used_at: None,
+            recent_source: None,
+        }
+    }
+
+    fn running_app(id: &str, name: &str, pid: i32) -> InstalledApp {
+        InstalledApp {
+            id: id.into(),
+            name: name.into(),
+            pid: Some(pid),
+            running: true,
+            recent_use_count: None,
+            recent_last_used_at: None,
+            recent_source: None,
+        }
+    }
+
+    #[test]
+    fn merge_available_apps_dedupes_by_id_and_sorts_running_first_then_name() {
+        let apps = merge_available_apps(
+            vec![
+                installed_app(r"c:\apps\zeta.exe", "Zeta"),
+                installed_app(r"c:\apps\alpha.exe", "Alpha"),
+            ],
+            vec![
+                running_app(r"c:\apps\alpha.exe", "Alpha Window", 42),
+                running_app(r"c:\apps\beta.exe", "Beta", 7),
+            ],
+        );
+
+        assert_eq!(apps.len(), 3);
+        assert_eq!(apps[0].name, "Alpha");
+        assert!(apps[0].running);
+        assert_eq!(apps[0].pid, Some(42));
+        assert_eq!(apps[1].name, "Beta");
+        assert!(apps[1].running);
+        assert_eq!(apps[2].name, "Zeta");
+        assert!(!apps[2].running);
+    }
+
+    #[test]
+    fn installed_app_from_shortcut_target_skips_missing_or_non_exe_targets() {
+        let root = std::env::temp_dir().join(format!(
+            "sessio-cu-windows-shortcut-target-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let shortcut = root.join("Example App.lnk");
+        std::fs::write(&shortcut, b"placeholder").unwrap();
+
+        let missing = root.join("missing.exe");
+        assert!(installed_app_from_shortcut_target(&shortcut, &missing).is_none());
+
+        let text_file = root.join("readme.txt");
+        std::fs::write(&text_file, b"hello").unwrap();
+        assert!(installed_app_from_shortcut_target(&shortcut, &text_file).is_none());
+
+        let exe_file = root.join("Example.EXE");
+        std::fs::write(&exe_file, b"MZ").unwrap();
+        let app = installed_app_from_shortcut_target(&shortcut, &exe_file).unwrap();
+        assert_eq!(
+            app.id,
+            normalize_app_id(exe_file.to_string_lossy().as_ref())
+        );
+        assert_eq!(app.name, "Example App");
+        assert!(!app.running);
+        assert!(app.pid.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_start_menu_dir_skips_bad_shortcuts_and_dedupes_targets() {
+        let root = std::env::temp_dir().join(format!(
+            "sessio-cu-windows-start-menu-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let nested = root.join("Nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let good = root.join("Good App.lnk");
+        let bad = root.join("Bad App.lnk");
+        let duplicate = nested.join("Alias App.lnk");
+        let ignored = root.join("Readme.txt");
+        for path in [&good, &bad, &duplicate] {
+            std::fs::write(path, b"placeholder").unwrap();
+        }
+        std::fs::write(&ignored, b"skip").unwrap();
+
+        let mut apps = HashMap::new();
+        let mut resolver = |path: &Path| match path.file_name().and_then(|name| name.to_str()) {
+            Some("Good App.lnk") => Some(installed_app(r"c:\apps\good.exe", "Good App")),
+            Some("Alias App.lnk") => Some(installed_app(r"c:\apps\good.exe", "Alias App")),
+            Some("Bad App.lnk") => None,
+            _ => None,
+        };
+
+        scan_start_menu_dir_with(&root, &mut apps, &mut resolver);
+
+        assert_eq!(apps.len(), 1);
+        let app = apps.get(r"c:\apps\good.exe").unwrap();
+        assert_eq!(app.name, "Good App");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -100,7 +100,7 @@ fn run_tool(
         "computer_list_apps" => {
             let apps = host
                 .list_apps_with_options(perm, parse_list_options(args)?)
-                .map_err(host_error_message)?;
+                .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_json_result(
                 serde_json::to_value(&apps).unwrap_or_default(),
             ))
@@ -109,14 +109,14 @@ fn run_tool(
             let target = parse_target(args)?;
             let lease = host
                 .start(session_id, target, perm)
-                .map_err(host_error_message)?;
+                .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_json_result(json!({ "lease": lease })))
         }
         "computer_launch_app" => {
             let target = parse_target(args)?;
             let result = host
                 .launch_app(session_id, target, perm)
-                .map_err(host_error_message)?;
+                .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_json_result(
                 serde_json::to_value(&result).unwrap_or_default(),
             ))
@@ -125,7 +125,7 @@ fn run_tool(
             let target = parse_target(args)?;
             let result = host
                 .raise_app(session_id, target, perm)
-                .map_err(host_error_message)?;
+                .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_json_result(
                 serde_json::to_value(&result).unwrap_or_default(),
             ))
@@ -135,7 +135,7 @@ fn run_tool(
                 Some(target) => host.get_app_state_for_target(session_id, target, perm),
                 None => host.get_app_state(session_id, perm),
             }
-            .map_err(host_error_message)?;
+            .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -150,7 +150,7 @@ fn run_tool(
                 let coord_space = parse_coordinate_space(args)?;
                 host.click_at(session_id, &snapshot, point, coord_space, route_hint, perm)
             }
-            .map_err(host_error_message)?;
+            .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -161,7 +161,7 @@ fn run_tool(
             let route_hint = parse_click_dispatch_route(args)?;
             let state = host
                 .click_element(session_id, &snapshot, &element, route_hint, perm)
-                .map_err(host_error_message)?;
+                .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -173,7 +173,7 @@ fn run_tool(
             let route_hint = parse_click_dispatch_route(args)?;
             let state = host
                 .click_at(session_id, &snapshot, point, coord_space, route_hint, perm)
-                .map_err(host_error_message)?;
+                .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -188,7 +188,7 @@ fn run_tool(
                 let coord_space = parse_coordinate_space(args)?;
                 host.secondary_click(session_id, &snapshot, point, coord_space, route_hint, perm)
             }
-            .map_err(host_error_message)?;
+            .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -200,7 +200,7 @@ fn run_tool(
             let route_hint = parse_click_dispatch_route(args)?;
             let state = host
                 .double_click(session_id, &snapshot, point, coord_space, route_hint, perm)
-                .map_err(host_error_message)?;
+                .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -212,8 +212,16 @@ fn run_tool(
             let coord_space = parse_coordinate_space(args)?;
             let route_hint = parse_click_dispatch_route(args)?;
             let state = host
-                .drag(session_id, &snapshot, from, to, coord_space, route_hint, perm)
-                .map_err(host_error_message)?;
+                .drag(
+                    session_id,
+                    &snapshot,
+                    from,
+                    to,
+                    coord_space,
+                    route_hint,
+                    perm,
+                )
+                .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -224,7 +232,7 @@ fn run_tool(
             let value = arg_str(args, "value")?;
             let state = host
                 .set_value(session_id, &snapshot, &element, &value, perm)
-                .map_err(host_error_message)?;
+                .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -234,7 +242,7 @@ fn run_tool(
             let text = arg_str(args, "text")?;
             let state = host
                 .type_text(session_id, &snapshot, &text, perm)
-                .map_err(host_error_message)?;
+                .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -244,7 +252,7 @@ fn run_tool(
             let key = arg_str(args, "key")?;
             let state = host
                 .press_key(session_id, &snapshot, &key, perm)
-                .map_err(host_error_message)?;
+                .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -256,18 +264,12 @@ fn run_tool(
             let route_hint = parse_click_dispatch_route(args)?;
             let state = if let Some(element) = optional_element_ref(args) {
                 host.scroll_element(
-                    session_id,
-                    &snapshot,
-                    &element,
-                    direction,
-                    amount,
-                    route_hint,
-                    perm,
+                    session_id, &snapshot, &element, direction, amount, route_hint, perm,
                 )
             } else {
                 host.scroll(session_id, &snapshot, direction, amount, route_hint, perm)
             }
-            .map_err(host_error_message)?;
+            .map_err(|error| host_error_message(error, perm))?;
             Ok(tool_app_state_result(
                 serde_json::to_value(&state).unwrap_or_default(),
             ))
@@ -280,7 +282,7 @@ fn run_tool(
     }
 }
 
-fn host_error_message(error: ComputerUseError) -> String {
+fn host_error_message(error: ComputerUseError, perm: &DesktopControlPermissionStatus) -> String {
     match error {
         ComputerUseError::Permission(PermissionDenied::Observe) => {
             "permission_missing:screenshots: screen capture permission is required. Call computer_permissions for status, then computer_grant with permission=\"screenshots\"."
@@ -295,8 +297,12 @@ fn host_error_message(error: ComputerUseError) -> String {
                 .into()
         }
         ComputerUseError::Provider(ProviderError::NoVisibleWindow) => {
-            "no_visible_window: the target is running but has no visible on-screen window. Call computer_raise_app with the same bundle/appId (or `sessio cu raise --bundle <bundle>`), then retry computer_get_app_state. Do not use `open -a`, AppleScript `activate`/`frontmost`, or Window-menu clicks for Dock-minimized windows; they can report success without restoring the window."
-                .into()
+            match perm.platform.as_str() {
+                "windows" => "no_visible_window: the target is running but has no visible on-screen window. Call computer_raise_app with the same appId (or `sessio cu raise --app-id <path-to-exe>`), then retry computer_get_app_state. When a window is minimized or hidden, do not keep clicking stale screenshot coordinates."
+                    .into(),
+                _ => "no_visible_window: the target is running but has no visible on-screen window. Call computer_raise_app with the same bundle/appId (or `sessio cu raise --bundle <bundle>`), then retry computer_get_app_state. Do not use `open -a`, AppleScript `activate`/`frontmost`, or Window-menu clicks for Dock-minimized windows; they can report success without restoring the window."
+                    .into(),
+            }
         }
         other => other.to_string(),
     }
@@ -933,7 +939,10 @@ mod tests {
 
         match click {
             McpResponse::Result { result, .. } => {
-                assert!(result.get("isError").is_none(), "click should succeed: {result}");
+                assert!(
+                    result.get("isError").is_none(),
+                    "click should succeed: {result}"
+                );
                 assert_eq!(
                     provider.actions(),
                     vec!["click:com.example.app:el-1:Hid".to_string()]
@@ -1163,7 +1172,10 @@ mod tests {
         );
         match drag {
             McpResponse::Result { result, .. } => {
-                assert!(result.get("isError").is_none(), "drag should succeed: {result}");
+                assert!(
+                    result.get("isError").is_none(),
+                    "drag should succeed: {result}"
+                );
             }
             _ => panic!("expected result"),
         }
@@ -1188,7 +1200,10 @@ mod tests {
         );
         match scroll {
             McpResponse::Result { result, .. } => {
-                assert!(result.get("isError").is_none(), "scroll should succeed: {result}");
+                assert!(
+                    result.get("isError").is_none(),
+                    "scroll should succeed: {result}"
+                );
             }
             _ => panic!("expected result"),
         }
@@ -1357,14 +1372,38 @@ mod tests {
 
     #[test]
     fn no_visible_window_error_points_to_raise_tool() {
-        let message =
-            host_error_message(ComputerUseError::Provider(ProviderError::NoVisibleWindow));
+        let message = host_error_message(
+            ComputerUseError::Provider(ProviderError::NoVisibleWindow),
+            &perm(),
+        );
 
         assert!(message.contains("no_visible_window"));
         assert!(message.contains("computer_raise_app"));
         assert!(message.contains("sessio cu raise"));
         assert!(message.contains("open -a"));
         assert!(message.contains("AppleScript"));
+    }
+
+    #[test]
+    fn windows_no_visible_window_error_uses_windows_guidance() {
+        let windows_perm =
+            DesktopControlPermissionStatus::derive(crate::desktop_control::DesktopControlInputs {
+                platform: crate::desktop_control::DesktopPlatform::Windows,
+                requires_permission: false,
+                screenshots: crate::desktop_control::PermissionTier::new(true, false),
+                accessibility: crate::desktop_control::PermissionTier::new(true, false),
+                input_injection_supported: true,
+            });
+        let message = host_error_message(
+            ComputerUseError::Provider(ProviderError::NoVisibleWindow),
+            &windows_perm,
+        );
+
+        assert!(message.contains("no_visible_window"));
+        assert!(message.contains("computer_raise_app"));
+        assert!(message.contains("--app-id <path-to-exe>"));
+        assert!(!message.contains("open -a"));
+        assert!(!message.contains("AppleScript"));
     }
 
     #[test]

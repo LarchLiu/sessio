@@ -3,9 +3,9 @@
 //! These records are written as JSON Lines so screenshot/coordinate issues can
 //! be inspected after the fact without relying on the global app log level.
 
+use std::cell::RefCell;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::cell::RefCell;
 
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
@@ -135,10 +135,16 @@ mod tests {
     #[test]
     fn diagnostics_log_path_uses_session_specific_file_names() {
         let path = diagnostics_log_path_for_session(Some("sess:1/2")).unwrap();
-        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("session-sess_1_2.log"));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("session-sess_1_2.log")
+        );
 
         let fallback = diagnostics_log_path_for_session(None).unwrap();
-        assert_eq!(fallback.file_name().and_then(|name| name.to_str()), Some("diagnostics.log"));
+        assert_eq!(
+            fallback.file_name().and_then(|name| name.to_str()),
+            Some("diagnostics.log")
+        );
     }
 
     #[test]
