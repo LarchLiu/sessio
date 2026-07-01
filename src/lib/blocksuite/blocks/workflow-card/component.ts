@@ -33,6 +33,7 @@ class WorkflowCardPageComponent extends BlockComponent<WorkflowCardBlockModel> {
       this.model.executionState || "idle",
       this.model.lastRunId || "",
       this.model.threadGoal || "",
+      this.model.workflowSnapshotJson || "",
       this.model.workflowSummaryMarkdown || "",
     ].join("\u001f");
     const content = bridge
@@ -45,6 +46,7 @@ class WorkflowCardPageComponent extends BlockComponent<WorkflowCardBlockModel> {
               executionState: this.model.executionState || "idle",
               lastRunId: this.model.lastRunId || "",
               threadGoal: this.model.threadGoal || "",
+              workflowSnapshotJson: this.model.workflowSnapshotJson || "",
               workflowSummaryMarkdown: this.model.workflowSummaryMarkdown || "",
               onRunWorkflow: () => {
                 bridge.runWorkflowBlock?.(this.model.id);
