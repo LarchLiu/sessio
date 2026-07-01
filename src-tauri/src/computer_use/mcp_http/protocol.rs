@@ -346,7 +346,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "computer_scroll",
-            description: "Scroll the target in a direction by an amount against the latest snapshot. The schema routes are the global upper bound; inspect AppState.actionCapabilities.scrollElementRoutes and scrollAtRoutes for the currently supported subset. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
+            description: "Scroll the target in a direction by an amount against the latest snapshot. The schema routes are the global upper bound; inspect AppState.actionCapabilities.scrollElementRoutes and scrollAtRoutes for the currently supported subset. When element scroll uses the AX/UIA route, provider semantics can still vary by platform; for example, Windows prefers UIA scroll patterns and may fall back to focus plus arrow-key scrolling when the target exposes no true scroll pattern. Returns a post-action AppState plus lastActionResult { kind, route, outcome }.",
             input_schema: snapshot_arg(json!({
                 "elementId": { "type": "string" },
                 "ref": { "type": "string" },
@@ -609,6 +609,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("AppState.actionCapabilities"));
+        assert!(scroll["description"]
+            .as_str()
+            .unwrap()
+            .contains("focus plus arrow-key scrolling"));
     }
 
     #[test]

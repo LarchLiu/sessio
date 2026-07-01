@@ -10,8 +10,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use image::{imageops::crop_imm, ImageReader};
 use sha2::{Digest, Sha256};
@@ -47,17 +48,19 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
-    IUIAutomationScrollItemPattern, IUIAutomationSelectionItemPattern, IUIAutomationValuePattern,
-    TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId,
-    UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId, UIA_DataGridControlTypeId,
-    UIA_DataItemControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
-    UIA_GroupControlTypeId, UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId,
-    UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId, UIA_MenuControlTypeId,
-    UIA_MenuItemControlTypeId, UIA_PaneControlTypeId, UIA_RadioButtonControlTypeId,
-    UIA_ScrollItemPatternId, UIA_SelectionItemPatternId, UIA_SliderControlTypeId,
-    UIA_TabControlTypeId, UIA_TabItemControlTypeId, UIA_TextControlTypeId,
-    UIA_ToolBarControlTypeId, UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId,
-    UIA_WindowControlTypeId, UIA_CONTROLTYPE_ID,
+    IUIAutomationScrollItemPattern, IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern,
+    IUIAutomationValuePattern, ScrollAmount, ScrollAmount_NoAmount, ScrollAmount_SmallDecrement,
+    ScrollAmount_SmallIncrement, TreeScope_Descendants, UIA_ButtonControlTypeId,
+    UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId,
+    UIA_DataGridControlTypeId, UIA_DataItemControlTypeId, UIA_DocumentControlTypeId,
+    UIA_EditControlTypeId, UIA_GroupControlTypeId, UIA_HyperlinkControlTypeId,
+    UIA_ImageControlTypeId, UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
+    UIA_MenuControlTypeId, UIA_MenuItemControlTypeId, UIA_PaneControlTypeId,
+    UIA_RadioButtonControlTypeId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
+    UIA_SelectionItemPatternId, UIA_SliderControlTypeId, UIA_TabControlTypeId,
+    UIA_TabItemControlTypeId, UIA_TextControlTypeId, UIA_ToolBarControlTypeId,
+    UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId, UIA_WindowControlTypeId,
+    UIA_CONTROLTYPE_ID,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -78,16 +81,45 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW,
 };
 
-/// Windows provider. Stateless: every operation re-reads live system state.
+/// Windows provider. Most operations re-read live system state; installed-app
+/// discovery is cached briefly to avoid repeated Start Menu scans.
 pub struct WindowsProvider {
     capture_dir: PathBuf,
+    installed_apps_cache: Mutex<Option<InstalledAppsCache>>,
 }
 
 impl WindowsProvider {
     pub fn new() -> Self {
         Self {
             capture_dir: std::env::temp_dir().join("sessio-computer-use"),
+            installed_apps_cache: Mutex::new(None),
         }
+    }
+
+    fn list_installed_apps_cached(&self) -> Vec<InstalledApp> {
+        let now = Instant::now();
+        {
+            let cache = self
+                .installed_apps_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(cached) = cache.as_ref() {
+                if now.duration_since(cached.fetched_at) < INSTALLED_APPS_CACHE_TTL {
+                    return cached.apps.clone();
+                }
+            }
+        }
+
+        let apps = list_installed_apps();
+        let mut cache = self
+            .installed_apps_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *cache = Some(InstalledAppsCache {
+            fetched_at: now,
+            apps: apps.clone(),
+        });
+        apps
     }
 }
 
@@ -123,7 +155,10 @@ impl ComputerUseProvider for WindowsProvider {
 
     fn list_apps(&self, options: AppListOptions) -> ProviderResult<Vec<InstalledApp>> {
         let _ = options;
-        Ok(list_available_apps())
+        Ok(merge_available_apps(
+            self.list_installed_apps_cached(),
+            list_running_apps(),
+        ))
     }
 
     fn is_app_running(&self, app_id: &AppId) -> ProviderResult<bool> {
@@ -165,7 +200,7 @@ impl ComputerUseProvider for WindowsProvider {
     ) -> ProviderResult<ClickExecutionResult> {
         let window = prepare_target_for_control(target)?;
         let entry = uia_entry_for_id(window.hwnd, element)?;
-        click_uia_element(target, &entry, route_hint)
+        click_uia_element(&self.capture_dir, &entry, route_hint)
     }
 
     fn click_point(
@@ -175,12 +210,12 @@ impl ComputerUseProvider for WindowsProvider {
         _route_hint: ClickDispatchRoute,
     ) -> ProviderResult<ClickExecutionResult> {
         let _ = prepare_target_for_control(target)?;
-        left_click_at(point)?;
-        Ok(ClickExecutionResult {
-            route: ClickExecutionRoute::Native,
-            outcome: ClickExecutionOutcome::ObservedEffect,
-            next_dispatch_route: None,
-        })
+        perform_click_with_effect_probe(
+            &self.capture_dir,
+            Some(point),
+            ClickExecutionRoute::Native,
+            || left_click_at(point),
+        )
     }
 
     fn secondary_click(
@@ -207,7 +242,7 @@ impl ComputerUseProvider for WindowsProvider {
     ) -> ProviderResult<ActionExecutionResult> {
         let window = prepare_target_for_control(target)?;
         let entry = uia_entry_for_id(window.hwnd, element)?;
-        secondary_click_uia_element(target, &self.capture_dir, &entry, route_hint)
+        secondary_click_uia_element(&self.capture_dir, &entry, route_hint)
     }
 
     fn double_click(
@@ -291,14 +326,7 @@ impl ComputerUseProvider for WindowsProvider {
     ) -> ProviderResult<ActionExecutionResult> {
         let window = prepare_target_for_control(target)?;
         let entry = uia_entry_for_id(window.hwnd, element)?;
-        scroll_uia_element(
-            target,
-            &self.capture_dir,
-            &entry,
-            direction,
-            amount,
-            route_hint,
-        )
+        scroll_uia_element(&self.capture_dir, &entry, direction, amount, route_hint)
     }
 }
 
@@ -317,6 +345,12 @@ struct WindowInfo {
 struct ScreenCaptureFingerprint {
     full_hash: [u8; 32],
     local_hash: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone)]
+struct InstalledAppsCache {
+    fetched_at: Instant,
+    apps: Vec<InstalledApp>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,12 +392,9 @@ impl EffectProbeTiming {
 }
 
 const EFFECT_LOCAL_PROBE_RADIUS_PX: u32 = 72;
+const INSTALLED_APPS_CACHE_TTL: Duration = Duration::from_secs(30);
 
 // --- App/window discovery -------------------------------------------------
-
-fn list_available_apps() -> Vec<InstalledApp> {
-    merge_available_apps(list_installed_apps(), list_running_apps())
-}
 
 fn merge_available_apps(
     installed: Vec<InstalledApp>,
@@ -420,7 +451,14 @@ fn list_running_apps() -> Vec<InstalledApp> {
 }
 
 fn list_installed_apps() -> Vec<InstalledApp> {
-    list_installed_apps_from_roots(start_menu_roots(), installed_app_from_shortcut)
+    match ShortcutResolver::new() {
+        Ok(resolver) => list_installed_apps_from_roots(start_menu_roots(), |path| {
+            installed_app_from_shortcut(path, Some(&resolver))
+        }),
+        Err(_) => list_installed_apps_from_roots(start_menu_roots(), |path| {
+            installed_app_from_shortcut(path, None)
+        }),
+    }
 }
 
 fn list_installed_apps_from_roots<F>(
@@ -653,8 +691,14 @@ fn process_exe_path(pid: u32) -> Option<String> {
     }
 }
 
-fn installed_app_from_shortcut(path: &Path) -> Option<InstalledApp> {
-    let target = resolve_shortcut_target(path)?;
+fn installed_app_from_shortcut(
+    path: &Path,
+    resolver: Option<&ShortcutResolver>,
+) -> Option<InstalledApp> {
+    let target = match resolver {
+        Some(resolver) => resolver.resolve_target(path),
+        None => resolve_shortcut_target(path),
+    }?;
     installed_app_from_shortcut_target(path, &target)
 }
 
@@ -690,29 +734,8 @@ fn installed_app_from_shortcut_target(path: &Path, target: &Path) -> Option<Inst
 }
 
 fn resolve_shortcut_target(path: &Path) -> Option<PathBuf> {
-    let _apartment = ComApartment::init().ok()?;
-    let shortcut: IShellLinkW =
-        unsafe { CoCreateInstance(&CLSID_ShellLink, None, CLSCTX_INPROC_SERVER) }.ok()?;
-    let persist: IPersistFile = shortcut.cast().ok()?;
-    let wide = wide_null(path.to_string_lossy().as_ref());
-    unsafe {
-        persist.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
-    }
-
-    let mut raw_path = vec![0u16; MAX_PATH as usize];
-    unsafe {
-        shortcut
-            .GetPath(&mut raw_path, std::ptr::null_mut(), 0)
-            .ok()?;
-    }
-    let len = raw_path
-        .iter()
-        .position(|ch| *ch == 0)
-        .unwrap_or(raw_path.len());
-    if len == 0 {
-        return None;
-    }
-    Some(PathBuf::from(String::from_utf16_lossy(&raw_path[..len])))
+    let resolver = ShortcutResolver::new().ok()?;
+    resolver.resolve_target(path)
 }
 
 fn normalize_app_id(path: &str) -> AppId {
@@ -1125,7 +1148,7 @@ fn press_key_chord(raw: &str) -> ProviderResult<()> {
 }
 
 fn scroll_wheel(direction: ScrollDirection, amount: i32) -> ProviderResult<()> {
-    let amount = amount.max(1).min(20);
+    let amount = amount.clamp(1, 20);
     let delta = 120_i32.saturating_mul(amount);
     let (flags, signed_delta) = match direction {
         ScrollDirection::Up => (MOUSEEVENTF_WHEEL, delta),
@@ -1283,6 +1306,52 @@ impl Drop for ComApartment {
                 CoUninitialize();
             }
         }
+    }
+}
+
+struct ShortcutResolver {
+    _apartment: ComApartment,
+    shortcut: IShellLinkW,
+    persist: IPersistFile,
+}
+
+impl ShortcutResolver {
+    fn new() -> ProviderResult<Self> {
+        let apartment = ComApartment::init()?;
+        let shortcut: IShellLinkW =
+            unsafe { CoCreateInstance(&CLSID_ShellLink, None, CLSCTX_INPROC_SERVER) }.map_err(
+                |e| ProviderError::Failed(format!("create ShellLink COM instance: {e}")),
+            )?;
+        let persist: IPersistFile = shortcut
+            .cast()
+            .map_err(|e| ProviderError::Failed(format!("cast ShellLink to IPersistFile: {e}")))?;
+        Ok(Self {
+            _apartment: apartment,
+            shortcut,
+            persist,
+        })
+    }
+
+    fn resolve_target(&self, path: &Path) -> Option<PathBuf> {
+        let wide = wide_null(path.to_string_lossy().as_ref());
+        unsafe {
+            self.persist.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
+        }
+
+        let mut raw_path = vec![0u16; MAX_PATH as usize];
+        unsafe {
+            self.shortcut
+                .GetPath(&mut raw_path, std::ptr::null_mut(), 0)
+                .ok()?;
+        }
+        let len = raw_path
+            .iter()
+            .position(|ch| *ch == 0)
+            .unwrap_or(raw_path.len());
+        if len == 0 {
+            return None;
+        }
+        Some(PathBuf::from(String::from_utf16_lossy(&raw_path[..len])))
     }
 }
 
@@ -1535,16 +1604,31 @@ fn element_action_route_plan(
     }
 }
 
-fn click_result_for_dispatch_route(route: ClickDispatchRoute) -> ClickExecutionResult {
+fn click_execution_route_for_dispatch_route(route: ClickDispatchRoute) -> ClickExecutionRoute {
+    match route {
+        ClickDispatchRoute::Ax => ClickExecutionRoute::Uia,
+        ClickDispatchRoute::Auto | ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
+            ClickExecutionRoute::Native
+        }
+    }
+}
+
+fn click_result_for_probe_outcome(
+    route: ClickDispatchRoute,
+    outcome: EffectProbeOutcome,
+) -> ClickExecutionResult {
     ClickExecutionResult {
-        route: match route {
-            ClickDispatchRoute::Ax => ClickExecutionRoute::Uia,
-            ClickDispatchRoute::Auto | ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
-                ClickExecutionRoute::Native
-            }
-        },
-        outcome: ClickExecutionOutcome::ObservedEffect,
+        route: click_execution_route_for_dispatch_route(route),
+        outcome: click_outcome_for_probe_outcome(outcome),
         next_dispatch_route: None,
+    }
+}
+
+fn click_outcome_for_probe_outcome(outcome: EffectProbeOutcome) -> ClickExecutionOutcome {
+    match outcome {
+        EffectProbeOutcome::ObservedEffect => ClickExecutionOutcome::ObservedEffect,
+        EffectProbeOutcome::NoEffect => ClickExecutionOutcome::NoEffect,
+        EffectProbeOutcome::Uncertain => ClickExecutionOutcome::Uncertain,
     }
 }
 
@@ -1625,7 +1709,7 @@ fn perform_scroll_for_route(
 }
 
 fn click_uia_element(
-    _target: &AppTarget,
+    capture_dir: &Path,
     entry: &UiaElementEntry,
     route_hint: ClickDispatchRoute,
 ) -> ProviderResult<ClickExecutionResult> {
@@ -1646,8 +1730,12 @@ fn click_uia_element(
             ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
                 let point = fallback_point
                     .ok_or_else(|| ProviderError::ElementNotFound(entry.ui.id.clone()))?;
-                perform_mouse_click_for_route(route, point)?;
-                return Ok(click_result_for_dispatch_route(route));
+                return perform_click_with_effect_probe(
+                    capture_dir,
+                    Some(point),
+                    click_execution_route_for_dispatch_route(route),
+                    || perform_mouse_click_for_route(route, point),
+                );
             }
             ClickDispatchRoute::Auto => {}
         }
@@ -1656,7 +1744,6 @@ fn click_uia_element(
 }
 
 fn secondary_click_uia_element(
-    _target: &AppTarget,
     capture_dir: &Path,
     entry: &UiaElementEntry,
     route_hint: ClickDispatchRoute,
@@ -1707,7 +1794,6 @@ fn secondary_click_uia_element(
 }
 
 fn scroll_uia_element(
-    _target: &AppTarget,
     capture_dir: &Path,
     entry: &UiaElementEntry,
     direction: ScrollDirection,
@@ -1777,18 +1863,16 @@ fn scroll_uia_element_by_direction(
     direction: ScrollDirection,
     amount: i32,
 ) -> ProviderResult<()> {
-    scroll_uia_element_into_view(element)?;
-    focus_uia_element(element)?;
-    let key = match direction {
-        ScrollDirection::Up => "up",
-        ScrollDirection::Down => "down",
-        ScrollDirection::Left => "left",
-        ScrollDirection::Right => "right",
-    };
-    for _ in 0..amount.max(1).min(20) {
-        press_key_chord(key)?;
+    if try_scroll_uia_element_with_pattern(element, direction, amount)? {
+        return Ok(());
     }
-    Ok(())
+
+    match scroll_uia_element_into_view(element) {
+        Ok(()) | Err(ProviderError::Unsupported(_)) => {}
+        Err(error) => return Err(error),
+    }
+    focus_uia_element(element)?;
+    scroll_uia_element_with_keys(direction, amount)
 }
 
 fn perform_action_with_effect_probe(
@@ -1799,6 +1883,22 @@ fn perform_action_with_effect_probe(
     let before = capture_screen_fingerprint(capture_dir, probe_point).ok();
     perform()?;
     probe_effect_after_capture(capture_dir, before, probe_point)
+}
+
+fn perform_click_with_effect_probe(
+    capture_dir: &Path,
+    probe_point: Option<Point>,
+    route: ClickExecutionRoute,
+    perform: impl FnOnce() -> ProviderResult<()>,
+) -> ProviderResult<ClickExecutionResult> {
+    let before = capture_screen_fingerprint(capture_dir, probe_point).ok();
+    perform()?;
+    let outcome = probe_effect_after_capture(capture_dir, before, probe_point)?;
+    Ok(ClickExecutionResult {
+        route,
+        outcome: click_outcome_for_probe_outcome(outcome),
+        next_dispatch_route: None,
+    })
 }
 
 fn probe_effect_after_capture(
@@ -1990,6 +2090,102 @@ fn scroll_uia_element_into_view(element: &IUIAutomationElement) -> ProviderResul
     }
 }
 
+fn try_scroll_uia_element_with_pattern(
+    element: &IUIAutomationElement,
+    direction: ScrollDirection,
+    amount: i32,
+) -> ProviderResult<bool> {
+    unsafe {
+        let Ok(pattern) =
+            element.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
+        else {
+            return Ok(false);
+        };
+
+        let (is_scrollable, horizontal_amount, vertical_amount) = match direction {
+            ScrollDirection::Up => (
+                pattern
+                    .CurrentVerticallyScrollable()
+                    .map_err(|e| {
+                        ProviderError::Failed(format!(
+                            "UIA ScrollPattern vertical scrollability check failed: {e}"
+                        ))
+                    })?
+                    .as_bool(),
+                ScrollAmount_NoAmount,
+                scroll_amount_for_direction(true),
+            ),
+            ScrollDirection::Down => (
+                pattern
+                    .CurrentVerticallyScrollable()
+                    .map_err(|e| {
+                        ProviderError::Failed(format!(
+                            "UIA ScrollPattern vertical scrollability check failed: {e}"
+                        ))
+                    })?
+                    .as_bool(),
+                ScrollAmount_NoAmount,
+                scroll_amount_for_direction(false),
+            ),
+            ScrollDirection::Left => (
+                pattern
+                    .CurrentHorizontallyScrollable()
+                    .map_err(|e| {
+                        ProviderError::Failed(format!(
+                            "UIA ScrollPattern horizontal scrollability check failed: {e}"
+                        ))
+                    })?
+                    .as_bool(),
+                scroll_amount_for_direction(true),
+                ScrollAmount_NoAmount,
+            ),
+            ScrollDirection::Right => (
+                pattern
+                    .CurrentHorizontallyScrollable()
+                    .map_err(|e| {
+                        ProviderError::Failed(format!(
+                            "UIA ScrollPattern horizontal scrollability check failed: {e}"
+                        ))
+                    })?
+                    .as_bool(),
+                scroll_amount_for_direction(false),
+                ScrollAmount_NoAmount,
+            ),
+        };
+
+        if !is_scrollable {
+            return Ok(false);
+        }
+
+        for _ in 0..amount.clamp(1, 20) {
+            pattern
+                .Scroll(horizontal_amount, vertical_amount)
+                .map_err(|e| ProviderError::Failed(format!("UIA ScrollPattern failed: {e}")))?;
+        }
+        Ok(true)
+    }
+}
+
+fn scroll_amount_for_direction(decrement: bool) -> ScrollAmount {
+    match decrement {
+        true => ScrollAmount_SmallDecrement,
+        false => ScrollAmount_SmallIncrement,
+    }
+}
+
+fn scroll_uia_element_with_keys(direction: ScrollDirection, amount: i32) -> ProviderResult<()> {
+    let key = match direction {
+        ScrollDirection::Up => "up",
+        ScrollDirection::Down => "down",
+        ScrollDirection::Left => "left",
+        ScrollDirection::Right => "right",
+    };
+    for _ in 0..amount.clamp(1, 20) {
+        press_key_chord(key)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2173,14 +2369,29 @@ mod tests {
 
     #[test]
     fn windows_internal_mouse_fallbacks_report_native_routes() {
-        let click = click_result_for_dispatch_route(ClickDispatchRoute::TargetPid);
+        let click = click_result_for_probe_outcome(
+            ClickDispatchRoute::TargetPid,
+            EffectProbeOutcome::Uncertain,
+        );
         assert_eq!(click.route, ClickExecutionRoute::Native);
-        assert_eq!(click.outcome, ClickExecutionOutcome::ObservedEffect);
+        assert_eq!(click.outcome, ClickExecutionOutcome::Uncertain);
 
         let action =
             action_result_for_dispatch_route(ActionExecutionKind::Scroll, ClickDispatchRoute::Hid);
         assert_eq!(action.route, ActionExecutionRoute::Native);
         assert_eq!(action.outcome, ActionExecutionOutcome::Dispatched);
+    }
+
+    #[test]
+    fn scroll_amount_for_direction_matches_expected_uia_increment() {
+        assert_eq!(
+            scroll_amount_for_direction(true),
+            ScrollAmount_SmallDecrement
+        );
+        assert_eq!(
+            scroll_amount_for_direction(false),
+            ScrollAmount_SmallIncrement
+        );
     }
 
     #[test]
