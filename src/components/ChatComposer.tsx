@@ -241,7 +241,7 @@ export default function ChatComposer({
                   aria-label={computerUseTooltip}
                   aria-pressed={composer.computerUseEnabled}
                 >
-                  {composer.computerUseActive && (
+                  {composer.computerUseEnabled && (
                     <span
                       className="absolute right-1 top-1 h-2 w-2 rounded-full bg-emerald ring-2 ring-surface"
                       aria-hidden="true"
