@@ -485,11 +485,6 @@ fn start_menu_roots() -> Vec<PathBuf> {
     out
 }
 
-fn scan_start_menu_dir(root: &Path, out: &mut HashMap<AppId, InstalledApp>) {
-    let mut resolver = installed_app_from_shortcut;
-    scan_start_menu_dir_with(root, out, &mut resolver);
-}
-
 fn scan_start_menu_dir_with<F>(
     root: &Path,
     out: &mut HashMap<AppId, InstalledApp>,
@@ -1310,9 +1305,10 @@ impl Drop for ComApartment {
 }
 
 struct ShortcutResolver {
-    _apartment: ComApartment,
     shortcut: IShellLinkW,
     persist: IPersistFile,
+    // Drop COM interface fields before tearing down the apartment.
+    _apartment: ComApartment,
 }
 
 impl ShortcutResolver {
@@ -1326,9 +1322,9 @@ impl ShortcutResolver {
             .cast()
             .map_err(|e| ProviderError::Failed(format!("cast ShellLink to IPersistFile: {e}")))?;
         Ok(Self {
-            _apartment: apartment,
             shortcut,
             persist,
+            _apartment: apartment,
         })
     }
 
@@ -1595,6 +1591,8 @@ fn element_action_route_plan(
 ) -> Vec<ClickDispatchRoute> {
     match route_hint {
         ClickDispatchRoute::Auto if has_native_fallback => {
+            // Windows only advertises `Auto` and `Ax` for element actions.
+            // Any concrete native route stays an internal detail behind `Auto`.
             vec![ClickDispatchRoute::TargetPid, ClickDispatchRoute::Ax]
         }
         ClickDispatchRoute::Auto => vec![ClickDispatchRoute::Ax],
@@ -1629,23 +1627,6 @@ fn click_outcome_for_probe_outcome(outcome: EffectProbeOutcome) -> ClickExecutio
         EffectProbeOutcome::ObservedEffect => ClickExecutionOutcome::ObservedEffect,
         EffectProbeOutcome::NoEffect => ClickExecutionOutcome::NoEffect,
         EffectProbeOutcome::Uncertain => ClickExecutionOutcome::Uncertain,
-    }
-}
-
-fn action_result_for_dispatch_route(
-    kind: ActionExecutionKind,
-    route: ClickDispatchRoute,
-) -> ActionExecutionResult {
-    ActionExecutionResult {
-        kind,
-        route: match route {
-            ClickDispatchRoute::Ax => ActionExecutionRoute::Uia,
-            ClickDispatchRoute::Auto | ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
-                ActionExecutionRoute::Native
-            }
-        },
-        outcome: ActionExecutionOutcome::Dispatched,
-        next_dispatch_route: None,
     }
 }
 
@@ -1772,17 +1753,19 @@ fn secondary_click_uia_element(
             ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
                 let point = fallback_point
                     .ok_or_else(|| ProviderError::ElementNotFound(entry.ui.id.clone()))?;
-                if let Err(error) = perform_secondary_click_for_route(route, point) {
-                    if route_hint == ClickDispatchRoute::Auto {
-                        last_error = Some(error);
-                        continue;
-                    }
-                    return Err(error);
-                }
-                return Ok(action_result_for_dispatch_route(
+                match perform_action_with_effect_probe_result(
                     ActionExecutionKind::SecondaryClick,
-                    route,
-                ));
+                    capture_dir,
+                    Some(point),
+                    ActionExecutionRoute::Native,
+                    || perform_secondary_click_for_route(route, point),
+                ) {
+                    Ok(result) => return Ok(result),
+                    Err(error) if route_hint == ClickDispatchRoute::Auto => {
+                        last_error = Some(error);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             ClickDispatchRoute::Auto => {}
         }
@@ -1824,17 +1807,19 @@ fn scroll_uia_element(
             ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
                 let point = fallback_point
                     .ok_or_else(|| ProviderError::ElementNotFound(entry.ui.id.clone()))?;
-                if let Err(error) = perform_scroll_for_route(route, point, direction, amount) {
-                    if route_hint == ClickDispatchRoute::Auto {
-                        last_error = Some(error);
-                        continue;
-                    }
-                    return Err(error);
-                }
-                return Ok(action_result_for_dispatch_route(
+                match perform_action_with_effect_probe_result(
                     ActionExecutionKind::Scroll,
-                    route,
-                ));
+                    capture_dir,
+                    Some(point),
+                    ActionExecutionRoute::Native,
+                    || perform_scroll_for_route(route, point, direction, amount),
+                ) {
+                    Ok(result) => return Ok(result),
+                    Err(error) if route_hint == ClickDispatchRoute::Auto => {
+                        last_error = Some(error);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             ClickDispatchRoute::Auto => {}
         }
@@ -1899,6 +1884,19 @@ fn perform_click_with_effect_probe(
         outcome: click_outcome_for_probe_outcome(outcome),
         next_dispatch_route: None,
     })
+}
+
+fn perform_action_with_effect_probe_result(
+    kind: ActionExecutionKind,
+    capture_dir: &Path,
+    probe_point: Option<Point>,
+    route: ActionExecutionRoute,
+    perform: impl FnOnce() -> ProviderResult<()>,
+) -> ProviderResult<ActionExecutionResult> {
+    let before = capture_screen_fingerprint(capture_dir, probe_point).ok();
+    perform()?;
+    let outcome = probe_effect_after_capture(capture_dir, before, probe_point)?;
+    Ok(action_result_for_probe_outcome(kind, route, outcome))
 }
 
 fn probe_effect_after_capture(
@@ -2376,10 +2374,13 @@ mod tests {
         assert_eq!(click.route, ClickExecutionRoute::Native);
         assert_eq!(click.outcome, ClickExecutionOutcome::Uncertain);
 
-        let action =
-            action_result_for_dispatch_route(ActionExecutionKind::Scroll, ClickDispatchRoute::Hid);
+        let action = action_result_for_probe_outcome(
+            ActionExecutionKind::Scroll,
+            ActionExecutionRoute::Native,
+            EffectProbeOutcome::NoEffect,
+        );
         assert_eq!(action.route, ActionExecutionRoute::Native);
-        assert_eq!(action.outcome, ActionExecutionOutcome::Dispatched);
+        assert_eq!(action.outcome, ActionExecutionOutcome::NoEffect);
     }
 
     #[test]
