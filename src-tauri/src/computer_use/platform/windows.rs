@@ -335,7 +335,6 @@ struct WindowInfo {
     app_id: AppId,
     name: String,
     pid: u32,
-    title: Option<String>,
     rect: Rect,
     minimized: bool,
 }
@@ -588,7 +587,6 @@ fn window_info(hwnd: HWND) -> Option<WindowInfo> {
         app_id,
         name,
         pid,
-        title: window_text(hwnd),
         rect: extended_window_rect(hwnd)?,
         minimized: unsafe { IsIconic(hwnd).as_bool() },
     })
@@ -1609,6 +1607,7 @@ fn click_execution_route_for_dispatch_route(route: ClickDispatchRoute) -> ClickE
     }
 }
 
+#[cfg(test)]
 fn click_result_for_probe_outcome(
     route: ClickDispatchRoute,
     outcome: EffectProbeOutcome,
