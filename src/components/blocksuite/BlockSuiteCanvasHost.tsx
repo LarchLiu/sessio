@@ -27,6 +27,8 @@ import {
   savePastedAttachment,
   updateCanvasBlocks,
   type Agent,
+  type RuntimeTurnStatus,
+  type ThreadWorkSnapshot,
 } from "../../api";
 import type { ChatComposerController } from "../../hooks/useChatComposer";
 import type { LiveRuntimeState } from "../../runtimeChat";
@@ -62,6 +64,7 @@ import {
   type CanvasSnapshotSelectionEventDetail,
 } from "../../lib/blocksuite/toolbar";
 import {
+  buildSessionThreadStageMap,
   createWorkflowOverlayCardContext,
   createWorkflowOverlayStore,
   projectWorkflowLiveOverlays,
@@ -752,6 +755,32 @@ function collectWorkflowOverlayCardContexts(
   return contexts;
 }
 
+function isTerminalRuntimeTurnStatus(status: RuntimeTurnStatus): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function canonicalWorkflowSnapshotForDiff(snapshot: ThreadWorkSnapshot | null): string {
+  if (!snapshot) return "";
+  return JSON.stringify({
+    ...snapshot,
+    capturedAt: 0,
+  });
+}
+
+function canonicalWorkflowSnapshotJsonForDiff(snapshotJson: string): string {
+  const trimmed = snapshotJson.trim();
+  if (!trimmed) return "";
+  try {
+    return canonicalWorkflowSnapshotForDiff(JSON.parse(trimmed) as ThreadWorkSnapshot);
+  } catch {
+    return trimmed;
+  }
+}
+
+function terminalWorkflowCardStatus(status: RuntimeTurnStatus): "completed" | "failed" | "cancelled" {
+  return status === "failed" || status === "cancelled" ? status : "completed";
+}
+
 function boundsOverlapWithPadding(a: Bound, b: Bound, padding: number): boolean {
   return (
     a.x < b.x + b.w + padding &&
@@ -932,6 +961,9 @@ export default function BlockSuiteCanvasHost({
   const workflowOverlayTimerRef = useRef<number | null>(null);
   const liveStateRef = useRef(liveState);
   const runtimeSessionAliasesRef = useRef(runtimeSessionAliases);
+  const workflowTurnStatusRef = useRef<Map<string, RuntimeTurnStatus>>(new Map());
+  const workflowTerminalFetchKeysRef = useRef<Set<string>>(new Set());
+  const workflowTerminalInFlightKeysRef = useRef<Set<string>>(new Set());
   const addMenuButtonRef = useRef<HTMLButtonElement>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [status, setStatus] = useState("Initializing BlockSuite canvas…");
@@ -1330,12 +1362,117 @@ export default function BlockSuiteCanvasHost({
     }, 160);
   }, [applyWorkflowLiveProjection]);
 
+  const recordCurrentWorkflowTurnStatuses = useCallback(() => {
+    for (const liveSession of Object.values(liveStateRef.current.sessions)) {
+      for (const turn of liveSession.turns) {
+        workflowTurnStatusRef.current.set(`${liveSession.sessioRuntimeSessionId}:${turn.turnId}`, turn.status);
+      }
+    }
+  }, []);
+
   const rebuildWorkflowOverlayCardContexts = useCallback((
     doc: ReturnType<typeof createBlockSuiteDoc>["doc"],
   ) => {
     workflowOverlayCardContextsRef.current = collectWorkflowOverlayCardContexts(doc);
+    recordCurrentWorkflowTurnStatuses();
     scheduleWorkflowLiveProjection();
-  }, [scheduleWorkflowLiveProjection]);
+  }, [recordCurrentWorkflowTurnStatuses, scheduleWorkflowLiveProjection]);
+
+  const writeTerminalWorkflowSnapshot = useCallback(async (
+    blockIds: string[],
+    snapshot: ThreadWorkSnapshot,
+    terminalStatus: RuntimeTurnStatus,
+  ) => {
+    const doc = getDoc();
+    if (!doc) return;
+    const nextSnapshotJson = JSON.stringify(snapshot);
+    const nextSnapshotDiff = canonicalWorkflowSnapshotForDiff(snapshot);
+    const nextSummary = workflowSnapshotToMarkdown(snapshot);
+    const nextStatus = terminalWorkflowCardStatus(terminalStatus);
+    let changed = false;
+    for (const blockId of blockIds) {
+      const model = doc.getModelById(blockId) as WorkflowCardBlockModel | null;
+      if (!model) continue;
+      const patch: Record<string, unknown> = {};
+      if (canonicalWorkflowSnapshotJsonForDiff(model.workflowSnapshotJson || "") !== nextSnapshotDiff) {
+        patch.workflowSnapshotJson = nextSnapshotJson;
+      }
+      if ((model.workflowSummaryMarkdown || "") !== nextSummary) {
+        patch.workflowSummaryMarkdown = nextSummary;
+      }
+      if ((model.executionState || "") !== nextStatus) {
+        patch.executionState = nextStatus;
+      }
+      if ((model.status || "") !== nextStatus) {
+        patch.status = nextStatus;
+      }
+      if (Object.keys(patch).length > 0) {
+        doc.updateBlock(model, patch);
+        changed = true;
+      }
+      workflowOverlayStoreRef.current?.delete(blockId);
+    }
+    if (!changed) return;
+    await syncCanvasBlocks(doc);
+    updateSelectionState();
+  }, [getDoc, syncCanvasBlocks, updateSelectionState]);
+
+  const reconcileTerminalWorkflowTurn = useCallback((
+    fetchKey: string,
+    blockIds: string[],
+    route: {
+      agent: Agent;
+      childSessionId: string;
+    },
+    terminalStatus: RuntimeTurnStatus,
+  ) => {
+    if (workflowTerminalFetchKeysRef.current.has(fetchKey)) return;
+    if (workflowTerminalInFlightKeysRef.current.has(fetchKey)) return;
+    workflowTerminalInFlightKeysRef.current.add(fetchKey);
+    void getThreadWorkSnapshot(route.agent, route.childSessionId)
+      .then(async (snapshotResult) => {
+        if (!snapshotResult?.snapshot) return;
+        await writeTerminalWorkflowSnapshot(blockIds, snapshotResult.snapshot, terminalStatus);
+        workflowTerminalFetchKeysRef.current.add(fetchKey);
+      })
+      .catch((error) => {
+        console.warn("workflow terminal snapshot reconciliation failed", error);
+      })
+      .finally(() => {
+        workflowTerminalInFlightKeysRef.current.delete(fetchKey);
+      });
+  }, [writeTerminalWorkflowSnapshot]);
+
+  const reconcileTerminalWorkflowTurns = useCallback(() => {
+    const contexts = workflowOverlayCardContextsRef.current;
+    if (contexts.length === 0) return;
+    const sessionMap = buildSessionThreadStageMap(contexts, runtimeSessionAliasesRef.current);
+    for (const liveSession of Object.values(liveStateRef.current.sessions)) {
+      const route = sessionMap.bySessioRuntimeId.get(liveSession.sessioRuntimeSessionId)
+        ?? sessionMap.bySessioRuntimeId.get(liveSession.agentRuntimeSessionId);
+      if (!route?.threadId) {
+        for (const turn of liveSession.turns) {
+          workflowTurnStatusRef.current.set(`${liveSession.sessioRuntimeSessionId}:${turn.turnId}`, turn.status);
+        }
+        continue;
+      }
+      const blockIds = [...sessionMap.blockIdsByThread.get(route.threadId) ?? []];
+      if (blockIds.length === 0) continue;
+      for (const turn of liveSession.turns) {
+        const statusKey = `${liveSession.sessioRuntimeSessionId}:${turn.turnId}`;
+        const previousStatus = workflowTurnStatusRef.current.get(statusKey);
+        if (
+          previousStatus &&
+          !isTerminalRuntimeTurnStatus(previousStatus) &&
+          isTerminalRuntimeTurnStatus(turn.status)
+        ) {
+          const fetchKey = `${liveSession.sessioRuntimeSessionId}:${turn.turnId}:${turn.status}`;
+          reconcileTerminalWorkflowTurn(fetchKey, blockIds, route, turn.status);
+        }
+        workflowTurnStatusRef.current.set(statusKey, turn.status);
+      }
+    }
+  }, [reconcileTerminalWorkflowTurn]);
 
   const attachDoc = useCallback((host: HTMLDivElement, doc: ReturnType<typeof createBlockSuiteDoc>["doc"]) => {
     ensureEdgelessRoot(doc);
@@ -1350,6 +1487,9 @@ export default function BlockSuiteCanvasHost({
     clearBoxSelectingObserver();
     workflowOverlayStoreRef.current?.clear();
     workflowOverlayCardContextsRef.current = [];
+    workflowTurnStatusRef.current.clear();
+    workflowTerminalFetchKeysRef.current.clear();
+    workflowTerminalInFlightKeysRef.current.clear();
     {
       const subscription = doc.slots.blockUpdated.subscribe((payload) => {
         if (payload?.type === "delete") {
@@ -1772,7 +1912,8 @@ export default function BlockSuiteCanvasHost({
     liveStateRef.current = liveState;
     runtimeSessionAliasesRef.current = runtimeSessionAliases;
     scheduleWorkflowLiveProjection();
-  }, [liveState, runtimeSessionAliases, scheduleWorkflowLiveProjection]);
+    reconcileTerminalWorkflowTurns();
+  }, [liveState, reconcileTerminalWorkflowTurns, runtimeSessionAliases, scheduleWorkflowLiveProjection]);
 
   useEffect(() => {
     currentSnapshotRef.current = initialSnapshot;
@@ -1792,6 +1933,9 @@ export default function BlockSuiteCanvasHost({
         workflowOverlayTimerRef.current = null;
       }
       workflowOverlayStoreRef.current?.clear();
+      workflowTurnStatusRef.current.clear();
+      workflowTerminalFetchKeysRef.current.clear();
+      workflowTerminalInFlightKeysRef.current.clear();
       clearBoxSelectingObserver();
     };
   }, [clearBoxSelectingObserver]);
@@ -1888,6 +2032,9 @@ export default function BlockSuiteCanvasHost({
       }
       workflowOverlayStoreRef.current?.clear();
       workflowOverlayCardContextsRef.current = [];
+      workflowTurnStatusRef.current.clear();
+      workflowTerminalFetchKeysRef.current.clear();
+      workflowTerminalInFlightKeysRef.current.clear();
       blockUpdatedDisposeRef.current?.dispose();
       blockUpdatedDisposeRef.current = null;
       selectionUpdatedDisposeRef.current?.dispose();
