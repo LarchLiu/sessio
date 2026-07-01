@@ -2677,6 +2677,10 @@ export async function updateAppshotConfig(config: AppshotConfig): Promise<Appsho
   return invoke<AppshotConfig>("update_appshot_config", { config });
 }
 
+export async function setAppshotShortcutRecording(recording: boolean): Promise<void> {
+  return invoke<void>("set_appshot_shortcut_recording", { recording });
+}
+
 export async function updateComputerUseSettings(
   settings: ComputerUseSettings,
 ): Promise<ComputerUseSettings> {

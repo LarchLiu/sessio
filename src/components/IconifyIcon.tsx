@@ -79,6 +79,10 @@ export function QrCodeIcon({ className, style }: IconifyIconComponentProps) {
   return <IconifyIcon iconClassName="icon-[material-symbols--qr-code]" className={className} style={style} />;
 }
 
+export function ScreenshotRegionIcon({ className, style }: IconifyIconComponentProps) {
+  return <IconifyIcon iconClassName="icon-[material-symbols--screenshot-region]" className={className} style={style} />;
+}
+
 export function HashtagChatLinearIcon({ className, style }: IconifyIconComponentProps) {
   return <IconifyIcon iconClassName="icon-[solar--hashtag-chat-linear]" className={className} style={style} />;
 }

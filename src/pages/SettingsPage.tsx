@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import { QRCodeSVG } from "@rc-component/qrcode";
@@ -32,8 +32,8 @@ import {
   XiaomiMiMo,
   ZAI,
 } from "@lobehub/icons";
-import { ArrowLeft, AtSign, Bot, Check, Circle, Download, Eye, EyeOff, Globe2, GripVertical, Hash, Info, Languages, Link2, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Server, Settings2, Shield, Sparkles, SquareKanban, Sun, Trash2, Workflow, X } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AppshotConfig, AstraConfig, AssistantInfo, ComputerUseSettings, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
+import { ArrowLeft, AtSign, Bot, Check, Circle, Download, Eye, EyeOff, Globe2, GripVertical, Hash, Info, Languages, Link2, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Save, Server, Settings2, Shield, Sparkles, SquareKanban, Sun, Trash2, Workflow, X } from "lucide-react";
+import type { Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AstraConfig, AssistantInfo, ComputerUseSettings, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
 import {
   createProcessTemplate,
   detectTelegramUserIds,
@@ -50,6 +50,7 @@ import {
   listProcessTemplateStages,
   listProcessTemplates,
   listRuntimeAgents,
+  setAppshotShortcutRecording,
   testDiscordBotConnection,
   testFeishuBotConnection,
   testTelegramBotConnection,
@@ -77,7 +78,7 @@ import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs from "../components/SegmentedTabs";
 import SwitchControl from "../components/SwitchControl";
 import Tooltip from "../components/Tooltip";
-import { AiGenerate2Icon, ChannelShare24RegularIcon, DiscordLogoIcon, LarkLogoIcon, QrCodeIcon, Robot3LineIcon, TelegramLogoIcon, TokenOutlineIcon, WechatLogoIcon } from "../components/IconifyIcon";
+import { AiGenerate2Icon, ChannelShare24RegularIcon, DiscordLogoIcon, LarkLogoIcon, QrCodeIcon, Robot3LineIcon, ScreenshotRegionIcon, TelegramLogoIcon, TokenOutlineIcon, WechatLogoIcon } from "../components/IconifyIcon";
 import { emitComputerUseSettingsChanged } from "../computerUseSettingsEvents";
 import { desktopControlPermissionPresentation } from "../desktopControlPermissionPresentation";
 import { type Lang, useI18n } from "../i18n";
@@ -145,7 +146,7 @@ export default function SettingsPage({
 
   return (
     <div className="flex h-screen text-body text-ink">
-      <aside className="flex w-[300px] shrink-0 flex-col bg-surface-sidebar">
+      <aside className="flex w-[248px] shrink-0 flex-col bg-surface-sidebar">
         <header data-tauri-drag-region className="h-12 shrink-0 select-none bg-surface-sidebar" />
         <div className="min-h-0 flex-1 px-2">
           <button
@@ -290,6 +291,566 @@ function formatSettingsDate(ts: number, lang: Lang): string {
   }).format(new Date(ts));
 }
 
+type ShortcutPlatform = "macos" | "windows" | "linux" | "other";
+
+const shortcutModifierOrderByPlatform: Record<ShortcutPlatform, string[]> = {
+  macos: ["super", "control", "alt", "shift", "commandorcontrol"],
+  windows: ["control", "alt", "shift", "super", "commandorcontrol"],
+  linux: ["control", "alt", "shift", "super", "commandorcontrol"],
+  other: ["control", "alt", "shift", "super", "commandorcontrol"],
+};
+
+function normalizeShortcutModifierToken(token: string): string | null {
+  const normalized = token.trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === "shift") return "shift";
+  if (normalized === "control" || normalized === "ctrl") return "control";
+  if (normalized === "alt" || normalized === "option") return "alt";
+  if (normalized === "super" || normalized === "command" || normalized === "cmd") {
+    return "super";
+  }
+  if (
+    normalized === "commandorcontrol" ||
+    normalized === "commandorctrl" ||
+    normalized === "cmdorctrl" ||
+    normalized === "cmdorcontrol"
+  ) {
+    return "commandorcontrol";
+  }
+  return null;
+}
+
+const supportedShortcutCodes = new Set([
+  "Backquote",
+  "Backslash",
+  "BracketLeft",
+  "BracketRight",
+  "Pause",
+  "Comma",
+  "Equal",
+  "Minus",
+  "Period",
+  "Quote",
+  "Semicolon",
+  "Slash",
+  "Backspace",
+  "CapsLock",
+  "Enter",
+  "Space",
+  "Tab",
+  "Delete",
+  "End",
+  "Home",
+  "Insert",
+  "PageDown",
+  "PageUp",
+  "PrintScreen",
+  "ScrollLock",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "NumLock",
+  "NumpadAdd",
+  "NumpadDecimal",
+  "NumpadDivide",
+  "NumpadEnter",
+  "NumpadEqual",
+  "NumpadMultiply",
+  "NumpadSubtract",
+  "Escape",
+  "AudioVolumeDown",
+  "AudioVolumeUp",
+  "AudioVolumeMute",
+  "MediaPlay",
+  "MediaPause",
+  "MediaPlayPause",
+  "MediaStop",
+  "MediaTrackNext",
+  "MediaTrackPrevious",
+]);
+
+function resolveShortcutPlatform(platform?: string | null): ShortcutPlatform {
+  if (platform === "macos" || platform === "windows" || platform === "linux") {
+    return platform;
+  }
+  if (typeof navigator === "undefined") {
+    return "other";
+  }
+  if (/Mac/i.test(navigator.platform)) return "macos";
+  if (/Win/i.test(navigator.platform)) return "windows";
+  if (/Linux/i.test(navigator.platform)) return "linux";
+  return "other";
+}
+
+function shortcutKeyFromCode(code: string): string | null {
+  if (/^Key[A-Z]$/.test(code)) return code;
+  if (/^Digit[0-9]$/.test(code)) return code;
+  if (/^Numpad[0-9]$/.test(code)) return code;
+  if (/^F(?:[1-9]|1\d|2[0-4])$/.test(code)) return code;
+  return supportedShortcutCodes.has(code) ? code : null;
+}
+
+function isModifierOnlyKey(event: { key: string; code: string }): boolean {
+  return (
+    event.key === "Shift" ||
+    event.key === "Control" ||
+    event.key === "Alt" ||
+    event.key === "Meta" ||
+    event.code === "ShiftLeft" ||
+    event.code === "ShiftRight" ||
+    event.code === "ControlLeft" ||
+    event.code === "ControlRight" ||
+    event.code === "AltLeft" ||
+    event.code === "AltRight" ||
+    event.code === "MetaLeft" ||
+    event.code === "MetaRight"
+  );
+}
+
+function shortcutModifiersFromEvent(event: {
+  shiftKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+}): string[] {
+  const modifiers: string[] = [];
+  if (event.shiftKey) modifiers.push("shift");
+  if (event.ctrlKey) modifiers.push("control");
+  if (event.altKey) modifiers.push("alt");
+  if (event.metaKey) modifiers.push("super");
+  return modifiers;
+}
+
+function formatShortcutToken(token: string, platform: ShortcutPlatform): string {
+  const normalized = token.trim().toLowerCase();
+  if (!normalized) return "";
+  if (normalized === "shift") return platform === "macos" ? "⇧" : "Shift";
+  if (normalized === "control" || normalized === "ctrl") {
+    return platform === "macos" ? "⌃" : "Ctrl";
+  }
+  if (normalized === "alt" || normalized === "option") {
+    return platform === "macos" ? "⌥" : "Alt";
+  }
+  if (normalized === "super" || normalized === "command" || normalized === "cmd") {
+    if (platform === "macos") return "⌘";
+    if (platform === "windows") return "Win";
+    return "Super";
+  }
+  if (
+    normalized === "commandorcontrol" ||
+    normalized === "commandorctrl" ||
+    normalized === "cmdorctrl" ||
+    normalized === "cmdorcontrol"
+  ) {
+    return platform === "macos" ? "⌘" : "Ctrl";
+  }
+  if (/^key[a-z]$/i.test(token)) return token.slice(-1).toUpperCase();
+  if (/^digit[0-9]$/i.test(token)) return token.slice(-1);
+  if (/^numpad[0-9]$/i.test(token)) return `Num ${token.slice(-1)}`;
+
+  switch (token) {
+    case "Backquote":
+      return "`";
+    case "Backslash":
+      return "\\";
+    case "BracketLeft":
+      return "[";
+    case "BracketRight":
+      return "]";
+    case "Comma":
+      return ",";
+    case "Equal":
+      return "=";
+    case "Minus":
+      return "-";
+    case "Period":
+      return ".";
+    case "Quote":
+      return "'";
+    case "Semicolon":
+      return ";";
+    case "Slash":
+      return "/";
+    case "ArrowUp":
+      return "Up";
+    case "ArrowDown":
+      return "Down";
+    case "ArrowLeft":
+      return "Left";
+    case "ArrowRight":
+      return "Right";
+    case "PageUp":
+      return "Page Up";
+    case "PageDown":
+      return "Page Down";
+    case "PrintScreen":
+      return "Print Screen";
+    case "ScrollLock":
+      return "Scroll Lock";
+    case "CapsLock":
+      return "Caps Lock";
+    case "NumLock":
+      return "Num Lock";
+    case "Backspace":
+      return "Backspace";
+    case "Delete":
+      return "Delete";
+    case "Enter":
+      return "Enter";
+    case "Escape":
+      return "Esc";
+    case "Home":
+      return "Home";
+    case "End":
+      return "End";
+    case "Insert":
+      return "Insert";
+    case "Space":
+      return "Space";
+    case "Tab":
+      return "Tab";
+    case "Pause":
+      return "Pause";
+    case "NumpadAdd":
+      return "Num +";
+    case "NumpadDecimal":
+      return "Num .";
+    case "NumpadDivide":
+      return "Num /";
+    case "NumpadEnter":
+      return "Num Enter";
+    case "NumpadEqual":
+      return "Num =";
+    case "NumpadMultiply":
+      return "Num *";
+    case "NumpadSubtract":
+      return "Num -";
+    case "AudioVolumeDown":
+      return "Volume Down";
+    case "AudioVolumeUp":
+      return "Volume Up";
+    case "AudioVolumeMute":
+      return "Mute";
+    case "MediaPlay":
+      return "Media Play";
+    case "MediaPause":
+      return "Media Pause";
+    case "MediaPlayPause":
+      return "Play/Pause";
+    case "MediaStop":
+      return "Media Stop";
+    case "MediaTrackNext":
+      return "Next Track";
+    case "MediaTrackPrevious":
+      return "Previous Track";
+    default:
+      return token.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+  }
+}
+
+function shortcutDisplayTokens(shortcut: string, platform: ShortcutPlatform): string[] {
+  const tokens = shortcut
+    .split("+")
+    .map((token) => token.trim())
+    .filter(Boolean);
+
+  if (tokens.length === 0) {
+    return [];
+  }
+
+  const order = shortcutModifierOrderByPlatform[platform];
+  const modifiers = tokens.filter((token) => {
+    const normalized = normalizeShortcutModifierToken(token);
+    return normalized ? order.includes(normalized) : false;
+  });
+  const keys = tokens.filter((token) => {
+    const normalized = normalizeShortcutModifierToken(token);
+    return !normalized || !order.includes(normalized);
+  });
+
+  modifiers.sort(
+    (left, right) =>
+      order.indexOf(normalizeShortcutModifierToken(left) ?? left.toLowerCase())
+      - order.indexOf(normalizeShortcutModifierToken(right) ?? right.toLowerCase()),
+  );
+
+  return [...modifiers, ...keys]
+    .map((token) => formatShortcutToken(token, platform))
+    .filter(Boolean);
+}
+
+function shortcutFromKeyboardEvent(event: {
+  key: string;
+  code: string;
+  shiftKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+}): string | null {
+  const key = shortcutKeyFromCode(event.code);
+  if (!key || isModifierOnlyKey(event)) {
+    return null;
+  }
+  return [...shortcutModifiersFromEvent(event), key].join("+");
+}
+
+function shortcutPreviewFromKeyboardEvent(
+  event: {
+    shiftKey: boolean;
+    ctrlKey: boolean;
+    altKey: boolean;
+    metaKey: boolean;
+  },
+  platform: ShortcutPlatform,
+): string[] {
+  const modifiers = shortcutModifiersFromEvent(event);
+  if (modifiers.length === 0) {
+    return [];
+  }
+  return modifiers.map((token) => formatShortcutToken(token, platform));
+}
+
+function splitLabelAroundToken(label: string, token: string): { before: string; after: string } | null {
+  const index = label.indexOf(token);
+  if (index < 0) return null;
+  return {
+    before: label.slice(0, index),
+    after: label.slice(index + token.length),
+  };
+}
+
+function ShortcutKeycap({
+  children,
+  recording = false,
+  className = "",
+}: {
+  children: ReactNode;
+  recording?: boolean;
+  className?: string;
+}) {
+  return (
+    <span
+      className={
+        "inline-flex h-7 min-w-7 items-center justify-center rounded-md border px-2 text-caption font-medium tabular-nums transition " +
+        (recording
+          ? "border-blue/20 bg-blue/[0.08] text-blue"
+          : "border-card-border/[0.16] bg-card-chip/[0.08] text-card-fg/72") +
+        (className ? ` ${className}` : "")
+      }
+    >
+      {children}
+    </span>
+  );
+}
+
+function ShortcutKeycapDisplay({
+  tokens,
+  recording = false,
+}: {
+  tokens: string[];
+  recording?: boolean;
+}) {
+  if (tokens.length === 0) return null;
+  return (
+    <span className="flex min-w-0 flex-wrap items-center gap-1">
+      {tokens.map((token, index) => (
+        <span key={`${token}:${index}`} className="inline-flex min-w-0 items-center gap-1">
+          {index > 0 ? <span className={recording ? "text-caption text-blue/55" : "text-caption text-ink/30"}>+</span> : null}
+          <ShortcutKeycap recording={recording}>{token}</ShortcutKeycap>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function AppshotShortcutControl({
+  value,
+  platform,
+  saving,
+  onError,
+  onSave,
+}: {
+  value: string;
+  platform: ShortcutPlatform;
+  saving: boolean;
+  onError: (error: string | null) => void;
+  onSave: (nextShortcut: string) => Promise<void> | void;
+}) {
+  const { t } = useI18n();
+  const [recording, setRecording] = useState(false);
+  const [previewTokens, setPreviewTokens] = useState<string[]>([]);
+  const [draftValue, setDraftValue] = useState<string | null>(null);
+  const [editingShortcut, setEditingShortcut] = useState<string | null>(null);
+  const controlRef = useRef<HTMLDivElement | null>(null);
+  const saveButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    void (async () => {
+      try {
+        await setAppshotShortcutRecording(recording);
+        if (!disposed && !recording) {
+          onError(null);
+        }
+      } catch (err) {
+        if (disposed) return;
+        setRecording(false);
+        onError(String(err));
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [onError, recording]);
+
+  useEffect(() => {
+    if (!recording) {
+      setPreviewTokens([]);
+      setDraftValue(null);
+      setEditingShortcut(null);
+      return;
+    }
+    controlRef.current?.focus();
+  }, [recording]);
+
+  const displayTokens = recording
+    ? previewTokens.length > 0
+      ? previewTokens
+      : shortcutDisplayTokens(editingShortcut ?? value, platform)
+    : shortcutDisplayTokens(value, platform);
+
+  const pendingValue = (editingShortcut ?? "").trim();
+  const originalValue = (draftValue ?? value).trim();
+  const canSave = recording && !saving && pendingValue.length > 0 && pendingValue !== originalValue;
+  const recordingHint = splitLabelAroundToken(t("settings.appshot_shortcut_recording_hint"), "Esc");
+
+  const startRecording = () => {
+    if (recording) return;
+    setDraftValue(value);
+    setEditingShortcut(value);
+    setRecording(true);
+  };
+
+  const cancelRecording = () => {
+    setRecording(false);
+  };
+
+  const commitRecording = async () => {
+    if (!canSave) return;
+    try {
+      await onSave(pendingValue);
+      setRecording(false);
+    } catch {}
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!recording && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      startRecording();
+      return;
+    }
+
+    if (!recording) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (event.key === "Escape") {
+      cancelRecording();
+      return;
+    }
+
+    const captured = shortcutFromKeyboardEvent(event);
+    if (!captured) {
+      setPreviewTokens(shortcutPreviewFromKeyboardEvent(event, platform));
+      return;
+    }
+
+    setEditingShortcut(captured);
+    setPreviewTokens(shortcutDisplayTokens(captured, platform));
+  };
+
+  return (
+    <div
+      ref={controlRef}
+      role="button"
+      tabIndex={0}
+      onClick={startRecording}
+      onBlur={(event) => {
+        if (recording) {
+          if (event.relatedTarget instanceof Node && saveButtonRef.current?.contains(event.relatedTarget)) {
+            return;
+          }
+          cancelRecording();
+        }
+      }}
+      onKeyDown={handleKeyDown}
+      className={
+        "flex min-h-11 w-full items-center justify-between gap-3 rounded-md border px-3 py-2 text-left text-body-sm outline-none transition " +
+        (recording
+          ? "border-blue/40 bg-blue/[0.08] text-ink shadow-[0_0_0_1px_rgba(59,130,246,0.15)]"
+          : "border-input-border/[0.16] bg-input text-input-fg hover:border-input-focus/22 focus-visible:border-input-focus/30")
+      }
+    >
+      <span className="min-w-0 flex-1">
+        {displayTokens.length > 0 ? (
+          <ShortcutKeycapDisplay tokens={displayTokens} recording={recording} />
+        ) : (
+          <span className="truncate font-medium">
+            {recording ? t("settings.appshot_shortcut_recording") : t("settings.appshot_shortcut_unset")}
+          </span>
+        )}
+      </span>
+      <span className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+        {recording ? (
+          recordingHint ? (
+            <span className="flex items-center gap-1 text-caption text-blue">
+              {recordingHint.before ? <span>{recordingHint.before}</span> : null}
+              <ShortcutKeycap recording className="min-w-8 px-2">
+                Esc
+              </ShortcutKeycap>
+              {recordingHint.after ? <span>{recordingHint.after}</span> : null}
+            </span>
+          ) : (
+            <span className="text-caption text-blue">{t("settings.appshot_shortcut_recording_hint")}</span>
+          )
+        ) : (
+          <span className="text-caption text-ink/45">
+            {t("settings.appshot_shortcut_capture_hint")}
+          </span>
+        )}
+        {recording && (
+          <button
+            ref={saveButtonRef}
+            type="button"
+            aria-label={t("chat.files.editor_save")}
+            title={t("chat.files.editor_save")}
+            className={
+              "inline-flex h-7 w-7 items-center justify-center rounded-md border transition " +
+              (canSave
+                ? "border-blue/20 bg-blue/[0.08] text-blue hover:bg-blue/[0.12]"
+                : "border-blue/10 bg-blue/[0.04] text-blue/35")
+            }
+            onMouseDown={(event) => {
+              event.preventDefault();
+            }}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void commitRecording();
+            }}
+          >
+            {saving ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+          </button>
+        )}
+      </span>
+    </div>
+  );
+}
+
 function GeneralSettings({
   lang,
   themeMode,
@@ -319,7 +880,6 @@ function GeneralSettings({
 }) {
   const { t } = useI18n();
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
-  const [appshotConfig, setAppshotConfig] = useState<AppshotConfig | null>(null);
   const [computerUseSettings, setComputerUseSettings] = useState<ComputerUseSettings | null>(null);
   const [desktopControlPermissionStatus, setDesktopControlPermissionStatus] = useState<import("../api").DesktopControlPermissionStatus | null>(null);
   const [proxyEnabled, setProxyEnabled] = useState(false);
@@ -328,6 +888,7 @@ function GeneralSettings({
   const [appshotShortcut, setAppshotShortcut] = useState("");
   const [desktopControlEnabled, setDesktopControlEnabled] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
+  const [proxySaveStatus, setProxySaveStatus] = useState<"idle" | "success" | "error">("idle");
   const [savingAppshot, setSavingAppshot] = useState(false);
   const [savingDesktopControl, setSavingDesktopControl] = useState(false);
 
@@ -345,7 +906,6 @@ function GeneralSettings({
         setProxyEnabled(config.proxy.enabled);
         setProxyUrl(config.proxy.url ?? "");
         setNoProxy(config.proxy.noProxy ?? "");
-        setAppshotConfig(nextAppshot);
         setAppshotShortcut(nextAppshot.shortcut);
         setComputerUseSettings(nextComputerUse);
         setDesktopControlEnabled(nextComputerUse.enabled);
@@ -409,22 +969,23 @@ function GeneralSettings({
       setProxyEnabled(next.proxy.enabled);
       setProxyUrl(next.proxy.url ?? "");
       setNoProxy(next.proxy.noProxy ?? "");
+      setProxySaveStatus("success");
       onError(null);
     } catch (err) {
+      setProxySaveStatus("error");
       onError(String(err));
     } finally {
       setSavingProxy(false);
     }
   };
 
-  const saveAppshotShortcut = async () => {
+  const saveAppshotShortcut = async (nextShortcut: string) => {
     if (savingAppshot) return;
     setSavingAppshot(true);
     try {
       const next = await updateAppshotConfig({
-        shortcut: appshotShortcut.trim(),
+        shortcut: nextShortcut.trim(),
       });
-      setAppshotConfig(next);
       setAppshotShortcut(next.shortcut);
       onError(null);
     } catch (err) {
@@ -434,12 +995,15 @@ function GeneralSettings({
     }
   };
 
-  const saveDesktopControlSettings = async () => {
+  const toggleDesktopControlEnabled = async () => {
     if (savingDesktopControl) return;
+    const previous = desktopControlEnabled;
+    const nextEnabled = !previous;
+    setDesktopControlEnabled(nextEnabled);
     setSavingDesktopControl(true);
     try {
       const next = await updateComputerUseSettings({
-        enabled: desktopControlEnabled,
+        enabled: nextEnabled,
         approvedApps: computerUseSettings?.approvedApps ?? [],
       });
       setComputerUseSettings(next);
@@ -447,6 +1011,7 @@ function GeneralSettings({
       emitComputerUseSettingsChanged(next);
       onError(null);
     } catch (err) {
+      setDesktopControlEnabled(previous);
       onError(String(err));
     } finally {
       setSavingDesktopControl(false);
@@ -484,14 +1049,17 @@ function GeneralSettings({
       || proxyUrl.trim() !== (networkConfig.proxy.url ?? "")
       || noProxy.trim() !== (networkConfig.proxy.noProxy ?? "")
     : false;
-  const appshotChanged = appshotConfig
-    ? appshotShortcut.trim() !== appshotConfig.shortcut
-    : false;
-  const desktopControlChanged = computerUseSettings
-    ? desktopControlEnabled !== computerUseSettings.enabled
-    : false;
+
+  useEffect(() => {
+    setProxySaveStatus("idle");
+  }, [proxyEnabled, proxyUrl, noProxy]);
+
   const approvedComputerUseApps = computerUseSettings?.approvedApps ?? [];
   const desktopControlPermission = desktopControlPermissionPresentation(desktopControlPermissionStatus);
+  const shortcutPlatform = useMemo(
+    () => resolveShortcutPlatform(desktopControlPermissionStatus?.platform),
+    [desktopControlPermissionStatus?.platform],
+  );
   return (
     <section className="min-w-0 max-w-full">
       <SettingsGroup title={t("settings.appearance")} flush>
@@ -510,38 +1078,27 @@ function GeneralSettings({
         </SettingsRow>
       </SettingsGroup>
       <SettingsGroup title={t("settings.desktop_control")} flush>
-        <SettingsRow
-          icon={<Monitor className="h-4 w-4" />}
-          label={t("settings.appshot_shortcut")}
-          description={t("settings.appshot_shortcut_description")}
-        >
-          <div className="flex items-center justify-end gap-2">
-            <input
-              value={appshotShortcut}
-              onChange={(event) => setAppshotShortcut(event.target.value)}
-              placeholder="CommandOrControl+Shift+Option+5"
-              className={inputClassName + " w-[320px]"}
-            />
-            <button
-              type="button"
-              disabled={savingAppshot || !appshotChanged || !appshotShortcut.trim()}
-              onClick={() => void saveAppshotShortcut()}
-              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35"
-            >
-              {savingAppshot ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-              {t("project.save")}
-            </button>
-          </div>
-        </SettingsRow>
         <SettingsStackedRow
           icon={<Shield className="h-4 w-4" />}
           label={t("settings.desktop_control")}
           description={t("settings.desktop_control_enable_description")}
         >
           <div className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-2 text-caption text-ink/50">
-                <span className="text-ink/60">{t(desktopControlPermission.descriptionKey)}</span>
+            <div className="text-caption text-ink/60">
+              {t(desktopControlPermission.descriptionKey)}
+            </div>
+            <div className="flex w-full flex-wrap items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2 text-caption">
+                {desktopControlPermission.showManageButton && (
+                  <button
+                    type="button"
+                    onClick={() => void openDesktopControlPermissions()}
+                    className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]"
+                  >
+                    <Shield className="h-4 w-4" />
+                    {t("settings.appshot_manage_permissions")}
+                  </button>
+                )}
                 <span className="text-ink/24">·</span>
                 <span className={desktopControlPermissionStatus?.screenshots.granted ? "text-emerald" : "text-amber"}>
                   {t(desktopControlPermission.screenshotKey)}
@@ -551,37 +1108,18 @@ function GeneralSettings({
                   {t(desktopControlPermission.accessibilityKey)}
                 </span>
               </div>
-              {desktopControlPermission.showManageButton && (
-                <button
-                  type="button"
-                  onClick={() => void openDesktopControlPermissions()}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]"
-                >
-                  <Shield className="h-4 w-4" />
-                  {t("settings.appshot_manage_permissions")}
-                </button>
-              )}
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-card-border/[0.12] bg-card-chip/[0.04] px-3 py-2.5">
-              <div className="flex items-center gap-3">
+              <div className="ml-auto flex shrink-0 items-center gap-3">
                 <span className="text-caption text-ink/45">
                   {desktopControlEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}
                 </span>
+                {savingDesktopControl && <LoaderCircle className="h-4 w-4 animate-spin text-ink/45" />}
                 <SwitchControl
                   checked={desktopControlEnabled}
                   tooltip={t("settings.desktop_control_enable")}
-                  onToggle={() => setDesktopControlEnabled((value) => !value)}
+                  disabled={savingDesktopControl}
+                  onToggle={() => void toggleDesktopControlEnabled()}
                 />
               </div>
-              <button
-                type="button"
-                disabled={savingDesktopControl || !desktopControlChanged}
-                onClick={() => void saveDesktopControlSettings()}
-                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35"
-              >
-                {savingDesktopControl ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                {t("project.save")}
-              </button>
             </div>
             <div className="rounded-lg border border-card-border/[0.12] bg-card-chip/[0.04]">
               <div className="flex items-center justify-between gap-3 border-b border-card-border/[0.08] px-3 py-2.5">
@@ -624,8 +1162,47 @@ function GeneralSettings({
             </div>
           </div>
         </SettingsStackedRow>
+        <SettingsStackedRow
+          icon={<ScreenshotRegionIcon className="h-4 w-4" />}
+          label={t("settings.appshot_shortcut")}
+          description={t("settings.appshot_shortcut_description")}
+        >
+          <div className="max-w-[32rem]">
+            <AppshotShortcutControl
+              value={appshotShortcut}
+              platform={shortcutPlatform}
+              saving={savingAppshot}
+              onError={onError}
+              onSave={(nextShortcut) => void saveAppshotShortcut(nextShortcut)}
+            />
+          </div>
+        </SettingsStackedRow>
       </SettingsGroup>
-      <SettingsGroup title={t("settings.network")} flush>
+      <SettingsGroup
+        title={t("settings.network")}
+        action={
+          <button
+            type="button"
+            disabled={savingProxy || !proxyChanged}
+            onClick={() => void saveProxyConfig()}
+            className={channelSaveButtonClass(proxySaveStatus)}
+          >
+            {savingProxy
+              ? <LoaderCircle className="h-4 w-4 animate-spin" />
+              : proxySaveStatus === "error"
+                ? <X className="h-4 w-4" />
+                : <Check className="h-4 w-4" />}
+            {savingProxy
+              ? t("project.save")
+              : proxySaveStatus === "success"
+                ? t("settings.saved")
+                : proxySaveStatus === "error"
+                  ? t("settings.save_failed")
+                  : t("project.save")}
+          </button>
+        }
+        flush
+      >
         <SettingsRow icon={<Globe2 className="h-4 w-4" />} label={t("settings.proxy")} description={t("settings.proxy_description")}>
           <div className="flex items-center justify-end gap-3">
             <span className="text-caption text-ink/45">{proxyEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}</span>
@@ -636,13 +1213,7 @@ function GeneralSettings({
           <input value={proxyUrl} onChange={(event) => setProxyUrl(event.target.value)} placeholder="http://127.0.0.1:7890" className={inputClassName + " w-[280px]"} />
         </SettingsRow>
         <SettingsRow icon={<Globe2 className="h-4 w-4" />} label={t("settings.no_proxy")} description={t("settings.no_proxy_description")}>
-          <div className="flex items-center justify-end gap-2">
-            <input value={noProxy} onChange={(event) => setNoProxy(event.target.value)} placeholder="localhost,127.0.0.1" className={inputClassName + " w-[280px]"} />
-            <button type="button" disabled={savingProxy || !proxyChanged} onClick={() => void saveProxyConfig()} className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35">
-              {savingProxy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-              {t("project.save")}
-            </button>
-          </div>
+          <input value={noProxy} onChange={(event) => setNoProxy(event.target.value)} placeholder="localhost,127.0.0.1" className={inputClassName + " w-[280px]"} />
         </SettingsRow>
       </SettingsGroup>
       <SettingsGroup title={t("settings.index")} flush>

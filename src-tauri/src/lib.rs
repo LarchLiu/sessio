@@ -125,6 +125,7 @@ struct AppshotPermissionRequiredPayload {
 #[derive(Default)]
 struct AppshotShortcutState {
     registered_shortcut: Mutex<Option<String>>,
+    suspended_shortcut: Mutex<Option<String>>,
 }
 
 /// How long a command-driven screenshot overlay waits for the user to
@@ -7935,6 +7936,55 @@ fn update_appshot_shortcut_registration(app: &AppHandle, shortcut: &str) -> Resu
     Ok(normalized)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn suspend_appshot_shortcut_registration(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppshotShortcutState>();
+    let mut registered_guard = state
+        .registered_shortcut
+        .lock()
+        .map_err(|_| "Appshot shortcut state is poisoned".to_string())?;
+    let current = registered_guard.clone();
+    if let Some(current_shortcut) = current {
+        let parsed = parsed_appshot_shortcut(&current_shortcut)?;
+        app.global_shortcut()
+            .unregister(parsed)
+            .map_err(|e| e.to_string())?;
+        let mut suspended_guard = state
+            .suspended_shortcut
+            .lock()
+            .map_err(|_| "Appshot shortcut state is poisoned".to_string())?;
+        *suspended_guard = Some(current_shortcut);
+        *registered_guard = None;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn suspend_appshot_shortcut_registration(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn resume_appshot_shortcut_registration(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppshotShortcutState>();
+    let suspended = {
+        let mut suspended_guard = state
+            .suspended_shortcut
+            .lock()
+            .map_err(|_| "Appshot shortcut state is poisoned".to_string())?;
+        suspended_guard.take()
+    };
+    if let Some(shortcut) = suspended {
+        let _ = update_appshot_shortcut_registration(app, &shortcut)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn resume_appshot_shortcut_registration(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(any(target_os = "android", target_os = "ios"))]
 fn update_appshot_shortcut_registration(
     _app: &AppHandle,
@@ -8367,11 +8417,36 @@ fn update_appshot_config(
     app: AppHandle,
     mut config: config::AppshotConfig,
 ) -> Result<config::AppshotConfig, String> {
-    config.shortcut = update_appshot_shortcut_registration(&app, &config.shortcut)?;
+    let normalized_shortcut = normalized_appshot_shortcut(&config.shortcut)?;
+    let state = app.state::<AppshotShortcutState>();
+    let is_suspended = state
+        .suspended_shortcut
+        .lock()
+        .map_err(|_| "Appshot shortcut state is poisoned".to_string())?
+        .is_some();
+    if is_suspended {
+        let mut suspended_guard = state
+            .suspended_shortcut
+            .lock()
+            .map_err(|_| "Appshot shortcut state is poisoned".to_string())?;
+        *suspended_guard = Some(normalized_shortcut.clone());
+        config.shortcut = normalized_shortcut;
+    } else {
+        config.shortcut = update_appshot_shortcut_registration(&app, &normalized_shortcut)?;
+    }
     let mut app_config = config::load_config().map_err(|e| e.to_string())?;
     app_config.appshot = config.clone();
     config::save_config(&app_config).map_err(|e| e.to_string())?;
     Ok(config)
+}
+
+#[tauri::command]
+fn set_appshot_shortcut_recording(app: AppHandle, recording: bool) -> Result<(), String> {
+    if recording {
+        suspend_appshot_shortcut_registration(&app)
+    } else {
+        resume_appshot_shortcut_registration(&app)
+    }
 }
 
 #[tauri::command]
@@ -9337,6 +9412,7 @@ pub fn run() {
             request_appshot_permission,
             open_appshot_permissions_panel,
             open_appshot_permission_settings,
+            set_appshot_shortcut_recording,
             update_appshot_config,
             update_computer_use_settings,
             get_im_bridge_config,

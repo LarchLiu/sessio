@@ -58,7 +58,7 @@ pub struct AppshotConfig {
 impl Default for AppshotConfig {
     fn default() -> Self {
         Self {
-            shortcut: "CommandOrControl+Shift+Option+5".to_string(),
+            shortcut: "Shift+Alt+Super+KeyK".to_string(),
         }
     }
 }
