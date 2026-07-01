@@ -8,6 +8,7 @@ use crate::memory::service::MemoryService;
 use crate::memory::{MemoryRecord, MemorySearchOptions, MemoryStore, RecordContinuation};
 use crate::models::{
     Agent, IssueSeverity, IssueStatus, SessionHistoryBlock, SessionHistoryTurn, StageStatus,
+    ThreadKind,
 };
 use crate::store::sqlite::SqliteStore;
 use crate::store::SessionStore;
@@ -53,6 +54,15 @@ enum ComputerUseCommand {
 
 #[derive(Debug)]
 enum ThreadCommand {
+    Create {
+        project: String,
+        goal: String,
+        description: Option<String>,
+        kind: ThreadKind,
+        assistant_ids: Vec<String>,
+        db_path: Option<String>,
+        json: bool,
+    },
     List {
         project: Option<String>,
         db_path: Option<String>,
@@ -63,10 +73,52 @@ enum ThreadCommand {
         db_path: Option<String>,
         json: bool,
     },
+    Update {
+        id: String,
+        goal: Option<String>,
+        description: Option<String>,
+        kind: Option<ThreadKind>,
+        enabled: Option<bool>,
+        assistant_ids: Option<Vec<String>>,
+        db_path: Option<String>,
+        json: bool,
+    },
+    SetStage {
+        thread_id: String,
+        stage_id: String,
+        db_path: Option<String>,
+        json: bool,
+    },
+    LinkSession {
+        thread_id: String,
+        agent: Agent,
+        session_id: String,
+        db_path: Option<String>,
+        json: bool,
+    },
+    UnlinkSession {
+        thread_id: String,
+        agent: Agent,
+        session_id: String,
+        db_path: Option<String>,
+        json: bool,
+    },
 }
 
 #[derive(Debug)]
 enum StageCommand {
+    Catalog {
+        project: String,
+        db_path: Option<String>,
+        json: bool,
+    },
+    Add {
+        thread_id: String,
+        stage_id: String,
+        assistant_ids: Vec<String>,
+        db_path: Option<String>,
+        json: bool,
+    },
     List {
         thread_id: String,
         db_path: Option<String>,
@@ -90,6 +142,28 @@ enum StageCommand {
         status: Option<String>,
         summary: Option<String>,
         outcome: Option<String>,
+        db_path: Option<String>,
+        json: bool,
+    },
+    Configure {
+        id: String,
+        assistant_ids: Option<Vec<String>>,
+        order: Option<i64>,
+        enabled: Option<bool>,
+        db_path: Option<String>,
+        json: bool,
+    },
+    LinkSession {
+        stage_id: String,
+        agent: Agent,
+        session_id: String,
+        db_path: Option<String>,
+        json: bool,
+    },
+    UnlinkSession {
+        stage_id: String,
+        agent: Agent,
+        session_id: String,
         db_path: Option<String>,
         json: bool,
     },
@@ -933,6 +1007,33 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
 
 fn run_thread(cmd: ThreadCommand) -> Result<()> {
     match cmd {
+        ThreadCommand::Create {
+            project,
+            goal,
+            description,
+            kind,
+            assistant_ids,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let project_id = resolve_project_id(&store, &project)?;
+            let thread = store.create_thread_with_options(
+                &project_id,
+                &goal,
+                description.as_deref(),
+                kind,
+                &assistant_ids,
+                &[],
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&thread)?);
+            } else {
+                println!("thread\t{}\t{}", thread.id, thread.goal);
+            }
+            Ok(())
+        }
         ThreadCommand::List {
             project,
             db_path,
@@ -993,11 +1094,140 @@ fn run_thread(cmd: ThreadCommand) -> Result<()> {
             }
             Ok(())
         }
+        ThreadCommand::Update {
+            id,
+            goal,
+            description,
+            kind,
+            enabled,
+            assistant_ids,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let description = description.as_ref().map(|value| Some(value.as_str()));
+            let thread = store.update_thread_with_options(
+                &id,
+                goal.as_deref(),
+                description,
+                enabled,
+                kind,
+                assistant_ids.as_deref(),
+                None,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&thread)?);
+            } else {
+                println!("thread\t{}\t{}", thread.id, thread.goal);
+            }
+            Ok(())
+        }
+        ThreadCommand::SetStage {
+            thread_id,
+            stage_id,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let thread = store.set_thread_stage(&thread_id, &stage_id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&thread)?);
+            } else {
+                println!("thread\t{}\tactive_stage\t{}", thread.id, stage_id);
+            }
+            Ok(())
+        }
+        ThreadCommand::LinkSession {
+            thread_id,
+            agent,
+            session_id,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let thread = store.link_thread_session(&thread_id, agent, &session_id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&thread)?);
+            } else {
+                println!(
+                    "thread_session\t{}\t{}\t{}",
+                    thread.id,
+                    agent.as_str(),
+                    session_id
+                );
+            }
+            Ok(())
+        }
+        ThreadCommand::UnlinkSession {
+            thread_id,
+            agent,
+            session_id,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let thread = store.unlink_thread_session(&thread_id, agent, &session_id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&thread)?);
+            } else {
+                println!(
+                    "thread_session_unlinked\t{}\t{}\t{}",
+                    thread.id,
+                    agent.as_str(),
+                    session_id
+                );
+            }
+            Ok(())
+        }
     }
 }
 
 fn run_stage(cmd: StageCommand) -> Result<()> {
     match cmd {
+        StageCommand::Catalog {
+            project,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let project_id = resolve_project_id(&store, &project)?;
+            let stages = store.list_project_stages(&project_id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stages)?);
+            } else {
+                for stage in &stages {
+                    println!(
+                        "{}\t{}\t{}",
+                        stage.id,
+                        stage.enabled,
+                        project_stage_display_name(stage)
+                    );
+                }
+            }
+            Ok(())
+        }
+        StageCommand::Add {
+            thread_id,
+            stage_id,
+            assistant_ids,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let stage = store.add_thread_stage(&thread_id, &stage_id, &assistant_ids)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stage)?);
+            } else {
+                println!("stage\t{}\t{}", stage.id, stage_display_name(&stage));
+            }
+            Ok(())
+        }
         StageCommand::List {
             thread_id,
             db_path,
@@ -1095,6 +1325,68 @@ fn run_stage(cmd: StageCommand) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&stage)?);
             } else {
                 println!("stage\t{}\t{}", stage.id, stage.status.as_str());
+            }
+            Ok(())
+        }
+        StageCommand::Configure {
+            id,
+            assistant_ids,
+            order,
+            enabled,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let stage = store.update_thread_stage(&id, assistant_ids.as_deref(), order, enabled)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stage)?);
+            } else {
+                println!("stage\t{}\t{}", stage.id, stage_display_name(&stage));
+            }
+            Ok(())
+        }
+        StageCommand::LinkSession {
+            stage_id,
+            agent,
+            session_id,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let stage = store.link_stage_session(&stage_id, agent, &session_id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stage)?);
+            } else {
+                println!(
+                    "stage_session\t{}\t{}\t{}",
+                    stage.id,
+                    agent.as_str(),
+                    session_id
+                );
+            }
+            Ok(())
+        }
+        StageCommand::UnlinkSession {
+            stage_id,
+            agent,
+            session_id,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let stage = store.unlink_stage_session(&stage_id, agent, &session_id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stage)?);
+            } else {
+                println!(
+                    "stage_session_unlinked\t{}\t{}\t{}",
+                    stage.id,
+                    agent.as_str(),
+                    session_id
+                );
             }
             Ok(())
         }
@@ -1235,6 +1527,24 @@ fn find_stage_by_id(
     bail!("thread stage not found: {thread_stage_id}")
 }
 
+fn resolve_project_id(store: &SqliteStore, project: &str) -> Result<String> {
+    let normalized = normalize_project_filter(project);
+    let mut path_matches = Vec::new();
+    for candidate in store.list_projects()? {
+        if candidate.id == project {
+            return Ok(candidate.id);
+        }
+        if normalize_project_filter(&candidate.path) == normalized {
+            path_matches.push(candidate.id);
+        }
+    }
+    match path_matches.len() {
+        1 => Ok(path_matches.remove(0)),
+        0 => bail!("project not found: {project}"),
+        _ => bail!("project path is ambiguous: {project}"),
+    }
+}
+
 fn stage_display_name(stage: &crate::models::StageInfo) -> String {
     if let Some(name) = &stage.name {
         return name.clone();
@@ -1243,6 +1553,16 @@ fn stage_display_name(stage: &crate::models::StageInfo) -> String {
         return kind.as_str().to_string();
     }
     stage.stage_id.clone()
+}
+
+fn project_stage_display_name(stage: &crate::models::ProjectStageInfo) -> String {
+    if let Some(name) = &stage.name {
+        return name.clone();
+    }
+    if let Some(kind) = &stage.kind {
+        return kind.as_str().to_string();
+    }
+    stage.id.clone()
 }
 
 fn run_sessions(cmd: SessionsCommand) -> Result<()> {
@@ -1687,6 +2007,41 @@ fn ensure_known_options(args: &[String], allowed: &[&str]) -> Result<()> {
     Ok(())
 }
 
+fn ensure_known_options_with_flags(
+    args: &[String],
+    value_flags: &[&str],
+    bool_flags: &[&str],
+) -> Result<()> {
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        if !flag.starts_with("--") {
+            bail!("unexpected argument '{flag}'");
+        }
+        if bool_flags.contains(&flag) {
+            i += 1;
+            continue;
+        }
+        if !value_flags.contains(&flag) {
+            bail!("unknown option '{flag}'");
+        }
+        i += 1;
+        if i >= args.len() {
+            bail!("missing value for {flag}");
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
+}
+
+fn has_option(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
+}
+
 fn required_option(args: &[String], flag: &str) -> Result<String> {
     optional_option(args, flag)?.with_context(|| format!("missing {flag}"))
 }
@@ -1715,6 +2070,23 @@ fn optional_option(args: &[String], flag: &str) -> Result<Option<String>> {
         i += 1;
     }
     Ok(found)
+}
+
+fn repeated_option(args: &[String], flag: &str) -> Result<Vec<String>> {
+    let mut values = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag {
+            i += 1;
+            values.push(
+                args.get(i)
+                    .with_context(|| format!("missing value for {flag}"))?
+                    .clone(),
+            );
+        }
+        i += 1;
+    }
+    Ok(values)
 }
 
 fn required_f64_option(args: &[String], flag: &str) -> Result<f64> {
@@ -2146,11 +2518,45 @@ fn parse_config_bool(value: &str) -> Result<bool> {
     }
 }
 
+fn parse_thread_kind(value: &str) -> Result<ThreadKind> {
+    ThreadKind::from_db_str(value).with_context(|| format!("invalid thread kind: {value}"))
+}
+
 fn parse_thread(args: &[String]) -> Result<Cli> {
     let Some(subcommand) = args.first() else {
         bail!("missing thread subcommand");
     };
     match subcommand.as_str() {
+        "create" => {
+            ensure_known_options_with_flags(
+                &args[1..],
+                &[
+                    "--project",
+                    "--goal",
+                    "--description",
+                    "--kind",
+                    "--assistant-id",
+                    "--db-path",
+                ],
+                &["--json"],
+            )?;
+            let rest = &args[1..];
+            Ok(Cli {
+                command: Command::Thread(ThreadCommand::Create {
+                    project: required_option(rest, "--project")?,
+                    goal: required_option(rest, "--goal")?,
+                    description: optional_option(rest, "--description")?,
+                    kind: parse_thread_kind(
+                        optional_option(rest, "--kind")?
+                            .as_deref()
+                            .unwrap_or(ThreadKind::Process.as_str()),
+                    )?,
+                    assistant_ids: repeated_option(rest, "--assistant-id")?,
+                    db_path: optional_option(rest, "--db-path")?,
+                    json: has_flag(rest, "--json"),
+                }),
+            })
+        }
         "list" => {
             let mut project = None;
             let mut db_path = None;
@@ -2207,6 +2613,94 @@ fn parse_thread(args: &[String]) -> Result<Cli> {
                 }),
             })
         }
+        "update" => {
+            ensure_known_options_with_flags(
+                &args[1..],
+                &[
+                    "--id",
+                    "--goal",
+                    "--description",
+                    "--kind",
+                    "--enabled",
+                    "--assistant-id",
+                    "--db-path",
+                ],
+                &["--json"],
+            )?;
+            let rest = &args[1..];
+            let assistant_ids = if has_option(rest, "--assistant-id") {
+                Some(repeated_option(rest, "--assistant-id")?)
+            } else {
+                None
+            };
+            Ok(Cli {
+                command: Command::Thread(ThreadCommand::Update {
+                    id: required_option(rest, "--id")?,
+                    goal: optional_option(rest, "--goal")?,
+                    description: optional_option(rest, "--description")?,
+                    kind: optional_option(rest, "--kind")?
+                        .as_deref()
+                        .map(parse_thread_kind)
+                        .transpose()?,
+                    enabled: optional_option(rest, "--enabled")?
+                        .as_deref()
+                        .map(parse_config_bool)
+                        .transpose()?,
+                    assistant_ids,
+                    db_path: optional_option(rest, "--db-path")?,
+                    json: has_flag(rest, "--json"),
+                }),
+            })
+        }
+        "set-stage" => {
+            ensure_known_options_with_flags(
+                &args[1..],
+                &["--thread-id", "--stage-id", "--db-path"],
+                &["--json"],
+            )?;
+            let rest = &args[1..];
+            Ok(Cli {
+                command: Command::Thread(ThreadCommand::SetStage {
+                    thread_id: required_option(rest, "--thread-id")?,
+                    stage_id: required_option(rest, "--stage-id")?,
+                    db_path: optional_option(rest, "--db-path")?,
+                    json: has_flag(rest, "--json"),
+                }),
+            })
+        }
+        "link-session" | "unlink-session" => {
+            ensure_known_options_with_flags(
+                &args[1..],
+                &["--thread-id", "--agent", "--session-id", "--db-path"],
+                &["--json"],
+            )?;
+            let rest = &args[1..];
+            let thread_id = required_option(rest, "--thread-id")?;
+            let agent = parse_agent(&required_option(rest, "--agent")?)?;
+            let session_id = required_option(rest, "--session-id")?;
+            let db_path = optional_option(rest, "--db-path")?;
+            let json = has_flag(rest, "--json");
+            let command = if subcommand == "link-session" {
+                ThreadCommand::LinkSession {
+                    thread_id,
+                    agent,
+                    session_id,
+                    db_path,
+                    json,
+                }
+            } else {
+                ThreadCommand::UnlinkSession {
+                    thread_id,
+                    agent,
+                    session_id,
+                    db_path,
+                    json,
+                }
+            };
+            Ok(Cli {
+                command: Command::Thread(command),
+            })
+        }
         other => bail!("unknown thread subcommand '{other}'"),
     }
 }
@@ -2216,6 +2710,34 @@ fn parse_stage(args: &[String]) -> Result<Cli> {
         bail!("missing stage subcommand");
     };
     match subcommand.as_str() {
+        "catalog" => {
+            ensure_known_options_with_flags(&args[1..], &["--project", "--db-path"], &["--json"])?;
+            let rest = &args[1..];
+            Ok(Cli {
+                command: Command::Stage(StageCommand::Catalog {
+                    project: required_option(rest, "--project")?,
+                    db_path: optional_option(rest, "--db-path")?,
+                    json: has_flag(rest, "--json"),
+                }),
+            })
+        }
+        "add" => {
+            ensure_known_options_with_flags(
+                &args[1..],
+                &["--thread-id", "--stage-id", "--assistant-id", "--db-path"],
+                &["--json"],
+            )?;
+            let rest = &args[1..];
+            Ok(Cli {
+                command: Command::Stage(StageCommand::Add {
+                    thread_id: required_option(rest, "--thread-id")?,
+                    stage_id: required_option(rest, "--stage-id")?,
+                    assistant_ids: repeated_option(rest, "--assistant-id")?,
+                    db_path: optional_option(rest, "--db-path")?,
+                    json: has_flag(rest, "--json"),
+                }),
+            })
+        }
         "list" => {
             let mut thread_id = None;
             let mut db_path = None;
@@ -2366,6 +2888,71 @@ fn parse_stage(args: &[String]) -> Result<Cli> {
                     db_path,
                     json,
                 }),
+            })
+        }
+        "configure" => {
+            ensure_known_options_with_flags(
+                &args[1..],
+                &[
+                    "--id",
+                    "--assistant-id",
+                    "--order",
+                    "--enabled",
+                    "--db-path",
+                ],
+                &["--json"],
+            )?;
+            let rest = &args[1..];
+            let assistant_ids = if has_option(rest, "--assistant-id") {
+                Some(repeated_option(rest, "--assistant-id")?)
+            } else {
+                None
+            };
+            Ok(Cli {
+                command: Command::Stage(StageCommand::Configure {
+                    id: required_option(rest, "--id")?,
+                    assistant_ids,
+                    order: optional_i64_option(rest, "--order")?,
+                    enabled: optional_option(rest, "--enabled")?
+                        .as_deref()
+                        .map(parse_config_bool)
+                        .transpose()?,
+                    db_path: optional_option(rest, "--db-path")?,
+                    json: has_flag(rest, "--json"),
+                }),
+            })
+        }
+        "link-session" | "unlink-session" => {
+            ensure_known_options_with_flags(
+                &args[1..],
+                &["--stage-id", "--agent", "--session-id", "--db-path"],
+                &["--json"],
+            )?;
+            let rest = &args[1..];
+            let stage_id = required_option(rest, "--stage-id")?;
+            let agent = parse_agent(&required_option(rest, "--agent")?)?;
+            let session_id = required_option(rest, "--session-id")?;
+            let db_path = optional_option(rest, "--db-path")?;
+            let json = has_flag(rest, "--json");
+            let command = if subcommand == "link-session" {
+                StageCommand::LinkSession {
+                    stage_id,
+                    agent,
+                    session_id,
+                    db_path,
+                    json,
+                }
+            } else {
+                StageCommand::UnlinkSession {
+                    stage_id,
+                    agent,
+                    session_id,
+                    db_path,
+                    json,
+                }
+            };
+            Ok(Cli {
+                command: Command::Stage(command),
             })
         }
         "issue" => parse_stage_issue(&args[1..]),
@@ -2761,10 +3348,20 @@ fn print_help() {
 Usage:
   sessio sessions list [--project <path>] [--db-path <path>] [--json]
   sessio sessions messages --agent <codex|claude|opencode|pi> [--session-id <id>] [--file-path <path>] [--json]
+  sessio thread create --project <projectPathOrId> --goal <text> [--description <text>] [--kind <process|teamwork|brainstorm|debate>] [--assistant-id <assistantId> ...] [--db-path <path>] [--json]
   sessio thread list [--project <path>] [--db-path <path>] [--json]
   sessio thread show --id <threadId> [--db-path <path>] [--json]
+  sessio thread update --id <threadId> [--goal <text>] [--description <text>] [--kind <process|teamwork|brainstorm|debate>] [--enabled <true|false>] [--assistant-id <assistantId> ...] [--db-path <path>] [--json]
+  sessio thread set-stage --thread-id <threadId> --stage-id <threadStageId> [--db-path <path>] [--json]
+  sessio thread link-session --thread-id <threadId> --agent <codex|claude|opencode|pi> --session-id <sessionId> [--db-path <path>] [--json]
+  sessio thread unlink-session --thread-id <threadId> --agent <codex|claude|opencode|pi> --session-id <sessionId> [--db-path <path>] [--json]
+  sessio stage catalog --project <projectPathOrId> [--db-path <path>] [--json]
+  sessio stage add --thread-id <threadId> --stage-id <projectStageId> [--assistant-id <assistantId> ...] [--db-path <path>] [--json]
   sessio stage list --thread-id <threadId> [--db-path <path>] [--json]
   sessio stage show --id <threadStageId> [--db-path <path>] [--json]
+  sessio stage configure --id <threadStageId> [--assistant-id <assistantId> ...] [--order <n>] [--enabled <true|false>] [--db-path <path>] [--json]
+  sessio stage link-session --stage-id <threadStageId> --agent <codex|claude|opencode|pi> --session-id <sessionId> [--db-path <path>] [--json]
+  sessio stage unlink-session --stage-id <threadStageId> --agent <codex|claude|opencode|pi> --session-id <sessionId> [--db-path <path>] [--json]
   sessio stage set-status --id <threadStageId> --status <not_started|in_progress|blocked|needs_review|completed|skipped> [--summary <text>] [--outcome <text>] [--db-path <path>] [--json]
   sessio stage update --id <threadStageId> [--status <not_started|in_progress|blocked|needs_review|completed|skipped>] [--summary <text>] [--outcome <text>] [--db-path <path>] [--json]
   sessio stage issue add --stage-id <threadStageId> --title <text> --severity <low|medium|high|critical> [--description <text>] [--db-path <path>] [--json]
@@ -2821,6 +3418,164 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_thread_create_workflow_command() {
+        let cli = parse_args(args(&[
+            "thread",
+            "create",
+            "--project",
+            "/tmp/project",
+            "--goal",
+            "Ship the workflow",
+            "--description",
+            "Coordinate stages",
+            "--kind",
+            "process",
+            "--assistant-id",
+            "assistant-a",
+            "--assistant-id",
+            "assistant-b",
+            "--json",
+        ]))
+        .unwrap();
+
+        let Command::Thread(ThreadCommand::Create {
+            project,
+            goal,
+            description,
+            kind,
+            assistant_ids,
+            json,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected thread create command");
+        };
+        assert_eq!(project, "/tmp/project");
+        assert_eq!(goal, "Ship the workflow");
+        assert_eq!(description.as_deref(), Some("Coordinate stages"));
+        assert_eq!(kind, ThreadKind::Process);
+        assert_eq!(assistant_ids, vec!["assistant-a", "assistant-b"]);
+        assert!(json);
+    }
+
+    #[test]
+    fn parses_thread_link_session_command() {
+        let cli = parse_args(args(&[
+            "thread",
+            "link-session",
+            "--thread-id",
+            "thread-1",
+            "--agent",
+            "codex",
+            "--session-id",
+            "session-1",
+            "--json",
+        ]))
+        .unwrap();
+
+        let Command::Thread(ThreadCommand::LinkSession {
+            thread_id,
+            agent,
+            session_id,
+            json,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected thread link-session command");
+        };
+        assert_eq!(thread_id, "thread-1");
+        assert_eq!(agent, Agent::Codex);
+        assert_eq!(session_id, "session-1");
+        assert!(json);
+    }
+
+    #[test]
+    fn parses_stage_add_configure_and_link_commands() {
+        let catalog = parse_args(args(&[
+            "stage",
+            "catalog",
+            "--project",
+            "/tmp/project",
+            "--json",
+        ]))
+        .unwrap();
+        let Command::Stage(StageCommand::Catalog { project, json, .. }) = catalog.command else {
+            panic!("expected stage catalog command");
+        };
+        assert_eq!(project, "/tmp/project");
+        assert!(json);
+
+        let add = parse_args(args(&[
+            "stage",
+            "add",
+            "--thread-id",
+            "thread-1",
+            "--stage-id",
+            "project-stage-1",
+            "--assistant-id",
+            "assistant-a",
+        ]))
+        .unwrap();
+        let Command::Stage(StageCommand::Add {
+            thread_id,
+            stage_id,
+            assistant_ids,
+            ..
+        }) = add.command
+        else {
+            panic!("expected stage add command");
+        };
+        assert_eq!(thread_id, "thread-1");
+        assert_eq!(stage_id, "project-stage-1");
+        assert_eq!(assistant_ids, vec!["assistant-a"]);
+
+        let configure = parse_args(args(&[
+            "stage",
+            "configure",
+            "--id",
+            "thread-stage-1",
+            "--order",
+            "2",
+            "--enabled",
+            "false",
+        ]))
+        .unwrap();
+        let Command::Stage(StageCommand::Configure {
+            id, order, enabled, ..
+        }) = configure.command
+        else {
+            panic!("expected stage configure command");
+        };
+        assert_eq!(id, "thread-stage-1");
+        assert_eq!(order, Some(2));
+        assert_eq!(enabled, Some(false));
+
+        let link = parse_args(args(&[
+            "stage",
+            "link-session",
+            "--stage-id",
+            "thread-stage-1",
+            "--agent",
+            "claude",
+            "--session-id",
+            "session-2",
+        ]))
+        .unwrap();
+        let Command::Stage(StageCommand::LinkSession {
+            stage_id,
+            agent,
+            session_id,
+            ..
+        }) = link.command
+        else {
+            panic!("expected stage link-session command");
+        };
+        assert_eq!(stage_id, "thread-stage-1");
+        assert_eq!(agent, Agent::Claude);
+        assert_eq!(session_id, "session-2");
     }
 
     #[test]
