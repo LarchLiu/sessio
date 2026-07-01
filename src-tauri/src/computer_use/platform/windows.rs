@@ -26,7 +26,7 @@ use crate::computer_use::provider::{
     ScrollDirection, UiElement,
 };
 
-use windows::core::{w, Interface, BOOL, BSTR, GUID, PCWSTR};
+use windows::core::{w, Interface, BOOL, BSTR, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, HANDLE, HWND, LPARAM, MAX_PATH, RECT, RPC_E_CHANGED_MODE,
 };
@@ -72,7 +72,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME, VK_INSERT, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN,
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
 };
-use windows::Win32::UI::Shell::{IShellLinkW, ShellExecuteW};
+use windows::Win32::UI::Shell::{IShellLinkW, ShellExecuteW, ShellLink};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetForegroundWindow, GetSystemMetrics, GetWindowLongW, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
@@ -392,8 +392,6 @@ impl EffectProbeTiming {
 
 const EFFECT_LOCAL_PROBE_RADIUS_PX: u32 = 72;
 const INSTALLED_APPS_CACHE_TTL: Duration = Duration::from_secs(30);
-const CLSID_SHELL_LINK: GUID = GUID::from_u128(0x00021401_0000_0000_c000_000000000046);
-
 // --- App/window discovery -------------------------------------------------
 
 fn merge_available_apps(
@@ -1315,7 +1313,7 @@ impl ShortcutResolver {
     fn new() -> ProviderResult<Self> {
         let apartment = ComApartment::init()?;
         let shortcut: IShellLinkW =
-            unsafe { CoCreateInstance(&CLSID_ShellLink, None, CLSCTX_INPROC_SERVER) }.map_err(
+            unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER) }.map_err(
                 |e| ProviderError::Failed(format!("create ShellLink COM instance: {e}")),
             )?;
         let persist: IPersistFile = shortcut
