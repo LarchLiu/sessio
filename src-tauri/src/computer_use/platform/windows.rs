@@ -104,13 +104,13 @@ impl ComputerUseProvider for WindowsProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            click_element_routes: vec![ClickDispatchRoute::Auto],
+            click_element_routes: vec![ClickDispatchRoute::Auto, ClickDispatchRoute::Ax],
             click_at_routes: vec![ClickDispatchRoute::Auto],
-            secondary_click_element_routes: Vec::new(),
+            secondary_click_element_routes: vec![ClickDispatchRoute::Auto, ClickDispatchRoute::Ax],
             secondary_click_at_routes: vec![ClickDispatchRoute::Auto],
             double_click_at_routes: vec![ClickDispatchRoute::Auto],
             drag_routes: vec![ClickDispatchRoute::Auto],
-            scroll_element_routes: Vec::new(),
+            scroll_element_routes: vec![ClickDispatchRoute::Auto, ClickDispatchRoute::Ax],
             scroll_at_routes: vec![ClickDispatchRoute::Auto],
             supports_set_value: true,
             supports_type_text: true,
@@ -158,16 +158,11 @@ impl ComputerUseProvider for WindowsProvider {
         &self,
         target: &AppTarget,
         element: &ElementId,
-        _route_hint: ClickDispatchRoute,
+        route_hint: ClickDispatchRoute,
     ) -> ProviderResult<ClickExecutionResult> {
         let window = prepare_target_for_control(target)?;
         let entry = uia_entry_for_id(window.hwnd, element)?;
-        invoke_uia_element(&entry.element)?;
-        Ok(ClickExecutionResult {
-            route: ClickExecutionRoute::Uia,
-            outcome: ClickExecutionOutcome::SemanticSuccess,
-            next_dispatch_route: None,
-        })
+        click_uia_element(target, &entry, route_hint)
     }
 
     fn click_point(
@@ -203,11 +198,13 @@ impl ComputerUseProvider for WindowsProvider {
 
     fn secondary_click_element(
         &self,
-        _target: &AppTarget,
-        _element: &ElementId,
-        _route_hint: ClickDispatchRoute,
+        target: &AppTarget,
+        element: &ElementId,
+        route_hint: ClickDispatchRoute,
     ) -> ProviderResult<ActionExecutionResult> {
-        Err(ProviderError::Unsupported("secondary_click_element"))
+        let window = prepare_target_for_control(target)?;
+        let entry = uia_entry_for_id(window.hwnd, element)?;
+        secondary_click_uia_element(target, &entry, route_hint)
     }
 
     fn double_click(
@@ -285,19 +282,13 @@ impl ComputerUseProvider for WindowsProvider {
         &self,
         target: &AppTarget,
         element: &ElementId,
-        _direction: ScrollDirection,
-        _amount: i32,
-        _route_hint: ClickDispatchRoute,
+        direction: ScrollDirection,
+        amount: i32,
+        route_hint: ClickDispatchRoute,
     ) -> ProviderResult<ActionExecutionResult> {
         let window = prepare_target_for_control(target)?;
         let entry = uia_entry_for_id(window.hwnd, element)?;
-        scroll_uia_element_into_view(&entry.element)?;
-        Ok(ActionExecutionResult {
-            kind: ActionExecutionKind::Scroll,
-            route: ActionExecutionRoute::Uia,
-            outcome: ActionExecutionOutcome::SemanticSuccess,
-            next_dispatch_route: None,
-        })
+        scroll_uia_element(target, &entry, direction, amount, route_hint)
     }
 }
 
@@ -1453,6 +1444,229 @@ fn invoke_uia_element(element: &IUIAutomationElement) -> ProviderResult<()> {
     Err(ProviderError::Unsupported("click_element"))
 }
 
+fn center_point(rect: Rect) -> Point {
+    Point {
+        x: rect.x + (rect.width / 2.0),
+        y: rect.y + (rect.height / 2.0),
+    }
+}
+
+fn click_route_plan(route_hint: ClickDispatchRoute) -> Vec<ClickDispatchRoute> {
+    match route_hint {
+        ClickDispatchRoute::Auto => vec![
+            ClickDispatchRoute::Ax,
+            ClickDispatchRoute::TargetPid,
+            ClickDispatchRoute::Hid,
+        ],
+        ClickDispatchRoute::Ax => vec![ClickDispatchRoute::Ax],
+        ClickDispatchRoute::TargetPid => vec![ClickDispatchRoute::TargetPid],
+        ClickDispatchRoute::Hid => vec![ClickDispatchRoute::Hid],
+    }
+}
+
+fn click_result_for_dispatch_route(route: ClickDispatchRoute) -> ClickExecutionResult {
+    ClickExecutionResult {
+        route: match route {
+            ClickDispatchRoute::Ax => ClickExecutionRoute::Uia,
+            ClickDispatchRoute::Auto | ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
+                ClickExecutionRoute::Native
+            }
+        },
+        outcome: ClickExecutionOutcome::ObservedEffect,
+        next_dispatch_route: None,
+    }
+}
+
+fn action_result_for_dispatch_route(
+    kind: ActionExecutionKind,
+    route: ClickDispatchRoute,
+) -> ActionExecutionResult {
+    ActionExecutionResult {
+        kind,
+        route: match route {
+            ClickDispatchRoute::Ax => ActionExecutionRoute::Uia,
+            ClickDispatchRoute::Auto | ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
+                ActionExecutionRoute::Native
+            }
+        },
+        outcome: ActionExecutionOutcome::Dispatched,
+        next_dispatch_route: None,
+    }
+}
+
+fn perform_mouse_click_for_route(route: ClickDispatchRoute, point: Point) -> ProviderResult<()> {
+    match route {
+        ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid | ClickDispatchRoute::Auto => {
+            left_click_at(point)
+        }
+        ClickDispatchRoute::Ax => Err(ProviderError::Unsupported("click_element")),
+    }
+}
+
+fn perform_secondary_click_for_route(
+    route: ClickDispatchRoute,
+    point: Point,
+) -> ProviderResult<()> {
+    match route {
+        ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid | ClickDispatchRoute::Auto => {
+            right_click_at(point)
+        }
+        ClickDispatchRoute::Ax => Err(ProviderError::Unsupported("secondary_click_element")),
+    }
+}
+
+fn perform_scroll_for_route(
+    route: ClickDispatchRoute,
+    point: Point,
+    direction: ScrollDirection,
+    amount: i32,
+) -> ProviderResult<()> {
+    match route {
+        ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid | ClickDispatchRoute::Auto => {
+            let (x, y) = absolute_mouse_point(point);
+            send_inputs(&[mouse_input(
+                x,
+                y,
+                0,
+                MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+            )])?;
+            scroll_wheel(direction, amount)
+        }
+        ClickDispatchRoute::Ax => Err(ProviderError::Unsupported("scroll_element")),
+    }
+}
+
+fn click_uia_element(
+    target: &AppTarget,
+    entry: &UiaElementEntry,
+    route_hint: ClickDispatchRoute,
+) -> ProviderResult<ClickExecutionResult> {
+    let fallback_point = entry.ui.bounds.map(center_point);
+    for route in click_route_plan(route_hint) {
+        match route {
+            ClickDispatchRoute::Ax => match invoke_uia_element(&entry.element) {
+                Ok(()) => {
+                    return Ok(ClickExecutionResult {
+                        route: ClickExecutionRoute::Uia,
+                        outcome: ClickExecutionOutcome::SemanticSuccess,
+                        next_dispatch_route: None,
+                    });
+                }
+                Err(ProviderError::Unsupported(_)) if route_hint == ClickDispatchRoute::Auto => {}
+                Err(error) => return Err(error),
+            },
+            ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
+                let point = fallback_point
+                    .ok_or_else(|| ProviderError::ElementNotFound(entry.ui.id.clone()))?;
+                perform_mouse_click_for_route(route, point)?;
+                return Ok(click_result_for_dispatch_route(route));
+            }
+            ClickDispatchRoute::Auto => {}
+        }
+    }
+    Err(ProviderError::Unsupported("click_element"))
+}
+
+fn secondary_click_uia_element(
+    target: &AppTarget,
+    entry: &UiaElementEntry,
+    route_hint: ClickDispatchRoute,
+) -> ProviderResult<ActionExecutionResult> {
+    let fallback_point = entry.ui.bounds.map(center_point);
+    for route in click_route_plan(route_hint) {
+        match route {
+            ClickDispatchRoute::Ax => match show_uia_element_menu(&entry.element) {
+                Ok(()) => {
+                    return Ok(ActionExecutionResult {
+                        kind: ActionExecutionKind::SecondaryClick,
+                        route: ActionExecutionRoute::Uia,
+                        outcome: ActionExecutionOutcome::Dispatched,
+                        next_dispatch_route: None,
+                    });
+                }
+                Err(ProviderError::Unsupported(_)) if route_hint == ClickDispatchRoute::Auto => {}
+                Err(error) => return Err(error),
+            },
+            ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
+                let point = fallback_point
+                    .ok_or_else(|| ProviderError::ElementNotFound(entry.ui.id.clone()))?;
+                perform_secondary_click_for_route(route, point)?;
+                return Ok(action_result_for_dispatch_route(
+                    ActionExecutionKind::SecondaryClick,
+                    route,
+                ));
+            }
+            ClickDispatchRoute::Auto => {}
+        }
+    }
+    Err(ProviderError::Unsupported("secondary_click_element"))
+}
+
+fn scroll_uia_element(
+    target: &AppTarget,
+    entry: &UiaElementEntry,
+    direction: ScrollDirection,
+    amount: i32,
+    route_hint: ClickDispatchRoute,
+) -> ProviderResult<ActionExecutionResult> {
+    let fallback_point = entry.ui.bounds.map(center_point);
+    for route in click_route_plan(route_hint) {
+        match route {
+            ClickDispatchRoute::Ax => {
+                match scroll_uia_element_by_direction(&entry.element, direction, amount) {
+                    Ok(()) => {
+                        return Ok(ActionExecutionResult {
+                            kind: ActionExecutionKind::Scroll,
+                            route: ActionExecutionRoute::Uia,
+                            outcome: ActionExecutionOutcome::Dispatched,
+                            next_dispatch_route: None,
+                        });
+                    }
+                    Err(ProviderError::Unsupported(_))
+                        if route_hint == ClickDispatchRoute::Auto => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
+                let point = fallback_point
+                    .ok_or_else(|| ProviderError::ElementNotFound(entry.ui.id.clone()))?;
+                perform_scroll_for_route(route, point, direction, amount)?;
+                return Ok(action_result_for_dispatch_route(
+                    ActionExecutionKind::Scroll,
+                    route,
+                ));
+            }
+            ClickDispatchRoute::Auto => {}
+        }
+    }
+    Err(ProviderError::Unsupported("scroll_element"))
+}
+
+fn show_uia_element_menu(element: &IUIAutomationElement) -> ProviderResult<()> {
+    unsafe {
+        let _ = element.SetFocus();
+    }
+    press_key_chord("shift+f10")
+}
+
+fn scroll_uia_element_by_direction(
+    element: &IUIAutomationElement,
+    direction: ScrollDirection,
+    amount: i32,
+) -> ProviderResult<()> {
+    scroll_uia_element_into_view(element)?;
+    let key = match direction {
+        ScrollDirection::Up => "up",
+        ScrollDirection::Down => "down",
+        ScrollDirection::Left => "left",
+        ScrollDirection::Right => "right",
+    };
+    for _ in 0..amount.max(1).min(20) {
+        press_key_chord(key)?;
+    }
+    Ok(())
+}
+
 fn set_uia_value(
     element: &IUIAutomationElement,
     value: &str,
@@ -1615,5 +1829,64 @@ mod tests {
         assert_eq!(app.name, "Good App");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn windows_provider_capabilities_expose_element_level_ax_routes() {
+        let caps = WindowsProvider::new().capabilities();
+
+        assert_eq!(
+            caps.click_element_routes,
+            vec![ClickDispatchRoute::Auto, ClickDispatchRoute::Ax]
+        );
+        assert_eq!(
+            caps.secondary_click_element_routes,
+            vec![ClickDispatchRoute::Auto, ClickDispatchRoute::Ax]
+        );
+        assert_eq!(
+            caps.scroll_element_routes,
+            vec![ClickDispatchRoute::Auto, ClickDispatchRoute::Ax]
+        );
+        assert_eq!(caps.click_at_routes, vec![ClickDispatchRoute::Auto]);
+        assert_eq!(caps.scroll_at_routes, vec![ClickDispatchRoute::Auto]);
+        assert!(caps.supports_set_value);
+        assert!(caps.supports_type_text);
+        assert!(caps.supports_press_key);
+    }
+
+    #[test]
+    fn click_route_plan_prefers_ax_then_internal_mouse_fallbacks() {
+        assert_eq!(
+            click_route_plan(ClickDispatchRoute::Auto),
+            vec![
+                ClickDispatchRoute::Ax,
+                ClickDispatchRoute::TargetPid,
+                ClickDispatchRoute::Hid
+            ]
+        );
+        assert_eq!(
+            click_route_plan(ClickDispatchRoute::Ax),
+            vec![ClickDispatchRoute::Ax]
+        );
+        assert_eq!(
+            click_route_plan(ClickDispatchRoute::TargetPid),
+            vec![ClickDispatchRoute::TargetPid]
+        );
+        assert_eq!(
+            click_route_plan(ClickDispatchRoute::Hid),
+            vec![ClickDispatchRoute::Hid]
+        );
+    }
+
+    #[test]
+    fn windows_internal_mouse_fallbacks_report_native_routes() {
+        let click = click_result_for_dispatch_route(ClickDispatchRoute::TargetPid);
+        assert_eq!(click.route, ClickExecutionRoute::Native);
+        assert_eq!(click.outcome, ClickExecutionOutcome::ObservedEffect);
+
+        let action =
+            action_result_for_dispatch_route(ActionExecutionKind::Scroll, ClickDispatchRoute::Hid);
+        assert_eq!(action.route, ActionExecutionRoute::Native);
+        assert_eq!(action.outcome, ActionExecutionOutcome::Dispatched);
     }
 }

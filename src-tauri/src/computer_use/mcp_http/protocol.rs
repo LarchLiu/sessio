@@ -764,13 +764,13 @@ mod tests {
         let result = tool_app_state_result(json!({
             "snapshotId": "snap-1",
             "actionCapabilities": {
-                "clickElementRoutes": ["auto"],
+                "clickElementRoutes": ["auto", "ax"],
                 "clickAtRoutes": ["auto"],
-                "secondaryClickElementRoutes": [],
+                "secondaryClickElementRoutes": ["auto", "ax"],
                 "secondaryClickAtRoutes": ["auto"],
                 "doubleClickAtRoutes": ["auto"],
                 "dragRoutes": ["auto"],
-                "scrollElementRoutes": [],
+                "scrollElementRoutes": ["auto", "ax"],
                 "scrollAtRoutes": ["auto"],
                 "supportsSetValue": true,
                 "supportsTypeText": true,
@@ -784,10 +784,10 @@ mod tests {
 
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("\"actionCapabilities\""));
-        assert!(text.contains("\"clickElementRoutes\":[\"auto\"]"));
+        assert!(text.contains("\"clickElementRoutes\":[\"auto\",\"ax\"]"));
         assert_eq!(
             result["structuredContent"]["actionCapabilities"]["scrollElementRoutes"],
-            json!([])
+            json!(["auto", "ax"])
         );
     }
 
