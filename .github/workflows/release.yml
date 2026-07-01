@@ -245,25 +245,33 @@ jobs:
           mkdir -p staged
           find artifacts -type f -print -exec mv {} staged/ \;
           ls -la staged
-      - name: Generate release changelog
+      - name: Resolve changelog base
+        id: changelog_base
         run: |
           set -euo pipefail
-          if [[ "$RELEASE_TAG" == *-* ]]; then
-            # Prerelease (e.g. v0.5.0-beta.1): diff from the previous tag (changelogithub default).
-            npx --yes changelogithub@14.0.0 --to "$RELEASE_TAG" --output RELEASE_NOTES.md
+          previous_tag="$(node scripts/find-previous-release-tag.mjs --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG")"
+          if [ -n "$previous_tag" ]; then
+            echo "Resolved previous published release tag: $previous_tag"
+            echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
           else
-            # Stable release: diff from the previous STABLE tag, skipping any betas in between.
-            from_tag="$(git tag --list 'v*' --sort=-version:refname | grep -vE '\-' | awk -v cur="$RELEASE_TAG" '$0==cur{f=1;next} f{print;exit}' || true)"
-            if [ -n "$from_tag" ]; then
-              echo "changelog range: $from_tag -> $RELEASE_TAG"
-              npx --yes changelogithub@14.0.0 --from "$from_tag" --to "$RELEASE_TAG" --output RELEASE_NOTES.md
-            else
-              echo "changelog range: <repo start> -> $RELEASE_TAG"
-              npx --yes changelogithub@14.0.0 --to "$RELEASE_TAG" --output RELEASE_NOTES.md
-            fi
+            echo "Resolved previous published release tag: <none>"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      - name: Generate release changelog
+        run: |
+          set -euo pipefail
+          if [ -n "$PREVIOUS_RELEASE_TAG" ]; then
+            echo "changelog range: $PREVIOUS_RELEASE_TAG -> $RELEASE_TAG"
+            npx --yes changelogithub@14.0.0 --from "$PREVIOUS_RELEASE_TAG" --to "$RELEASE_TAG" --output RELEASE_NOTES.md
+          else
+            echo "changelog range: <repo start> -> $RELEASE_TAG"
+            npx --yes changelogithub@14.0.0 --to "$RELEASE_TAG" --output RELEASE_NOTES.md
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_RELEASE_TAG: ${{ steps.changelog_base.outputs.previous_tag }}
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       - name: Generate updater manifest
         run: node scripts/generate-updater-manifest.mjs --dir staged --tag "${{ inputs.tag || github.ref_name }}" --repo "${{ github.repository }}" --notes RELEASE_NOTES.md
