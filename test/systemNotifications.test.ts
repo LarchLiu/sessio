@@ -256,4 +256,33 @@ describe("system notification state", () => {
     expect(events[0]?.row.kind).toBe("thread");
     expect(events[0]?.row.threadId).toBe("thread-1");
   });
+
+  it("suppresses unread notifications for a focused new-chat pending session during chat-page transition", () => {
+    const previous = snapshot({
+      detailMode: "chat",
+      windowFocused: true,
+    });
+    const next = snapshot({
+      pendingNewChats: {
+        "runtime-3": {
+          sessioRuntimeSessionId: "runtime-3",
+          agent: "codex",
+          projectPath: "/workspace",
+          projectName: "Workspace",
+          prompt: "Ship beta",
+          timestamp: 3,
+          origin: "new_chat",
+        },
+      },
+      liveSessions: {
+        "runtime-3": makeLiveSession("runtime-3", {
+          agentRuntimeSessionId: "pending",
+        }),
+      },
+      unreadSessionIds: new Set(["runtime-3"]),
+      detailMode: "chat",
+      windowFocused: true,
+    });
+    expect(diffNotificationSnapshots(previous, next)).toEqual([]);
+  });
 });

@@ -27,6 +27,7 @@ export interface NotificationRowSnapshot {
   label: string;
   sessionIdentityKey: string | null;
   threadId: string | null;
+  pendingOrigin: PendingNewChatSession["origin"] | null;
   liveActivity: LiveSessionActivity;
   unread: boolean;
   visible: boolean;
@@ -90,6 +91,7 @@ export function buildNotificationSnapshot({
       label: thread.goal || t("thread.goal_placeholder"),
       sessionIdentityKey: null,
       threadId: thread.threadId,
+      pendingOrigin: null,
       liveActivity,
       unread,
       visible: isThreadVisible({
@@ -124,6 +126,7 @@ export function buildNotificationSnapshot({
       label: sessionDisplayTitle(session) ?? t("notification.session.fallback"),
       sessionIdentityKey: identity,
       threadId: null,
+      pendingOrigin: null,
       liveActivity,
       unread,
       visible: isSessionVisible({
@@ -149,6 +152,7 @@ export function buildNotificationSnapshot({
         label: pending.prompt || t("thread.goal_placeholder"),
         sessionIdentityKey: null,
         threadId,
+        pendingOrigin: pending.origin ?? null,
         liveActivity: liveSessionActivity(liveSessions[pending.sessioRuntimeSessionId]),
         unread: unreadSessionIds.has(pending.sessioRuntimeSessionId),
         visible: isThreadVisible({
@@ -168,6 +172,7 @@ export function buildNotificationSnapshot({
       label: pending.prompt || t("notification.session.fallback"),
       sessionIdentityKey: identity,
       threadId: null,
+      pendingOrigin: pending.origin ?? null,
       liveActivity: liveSessionActivity(liveSessions[pending.sessioRuntimeSessionId]),
       unread: unreadSessionIds.has(pending.sessioRuntimeSessionId),
       visible: isSessionVisible({
@@ -177,6 +182,7 @@ export function buildNotificationSnapshot({
         selectedRuntimeSessionId,
         detailMode,
         windowFocused,
+        pendingOrigin: pending.origin ?? null,
       }),
     });
   }
@@ -259,6 +265,7 @@ export function isSessionVisible({
   selectedRuntimeSessionId,
   detailMode,
   windowFocused,
+  pendingOrigin = null,
 }: {
   sessionIdentityKey: string;
   runtimeSessionId: string | null;
@@ -266,8 +273,10 @@ export function isSessionVisible({
   selectedRuntimeSessionId: string | null;
   detailMode: DetailMode;
   windowFocused: boolean;
+  pendingOrigin?: PendingNewChatSession["origin"] | null;
 }): boolean {
   if (!windowFocused) return false;
+  if (pendingOrigin === "new_chat" && detailMode === "chat") return true;
   if (detailMode !== "chat" && detailMode !== "threadChat") return false;
   if (selectedSessionIdentity && selectedSessionIdentity === sessionIdentityKey) return true;
   if (selectedRuntimeSessionId && runtimeSessionId && selectedRuntimeSessionId === runtimeSessionId) {

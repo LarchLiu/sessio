@@ -364,6 +364,9 @@ export default function NewChatPage({
         projectName: project.label,
         assistantPrompt: selectedAssistant?.systemPrompt?.trim() || undefined,
         clearComposerOnSuccess: false,
+        pendingSession: {
+          origin: "new_chat",
+        },
       });
       if (sent) {
         setChatTransitionPending(true);
