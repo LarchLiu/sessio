@@ -159,6 +159,15 @@ export interface AppshotConfig {
   shortcut: string;
 }
 
+export interface ConfigRecoveryNotice {
+  path: string;
+  backupPath: string | null;
+  error: string;
+  lineNumber: number | null;
+  lineText: string | null;
+  usedDefaults: boolean;
+}
+
 export interface ComputerUseSettings {
   enabled: boolean;
   approvedApps: string[];
@@ -2600,6 +2609,10 @@ export async function updateNetworkConfig(config: NetworkConfig): Promise<Networ
 
 export async function getAppshotConfig(): Promise<AppshotConfig> {
   return invoke<AppshotConfig>("get_appshot_config");
+}
+
+export async function takeConfigRecoveryNotice(): Promise<ConfigRecoveryNotice | null> {
+  return invoke<ConfigRecoveryNotice | null>("take_config_recovery_notice");
 }
 
 export async function getComputerUseSettings(): Promise<ComputerUseSettings> {

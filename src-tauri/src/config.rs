@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-
+use std::sync::{Mutex, OnceLock};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +16,17 @@ pub struct AppConfig {
     pub appshot: AppshotConfig,
     pub computer_use: ComputerUseSettings,
     pub debug: DebugConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigRecoveryNotice {
+    pub path: String,
+    pub backup_path: Option<String>,
+    pub error: String,
+    pub line_number: Option<usize>,
+    pub line_text: Option<String>,
+    pub used_defaults: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -141,13 +152,17 @@ struct RawQmdBackendConfig {
     install_command: Option<String>,
 }
 
+static CONFIG_RECOVERY_NOTICE: OnceLock<Mutex<Option<ConfigRecoveryNotice>>> = OnceLock::new();
+
 pub fn load_config() -> Result<AppConfig> {
-    let raw = load_raw_config()?;
-    let (raw, added_defaults) = raw_config_with_defaults(raw)?;
-    if added_defaults {
-        save_config(&resolve_app_config(raw.clone(), false)?)?;
-    }
-    resolve_app_config(raw, true)
+    load_config_from_path(&config_path()?)
+}
+
+pub fn take_config_recovery_notice() -> Option<ConfigRecoveryNotice> {
+    config_recovery_notice_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
 }
 
 pub fn load_memory_config() -> Result<MemoryConfig> {
@@ -181,37 +196,120 @@ pub fn expand_path(value: &str) -> Result<PathBuf> {
     Ok(Path::new(value).to_path_buf())
 }
 
-fn load_raw_config() -> Result<RawConfig> {
-    let path = config_path()?;
+fn load_config_from_path(path: &Path) -> Result<AppConfig> {
     if !path.exists() {
-        write_default_config_file(&path)?;
+        write_default_config_file(path)?;
     }
     let contents =
-        fs::read_to_string(&path).with_context(|| format!("read config {}", path.display()))?;
+        fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
     if contents.trim().is_empty() {
-        return Ok(RawConfig::default());
+        return finalize_loaded_config(path, Some(contents.as_str()), RawConfig::default());
     }
-    parse_raw_config(&contents).with_context(|| format!("parse config {}", path.display()))
+    let raw = match parse_raw_config(&contents) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return recover_invalid_config(path, Some(contents.as_str()), &error)
+                .with_context(|| format!("parse config {}", path.display()));
+        }
+    };
+    finalize_loaded_config(path, Some(contents.as_str()), raw)
+}
+
+fn finalize_loaded_config(path: &Path, contents: Option<&str>, raw: RawConfig) -> Result<AppConfig> {
+    let (raw, added_defaults) = raw_config_with_defaults(raw)?;
+    let config = match resolve_app_config(raw.clone(), true) {
+        Ok(config) => config,
+        Err(error) => {
+            return recover_invalid_config(path, contents, &error)
+                .with_context(|| format!("resolve config {}", path.display()));
+        }
+    };
+    if added_defaults {
+        save_config(&resolve_app_config(raw, false)?)?;
+    }
+    Ok(config)
+}
+
+fn recover_invalid_config(path: &Path, contents: Option<&str>, error: &anyhow::Error) -> Result<AppConfig> {
+    let default = default_app_config()?;
+    let error_text = format!("{error:#}");
+    let line_number = extract_line_number(&error_text);
+    let line_text = line_number
+        .and_then(|line| contents.and_then(|text| text.lines().nth(line.saturating_sub(1))))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string);
+    log::warn!(
+        "[config] invalid config at {}: {error:#}. Keeping the file unchanged and using defaults for this launch.",
+        path.display(),
+    );
+
+    set_config_recovery_notice(ConfigRecoveryNotice {
+        path: path.display().to_string(),
+        backup_path: None,
+        error: error_text,
+        line_number,
+        line_text,
+        used_defaults: true,
+    });
+
+    Ok(default)
+}
+
+fn config_recovery_notice_slot() -> &'static Mutex<Option<ConfigRecoveryNotice>> {
+    CONFIG_RECOVERY_NOTICE.get_or_init(|| Mutex::new(None))
+}
+
+fn set_config_recovery_notice(notice: ConfigRecoveryNotice) {
+    *config_recovery_notice_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(notice);
+}
+
+fn extract_line_number(message: &str) -> Option<usize> {
+    let needle = "line ";
+    let start = message.find(needle)? + needle.len();
+    let digits = message[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<usize>().ok()
+    }
+}
+
+fn line_context(line_number: usize, raw_line: &str) -> String {
+    let trimmed = raw_line.trim();
+    if trimmed.is_empty() {
+        format!("line {line_number}")
+    } else {
+        format!("line {line_number}: {trimmed}")
+    }
 }
 
 fn parse_raw_config(contents: &str) -> Result<RawConfig> {
     let mut raw = RawConfig::default();
     let mut section = Section::Root;
 
-    for line in contents.lines() {
-        let line = strip_comment(line).trim();
+    for (index, raw_line) in contents.lines().enumerate() {
+        let line_number = index + 1;
+        let line = strip_comment(raw_line).trim();
         if line.is_empty() {
             continue;
         }
-        if let Some(section_name) = parse_section(line)? {
+        if let Some(section_name) =
+            parse_section(line).with_context(|| line_context(line_number, raw_line))?
+        {
             section = section_name;
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
-            bail!("invalid config line: {line}");
+            bail!("line {line_number}: invalid config line: {line}");
         };
         let key = key.trim();
-        let value = parse_value(value.trim())?;
+        let value = parse_value(value.trim()).with_context(|| line_context(line_number, raw_line))?;
         match section {
             Section::Memory => match key {
                 "backend" => {
@@ -219,7 +317,7 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                         .get_or_insert_with(RawMemoryConfig::default)
                         .backend = value
                 }
-                other => bail!("unknown key in [memory]: {other}"),
+                other => bail!("line {line_number}: unknown key in [memory]: {other}"),
             },
             Section::MemoryBackendsQmd => match key {
                 "binary" => {
@@ -248,7 +346,10 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                         .get_or_insert_with(RawMemoryConfig::default)
                         .backends
                         .qmd
-                        .auto_embed = value.map(parse_bool).transpose()?
+                        .auto_embed = value
+                        .map(parse_bool)
+                        .transpose()
+                        .with_context(|| line_context(line_number, raw_line))?
                 }
                 "install_command" => {
                     raw.memory
@@ -257,29 +358,45 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                         .qmd
                         .install_command = value
                 }
-                other => bail!("unknown key in [memory.backends.qmd]: {other}"),
+                other => bail!("line {line_number}: unknown key in [memory.backends.qmd]: {other}"),
             },
             Section::Index => match key {
                 "poll_interval_seconds" => {
-                    raw.index.poll_interval_seconds = value.map(parse_u64).transpose()?
+                    raw.index.poll_interval_seconds = value
+                        .map(parse_u64)
+                        .transpose()
+                        .with_context(|| line_context(line_number, raw_line))?
                 }
-                other => bail!("unknown key in [index]: {other}"),
+                other => bail!("line {line_number}: unknown key in [index]: {other}"),
             },
             Section::NetworkProxy => match key {
-                "enabled" => raw.network.proxy.enabled = value.map(parse_bool).transpose()?,
+                "enabled" => {
+                    raw.network.proxy.enabled = value
+                        .map(parse_bool)
+                        .transpose()
+                        .with_context(|| line_context(line_number, raw_line))?
+                }
                 "url" => raw.network.proxy.url = value,
                 "no_proxy" => raw.network.proxy.no_proxy = value,
-                other => bail!("unknown key in [network.proxy]: {other}"),
+                other => bail!("line {line_number}: unknown key in [network.proxy]: {other}"),
             },
             Section::Appshot => match key {
                 "shortcut" => raw.appshot.shortcut = value,
-                other => bail!("unknown key in [appshot]: {other}"),
+                other => bail!("line {line_number}: unknown key in [appshot]: {other}"),
             },
             Section::ComputerUse => match key {
-                "enabled" => raw.computer_use.enabled = value.map(parse_bool).transpose()?,
+                "enabled" => {
+                    raw.computer_use.enabled = value
+                        .map(parse_bool)
+                        .transpose()
+                        .with_context(|| line_context(line_number, raw_line))?
+                }
                 "approved_apps" => {
                     raw.computer_use.approved_apps =
-                        value.map(|value| parse_string_array(&value)).transpose()?
+                        value
+                        .map(|value| parse_string_array(&value))
+                        .transpose()
+                        .with_context(|| line_context(line_number, raw_line))?
                 }
                 "app_route_preferences" => {
                     raw.computer_use.app_route_preferences = value
@@ -287,21 +404,37 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                             serde_json::from_str::<std::collections::BTreeMap<String, crate::computer_use::settings::AppRoutePreferences>>(&value)
                                 .map_err(anyhow::Error::from)
                         })
-                        .transpose()?
+                        .transpose()
+                        .with_context(|| line_context(line_number, raw_line))?
                 }
                 "allow_input_injection" => {
-                    raw.computer_use.allow_input_injection = value.map(parse_bool).transpose()?
+                    raw.computer_use.allow_input_injection = value
+                        .map(parse_bool)
+                        .transpose()
+                        .with_context(|| line_context(line_number, raw_line))?
                 }
                 "allow_foreground_takeover" => {
-                    raw.computer_use.allow_foreground_takeover =
-                        value.map(parse_bool).transpose()?
+                    raw.computer_use.allow_foreground_takeover = value
+                        .map(parse_bool)
+                        .transpose()
+                        .with_context(|| line_context(line_number, raw_line))?
                 }
-                other => bail!("unknown key in [computer_use]: {other}"),
+                other => bail!("line {line_number}: unknown key in [computer_use]: {other}"),
             },
             Section::Debug => match key {
-                "acp_config" => raw.debug.acp_config = value.map(parse_bool).transpose()?,
-                "update_preview" => raw.debug.update_preview = value.map(parse_bool).transpose()?,
-                other => bail!("unknown key in [debug]: {other}"),
+                "acp_config" => {
+                    raw.debug.acp_config = value
+                        .map(parse_bool)
+                        .transpose()
+                        .with_context(|| line_context(line_number, raw_line))?
+                }
+                "update_preview" => {
+                    raw.debug.update_preview = value
+                        .map(parse_bool)
+                        .transpose()
+                        .with_context(|| line_context(line_number, raw_line))?
+                }
+                other => bail!("line {line_number}: unknown key in [debug]: {other}"),
             },
             Section::Root | Section::Ignored => {}
         }
@@ -825,12 +958,18 @@ fn serialize_debug_config(config: &DebugConfig) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use anyhow::Context;
 
     use super::{
         default_app_config, parse_raw_config, raw_config_with_defaults,
-        resolve_memory_config_inner, serialize_app_config,
+        resolve_memory_config_inner, serialize_app_config, take_config_recovery_notice,
     };
+
+    static CONFIG_TEST_GUARD: Mutex<()> = Mutex::new(());
 
     fn resolve_memory_config(raw: super::RawConfig) -> super::Result<super::MemoryConfig> {
         resolve_memory_config_inner(raw.memory.context("memory is not configured")?, true)
@@ -911,6 +1050,20 @@ mod tests {
             "#,
         );
         assert!(raw.is_err());
+    }
+
+    #[test]
+    fn parse_errors_include_line_number_for_invalid_line() {
+        let err = parse_raw_config(
+            r#"
+            [debug]
+            acp_config = false
+            oops
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("line 4: invalid config line: oops"));
     }
 
     #[test]
@@ -1116,5 +1269,42 @@ mod tests {
         .unwrap();
 
         assert!(resolve_memory_config(raw).is_err());
+    }
+
+    #[test]
+    fn invalid_config_recovery_reports_notice_and_keeps_original_file() {
+        let _guard = CONFIG_TEST_GUARD.lock().unwrap();
+        let _ = take_config_recovery_notice();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("sessio-config-test-{stamp}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            r#"[debug]
+acp_config = false
+e
+"#,
+        )
+        .unwrap();
+
+        let config = super::load_config_from_path(&path).unwrap();
+        let notice = take_config_recovery_notice().expect("config recovery notice");
+        let preserved = fs::read_to_string(&path).unwrap();
+
+        assert!(!config.debug.acp_config);
+        assert_eq!(notice.path, path.display().to_string());
+        assert_eq!(notice.line_number, Some(3));
+        assert_eq!(notice.line_text.as_deref(), Some("e"));
+        assert!(notice.backup_path.is_none());
+        assert!(notice.error.contains("invalid config line: e"));
+        assert!(notice.used_defaults);
+        assert!(preserved.contains("\ne\n"));
+        assert!(preserved.contains("[debug]"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

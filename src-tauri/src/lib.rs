@@ -8289,6 +8289,11 @@ fn get_appshot_config() -> Result<config::AppshotConfig, String> {
 }
 
 #[tauri::command]
+fn take_config_recovery_notice() -> Option<config::ConfigRecoveryNotice> {
+    config::take_config_recovery_notice()
+}
+
+#[tauri::command]
 fn get_computer_use_settings() -> Result<computer_use::settings::ComputerUseSettings, String> {
     computer_use::config::load_settings().map_err(|e| e.to_string())
 }
@@ -9321,6 +9326,7 @@ pub fn run() {
             get_network_config,
             update_network_config,
             get_appshot_config,
+            take_config_recovery_notice,
             get_computer_use_settings,
             get_appshot_permission_status,
             get_desktop_control_permission_status,

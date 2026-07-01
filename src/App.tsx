@@ -21,6 +21,7 @@ import {
   SessionInfo,
   removeSessionsByScope,
   removeSessionFiles,
+  takeConfigRecoveryNotice,
   updateSessionRenameTitle,
   type SessionScope,
   type ThreadIndexItemInfo,
@@ -214,6 +215,33 @@ export default function App() {
         }
       })
       .catch((err) => console.warn("load debug config failed", err));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    takeConfigRecoveryNotice()
+      .then((notice) => {
+        if (cancelled || !notice) return;
+        const line = notice.lineNumber
+          ? notice.lineText
+            ? `第 ${notice.lineNumber} 行：${notice.lineText}`
+            : `第 ${notice.lineNumber} 行`
+          : null;
+        const backup = notice.backupPath ? `\n已备份到：${notice.backupPath}` : "";
+        const details = line ? `\n问题位置：${line}` : "";
+        setToast({
+          message:
+            `配置文件解析失败，已回退到默认配置。\n文件：${notice.path}${details}${backup}\n${notice.error}`,
+          tone: "error",
+        });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn("load config recovery notice failed", err);
+      });
     return () => {
       cancelled = true;
     };
