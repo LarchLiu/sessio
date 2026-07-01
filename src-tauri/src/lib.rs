@@ -19,6 +19,7 @@ pub mod store;
 pub mod terminal;
 pub mod turns;
 pub mod watch;
+pub mod work_state_skill_resource;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

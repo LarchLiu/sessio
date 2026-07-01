@@ -188,19 +188,19 @@ export function renderThreadWorkContext(snapshot: ThreadWorkSnapshot, targetAgen
     lines.push("");
     lines.push("## Report progress back to Sessio");
     lines.push(`You are working in Sessio thread stage ${focusedId}.`);
+    lines.push("Use `~/.sessio/bin/sessio` for reliable CLI access; `sessio` is also acceptable if it is on PATH.");
     lines.push("When you begin work:");
-    lines.push(`  sessio stage set-status --id ${focusedId} --status in_progress --json`);
+    lines.push(`  ~/.sessio/bin/sessio stage set-status --id ${focusedId} --status in_progress --json`);
     lines.push("When the stage is complete:");
-    lines.push(`  sessio stage set-status --id ${focusedId} --status completed --json`);
+    lines.push(`  ~/.sessio/bin/sessio stage set-status --id ${focusedId} --status completed --json`);
     lines.push("If blocked, record why:");
     lines.push(
-      `  sessio stage set-status --id ${focusedId} --status blocked --summary "what is blocking" --json`,
+      `  ~/.sessio/bin/sessio stage set-status --id ${focusedId} --status blocked --summary "what is blocking" --json`,
     );
     lines.push("To add a structured issue:");
     lines.push(
-      `  sessio stage issue add --stage-id ${focusedId} --title "what is wrong" --severity medium --json`,
+      `  ~/.sessio/bin/sessio stage issue add --stage-id ${focusedId} --title "what is wrong" --severity medium --json`,
     );
-    lines.push("(sessio resolves to ~/.sessio/bin/sessio)");
   }
   return buildSessioThreadPromptBlock("work_context", lines.join("\n"), {
     thread_id: snapshot.threadId,

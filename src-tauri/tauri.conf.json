@@ -43,6 +43,7 @@
     "resources": {
       "../docs/computer-use-skill.md": "computer-use-skill/SKILL.md",
       "../docs/computer-use/playbooks": "computer-use-skill/playbooks",
+      "../docs/sessio-work-state-skill.md": "sessio-work-state-skill/SKILL.md",
       "resources/pi/sessio-computer-use.ts": "computer-use-pi/sessio-computer-use.ts"
     },
     "android": {

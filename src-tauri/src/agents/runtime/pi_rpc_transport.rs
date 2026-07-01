@@ -1245,6 +1245,7 @@ fn prompt_params_from_input(input: AgentInput) -> Result<Value> {
 
 fn normalize_runtime_prompt_text(text: &str, options: &RuntimeMetadata) -> String {
     let text = normalize_canvas_prompt_text(text, options);
+    let text = crate::work_state_skill_resource::inject_work_state_skill_prompt_block(&text);
     if !runtime_option_bool(options, "computerUse") && !runtime_option_bool(options, "computer_use")
     {
         return text;
@@ -2068,6 +2069,22 @@ mod tests {
         assert!(text.contains("open -a"));
         assert!(text.contains("AppleScript"));
         assert!(text.ends_with("send the message"));
+    }
+
+    #[test]
+    fn work_state_skill_pointer_is_injected_for_work_context() {
+        let prompt = concat!(
+            "<!-- sessio-thread-prompt:start nonce=\"abc\" kind=\"work_context\" -->\n",
+            "stage context\n",
+            "<!-- sessio-thread-prompt:end nonce=\"abc\" -->"
+        );
+
+        let text = normalize_runtime_prompt_text(prompt, &RuntimeMetadata::new());
+
+        assert!(text.contains("kind=\"work_state_skill\""));
+        assert!(text.contains("Full Sessio work-state skill"));
+        assert!(text.contains("~/.sessio/bin/sessio"));
+        assert!(text.ends_with(prompt));
     }
 
     #[test]

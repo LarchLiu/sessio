@@ -108,6 +108,7 @@ fn dedupe_existing_order(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn dev_skill_path_resolves_in_repo() {
