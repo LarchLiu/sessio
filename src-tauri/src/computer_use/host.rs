@@ -298,11 +298,9 @@ impl ComputerUseHost {
         ) {
             return;
         }
-        let route = match result.route {
-            ClickExecutionRoute::Ax => ClickDispatchRoute::Ax,
-            ClickExecutionRoute::TargetPid => ClickDispatchRoute::TargetPid,
-            ClickExecutionRoute::Hid => ClickDispatchRoute::Hid,
-            _ => return,
+        let Some(route) = Self::remembered_click_dispatch_route(requested_route, result.route)
+        else {
+            return;
         };
         if requested_route != ClickDispatchRoute::Auto && requested_route != route {
             return;
@@ -323,16 +321,49 @@ impl ComputerUseHost {
         ) {
             return;
         }
-        let route = match result.route {
-            ActionExecutionRoute::Ax => ClickDispatchRoute::Ax,
-            ActionExecutionRoute::TargetPid => ClickDispatchRoute::TargetPid,
-            ActionExecutionRoute::Hid => ClickDispatchRoute::Hid,
-            _ => return,
+        let Some(route) = Self::remembered_action_dispatch_route(requested_route, result.route)
+        else {
+            return;
         };
         if requested_route != ClickDispatchRoute::Auto && requested_route != route {
             return;
         }
         self.remember_route_preference(&target.app_id, key, route);
+    }
+
+    fn remember_requested_native_route(
+        requested_route: ClickDispatchRoute,
+    ) -> Option<ClickDispatchRoute> {
+        match requested_route {
+            ClickDispatchRoute::Ax | ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
+                Some(requested_route)
+            }
+            ClickDispatchRoute::Auto => None,
+        }
+    }
+
+    fn remembered_click_dispatch_route(
+        requested_route: ClickDispatchRoute,
+        route: ClickExecutionRoute,
+    ) -> Option<ClickDispatchRoute> {
+        match route {
+            ClickExecutionRoute::Ax | ClickExecutionRoute::Uia => Some(ClickDispatchRoute::Ax),
+            ClickExecutionRoute::TargetPid => Some(ClickDispatchRoute::TargetPid),
+            ClickExecutionRoute::Hid => Some(ClickDispatchRoute::Hid),
+            ClickExecutionRoute::Native => Self::remember_requested_native_route(requested_route),
+        }
+    }
+
+    fn remembered_action_dispatch_route(
+        requested_route: ClickDispatchRoute,
+        route: ActionExecutionRoute,
+    ) -> Option<ClickDispatchRoute> {
+        match route {
+            ActionExecutionRoute::Ax | ActionExecutionRoute::Uia => Some(ClickDispatchRoute::Ax),
+            ActionExecutionRoute::TargetPid => Some(ClickDispatchRoute::TargetPid),
+            ActionExecutionRoute::Hid => Some(ClickDispatchRoute::Hid),
+            ActionExecutionRoute::Native => Self::remember_requested_native_route(requested_route),
+        }
     }
 
     fn next_click_retry_route(
@@ -3203,6 +3234,64 @@ mod tests {
     }
 
     #[test]
+    fn uia_click_route_is_persisted_as_ax_preference() {
+        let h = ComputerUseHost::new(
+            Arc::new(FakeProvider::default()),
+            ComputerUseSettings::enabled(),
+        );
+
+        h.remember_primary_click_route(
+            &target(),
+            ClickDispatchRoute::Ax,
+            RoutePreferenceKey::ClickElement,
+            ClickExecutionResult {
+                route: ClickExecutionRoute::Uia,
+                outcome: ClickExecutionOutcome::SemanticSuccess,
+                next_dispatch_route: None,
+            },
+        );
+
+        let settings = h.settings();
+        assert_eq!(
+            settings
+                .app_route_preferences
+                .get("com.example.app")
+                .and_then(|prefs| prefs.click_element.as_ref())
+                .map(|pref| pref.to_dispatch_route()),
+            Some(ClickDispatchRoute::Ax)
+        );
+    }
+
+    #[test]
+    fn native_click_route_uses_requested_explicit_route_for_preference() {
+        let h = ComputerUseHost::new(
+            Arc::new(FakeProvider::default()),
+            ComputerUseSettings::enabled(),
+        );
+
+        h.remember_primary_click_route(
+            &target(),
+            ClickDispatchRoute::Hid,
+            RoutePreferenceKey::ClickAt,
+            ClickExecutionResult {
+                route: ClickExecutionRoute::Native,
+                outcome: ClickExecutionOutcome::ObservedEffect,
+                next_dispatch_route: None,
+            },
+        );
+
+        let settings = h.settings();
+        assert_eq!(
+            settings
+                .app_route_preferences
+                .get("com.example.app")
+                .and_then(|prefs| prefs.click_at.as_ref())
+                .map(|pref| pref.to_dispatch_route()),
+            Some(ClickDispatchRoute::Hid)
+        );
+    }
+
+    #[test]
     fn explicit_successful_action_route_is_persisted_for_future_auto() {
         let provider = Arc::new(FakeProvider::default());
         let h = ComputerUseHost::new(provider, ComputerUseSettings::enabled());
@@ -3228,6 +3317,66 @@ mod tests {
                 .app_route_preferences
                 .get("com.example.app")
                 .and_then(|prefs| prefs.double_click.as_ref())
+                .map(|pref| pref.to_dispatch_route()),
+            Some(ClickDispatchRoute::TargetPid)
+        );
+    }
+
+    #[test]
+    fn uia_action_route_is_persisted_as_ax_preference() {
+        let h = ComputerUseHost::new(
+            Arc::new(FakeProvider::default()),
+            ComputerUseSettings::enabled(),
+        );
+
+        h.remember_action_route(
+            &target(),
+            ClickDispatchRoute::Ax,
+            RoutePreferenceKey::ScrollElement,
+            ActionExecutionResult {
+                kind: ActionExecutionKind::Scroll,
+                route: ActionExecutionRoute::Uia,
+                outcome: ActionExecutionOutcome::Dispatched,
+                next_dispatch_route: None,
+            },
+        );
+
+        let settings = h.settings();
+        assert_eq!(
+            settings
+                .app_route_preferences
+                .get("com.example.app")
+                .and_then(|prefs| prefs.scroll_element.as_ref())
+                .map(|pref| pref.to_dispatch_route()),
+            Some(ClickDispatchRoute::Ax)
+        );
+    }
+
+    #[test]
+    fn native_action_route_uses_requested_explicit_route_for_preference() {
+        let h = ComputerUseHost::new(
+            Arc::new(FakeProvider::default()),
+            ComputerUseSettings::enabled(),
+        );
+
+        h.remember_action_route(
+            &target(),
+            ClickDispatchRoute::TargetPid,
+            RoutePreferenceKey::Scroll,
+            ActionExecutionResult {
+                kind: ActionExecutionKind::Scroll,
+                route: ActionExecutionRoute::Native,
+                outcome: ActionExecutionOutcome::Dispatched,
+                next_dispatch_route: None,
+            },
+        );
+
+        let settings = h.settings();
+        assert_eq!(
+            settings
+                .app_route_preferences
+                .get("com.example.app")
+                .and_then(|prefs| prefs.scroll.as_ref())
                 .map(|pref| pref.to_dispatch_route()),
             Some(ClickDispatchRoute::TargetPid)
         );

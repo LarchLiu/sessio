@@ -1464,6 +1464,21 @@ fn click_route_plan(route_hint: ClickDispatchRoute) -> Vec<ClickDispatchRoute> {
     }
 }
 
+fn element_action_route_plan(
+    route_hint: ClickDispatchRoute,
+    has_native_fallback: bool,
+) -> Vec<ClickDispatchRoute> {
+    match route_hint {
+        ClickDispatchRoute::Auto if has_native_fallback => {
+            vec![ClickDispatchRoute::TargetPid, ClickDispatchRoute::Ax]
+        }
+        ClickDispatchRoute::Auto => vec![ClickDispatchRoute::Ax],
+        ClickDispatchRoute::Ax => vec![ClickDispatchRoute::Ax],
+        ClickDispatchRoute::TargetPid => vec![ClickDispatchRoute::TargetPid],
+        ClickDispatchRoute::Hid => vec![ClickDispatchRoute::Hid],
+    }
+}
+
 fn click_result_for_dispatch_route(route: ClickDispatchRoute) -> ClickExecutionResult {
     ClickExecutionResult {
         route: match route {
@@ -1537,7 +1552,7 @@ fn perform_scroll_for_route(
 }
 
 fn click_uia_element(
-    target: &AppTarget,
+    _target: &AppTarget,
     entry: &UiaElementEntry,
     route_hint: ClickDispatchRoute,
 ) -> ProviderResult<ClickExecutionResult> {
@@ -1568,12 +1583,13 @@ fn click_uia_element(
 }
 
 fn secondary_click_uia_element(
-    target: &AppTarget,
+    _target: &AppTarget,
     entry: &UiaElementEntry,
     route_hint: ClickDispatchRoute,
 ) -> ProviderResult<ActionExecutionResult> {
     let fallback_point = entry.ui.bounds.map(center_point);
-    for route in click_route_plan(route_hint) {
+    let mut last_error = None;
+    for route in element_action_route_plan(route_hint, fallback_point.is_some()) {
         match route {
             ClickDispatchRoute::Ax => match show_uia_element_menu(&entry.element) {
                 Ok(()) => {
@@ -1584,13 +1600,21 @@ fn secondary_click_uia_element(
                         next_dispatch_route: None,
                     });
                 }
-                Err(ProviderError::Unsupported(_)) if route_hint == ClickDispatchRoute::Auto => {}
+                Err(error) if route_hint == ClickDispatchRoute::Auto => {
+                    last_error = Some(error);
+                }
                 Err(error) => return Err(error),
             },
             ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
                 let point = fallback_point
                     .ok_or_else(|| ProviderError::ElementNotFound(entry.ui.id.clone()))?;
-                perform_secondary_click_for_route(route, point)?;
+                if let Err(error) = perform_secondary_click_for_route(route, point) {
+                    if route_hint == ClickDispatchRoute::Auto {
+                        last_error = Some(error);
+                        continue;
+                    }
+                    return Err(error);
+                }
                 return Ok(action_result_for_dispatch_route(
                     ActionExecutionKind::SecondaryClick,
                     route,
@@ -1599,18 +1623,22 @@ fn secondary_click_uia_element(
             ClickDispatchRoute::Auto => {}
         }
     }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
     Err(ProviderError::Unsupported("secondary_click_element"))
 }
 
 fn scroll_uia_element(
-    target: &AppTarget,
+    _target: &AppTarget,
     entry: &UiaElementEntry,
     direction: ScrollDirection,
     amount: i32,
     route_hint: ClickDispatchRoute,
 ) -> ProviderResult<ActionExecutionResult> {
     let fallback_point = entry.ui.bounds.map(center_point);
-    for route in click_route_plan(route_hint) {
+    let mut last_error = None;
+    for route in element_action_route_plan(route_hint, fallback_point.is_some()) {
         match route {
             ClickDispatchRoute::Ax => {
                 match scroll_uia_element_by_direction(&entry.element, direction, amount) {
@@ -1622,15 +1650,22 @@ fn scroll_uia_element(
                             next_dispatch_route: None,
                         });
                     }
-                    Err(ProviderError::Unsupported(_))
-                        if route_hint == ClickDispatchRoute::Auto => {}
+                    Err(error) if route_hint == ClickDispatchRoute::Auto => {
+                        last_error = Some(error);
+                    }
                     Err(error) => return Err(error),
                 }
             }
             ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
                 let point = fallback_point
                     .ok_or_else(|| ProviderError::ElementNotFound(entry.ui.id.clone()))?;
-                perform_scroll_for_route(route, point, direction, amount)?;
+                if let Err(error) = perform_scroll_for_route(route, point, direction, amount) {
+                    if route_hint == ClickDispatchRoute::Auto {
+                        last_error = Some(error);
+                        continue;
+                    }
+                    return Err(error);
+                }
                 return Ok(action_result_for_dispatch_route(
                     ActionExecutionKind::Scroll,
                     route,
@@ -1639,13 +1674,22 @@ fn scroll_uia_element(
             ClickDispatchRoute::Auto => {}
         }
     }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
     Err(ProviderError::Unsupported("scroll_element"))
 }
 
-fn show_uia_element_menu(element: &IUIAutomationElement) -> ProviderResult<()> {
+fn focus_uia_element(element: &IUIAutomationElement) -> ProviderResult<()> {
     unsafe {
-        let _ = element.SetFocus();
+        element
+            .SetFocus()
+            .map_err(|e| ProviderError::Failed(format!("UIA SetFocus failed: {e}")))
     }
+}
+
+fn show_uia_element_menu(element: &IUIAutomationElement) -> ProviderResult<()> {
+    focus_uia_element(element)?;
     press_key_chord("shift+f10")
 }
 
@@ -1655,6 +1699,7 @@ fn scroll_uia_element_by_direction(
     amount: i32,
 ) -> ProviderResult<()> {
     scroll_uia_element_into_view(element)?;
+    focus_uia_element(element)?;
     let key = match direction {
         ScrollDirection::Up => "up",
         ScrollDirection::Down => "down",
@@ -1875,6 +1920,22 @@ mod tests {
         assert_eq!(
             click_route_plan(ClickDispatchRoute::Hid),
             vec![ClickDispatchRoute::Hid]
+        );
+    }
+
+    #[test]
+    fn element_action_route_plan_prefers_native_fallback_before_ax_when_available() {
+        assert_eq!(
+            element_action_route_plan(ClickDispatchRoute::Auto, true),
+            vec![ClickDispatchRoute::TargetPid, ClickDispatchRoute::Ax]
+        );
+        assert_eq!(
+            element_action_route_plan(ClickDispatchRoute::Auto, false),
+            vec![ClickDispatchRoute::Ax]
+        );
+        assert_eq!(
+            element_action_route_plan(ClickDispatchRoute::Ax, true),
+            vec![ClickDispatchRoute::Ax]
         );
     }
 
