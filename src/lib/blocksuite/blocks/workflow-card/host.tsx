@@ -1,4 +1,5 @@
 import { parseWorkflowSnapshot, type WorkflowSnapshotStageView } from "./snapshot";
+import type { WorkflowOverlay } from "../../workflowLiveProjection";
 
 export interface WorkflowCardHostProps {
   title: string;
@@ -9,6 +10,7 @@ export interface WorkflowCardHostProps {
   threadGoal: string;
   workflowSnapshotJson: string;
   workflowSummaryMarkdown: string;
+  workflowOverlay?: WorkflowOverlay | null;
   onRunWorkflow: () => void;
   onOpenThread: () => void;
   interactionMode?: "block" | "overlay";
@@ -31,6 +33,7 @@ export function WorkflowCardHost({
   threadGoal,
   workflowSnapshotJson,
   workflowSummaryMarkdown,
+  workflowOverlay = null,
   onRunWorkflow,
   onOpenThread,
   interactionMode = "block",
@@ -41,6 +44,7 @@ export function WorkflowCardHost({
     interactionMode === "overlay" ? "pointer-events-auto" : "";
   const snapshot = parseWorkflowSnapshot(workflowSnapshotJson);
   const stages = snapshot?.stages ?? [];
+  const displayStages = stages.map((stage) => mergeStageOverlay(stage, workflowOverlay));
   const displayGoal = threadGoal.trim() || snapshot?.goal.trim() || "";
   const displayId = threadStageId || threadId || snapshot?.threadId || "Unlinked workflow";
 
@@ -101,14 +105,25 @@ export function WorkflowCardHost({
               {snapshot.rollup.openIssues > 0 && <span>{snapshot.rollup.openIssues} open issues</span>}
             </>
           )}
+          {workflowOverlay?.activeCount ? (
+            <>
+              <span className="h-1 w-1 rounded-full bg-blue/35" />
+              <span>{workflowOverlay.activeCount} live</span>
+            </>
+          ) : null}
         </div>
         <div className="shrink-0 truncate text-caption leading-5 text-ink/68">
           {displayGoal || "Workflow goal is not available yet."}
         </div>
-        {stages.length > 0 ? (
+        {workflowOverlay?.currentAction && (
+          <div className="shrink-0 truncate rounded bg-blue/8 px-2 py-1 text-[11px] leading-4 text-blue">
+            {workflowOverlay.currentAction}
+          </div>
+        )}
+        {displayStages.length > 0 ? (
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
             <div className="grid gap-1.5">
-              {stages.map((stage) => (
+              {displayStages.map((stage) => (
                 <WorkflowStageRow key={stage.threadStageId} stage={stage} />
               ))}
             </div>
@@ -123,11 +138,17 @@ export function WorkflowCardHost({
   );
 }
 
-function WorkflowStageRow({ stage }: { stage: WorkflowSnapshotStageView }) {
+type WorkflowStageDisplay = WorkflowSnapshotStageView & {
+  currentAction?: string | null;
+  activeAssistantIds?: string[];
+};
+
+function WorkflowStageRow({ stage }: { stage: WorkflowStageDisplay }) {
   const openIssueLabel = stage.openIssues === 1 ? "1 issue" : `${stage.openIssues} issues`;
-  const stageDetail = stage.summary ?? stage.outcome;
+  const stageDetail = stage.currentAction ?? stage.summary ?? stage.outcome;
   const visibleAssistants = stage.assistants.slice(0, 4);
   const extraAssistants = stage.assistants.length - visibleAssistants.length;
+  const activeAssistantIds = new Set(stage.activeAssistantIds ?? []);
   return (
     <div
       className={
@@ -159,10 +180,18 @@ function WorkflowStageRow({ stage }: { stage: WorkflowSnapshotStageView }) {
             <span
               key={assistant.assistantId}
               title={assistant.agentLabel ?? assistant.name}
-              className="inline-flex max-w-[120px] items-center gap-1 rounded bg-ink/[0.055] px-1.5 py-0.5 text-[10px] leading-3 text-ink/55"
+              className={
+                "inline-flex max-w-[120px] items-center gap-1 rounded px-1.5 py-0.5 text-[10px] leading-3 " +
+                (activeAssistantIds.has(assistant.assistantId)
+                  ? "bg-blue/10 text-blue"
+                  : "bg-ink/[0.055] text-ink/55")
+              }
             >
               <span
-                className="grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full text-[8px] font-medium text-white"
+                className={
+                  "grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full text-[8px] font-medium text-white " +
+                  (activeAssistantIds.has(assistant.assistantId) ? "ring-2 ring-blue/25" : "")
+                }
                 style={{ backgroundColor: assistant.color ?? "rgb(var(--color-blue))" }}
               >
                 {assistant.initial}
@@ -179,6 +208,21 @@ function WorkflowStageRow({ stage }: { stage: WorkflowSnapshotStageView }) {
       )}
     </div>
   );
+}
+
+function mergeStageOverlay(
+  stage: WorkflowSnapshotStageView,
+  workflowOverlay: WorkflowOverlay | null,
+): WorkflowStageDisplay {
+  const overlay = workflowOverlay?.stages[stage.threadStageId];
+  if (!overlay) return stage;
+  return {
+    ...stage,
+    status: overlay.status,
+    active: stage.active || overlay.active,
+    currentAction: overlay.currentAction,
+    activeAssistantIds: overlay.activeAssistantIds,
+  };
 }
 
 function statusLabel(status: string) {

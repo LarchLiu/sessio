@@ -5,11 +5,15 @@ import { html } from "lit";
 import { classMap } from "lit/directives/class-map.js";
 import { styleMap } from "lit/directives/style-map.js";
 import { getBlockSuitePortalBridge } from "../../portalBridge";
+import type { WorkflowOverlayStore } from "../../workflowLiveProjection";
 import { WorkflowCardHost } from "./host";
 import type { WorkflowCardBlockModel } from "./model";
 
 class WorkflowCardPageComponent extends BlockComponent<WorkflowCardBlockModel> {
   blockDraggable = true;
+  private workflowOverlayStore: WorkflowOverlayStore | null = null;
+  private workflowOverlayBlockId: string | null = null;
+  private workflowOverlayUnsubscribe: (() => void) | null = null;
 
   protected containerStyleMap = styleMap({
     position: "relative",
@@ -22,9 +26,17 @@ class WorkflowCardPageComponent extends BlockComponent<WorkflowCardBlockModel> {
     this.contentEditable = "false";
   }
 
+  override disconnectedCallback() {
+    this.setWorkflowOverlaySubscription(null);
+    super.disconnectedCallback();
+  }
+
   override renderBlock() {
     const selected = this.selected$.value;
     const bridge = getBlockSuitePortalBridge();
+    const workflowOverlayStore = bridge?.workflowOverlay ?? null;
+    this.setWorkflowOverlaySubscription(workflowOverlayStore);
+    const workflowOverlayEntry = workflowOverlayStore?.get(this.model.id) ?? null;
     const rerenderToken = [
       selected ? "1" : "0",
       this.model.title || "Workflow",
@@ -35,6 +47,7 @@ class WorkflowCardPageComponent extends BlockComponent<WorkflowCardBlockModel> {
       this.model.threadGoal || "",
       this.model.workflowSnapshotJson || "",
       this.model.workflowSummaryMarkdown || "",
+      workflowOverlayEntry?.revision ?? "",
     ].join("\u001f");
     const content = bridge
       ? bridge.reactToLit(
@@ -48,6 +61,7 @@ class WorkflowCardPageComponent extends BlockComponent<WorkflowCardBlockModel> {
               threadGoal: this.model.threadGoal || "",
               workflowSnapshotJson: this.model.workflowSnapshotJson || "",
               workflowSummaryMarkdown: this.model.workflowSummaryMarkdown || "",
+              workflowOverlay: workflowOverlayEntry?.overlay ?? null,
               onRunWorkflow: () => {
                 bridge.runWorkflowBlock?.(this.model.id);
               },
@@ -71,6 +85,19 @@ class WorkflowCardPageComponent extends BlockComponent<WorkflowCardBlockModel> {
         ${content}
       </div>
     `;
+  }
+
+  private setWorkflowOverlaySubscription(store: WorkflowOverlayStore | null) {
+    const blockId = this.model.id;
+    if (this.workflowOverlayStore === store && this.workflowOverlayBlockId === blockId) return;
+    this.workflowOverlayUnsubscribe?.();
+    this.workflowOverlayUnsubscribe = null;
+    this.workflowOverlayStore = store;
+    this.workflowOverlayBlockId = store ? blockId : null;
+    if (!store) return;
+    this.workflowOverlayUnsubscribe = store.subscribe(blockId, () => {
+      this.requestUpdate();
+    });
   }
 }
 

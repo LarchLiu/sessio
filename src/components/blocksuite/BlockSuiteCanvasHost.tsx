@@ -61,6 +61,13 @@ import {
   CANVAS_SNAPSHOT_SELECTION_EVENT,
   type CanvasSnapshotSelectionEventDetail,
 } from "../../lib/blocksuite/toolbar";
+import {
+  createWorkflowOverlayCardContext,
+  createWorkflowOverlayStore,
+  projectWorkflowLiveOverlays,
+  type WorkflowOverlayCardContext,
+  type WorkflowOverlayStore,
+} from "../../lib/blocksuite/workflowLiveProjection";
 
 const CANVAS_ADD_FILES_EVENT = "sessio:canvas-add-files";
 const CANVAS_GROUP_SELECTION_EVENT = "sessio:canvas-group-selection";
@@ -727,6 +734,24 @@ function getExistingCanvasFileBlockIds(
   return existing;
 }
 
+function collectWorkflowOverlayCardContexts(
+  doc: ReturnType<typeof createBlockSuiteDoc>["doc"],
+): WorkflowOverlayCardContext[] {
+  const contexts: WorkflowOverlayCardContext[] = [];
+  const workflowBlocks = doc.getBlocksByFlavour(["sessio:workflow-card"]);
+  for (const block of workflowBlocks) {
+    const model = block.model as WorkflowCardBlockModel;
+    const context = createWorkflowOverlayCardContext({
+      blockId: model.id,
+      threadId: model.threadId,
+      threadStageId: model.threadStageId,
+      workflowSnapshotJson: model.workflowSnapshotJson,
+    });
+    if (context) contexts.push(context);
+  }
+  return contexts;
+}
+
 function boundsOverlapWithPadding(a: Bound, b: Bound, padding: number): boolean {
   return (
     a.x < b.x + b.w + padding &&
@@ -863,6 +888,8 @@ export default function BlockSuiteCanvasHost({
   editedFiles = [],
   autoAddedEditedFiles = [],
   latestEditedFiles = [],
+  liveState,
+  runtimeSessionAliases,
   selectedFileRequest = null,
   initialState,
   initialSnapshot,
@@ -897,6 +924,14 @@ export default function BlockSuiteCanvasHost({
   const autoAddedEditedFilesHydratedRef = useRef(false);
   const previousEditedFileKeysRef = useRef<Set<string>>(new Set());
   const previousAvailableEditedFilesRef = useRef<string[]>([]);
+  const workflowOverlayStoreRef = useRef<WorkflowOverlayStore | null>(null);
+  if (!workflowOverlayStoreRef.current) {
+    workflowOverlayStoreRef.current = createWorkflowOverlayStore();
+  }
+  const workflowOverlayCardContextsRef = useRef<WorkflowOverlayCardContext[]>([]);
+  const workflowOverlayTimerRef = useRef<number | null>(null);
+  const liveStateRef = useRef(liveState);
+  const runtimeSessionAliasesRef = useRef(runtimeSessionAliases);
   const addMenuButtonRef = useRef<HTMLButtonElement>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [status, setStatus] = useState("Initializing BlockSuite canvas…");
@@ -1258,6 +1293,50 @@ export default function BlockSuiteCanvasHost({
     });
   }, [recomputeLocalCanvasFileKeys]);
 
+  const applyWorkflowLiveProjection = useCallback(() => {
+    const store = workflowOverlayStoreRef.current;
+    if (!store) return;
+    const contexts = workflowOverlayCardContextsRef.current;
+    if (contexts.length === 0) {
+      store.clear();
+      return;
+    }
+    const overlays = projectWorkflowLiveOverlays({
+      cards: contexts,
+      runtimeSessionAliases: runtimeSessionAliasesRef.current,
+      liveState: liveStateRef.current,
+    });
+    const knownBlockIds = new Set(contexts.map((context) => context.blockId));
+    for (const blockId of knownBlockIds) {
+      const overlay = overlays.get(blockId);
+      if (overlay) {
+        store.set(blockId, overlay);
+      } else {
+        store.delete(blockId);
+      }
+    }
+    for (const blockId of store.keys()) {
+      if (!knownBlockIds.has(blockId)) store.delete(blockId);
+    }
+  }, []);
+
+  const scheduleWorkflowLiveProjection = useCallback(() => {
+    if (workflowOverlayTimerRef.current !== null) {
+      window.clearTimeout(workflowOverlayTimerRef.current);
+    }
+    workflowOverlayTimerRef.current = window.setTimeout(() => {
+      workflowOverlayTimerRef.current = null;
+      applyWorkflowLiveProjection();
+    }, 160);
+  }, [applyWorkflowLiveProjection]);
+
+  const rebuildWorkflowOverlayCardContexts = useCallback((
+    doc: ReturnType<typeof createBlockSuiteDoc>["doc"],
+  ) => {
+    workflowOverlayCardContextsRef.current = collectWorkflowOverlayCardContexts(doc);
+    scheduleWorkflowLiveProjection();
+  }, [scheduleWorkflowLiveProjection]);
+
   const attachDoc = useCallback((host: HTMLDivElement, doc: ReturnType<typeof createBlockSuiteDoc>["doc"]) => {
     ensureEdgelessRoot(doc);
     removePlaceholderNotes(doc);
@@ -1269,6 +1348,8 @@ export default function BlockSuiteCanvasHost({
     blockUpdatedDisposeRef.current?.dispose();
     selectionUpdatedDisposeRef.current?.dispose();
     clearBoxSelectingObserver();
+    workflowOverlayStoreRef.current?.clear();
+    workflowOverlayCardContextsRef.current = [];
     {
       const subscription = doc.slots.blockUpdated.subscribe((payload) => {
         if (payload?.type === "delete") {
@@ -1276,6 +1357,7 @@ export default function BlockSuiteCanvasHost({
         } else {
           recomputeLocalCanvasFileKeys(doc);
         }
+        rebuildWorkflowOverlayCardContexts(doc);
         scheduleAutosave(doc);
       });
       blockUpdatedDisposeRef.current = {
@@ -1301,9 +1383,10 @@ export default function BlockSuiteCanvasHost({
         updateSelectionState();
       });
       recomputeLocalCanvasFileKeys(doc);
+      rebuildWorkflowOverlayCardContexts(doc);
       scheduleSyncBlocks();
     });
-  }, [attachBoxSelectingObserver, clearBoxSelectingObserver, recomputeLocalCanvasFileKeys, scheduleAutosave, scheduleRecomputeLocalCanvasFileKeys, scheduleSelectionStateUpdate, scheduleSyncBlocks, updateSelectionState, waitForRootService]);
+  }, [attachBoxSelectingObserver, clearBoxSelectingObserver, rebuildWorkflowOverlayCardContexts, recomputeLocalCanvasFileKeys, scheduleAutosave, scheduleRecomputeLocalCanvasFileKeys, scheduleSelectionStateUpdate, scheduleSyncBlocks, updateSelectionState, waitForRootService]);
 
   const openEditedFilesPicker = () => {
     const filteredAvailableFiles = availableEditedFiles;
@@ -1638,6 +1721,7 @@ export default function BlockSuiteCanvasHost({
       reactToLit,
       workspacePath,
       latestEditedFileKeys,
+      workflowOverlay: workflowOverlayStoreRef.current ?? undefined,
       updateBlock: (blockId, props) => {
         const doc = getDoc();
         const model = doc?.getModelById(blockId) ?? null;
@@ -1685,6 +1769,12 @@ export default function BlockSuiteCanvasHost({
   ]);
 
   useEffect(() => {
+    liveStateRef.current = liveState;
+    runtimeSessionAliasesRef.current = runtimeSessionAliases;
+    scheduleWorkflowLiveProjection();
+  }, [liveState, runtimeSessionAliases, scheduleWorkflowLiveProjection]);
+
+  useEffect(() => {
     currentSnapshotRef.current = initialSnapshot;
   }, [initialSnapshot, sessionId]);
 
@@ -1697,6 +1787,11 @@ export default function BlockSuiteCanvasHost({
         window.cancelAnimationFrame(selectionUiFrameRef.current);
         selectionUiFrameRef.current = null;
       }
+      if (workflowOverlayTimerRef.current !== null) {
+        window.clearTimeout(workflowOverlayTimerRef.current);
+        workflowOverlayTimerRef.current = null;
+      }
+      workflowOverlayStoreRef.current?.clear();
       clearBoxSelectingObserver();
     };
   }, [clearBoxSelectingObserver]);
@@ -1787,6 +1882,12 @@ export default function BlockSuiteCanvasHost({
         window.cancelAnimationFrame(selectionUiFrameRef.current);
         selectionUiFrameRef.current = null;
       }
+      if (workflowOverlayTimerRef.current !== null) {
+        window.clearTimeout(workflowOverlayTimerRef.current);
+        workflowOverlayTimerRef.current = null;
+      }
+      workflowOverlayStoreRef.current?.clear();
+      workflowOverlayCardContextsRef.current = [];
       blockUpdatedDisposeRef.current?.dispose();
       blockUpdatedDisposeRef.current = null;
       selectionUpdatedDisposeRef.current?.dispose();
