@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use image::{imageops::crop_imm, ImageReader};
+use sha2::{Digest, Sha256};
+
 use crate::computer_use::provider::{
     ActionExecutionKind, ActionExecutionOutcome, ActionExecutionResult, ActionExecutionRoute,
     AppId, AppLaunchResult, AppListOptions, AppRaiseResult, AppTarget, ClickDispatchRoute,
@@ -204,7 +207,7 @@ impl ComputerUseProvider for WindowsProvider {
     ) -> ProviderResult<ActionExecutionResult> {
         let window = prepare_target_for_control(target)?;
         let entry = uia_entry_for_id(window.hwnd, element)?;
-        secondary_click_uia_element(target, &entry, route_hint)
+        secondary_click_uia_element(target, &self.capture_dir, &entry, route_hint)
     }
 
     fn double_click(
@@ -288,7 +291,14 @@ impl ComputerUseProvider for WindowsProvider {
     ) -> ProviderResult<ActionExecutionResult> {
         let window = prepare_target_for_control(target)?;
         let entry = uia_entry_for_id(window.hwnd, element)?;
-        scroll_uia_element(target, &entry, direction, amount, route_hint)
+        scroll_uia_element(
+            target,
+            &self.capture_dir,
+            &entry,
+            direction,
+            amount,
+            route_hint,
+        )
     }
 }
 
@@ -302,6 +312,52 @@ struct WindowInfo {
     rect: Rect,
     minimized: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScreenCaptureFingerprint {
+    full_hash: [u8; 32],
+    local_hash: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectProbeOutcome {
+    ObservedEffect,
+    NoEffect,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EffectProbeTiming {
+    initial_delay_ms: u64,
+    poll_interval_ms: u64,
+    total_window_ms: u64,
+}
+
+impl EffectProbeTiming {
+    #[cfg(not(test))]
+    const DEFAULT: Self = Self {
+        initial_delay_ms: 500,
+        poll_interval_ms: 500,
+        total_window_ms: 2000,
+    };
+
+    #[cfg(test)]
+    const DEFAULT: Self = Self {
+        initial_delay_ms: 0,
+        poll_interval_ms: 0,
+        total_window_ms: 0,
+    };
+
+    fn attempt_count(self) -> usize {
+        if self.total_window_ms <= self.initial_delay_ms || self.poll_interval_ms == 0 {
+            1
+        } else {
+            1 + ((self.total_window_ms - self.initial_delay_ms) / self.poll_interval_ms) as usize
+        }
+    }
+}
+
+const EFFECT_LOCAL_PROBE_RADIUS_PX: u32 = 72;
 
 // --- App/window discovery -------------------------------------------------
 
@@ -1509,6 +1565,23 @@ fn action_result_for_dispatch_route(
     }
 }
 
+fn action_result_for_probe_outcome(
+    kind: ActionExecutionKind,
+    route: ActionExecutionRoute,
+    outcome: EffectProbeOutcome,
+) -> ActionExecutionResult {
+    ActionExecutionResult {
+        kind,
+        route,
+        outcome: match outcome {
+            EffectProbeOutcome::ObservedEffect => ActionExecutionOutcome::Dispatched,
+            EffectProbeOutcome::NoEffect => ActionExecutionOutcome::NoEffect,
+            EffectProbeOutcome::Uncertain => ActionExecutionOutcome::Uncertain,
+        },
+        next_dispatch_route: None,
+    }
+}
+
 fn perform_mouse_click_for_route(route: ClickDispatchRoute, point: Point) -> ProviderResult<()> {
     match route {
         ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid | ClickDispatchRoute::Auto => {
@@ -1584,6 +1657,7 @@ fn click_uia_element(
 
 fn secondary_click_uia_element(
     _target: &AppTarget,
+    capture_dir: &Path,
     entry: &UiaElementEntry,
     route_hint: ClickDispatchRoute,
 ) -> ProviderResult<ActionExecutionResult> {
@@ -1591,20 +1665,23 @@ fn secondary_click_uia_element(
     let mut last_error = None;
     for route in element_action_route_plan(route_hint, fallback_point.is_some()) {
         match route {
-            ClickDispatchRoute::Ax => match show_uia_element_menu(&entry.element) {
-                Ok(()) => {
-                    return Ok(ActionExecutionResult {
-                        kind: ActionExecutionKind::SecondaryClick,
-                        route: ActionExecutionRoute::Uia,
-                        outcome: ActionExecutionOutcome::Dispatched,
-                        next_dispatch_route: None,
-                    });
+            ClickDispatchRoute::Ax => {
+                match perform_action_with_effect_probe(capture_dir, fallback_point, || {
+                    show_uia_element_menu(&entry.element)
+                }) {
+                    Ok(outcome) => {
+                        return Ok(action_result_for_probe_outcome(
+                            ActionExecutionKind::SecondaryClick,
+                            ActionExecutionRoute::Uia,
+                            outcome,
+                        ));
+                    }
+                    Err(error) if route_hint == ClickDispatchRoute::Auto => {
+                        last_error = Some(error);
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) if route_hint == ClickDispatchRoute::Auto => {
-                    last_error = Some(error);
-                }
-                Err(error) => return Err(error),
-            },
+            }
             ClickDispatchRoute::TargetPid | ClickDispatchRoute::Hid => {
                 let point = fallback_point
                     .ok_or_else(|| ProviderError::ElementNotFound(entry.ui.id.clone()))?;
@@ -1631,6 +1708,7 @@ fn secondary_click_uia_element(
 
 fn scroll_uia_element(
     _target: &AppTarget,
+    capture_dir: &Path,
     entry: &UiaElementEntry,
     direction: ScrollDirection,
     amount: i32,
@@ -1641,14 +1719,15 @@ fn scroll_uia_element(
     for route in element_action_route_plan(route_hint, fallback_point.is_some()) {
         match route {
             ClickDispatchRoute::Ax => {
-                match scroll_uia_element_by_direction(&entry.element, direction, amount) {
-                    Ok(()) => {
-                        return Ok(ActionExecutionResult {
-                            kind: ActionExecutionKind::Scroll,
-                            route: ActionExecutionRoute::Uia,
-                            outcome: ActionExecutionOutcome::Dispatched,
-                            next_dispatch_route: None,
-                        });
+                match perform_action_with_effect_probe(capture_dir, fallback_point, || {
+                    scroll_uia_element_by_direction(&entry.element, direction, amount)
+                }) {
+                    Ok(outcome) => {
+                        return Ok(action_result_for_probe_outcome(
+                            ActionExecutionKind::Scroll,
+                            ActionExecutionRoute::Uia,
+                            outcome,
+                        ));
                     }
                     Err(error) if route_hint == ClickDispatchRoute::Auto => {
                         last_error = Some(error);
@@ -1710,6 +1789,159 @@ fn scroll_uia_element_by_direction(
         press_key_chord(key)?;
     }
     Ok(())
+}
+
+fn perform_action_with_effect_probe(
+    capture_dir: &Path,
+    probe_point: Option<Point>,
+    perform: impl FnOnce() -> ProviderResult<()>,
+) -> ProviderResult<EffectProbeOutcome> {
+    let before = capture_screen_fingerprint(capture_dir, probe_point).ok();
+    perform()?;
+    probe_effect_after_capture(capture_dir, before, probe_point)
+}
+
+fn probe_effect_after_capture(
+    capture_dir: &Path,
+    before: Option<ScreenCaptureFingerprint>,
+    probe_point: Option<Point>,
+) -> ProviderResult<EffectProbeOutcome> {
+    let Some(before) = before else {
+        return Ok(EffectProbeOutcome::Uncertain);
+    };
+    let timing = EffectProbeTiming::DEFAULT;
+    let attempts_total = timing.attempt_count();
+
+    if timing.initial_delay_ms > 0 {
+        thread::sleep(Duration::from_millis(timing.initial_delay_ms));
+    }
+
+    let mut saw_remote_only_change = false;
+    for attempt_index in 0..attempts_total {
+        if attempt_index > 0 && timing.poll_interval_ms > 0 {
+            thread::sleep(Duration::from_millis(timing.poll_interval_ms));
+        }
+
+        let after = match capture_screen_fingerprint(capture_dir, probe_point) {
+            Ok(after) => after,
+            Err(_) => return Ok(EffectProbeOutcome::Uncertain),
+        };
+
+        let outcome = classify_effect_sample(before, after);
+        if matches!(outcome, EffectProbeOutcome::Uncertain) {
+            saw_remote_only_change = true;
+        }
+        if matches!(outcome, EffectProbeOutcome::ObservedEffect) {
+            return Ok(outcome);
+        }
+    }
+
+    if saw_remote_only_change {
+        Ok(EffectProbeOutcome::Uncertain)
+    } else {
+        Ok(EffectProbeOutcome::NoEffect)
+    }
+}
+
+fn classify_effect_sample(
+    before: ScreenCaptureFingerprint,
+    after: ScreenCaptureFingerprint,
+) -> EffectProbeOutcome {
+    let local_changed = before.local_hash.zip(after.local_hash).map(|(a, b)| a != b);
+    let full_changed = before.full_hash != after.full_hash;
+    if local_changed == Some(true) {
+        EffectProbeOutcome::ObservedEffect
+    } else if full_changed {
+        EffectProbeOutcome::Uncertain
+    } else {
+        EffectProbeOutcome::NoEffect
+    }
+}
+
+fn capture_screen_fingerprint(
+    _capture_dir: &Path,
+    probe_point: Option<Point>,
+) -> ProviderResult<ScreenCaptureFingerprint> {
+    let screen_rect = virtual_screen_rect();
+    let saved = crate::screenshot::windows::capture_screen_rect_png(
+        screen_rect,
+        None,
+        "computer-use-effect-probe",
+    )
+    .map_err(ProviderError::Failed)?;
+    let path = PathBuf::from(saved.path);
+    let rgba = ImageReader::open(&path)
+        .map_err(|e| ProviderError::Failed(format!("open capture for effect probe: {e}")))?
+        .with_guessed_format()
+        .map_err(|e| ProviderError::Failed(format!("guess capture format for effect probe: {e}")))?
+        .decode()
+        .map_err(|e| ProviderError::Failed(format!("decode capture for effect probe: {e}")))?
+        .to_rgba8();
+
+    let _ = std::fs::remove_file(&path);
+
+    let full_hash = hash_rgba_image(&rgba);
+    let screen_bounds = Rect {
+        x: screen_rect.x as f32,
+        y: screen_rect.y as f32,
+        width: screen_rect.width as f32,
+        height: screen_rect.height as f32,
+    };
+    let local_hash = probe_point.and_then(|point| {
+        local_probe_rect(rgba.width(), rgba.height(), screen_bounds, point).map(
+            |(x, y, width, height)| {
+                let cropped = crop_imm(&rgba, x, y, width, height).to_image();
+                hash_rgba_image(&cropped)
+            },
+        )
+    });
+
+    Ok(ScreenCaptureFingerprint {
+        full_hash,
+        local_hash,
+    })
+}
+
+fn hash_rgba_image(image: &image::RgbaImage) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(image.width().to_le_bytes());
+    hasher.update(image.height().to_le_bytes());
+    hasher.update(image.as_raw());
+    hasher.finalize().into()
+}
+
+fn local_probe_rect(
+    image_width: u32,
+    image_height: u32,
+    screen_bounds: Rect,
+    probe_point: Point,
+) -> Option<(u32, u32, u32, u32)> {
+    if image_width == 0
+        || image_height == 0
+        || screen_bounds.width <= 0.0
+        || screen_bounds.height <= 0.0
+    {
+        return None;
+    }
+
+    let relative_x = ((probe_point.x - screen_bounds.x) / screen_bounds.width).clamp(0.0, 1.0);
+    let relative_y = ((probe_point.y - screen_bounds.y) / screen_bounds.height).clamp(0.0, 1.0);
+    let center_x = (relative_x * image_width as f32).round() as i32;
+    let center_y = (relative_y * image_height as f32).round() as i32;
+    let radius = EFFECT_LOCAL_PROBE_RADIUS_PX as i32;
+
+    let left = (center_x - radius).clamp(0, image_width as i32);
+    let top = (center_y - radius).clamp(0, image_height as i32);
+    let right = (center_x + radius).clamp(0, image_width as i32);
+    let bottom = (center_y + radius).clamp(0, image_height as i32);
+
+    let width = u32::try_from(right.saturating_sub(left)).ok()?;
+    let height = u32::try_from(bottom.saturating_sub(top)).ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    Some((left as u32, top as u32, width, height))
 }
 
 fn set_uia_value(
@@ -1949,5 +2181,56 @@ mod tests {
             action_result_for_dispatch_route(ActionExecutionKind::Scroll, ClickDispatchRoute::Hid);
         assert_eq!(action.route, ActionExecutionRoute::Native);
         assert_eq!(action.outcome, ActionExecutionOutcome::Dispatched);
+    }
+
+    #[test]
+    fn effect_sample_detects_local_change_as_observed_effect() {
+        let before = ScreenCaptureFingerprint {
+            full_hash: [1; 32],
+            local_hash: Some([2; 32]),
+        };
+        let after = ScreenCaptureFingerprint {
+            full_hash: [3; 32],
+            local_hash: Some([4; 32]),
+        };
+
+        assert_eq!(
+            classify_effect_sample(before, after),
+            EffectProbeOutcome::ObservedEffect
+        );
+    }
+
+    #[test]
+    fn effect_sample_treats_remote_only_change_as_uncertain() {
+        let before = ScreenCaptureFingerprint {
+            full_hash: [1; 32],
+            local_hash: Some([2; 32]),
+        };
+        let after = ScreenCaptureFingerprint {
+            full_hash: [3; 32],
+            local_hash: Some([2; 32]),
+        };
+
+        assert_eq!(
+            classify_effect_sample(before, after),
+            EffectProbeOutcome::Uncertain
+        );
+    }
+
+    #[test]
+    fn effect_sample_treats_no_change_as_no_effect() {
+        let before = ScreenCaptureFingerprint {
+            full_hash: [1; 32],
+            local_hash: Some([2; 32]),
+        };
+        let after = ScreenCaptureFingerprint {
+            full_hash: [1; 32],
+            local_hash: Some([2; 32]),
+        };
+
+        assert_eq!(
+            classify_effect_sample(before, after),
+            EffectProbeOutcome::NoEffect
+        );
     }
 }
