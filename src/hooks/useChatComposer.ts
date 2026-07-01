@@ -57,6 +57,7 @@ export interface ChatComposerStartOptions {
   projectName: string;
   extraContext?: string | null;
   assistantPrompt?: string | null;
+  clearComposerOnSuccess?: boolean;
   pendingSession?: PendingSessionExtras;
   onPendingCreated?: (session: PendingNewChatSession) => void;
 }
@@ -425,8 +426,10 @@ export function useChatComposer({
           displayName,
         })),
       });
-      setText("");
-      clearAttachments();
+      if (options.clearComposerOnSuccess ?? true) {
+        setText("");
+        clearAttachments();
+      }
       return true;
     } catch (err) {
       const message = String(err);

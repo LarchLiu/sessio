@@ -118,6 +118,7 @@ export default function NewChatPage({
   const [selectedAssistantIds, setSelectedAssistantIds] = useState<string[]>([]);
   const [participantDrafts, setParticipantDrafts] = useState<ParticipantDraft[]>([]);
   const [threadSending, setThreadSending] = useState(false);
+  const [chatTransitionPending, setChatTransitionPending] = useState(false);
   const [selectedAssistant, setSelectedAssistant] = useState<AssistantInfo | null>(null);
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<AcpAvailableCommand | null>(null);
   const [cachedAvailableCommands, setCachedAvailableCommands] = useState<AcpAvailableCommand[]>([]);
@@ -137,6 +138,7 @@ export default function NewChatPage({
   });
   useAppshotComposerRegistration(composer, true);
   const threadMode = mode !== "chat";
+  const composerBusy = composer.sending || threadSending || chatTransitionPending;
   const threadValidationError = threadMode
     ? validateThreadMode({
       mode,
@@ -240,7 +242,7 @@ export default function NewChatPage({
   const commandMenu = useComposerCommandMenuState({
     trigger: command,
     items: commandItems,
-    disabled: threadSending || composer.sending,
+    disabled: composerBusy,
   });
 
   const projectKeys = useMemo(() => new Set(projects.map((p) => p.key)), [projects]);
@@ -343,7 +345,7 @@ export default function NewChatPage({
 
   const handleSend = async () => {
     const prompt = buildPromptText(selectedSlashCommand, composer.text).trim();
-    if (!prompt || threadSending) return;
+    if (!prompt || threadSending || chatTransitionPending) return;
     const slashName = parseSelectedSlashCommandName(prompt);
     if (slashName) {
       const slashCommand = cachedAvailableCommands.find((item) => item.name === slashName);
@@ -361,10 +363,10 @@ export default function NewChatPage({
         workspacePath,
         projectName: project.label,
         assistantPrompt: selectedAssistant?.systemPrompt?.trim() || undefined,
+        clearComposerOnSuccess: false,
       });
       if (sent) {
-        setSelectedSlashCommand(null);
-        setSelectedAssistant(null);
+        setChatTransitionPending(true);
       }
       return;
     }
@@ -476,14 +478,14 @@ export default function NewChatPage({
             canSend={
               threadMode
                 ? threadCanSend
-                : composer.canSendWithWorkspace(workspacePath) && !threadSending
+                : composer.canSendWithWorkspace(workspacePath) && !threadSending && !chatTransitionPending
             }
             onSend={() => void handleSend()}
             onTextareaKeyDown={handleTextareaKeyDown}
             sendButtonVariant={threadMode ? "astra" : "chat"}
             sendButtonLabel={threadMode ? threadValidationError ?? createThreadLabel(mode, t) : undefined}
-            sendButtonBusy={threadMode ? threadSending || composer.sending : undefined}
-            runtimeControlsDisabled={threadMode}
+            sendButtonBusy={threadMode ? threadSending || composer.sending : composer.sending || chatTransitionPending}
+            runtimeControlsDisabled={threadMode || chatTransitionPending}
             placeholder={threadMode ? t("new_chat.thread_placeholder") : undefined}
             modeActions={
               !threadMode ? (
