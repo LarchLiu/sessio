@@ -29,6 +29,7 @@ import {
   type Agent,
 } from "../../api";
 import type { ChatComposerController } from "../../hooks/useChatComposer";
+import type { LiveRuntimeState } from "../../runtimeChat";
 import {
   createBlockSuiteDoc,
   createEdgelessEditorWithSpecs,
@@ -576,6 +577,8 @@ export interface BlockSuiteCanvasHostProps {
   editedFiles?: string[];
   autoAddedEditedFiles?: string[];
   latestEditedFiles?: string[];
+  liveState: LiveRuntimeState;
+  runtimeSessionAliases: Record<string, string>;
   selectedFileRequest?: {
     paths: string[];
     requestId: number;

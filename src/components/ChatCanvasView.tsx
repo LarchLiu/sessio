@@ -5,6 +5,7 @@ import {
   getSessionCanvas,
 } from "../api";
 import type { ChatComposerController } from "../hooks/useChatComposer";
+import type { LiveRuntimeState } from "../runtimeChat";
 
 const BlockSuiteCanvasHost = lazy(() => import("./blocksuite/BlockSuiteCanvasHost"));
 
@@ -17,6 +18,8 @@ export interface ChatCanvasViewProps {
   editedFiles?: string[];
   autoAddedEditedFiles?: string[];
   latestEditedFiles?: string[];
+  liveState: LiveRuntimeState;
+  runtimeSessionAliases: Record<string, string>;
   selectedCanvasFileRequest?: {
     paths: string[];
     requestId: number;
@@ -36,6 +39,8 @@ export default function ChatCanvasView({
   editedFiles = [],
   autoAddedEditedFiles = [],
   latestEditedFiles = [],
+  liveState,
+  runtimeSessionAliases,
   selectedCanvasFileRequest = null,
   composer,
   onError,
@@ -128,6 +133,8 @@ export default function ChatCanvasView({
             editedFiles={editedFiles}
             autoAddedEditedFiles={autoAddedEditedFiles}
             latestEditedFiles={latestEditedFiles}
+            liveState={liveState}
+            runtimeSessionAliases={runtimeSessionAliases}
             selectedFileRequest={selectedCanvasFileRequest}
             initialState={state}
             initialSnapshot={initialSnapshot}
