@@ -26,7 +26,7 @@ use crate::computer_use::provider::{
     ScrollDirection, UiElement,
 };
 
-use windows::core::{w, BOOL, BSTR, PCWSTR};
+use windows::core::{w, Interface, BOOL, BSTR, GUID, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, HANDLE, HWND, LPARAM, MAX_PATH, RECT, RPC_E_CHANGED_MODE,
 };
@@ -43,7 +43,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken,
+    AttachThreadInput, GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
 };
 use windows::Win32::UI::Accessibility::{
@@ -72,13 +72,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME, VK_INSERT, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN,
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
 };
-use windows::Win32::UI::Shell::{CLSID_ShellLink, IShellLinkW, ShellExecuteW};
+use windows::Win32::UI::Shell::{IShellLinkW, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AttachThreadInput, EnumWindows, GetAncestor, GetForegroundWindow, GetSystemMetrics,
-    GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, GA_ROOT, GWL_EXSTYLE,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE,
-    WS_EX_TOOLWINDOW,
+    EnumWindows, GetAncestor, GetForegroundWindow, GetSystemMetrics, GetWindowLongW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    SetForegroundWindow, ShowWindow, GA_ROOT, GWL_EXSTYLE, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE, WS_EX_TOOLWINDOW,
 };
 
 /// Windows provider. Most operations re-read live system state; installed-app
@@ -393,6 +392,7 @@ impl EffectProbeTiming {
 
 const EFFECT_LOCAL_PROBE_RADIUS_PX: u32 = 72;
 const INSTALLED_APPS_CACHE_TTL: Duration = Duration::from_secs(30);
+const CLSID_SHELL_LINK: GUID = GUID::from_u128(0x00021401_0000_0000_c000_000000000046);
 
 // --- App/window discovery -------------------------------------------------
 
@@ -677,7 +677,7 @@ fn process_exe_path(pid: u32) -> Option<String> {
         )
         .ok()?;
         let mut buffer = vec![0u16; MAX_PATH as usize];
-        let len = K32GetModuleFileNameExW(handle, None, &mut buffer);
+        let len = K32GetModuleFileNameExW(Some(handle), None, &mut buffer);
         let _ = CloseHandle(handle);
         if len == 0 {
             return None;
@@ -1033,7 +1033,7 @@ fn hwnd_from_id(raw: &str) -> Option<HWND> {
         .parse::<isize>()
         .ok()
         .filter(|value| *value != 0)
-        .map(HWND)
+        .map(|value| HWND(value as *mut core::ffi::c_void))
 }
 
 fn wide_null(value: &str) -> Vec<u16> {

@@ -70,7 +70,6 @@ use tauri::RunEvent;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    utils::config::Color,
     AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
     WindowEvent,
 };
@@ -3924,7 +3923,7 @@ async fn open_screenshot_overlay_capture(
         .shadow(false)
         .resizable(false)
         .transparent(true)
-        .background_color(Color(0, 0, 0, 0))
+        .background_color(tauri::utils::config::Color(0, 0, 0, 0))
         .always_on_top(true)
         .skip_taskbar(true)
         .initialization_script(init_script)

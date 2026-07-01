@@ -4,7 +4,7 @@
 //! maps that file to `computer-use-skill/SKILL.md` so release builds can point
 //! agents at a stable, readable skill path even when the source tree is absent.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const BUNDLED_SKILL_RELATIVE_PATH: &str = "computer-use-skill/SKILL.md";
 const DEV_SKILL_RELATIVE_PATH: &str = "docs/computer-use-skill.md";
@@ -76,7 +76,7 @@ fn bundle_resource_skill_paths() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_bundle_contents_dir(exe: &Path) -> Option<PathBuf> {
+fn macos_bundle_contents_dir(exe: &std::path::Path) -> Option<PathBuf> {
     let mut current = exe.parent();
     while let Some(dir) = current {
         if dir.file_name().and_then(|name| name.to_str()) == Some("Contents") {
