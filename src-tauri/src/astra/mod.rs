@@ -946,6 +946,12 @@ impl AstraService {
         let mut options = RuntimeMetadata::default();
         options.insert("astraRunId".to_string(), Value::String(run.run_id.clone()));
         options.insert("astraTaskId".to_string(), Value::String(task.id.clone()));
+        if let Some(assistant_id) = task.assistant_id.as_deref() {
+            options.insert(
+                "astraAssistantId".to_string(),
+                Value::String(assistant_id.to_string()),
+            );
+        }
         if let Some(stage_id) = attempt.thread_stage_id {
             options.insert(
                 "astraThreadStageId".to_string(),

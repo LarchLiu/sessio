@@ -62,7 +62,36 @@ function snapshot(): ThreadWorkSnapshot {
         status: "not_started",
         summary: null,
         outcome: null,
-        assistants: [],
+        assistants: [
+          {
+            assistantId: "assistant-review-a",
+            name: "Reviewer A",
+            color: "#14b8a6",
+            agent: {
+              id: "codex",
+              name: "Codex",
+              model: "gpt-5.3-codex",
+              mode: "read-write",
+              effort: "medium",
+            },
+            systemPrompt: null,
+            order: 0,
+          },
+          {
+            assistantId: "assistant-review-b",
+            name: "Reviewer B",
+            color: "#8b5cf6",
+            agent: {
+              id: "codex",
+              name: "Codex",
+              model: "gpt-5.3-codex",
+              mode: "read-write",
+              effort: "medium",
+            },
+            systemPrompt: null,
+            order: 1,
+          },
+        ],
         issues: [],
         sessionRefs: [],
       },
@@ -178,6 +207,7 @@ describe("workflow live projection", () => {
           active: true,
           status: "in_progress",
           activeAssistantIds: ["assistant-codex"],
+          activeAgents: ["codex"],
           currentAction: "Running tests",
           updatedAt: 10,
         },
@@ -236,6 +266,39 @@ describe("workflow live projection", () => {
       status: "in_progress",
     });
     expect(overlays.has("review-card")).toBe(false);
+  });
+
+  it("uses the latest live turn block so assistant text can follow tool activity", () => {
+    const cards = [
+      card("thread-card", null),
+      card("build-card", "stage-build"),
+    ];
+    const session = liveSession("runtime-build", "child-build", 18, "Running tests");
+    session.turns[0].blocks = [
+      { kind: "tool", toolId: "tool-1", timestamp: 17 },
+      {
+        kind: "assistant",
+        blocks: [{ type: "text", text: "Tests passed; preparing the summary." }],
+        raw: null,
+        timestamp: 18,
+      },
+    ];
+    const liveState: LiveRuntimeState = {
+      sessions: {
+        "runtime-build": session,
+      },
+      lastSequence: 1,
+    };
+
+    const overlays = projectWorkflowLiveOverlays({
+      cards,
+      runtimeSessionAliases: { "codex:child-build": "runtime-build" },
+      liveState,
+    });
+
+    expect(overlays.get("thread-card")?.stages["stage-build"]).toMatchObject({
+      currentAction: "Tests passed; preparing the summary.",
+    });
   });
 
   it("keeps thread-level sessions on thread cards only", () => {
@@ -305,6 +368,7 @@ describe("workflow live projection", () => {
         "runtime-review": liveSession("runtime-review", "agent-review", 16, "Proofreading draft", {
           astraRunId: "run-1",
           astraTaskId: "task-review",
+          astraAssistantId: "assistant-review-b",
           astraThreadStageId: "stage-review",
         }),
       },
@@ -320,11 +384,14 @@ describe("workflow live projection", () => {
     expect(overlays.get("thread-card")?.stages["stage-review"]).toMatchObject({
       active: true,
       status: "in_progress",
+      activeAssistantIds: ["assistant-review-b"],
+      activeAgents: ["codex"],
       currentAction: "Proofreading draft",
     });
     expect(overlays.get("review-card")?.stages["stage-review"]).toMatchObject({
       active: true,
       status: "in_progress",
+      activeAssistantIds: ["assistant-review-b"],
     });
     expect(overlays.has("build-card")).toBe(false);
 
@@ -333,6 +400,7 @@ describe("workflow live projection", () => {
       childSessionId: "agent-review",
       threadId: "thread-1",
       stageId: "stage-review",
+      assistantId: "assistant-review-b",
     });
   });
 

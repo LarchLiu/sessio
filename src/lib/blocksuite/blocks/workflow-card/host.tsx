@@ -1,5 +1,6 @@
 import { parseWorkflowSnapshot, type WorkflowSnapshotStageView } from "./snapshot";
 import type { WorkflowOverlay } from "../../workflowLiveProjection";
+import AssistantBotIcon from "../../../../components/AssistantBotIcon";
 
 export interface WorkflowCardHostProps {
   title: string;
@@ -141,14 +142,23 @@ export function WorkflowCardHost({
 type WorkflowStageDisplay = WorkflowSnapshotStageView & {
   currentAction?: string | null;
   activeAssistantIds?: string[];
+  activeAgents?: string[];
 };
 
 function WorkflowStageRow({ stage }: { stage: WorkflowStageDisplay }) {
   const openIssueLabel = stage.openIssues === 1 ? "1 issue" : `${stage.openIssues} issues`;
   const stageDetail = stage.currentAction ?? stage.summary ?? stage.outcome;
-  const visibleAssistants = stage.assistants.slice(0, 4);
-  const extraAssistants = stage.assistants.length - visibleAssistants.length;
   const activeAssistantIds = new Set(stage.activeAssistantIds ?? []);
+  const activeAgents = new Set(stage.activeAgents ?? []);
+  const orderedAssistants = stage.assistants
+    .map((assistant, order) => ({
+      assistant,
+      order,
+      active: assistantIsActive(assistant, activeAssistantIds, activeAgents),
+    }))
+    .sort((a, b) => Number(b.active) - Number(a.active) || a.order - b.order);
+  const visibleAssistants = orderedAssistants.slice(0, 4);
+  const extraAssistants = Math.max(0, stage.assistants.length - visibleAssistants.length);
   return (
     <div
       className={
@@ -176,25 +186,24 @@ function WorkflowStageRow({ stage }: { stage: WorkflowStageDisplay }) {
       )}
       {visibleAssistants.length > 0 && (
         <div className="mt-1.5 flex min-w-0 flex-wrap gap-1">
-          {visibleAssistants.map((assistant) => (
+          {visibleAssistants.map(({ assistant, active }) => (
             <span
               key={assistant.assistantId}
               title={assistant.agentLabel ?? assistant.name}
               className={
                 "inline-flex max-w-[120px] items-center gap-1 rounded px-1.5 py-0.5 text-[10px] leading-3 " +
-                (activeAssistantIds.has(assistant.assistantId)
+                (active
                   ? "bg-blue/10 text-blue"
                   : "bg-ink/[0.055] text-ink/55")
               }
             >
               <span
                 className={
-                  "grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full text-[8px] font-medium text-white " +
-                  (activeAssistantIds.has(assistant.assistantId) ? "ring-2 ring-blue/25" : "")
+                  "grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full " +
+                  (active ? "ring-2 ring-blue/25" : "")
                 }
-                style={{ backgroundColor: assistant.color ?? "rgb(var(--color-blue))" }}
               >
-                {assistant.initial}
+                <AssistantBotIcon color={assistant.color} className="h-3.5 w-3.5 shrink-0" />
               </span>
               <span className="truncate">{assistant.name}</span>
             </span>
@@ -222,7 +231,17 @@ function mergeStageOverlay(
     active: stage.active || overlay.active,
     currentAction: overlay.currentAction,
     activeAssistantIds: overlay.activeAssistantIds,
+    activeAgents: overlay.activeAgents,
   };
+}
+
+function assistantIsActive(
+  assistant: WorkflowStageDisplay["assistants"][number],
+  activeAssistantIds: Set<string>,
+  activeAgents: Set<string>,
+): boolean {
+  return activeAssistantIds.has(assistant.assistantId)
+    || Boolean(assistant.agent && activeAgents.has(assistant.agent));
 }
 
 function statusLabel(status: string) {

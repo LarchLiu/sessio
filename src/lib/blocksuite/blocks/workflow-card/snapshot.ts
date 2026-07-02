@@ -1,9 +1,10 @@
-import type { StageStatus } from "../../../../api";
+import { isAgent, type Agent, type StageStatus } from "../../../../api";
 
 export interface WorkflowSnapshotAssistantView {
   assistantId: string;
   name: string;
   color: string | null;
+  agent: Agent | null;
   agentLabel: string | null;
   initial: string;
 }
@@ -107,11 +108,13 @@ function assistantToView(value: unknown): WorkflowSnapshotAssistantView | null {
   const name = pickString(record.name);
   if (!assistantId || !name) return null;
   const agent = asRecord(record.agent);
+  const agentId = pickString(agent?.id);
   const agentLabel = pickString(agent?.name) ?? pickString(agent?.id);
   return {
     assistantId,
     name,
     color: pickString(record.color),
+    agent: isAgent(agentId) ? agentId : null,
     agentLabel,
     initial: name.trim().charAt(0).toUpperCase() || "?",
   };

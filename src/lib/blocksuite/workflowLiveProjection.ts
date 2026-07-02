@@ -5,6 +5,7 @@ export interface WorkflowOverlayStage {
   active: boolean;
   status: "in_progress";
   activeAssistantIds: string[];
+  activeAgents: Agent[];
   currentAction: string | null;
   updatedAt: number;
 }
@@ -194,6 +195,7 @@ export function projectWorkflowLiveOverlays({
           active: true,
           status: "in_progress",
           activeAssistantIds: route.assistantId ? [route.assistantId] : [],
+          activeAgents: [route.agent],
           currentAction: action,
           updatedAt: latestTurn.updatedAt,
         });
@@ -241,6 +243,8 @@ export function resolveWorkflowLiveSessionRoute(
   const stageId = stringMeta(metadata, "astraThreadStageId")
     ?? stringMeta(metadata, "threadStageId")
     ?? stringMeta(metadata, "stageId");
+  const metadataAssistantId = stringMeta(metadata, "astraAssistantId")
+    ?? stringMeta(metadata, "assistantId");
   const threadId = stringMeta(metadata, "astraThreadId")
     ?? stringMeta(metadata, "threadId")
     ?? threadIdForMetadataStage(sessionMap, stageId);
@@ -254,7 +258,9 @@ export function resolveWorkflowLiveSessionRoute(
     childSessionId: liveSession.agentRuntimeSessionId || liveSession.sessioRuntimeSessionId,
     threadId,
     stageId: resolvedStageId,
-    assistantId: resolvedStageId ? assistantIdForRoutedStage(sessionMap, threadId, resolvedStageId, liveSession.agent) : null,
+    assistantId: resolvedStageId
+      ? assistantIdForRoutedStage(sessionMap, threadId, resolvedStageId, liveSession.agent, metadataAssistantId)
+      : null,
   };
 }
 
@@ -290,13 +296,31 @@ function assistantIdForRoutedStage(
   threadId: string,
   stageId: string,
   agent: Agent,
+  metadataAssistantId: string | null,
 ): string | null {
+  if (metadataAssistantId && assistantBelongsToStage(sessionMap, threadId, stageId, metadataAssistantId)) {
+    return metadataAssistantId;
+  }
   for (const card of sessionMap.cardsByBlockId.values()) {
     if (card.threadId !== threadId) continue;
     const assistantId = assistantIdForStageAgent(card.snapshot, stageId, agent);
     if (assistantId) return assistantId;
   }
   return null;
+}
+
+function assistantBelongsToStage(
+  sessionMap: SessionThreadStageMap,
+  threadId: string,
+  stageId: string,
+  assistantId: string,
+): boolean {
+  for (const card of sessionMap.cardsByBlockId.values()) {
+    if (card.threadId !== threadId) continue;
+    const stage = card.snapshot.stages?.find((item) => item.threadStageId === stageId);
+    if (stage?.assistants?.some((assistant) => assistant.assistantId === assistantId)) return true;
+  }
+  return false;
 }
 
 function parseThreadWorkSnapshot(workflowSnapshotJson: string | null | undefined): ThreadWorkSnapshot | null {
@@ -374,6 +398,10 @@ function mergeStageOverlay(
         ...(current?.activeAssistantIds ?? []),
         ...next.activeAssistantIds,
       ]),
+      activeAgents: dedupeAgents([
+        ...(current?.activeAgents ?? []),
+        ...next.activeAgents,
+      ]),
     };
   }
   return {
@@ -381,6 +409,10 @@ function mergeStageOverlay(
     activeAssistantIds: dedupeStrings([
       ...current.activeAssistantIds,
       ...next.activeAssistantIds,
+    ]),
+    activeAgents: dedupeAgents([
+      ...(current.activeAgents ?? []),
+      ...next.activeAgents,
     ]),
   };
 }
@@ -404,26 +436,62 @@ function liveTurnAction(turn: LiveTurn): string {
     item.options.length > 0 && !item.selectedOptionId && !item.cancelled
   );
   if (permission) return `Waiting for ${permission.toolName}`;
+
+  for (const block of [...turn.blocks].reverse()) {
+    if (block.kind === "tool") {
+      const tool = turn.tools.find((item) => item.toolId === block.toolId);
+      if (tool?.title.trim()) return tool.title.trim();
+      continue;
+    }
+    if (block.kind === "sessionUpdate") {
+      const text = sessionUpdateText(block.data);
+      if (text) return text;
+      continue;
+    }
+    if (block.kind === "assistant" || block.kind === "thought") {
+      const text = latestTextContent(block.blocks);
+      if (text) return text;
+    }
+  }
+
   const tool = [...turn.tools].reverse().find((item) => item.title.trim());
   if (tool) return tool.title.trim();
-  const text = latestTurnText(turn);
-  if (text) return text;
   return turn.status === "cancelling" ? "Cancelling" : "Running";
 }
 
-function latestTurnText(turn: LiveTurn): string | null {
-  for (const block of [...turn.blocks].reverse()) {
-    if (block.kind !== "assistant" && block.kind !== "thought") continue;
-    for (const content of [...block.blocks].reverse()) {
-      if (content.type !== "text") continue;
-      const text = content.text.trim().replace(/\s+/g, " ");
-      if (text) return text.length > 80 ? `${text.slice(0, 77)}...` : text;
-    }
+function latestTextContent(blocks: Array<{ type: string; text?: string }>): string | null {
+  for (const content of [...blocks].reverse()) {
+    if (content.type !== "text") continue;
+    const text = content.text?.trim().replace(/\s+/g, " ");
+    if (text) return trimActionText(text);
   }
   return null;
 }
 
+function sessionUpdateText(data: unknown): string | null {
+  if (typeof data === "string") return trimActionText(data.split("\n")[0] ?? "");
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const record = data as Record<string, unknown>;
+  for (const key of ["text", "message", "summary"]) {
+    const value = record[key];
+    if (typeof value !== "string") continue;
+    const text = trimActionText(value.split("\n")[0] ?? "");
+    if (text) return text;
+  }
+  return null;
+}
+
+function trimActionText(text: string): string | null {
+  const trimmed = text.trim().replace(/\s+/g, " ");
+  if (!trimmed) return null;
+  return trimmed.length > 80 ? `${trimmed.slice(0, 77)}...` : trimmed;
+}
+
 function dedupeStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function dedupeAgents(values: Agent[]): Agent[] {
   return [...new Set(values.filter(Boolean))];
 }
 
