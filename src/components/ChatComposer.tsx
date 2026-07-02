@@ -18,6 +18,7 @@ import {
   Square,
   Sparkles,
   Trash2,
+  Wrench,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -96,7 +97,9 @@ export default function ChatComposer({
           : t("new_chat.send")
     );
   const showContextMenuTrigger =
-    composer.supportsAttachments || composer.availableSkills.length > 0;
+    composer.supportsAttachments
+    || composer.availableSkills.length > 0
+    || composer.availableMcpServers.length > 0;
   const systemSkills = composer.availableSkills.filter(
     (skill) => skill.source === SESSIO_PROMPT_MARKERS.skillSourceBuiltin,
   );
@@ -132,6 +135,22 @@ export default function ChatComposer({
         : <BookOpen className="h-4 w-4" />,
     })),
   ];
+  const mcpSubmenuOptions: PopupMenuOption<string>[] = [
+    ...(composer.selectedMcpIds.length > 0
+      ? [{
+          key: "mcps:clear",
+          label: t("new_chat.mcps_clear"),
+          icon: <Trash2 className="h-4 w-4" />,
+        }]
+      : []),
+    ...composer.availableMcpServers.map((server) => ({
+      key: `mcp:${server.id}`,
+      label: server.name,
+      icon: composer.selectedMcpIds.includes(server.id)
+        ? <Check className="h-4 w-4" />
+        : <Wrench className="h-4 w-4" />,
+    })),
+  ];
   const attachmentOptions: PopupMenuOption<string>[] = [
     ...(composer.supportsImageAttachments
       ? [{
@@ -158,6 +177,19 @@ export default function ChatComposer({
               : t("new_chat.add_skills"),
           icon: <BookOpen className="h-4 w-4" />,
           children: skillSubmenuOptions,
+        }]
+      : []),
+    ...(composer.availableMcpServers.length > 0
+      ? [{
+          key: "mcps",
+          label:
+            composer.selectedMcpIds.length > 0
+              ? t("new_chat.add_mcps_selected", {
+                  count: composer.selectedMcpIds.length,
+                })
+              : t("new_chat.add_mcps"),
+          icon: <Wrench className="h-4 w-4" />,
+          children: mcpSubmenuOptions,
         }]
       : []),
   ];
@@ -394,6 +426,14 @@ export default function ChatComposer({
             }
             if (key.startsWith("skill:")) {
               composer.toggleSkillSelection(key.slice("skill:".length));
+              return false;
+            }
+            if (key === "mcps:clear") {
+              composer.clearSelectedMcps();
+              return false;
+            }
+            if (key.startsWith("mcp:")) {
+              composer.toggleMcpSelection(key.slice("mcp:".length));
               return false;
             }
             if (key === "images" || key === "files") {

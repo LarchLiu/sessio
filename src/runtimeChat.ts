@@ -320,12 +320,14 @@ export function dispatchSessionStartedFallback({
   liveState,
   sequenceRef,
   timestamp,
+  metadata,
 }: {
   dispatch: React.Dispatch<LiveRuntimeAction>;
   handle: AgentSessionHandle;
   liveState: LiveRuntimeState;
   sequenceRef: { current: number };
   timestamp: number;
+  metadata?: Record<string, unknown>;
 }): void {
   if (liveState.sessions[handle.sessioRuntimeSessionId]) return;
   sequenceRef.current += 1;
@@ -341,7 +343,7 @@ export function dispatchSessionStartedFallback({
       transport: handle.transport,
       workspacePath: handle.workspacePath,
       capabilities: handle.capabilities,
-      metadata: {},
+      metadata: metadata ?? {},
     },
   });
 }

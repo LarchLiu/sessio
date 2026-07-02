@@ -90,6 +90,7 @@ import {
 } from "../hooks/useComposerInputHistory";
 import { useComputerUseFeatureEnabled } from "../hooks/useComputerUseFeatureEnabled";
 import type { ChatComposerController } from "../hooks/useChatComposer";
+import { normalizeSelectedMcpIds, useSelectableMcpServers } from "../hooks/useSelectableMcpServers";
 import { useSelectableSkills } from "../hooks/useSelectableSkills";
 import { localeTag, useI18n } from "../i18n";
 import type { ChatView, ViewMode } from "../navigation";
@@ -725,6 +726,13 @@ export function AcpTranscriptPanel({
     runtimeAgents.find((item) => item.agent === composerAgent) ?? null;
   const computerUseFeatureEnabled = useComputerUseFeatureEnabled();
   const {
+    availableMcpServers,
+    selectedMcpIds,
+    selectedMcpServers,
+    toggleMcpSelection,
+    clearSelectedMcps,
+  } = useSelectableMcpServers(selectedComposerAgent?.capabilities ?? null);
+  const {
     availableSkills,
     selectedSkillIds,
     selectedSkills,
@@ -1337,20 +1345,28 @@ export function AcpTranscriptPanel({
     const targetAgent = composerAgent;
     const sameAgent = targetAgent === agent;
     const desiredComputerUseEnabled = Boolean(composerComputerUseEligible && computerUseEnabled);
+    const normalizedSelectedMcpIds = normalizeSelectedMcpIds(selectedMcpIds);
     const sessionOptions = buildRuntimeSessionOptions(
       composerModel,
       composerPermissionMode,
       composerEffort,
       desiredComputerUseEnabled,
       selectedSkillIds,
+      normalizedSelectedMcpIds,
     );
     const existingRuntimeSession = sameAgent ? liveState.sessions[runtimeSessionId] : null;
     const existingComputerUseAttached = Boolean(
       existingRuntimeSession && !existingRuntimeSession.ended && existingRuntimeSession.metadata?.computerUse,
     );
+    const existingSelectedMcpIds = runtimeMetadataSelectedMcpIds(existingRuntimeSession?.metadata);
     const shouldRecreateForComputerUse =
       Boolean(existingRuntimeSession && !existingRuntimeSession.ended) &&
       existingComputerUseAttached !== desiredComputerUseEnabled;
+    const shouldRecreateForSelectedMcps =
+      Boolean(existingRuntimeSession && !existingRuntimeSession.ended) &&
+      !sameNormalizedStringList(existingSelectedMcpIds, normalizedSelectedMcpIds);
+    const shouldRecreateRuntimeSession =
+      shouldRecreateForComputerUse || shouldRecreateForSelectedMcps;
     console.info("[sessio-runtime:frontend:send]", {
       text,
       runtimeSessionId,
@@ -1358,10 +1374,10 @@ export function AcpTranscriptPanel({
       workspacePath,
       sourceSessionId: sessionId,
     });
-    if (sameAgent && shouldRecreateForComputerUse) {
+    if (sameAgent && shouldRecreateRuntimeSession) {
       await disposeAgentRuntimeSession(runtimeSessionId).catch(() => {});
     }
-    if (sameAgent && (!liveState.sessions[runtimeSessionId] || shouldRecreateForComputerUse)) {
+    if (sameAgent && (!liveState.sessions[runtimeSessionId] || shouldRecreateRuntimeSession)) {
       dispatchLiveEvent({
         type: "ensure-session",
         session: pendingLiveSession({
@@ -1369,7 +1385,7 @@ export function AcpTranscriptPanel({
           agent: targetAgent,
           workspacePath: workspacePath ?? "",
           capabilities: fallbackComposerCapabilities,
-          metadata: desiredComputerUseEnabled ? { computerUse: true } : {},
+          metadata: sessionOptions,
         }),
       });
     }
@@ -1445,6 +1461,7 @@ export function AcpTranscriptPanel({
           liveState,
           sequenceRef: fallbackRuntimeSequenceRef,
           timestamp,
+          metadata: sessionOptions,
         });
         dispatchLiveEvent({
           type: "ensure-session",
@@ -1453,6 +1470,7 @@ export function AcpTranscriptPanel({
             agent: handle.agent,
             workspacePath: handle.workspacePath,
             capabilities: handle.capabilities,
+            metadata: sessionOptions,
           }),
         });
         onPendingSession({
@@ -1487,6 +1505,7 @@ export function AcpTranscriptPanel({
           ];
       const turnRuntimeOptions = {
         selectedSkillIds,
+        selectedMcpIds: normalizedSelectedMcpIds,
         ...(runtimeOptions ?? {}),
       };
       const turn = await sendAgentInput(handle.sessioRuntimeSessionId, {
@@ -1510,7 +1529,7 @@ export function AcpTranscriptPanel({
     } finally {
       setSending(false);
     }
-  }, [agent, beginFollowingLiveStream, cachedAvailableCommands, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, resetComposerInputHistory, runtimeSessionId, scrollChatToBottom, selectedSkillIds, selectedSlashCommand, sending, sessionId, workspacePath]);
+  }, [agent, beginFollowingLiveStream, cachedAvailableCommands, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, resetComposerInputHistory, runtimeSessionId, scrollChatToBottom, selectedMcpIds, selectedSkillIds, selectedSlashCommand, sending, sessionId, workspacePath]);
 
   const runCommandText = useCallback(async (text: string) => {
     await handleSendText(text);
@@ -1702,6 +1721,11 @@ export function AcpTranscriptPanel({
     setComputerUseEnabled,
     handleComputerUseToggle,
     computerUseEligible: composerComputerUseEligible,
+    availableMcpServers,
+    selectedMcpIds,
+    selectedMcpServers,
+    toggleMcpSelection,
+    clearSelectedMcps,
     availableSkills,
     selectedSkillIds,
     selectedSkills,
@@ -1730,7 +1754,9 @@ export function AcpTranscriptPanel({
     sessionComputerUseActive,
     composerText,
     composerPermissionOptions,
+    availableMcpServers,
     availableSkills,
+    clearSelectedMcps,
     clearSelectedSkills,
     handleComposerAgentModelChange,
     handleComputerUseToggle,
@@ -1740,14 +1766,17 @@ export function AcpTranscriptPanel({
     removeAttachment,
     sendWithContext,
     setComposerAttachmentMenuOpen,
+    selectedMcpIds,
     selectedSkillIds,
     selectedAgentModelValue,
+    selectedMcpServers,
     selectedComposerAgent,
     selectedSkills,
     sending,
     supportsAttachments,
     supportsEmbeddedContext,
     supportsImageAttachments,
+    toggleMcpSelection,
     toggleSkillSelection,
   ]);
   useAppshotComposerRegistration(chatComposerController, true);
@@ -2031,6 +2060,19 @@ function pendingLiveSession(handle: {
     protocolMessages: [],
     ended: false,
   };
+}
+
+function runtimeMetadataSelectedMcpIds(
+  metadata: Record<string, unknown> | undefined,
+): string[] {
+  const raw = metadata?.selectedMcpIds;
+  if (!Array.isArray(raw)) return [];
+  return normalizeSelectedMcpIds(raw.filter((value): value is string => typeof value === "string"));
+}
+
+function sameNormalizedStringList(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
 }
 
 function RoleNav({

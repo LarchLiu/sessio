@@ -14,6 +14,7 @@ use crate::config;
 const BUILTIN_COMPUTER_USE_ID: &str = "builtin:computer-use";
 const BUILTIN_COMPUTER_USE_NAME: &str = "Sessio Computer Use";
 const BUILTIN_COMPUTER_USE_SERVER_NAME: &str = "sessio-computer-use";
+pub const SELECTED_MCP_IDS_OPTION: &str = "selectedMcpIds";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -39,7 +40,7 @@ pub enum McpServerInjectionMode {
 
 impl Default for McpServerInjectionMode {
     fn default() -> Self {
-        Self::Always
+        Self::SessionOptIn
     }
 }
 
@@ -144,19 +145,21 @@ pub fn normalize_custom_settings(settings: McpSettings) -> Result<McpSettings> {
     Ok(McpSettings { servers })
 }
 
-pub fn custom_session_servers(
+pub fn selected_session_servers(
     settings: &McpSettings,
     capabilities: Option<&RuntimeCapabilitySet>,
+    options: &crate::agents::runtime::types::RuntimeMetadata,
 ) -> Result<Vec<McpServer>> {
+    let selected_ids = selected_mcp_ids_from_options(options);
+    if selected_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let selectable_servers = selectable_custom_servers(settings, capabilities);
     let mut out = Vec::new();
-    for server in &settings.servers {
-        if server.source != McpServerSource::Custom
-            || !server.enabled
-            || server.injection_mode != McpServerInjectionMode::Always
-            || !transport_supported(server.transport, capabilities)
-        {
+    for id in selected_ids {
+        let Some(server) = selectable_servers.iter().find(|server| server.id == id) else {
             continue;
-        }
+        };
         out.push(configured_server_to_mcp_server(server)?);
     }
     Ok(out)
@@ -226,7 +229,7 @@ fn normalize_custom_server(server: McpServerConfig) -> Result<McpServerConfig> {
                 enabled: server.enabled,
                 source: McpServerSource::Custom,
                 transport: server.transport,
-                injection_mode: McpServerInjectionMode::Always,
+                injection_mode: McpServerInjectionMode::SessionOptIn,
                 builtin_kind: None,
                 url: Some(url),
                 headers,
@@ -245,7 +248,7 @@ fn normalize_custom_server(server: McpServerConfig) -> Result<McpServerConfig> {
                 enabled: server.enabled,
                 source: McpServerSource::Custom,
                 transport: McpServerTransport::Stdio,
-                injection_mode: McpServerInjectionMode::Always,
+                injection_mode: McpServerInjectionMode::SessionOptIn,
                 builtin_kind: None,
                 url: None,
                 headers: Vec::new(),
@@ -265,6 +268,44 @@ fn normalize_entries(entries: Vec<McpKeyValue>) -> Vec<McpKeyValue> {
             value: entry.value.trim().to_string(),
         })
         .filter(|entry| !entry.name.is_empty())
+        .collect()
+}
+
+fn selected_mcp_ids_from_options(
+    options: &crate::agents::runtime::types::RuntimeMetadata,
+) -> Vec<String> {
+    let Some(values) = options
+        .get(SELECTED_MCP_IDS_OPTION)
+        .or_else(|| options.get("selected_mcp_ids"))
+        .and_then(|value| value.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    values
+        .iter()
+        .filter_map(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter_map(|value| {
+            let owned = value.to_string();
+            seen.insert(owned.clone()).then_some(owned)
+        })
+        .collect()
+}
+
+fn selectable_custom_servers<'a>(
+    settings: &'a McpSettings,
+    capabilities: Option<&RuntimeCapabilitySet>,
+) -> Vec<&'a McpServerConfig> {
+    settings
+        .servers
+        .iter()
+        .filter(|server| {
+            server.source == McpServerSource::Custom
+                && server.enabled
+                && transport_supported(server.transport, capabilities)
+        })
         .collect()
 }
 
@@ -337,6 +378,7 @@ fn transport_supported(
 mod tests {
     use super::*;
     use crate::agents::runtime::types::McpInjectionCapabilities;
+    use serde_json::json;
 
     fn caps(http: bool, sse: bool) -> RuntimeCapabilitySet {
         let mut capabilities = RuntimeCapabilitySet::fake();
@@ -381,7 +423,7 @@ mod tests {
         assert_eq!(settings.servers.len(), 1);
         let server = &settings.servers[0];
         assert_eq!(server.id, "custom-1");
-        assert_eq!(server.injection_mode, McpServerInjectionMode::Always);
+        assert_eq!(server.injection_mode, McpServerInjectionMode::SessionOptIn);
         assert_eq!(server.url.as_deref(), Some("http://127.0.0.1:8123/mcp"));
         assert!(server.command.is_none());
         assert!(server.args.is_empty());
@@ -390,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_session_servers_respect_transport_capabilities() {
+    fn selected_session_servers_inject_only_selected_ids() {
         let settings = McpSettings {
             servers: vec![
                 McpServerConfig {
@@ -399,7 +441,7 @@ mod tests {
                     enabled: true,
                     source: McpServerSource::Custom,
                     transport: McpServerTransport::Http,
-                    injection_mode: McpServerInjectionMode::Always,
+                    injection_mode: McpServerInjectionMode::SessionOptIn,
                     builtin_kind: None,
                     url: Some("http://127.0.0.1:8123/mcp".into()),
                     headers: Vec::new(),
@@ -413,7 +455,7 @@ mod tests {
                     enabled: true,
                     source: McpServerSource::Custom,
                     transport: McpServerTransport::Sse,
-                    injection_mode: McpServerInjectionMode::Always,
+                    injection_mode: McpServerInjectionMode::SessionOptIn,
                     builtin_kind: None,
                     url: Some("http://127.0.0.1:9000/sse".into()),
                     headers: Vec::new(),
@@ -427,7 +469,7 @@ mod tests {
                     enabled: true,
                     source: McpServerSource::Custom,
                     transport: McpServerTransport::Stdio,
-                    injection_mode: McpServerInjectionMode::Always,
+                    injection_mode: McpServerInjectionMode::SessionOptIn,
                     builtin_kind: None,
                     url: None,
                     headers: Vec::new(),
@@ -438,16 +480,62 @@ mod tests {
             ],
         };
 
-        let http_only = custom_session_servers(&settings, Some(&caps(true, false))).unwrap();
-        assert_eq!(http_only.len(), 2);
-        assert!(matches!(http_only[0], McpServer::Http(_)));
-        assert!(matches!(http_only[1], McpServer::Stdio(_)));
+        let mut options = crate::agents::runtime::types::RuntimeMetadata::new();
+        options.insert(
+            SELECTED_MCP_IDS_OPTION.to_string(),
+            json!(["stdio", "http", "missing"]),
+        );
 
-        let full = custom_session_servers(&settings, Some(&caps(true, true))).unwrap();
-        assert_eq!(full.len(), 3);
+        let selected =
+            selected_session_servers(&settings, Some(&caps(true, false)), &options).unwrap();
+        assert_eq!(selected.len(), 2);
+        assert!(matches!(selected[0], McpServer::Stdio(_)));
+        assert!(matches!(selected[1], McpServer::Http(_)));
+    }
 
-        let unknown = custom_session_servers(&settings, None).unwrap();
-        assert_eq!(unknown.len(), 1);
-        assert!(matches!(unknown[0], McpServer::Stdio(_)));
+    #[test]
+    fn selected_session_servers_ignore_unsupported_transports() {
+        let settings = McpSettings {
+            servers: vec![
+                McpServerConfig {
+                    id: "http".into(),
+                    name: "HTTP".into(),
+                    enabled: true,
+                    source: McpServerSource::Custom,
+                    transport: McpServerTransport::Http,
+                    injection_mode: McpServerInjectionMode::SessionOptIn,
+                    builtin_kind: None,
+                    url: Some("http://127.0.0.1:8123/mcp".into()),
+                    headers: Vec::new(),
+                    command: None,
+                    args: Vec::new(),
+                    env: Vec::new(),
+                },
+                McpServerConfig {
+                    id: "stdio".into(),
+                    name: "Stdio".into(),
+                    enabled: true,
+                    source: McpServerSource::Custom,
+                    transport: McpServerTransport::Stdio,
+                    injection_mode: McpServerInjectionMode::SessionOptIn,
+                    builtin_kind: None,
+                    url: None,
+                    headers: Vec::new(),
+                    command: Some("/bin/echo".into()),
+                    args: vec!["ok".into()],
+                    env: Vec::new(),
+                },
+            ],
+        };
+        let mut options = crate::agents::runtime::types::RuntimeMetadata::new();
+        options.insert(
+            SELECTED_MCP_IDS_OPTION.to_string(),
+            json!(["http", "stdio"]),
+        );
+
+        let selected =
+            selected_session_servers(&settings, Some(&caps(false, false)), &options).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert!(matches!(selected[0], McpServer::Stdio(_)));
     }
 }

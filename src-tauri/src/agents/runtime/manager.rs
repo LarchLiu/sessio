@@ -552,8 +552,8 @@ impl RuntimeManager {
     }
 
     /// Attach any configured MCP servers to this session config. Custom MCPs
-    /// are injected whenever the target agent supports their transport. Built-in
-    /// MCPs can additionally inspect session options before opting in.
+    /// are only injected when the user selected them for this conversation.
+    /// Built-in MCPs can additionally inspect session options before opting in.
     fn attach_mcp_injections(
         &self,
         agent: Agent,
@@ -568,13 +568,13 @@ impl RuntimeManager {
             .try_state::<crate::mcp::McpSettingsCache>()
             .map(|cache| cache.get())
             .unwrap_or_else(|| crate::mcp::load_settings().unwrap_or_default());
-        match crate::mcp::custom_session_servers(&settings, capabilities.as_ref()) {
+        match crate::mcp::selected_session_servers(&settings, capabilities.as_ref(), options) {
             Ok(mut servers) => {
                 config.mcp_servers.append(&mut servers);
             }
             Err(error) => {
                 log::warn!(
-                    "[sessio-runtime:mcp] failed to load custom MCP servers for session={}: {}",
+                    "[sessio-runtime:mcp] failed to load selected MCP servers for session={}: {}",
                     sessio_runtime_session_id,
                     error
                 );

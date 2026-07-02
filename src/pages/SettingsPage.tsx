@@ -5199,7 +5199,7 @@ function createDefaultCustomMcpServer(): McpServerConfig {
     enabled: true,
     source: SESSIO_PROMPT_MARKERS.mcpSourceCustom,
     transport: "http",
-    injectionMode: "always",
+    injectionMode: "sessionOptIn",
     builtinKind: null,
     url: "",
     headers: [],

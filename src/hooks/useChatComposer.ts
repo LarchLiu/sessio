@@ -46,6 +46,10 @@ import {
   selectionPermissionMode,
 } from "../runtimeAgents";
 import { useComputerUseFeatureEnabled } from "./useComputerUseFeatureEnabled";
+import {
+  normalizeSelectedMcpIds,
+  useSelectableMcpServers,
+} from "./useSelectableMcpServers";
 import { useSelectableSkills } from "./useSelectableSkills";
 
 type PendingSessionExtras = Omit<
@@ -103,6 +107,11 @@ export interface ChatComposerController {
   setComputerUseEnabled: Dispatch<SetStateAction<boolean>>;
   handleComputerUseToggle: () => void | Promise<void>;
   computerUseEligible: boolean;
+  availableMcpServers: import("../api").McpServerConfig[];
+  selectedMcpIds: string[];
+  selectedMcpServers: import("../api").McpServerConfig[];
+  toggleMcpSelection: (mcpId: string) => void;
+  clearSelectedMcps: () => void;
   availableSkills: import("../api").SkillMetadata[];
   selectedSkillIds: string[];
   selectedSkills: import("../api").SkillMetadata[];
@@ -169,6 +178,13 @@ export function useChatComposer({
   const computerUseEligible = Boolean(
     selectedRuntimeAgent?.computerUseEligible && computerUseFeatureEnabled,
   );
+  const {
+    availableMcpServers,
+    selectedMcpIds,
+    selectedMcpServers,
+    toggleMcpSelection,
+    clearSelectedMcps,
+  } = useSelectableMcpServers(selectedRuntimeAgent?.capabilities ?? null);
   const {
     availableSkills,
     selectedSkillIds,
@@ -277,10 +293,10 @@ export function useChatComposer({
   }, [computerUseEligible]);
 
   useEffect(() => {
-    if (!supportsAttachments && availableSkills.length === 0) {
+    if (!supportsAttachments && availableSkills.length === 0 && availableMcpServers.length === 0) {
       setAttachmentMenuOpen(false);
     }
-  }, [availableSkills.length, supportsAttachments]);
+  }, [availableMcpServers.length, availableSkills.length, supportsAttachments]);
 
   useEffect(() => {
     window.requestAnimationFrame(() => textareaRef.current?.focus());
@@ -396,6 +412,7 @@ export function useChatComposer({
           effort,
           computerUseEnabled,
           selectedSkillIds,
+          selectedMcpIds,
         ),
       });
       if (computerUseEnabled) {
@@ -414,6 +431,14 @@ export function useChatComposer({
         liveState,
         sequenceRef: fallbackRuntimeSequenceRef,
         timestamp,
+        metadata: runtimeSessionOptions(
+          model,
+          permissionMode,
+          effort,
+          computerUseEnabled,
+          selectedSkillIds,
+          selectedMcpIds,
+        ),
       });
       const pendingSession: PendingNewChatSession = {
         ...(options.pendingSession ?? {}),
@@ -498,6 +523,11 @@ export function useChatComposer({
     setComputerUseEnabled,
     handleComputerUseToggle: () => setComputerUseEnabled((enabled) => !enabled),
     computerUseEligible,
+    availableMcpServers,
+    selectedMcpIds,
+    selectedMcpServers,
+    toggleMcpSelection,
+    clearSelectedMcps,
     availableSkills,
     selectedSkillIds,
     selectedSkills,
@@ -526,6 +556,7 @@ export function runtimeSessionOptions(
   effort = "",
   computerUse = false,
   selectedSkillIds: string[] = [],
+  selectedMcpIds: string[] = [],
 ): Record<string, unknown> {
   return {
     ...(model ? { model } : {}),
@@ -533,5 +564,6 @@ export function runtimeSessionOptions(
     ...(permissionMode ? { permissionMode } : {}),
     ...(computerUse ? { computerUse: true } : {}),
     selectedSkillIds,
+    selectedMcpIds: normalizeSelectedMcpIds(selectedMcpIds),
   };
 }
