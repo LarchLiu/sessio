@@ -849,10 +849,7 @@ fn new_session_request(
 ) -> NewSessionRequest {
     let mut request = NewSessionRequest::new(workspace_path);
 
-    // Inject the desktop-owned computer-use MCP server (agent-agnostic; gated by
-    // eligibility before this point). Done first so it applies to every agent,
-    // not just Claude's meta-options path below.
-    request.mcp_servers.extend(computer_use_mcp_servers(config));
+    request.mcp_servers.extend(configured_mcp_servers(config));
 
     if agent != Agent::Claude {
         return request;
@@ -899,7 +896,7 @@ fn load_session_request(
     config: Option<&AgentRuntimeSessionConfig>,
 ) -> LoadSessionRequest {
     let mut request = LoadSessionRequest::new(session_id, workspace_path);
-    request.mcp_servers.extend(computer_use_mcp_servers(config));
+    request.mcp_servers.extend(configured_mcp_servers(config));
     request
 }
 
@@ -909,7 +906,7 @@ fn resume_session_request(
     config: Option<&AgentRuntimeSessionConfig>,
 ) -> ResumeSessionRequest {
     let mut request = ResumeSessionRequest::new(session_id, workspace_path);
-    request.mcp_servers.extend(computer_use_mcp_servers(config));
+    request.mcp_servers.extend(configured_mcp_servers(config));
     request
 }
 
@@ -919,23 +916,14 @@ fn fork_session_request(
     config: Option<&AgentRuntimeSessionConfig>,
 ) -> ForkSessionRequest {
     let mut request = ForkSessionRequest::new(session_id, workspace_path);
-    request.mcp_servers.extend(computer_use_mcp_servers(config));
+    request.mcp_servers.extend(configured_mcp_servers(config));
     request
 }
 
-fn computer_use_mcp_servers(config: Option<&AgentRuntimeSessionConfig>) -> Vec<McpServer> {
-    let Some(injection) = config.and_then(|c| c.computer_use.as_ref()) else {
-        return Vec::new();
-    };
-    use agent_client_protocol::schema::v1::{HttpHeader, McpServerHttp};
-    vec![McpServer::Http(
-        McpServerHttp::new("sessio-computer-use", injection.url.clone()).headers(vec![
-            HttpHeader::new(
-                "Authorization",
-                format!("Bearer {}", injection.bearer_token),
-            ),
-        ]),
-    )]
+fn configured_mcp_servers(config: Option<&AgentRuntimeSessionConfig>) -> Vec<McpServer> {
+    config
+        .map(|config| config.mcp_servers.clone())
+        .unwrap_or_default()
 }
 
 async fn apply_initial_session_config(
@@ -2086,11 +2074,12 @@ mod tests {
     #[test]
     fn new_session_request_injects_http_mcp_server_with_bearer() {
         use agent_client_protocol::schema::v1::McpServer;
+        let injection = super::super::types::ComputerUseInjection {
+            url: "http://127.0.0.1:54321/mcp".into(),
+            bearer_token: "tok-abc".into(),
+        };
         let config = AgentRuntimeSessionConfig {
-            computer_use: Some(super::super::types::ComputerUseInjection {
-                url: "http://127.0.0.1:54321/mcp".into(),
-                bearer_token: "tok-abc".into(),
-            }),
+            mcp_servers: vec![crate::mcp::computer_use_runtime_server(&injection)],
             ..Default::default()
         };
         let request = new_session_request(Agent::Codex, "/tmp/ws".to_string(), Some(&config));
@@ -2113,11 +2102,12 @@ mod tests {
     #[test]
     fn restored_session_requests_inject_http_mcp_server_with_bearer() {
         use agent_client_protocol::schema::v1::McpServer;
+        let injection = super::super::types::ComputerUseInjection {
+            url: "http://127.0.0.1:54321/mcp".into(),
+            bearer_token: "tok-restore".into(),
+        };
         let config = AgentRuntimeSessionConfig {
-            computer_use: Some(super::super::types::ComputerUseInjection {
-                url: "http://127.0.0.1:54321/mcp".into(),
-                bearer_token: "tok-restore".into(),
-            }),
+            mcp_servers: vec![crate::mcp::computer_use_runtime_server(&injection)],
             ..Default::default()
         };
 
@@ -2163,12 +2153,13 @@ mod tests {
     #[test]
     fn new_session_request_injects_for_claude_alongside_meta_options() {
         use agent_client_protocol::schema::v1::McpServer;
+        let injection = super::super::types::ComputerUseInjection {
+            url: "http://127.0.0.1:9/mcp".into(),
+            bearer_token: "t".into(),
+        };
         let config = AgentRuntimeSessionConfig {
             model: Some("opus".into()),
-            computer_use: Some(super::super::types::ComputerUseInjection {
-                url: "http://127.0.0.1:9/mcp".into(),
-                bearer_token: "t".into(),
-            }),
+            mcp_servers: vec![crate::mcp::computer_use_runtime_server(&injection)],
             ..Default::default()
         };
         let request = new_session_request(Agent::Claude, "/tmp/ws".to_string(), Some(&config));

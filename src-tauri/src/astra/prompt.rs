@@ -724,12 +724,10 @@ fn render_process_plan_task_snapshot_prompt(
     task: &AstraTaskProposal,
 ) -> String {
     let mut lines = Vec::new();
-    let focused_stage = task.target_stage_id.as_deref().and_then(|stage_id| {
-        thread
-            .stages
-            .iter()
-            .find(|stage| stage.id == stage_id)
-    });
+    let focused_stage = task
+        .target_stage_id
+        .as_deref()
+        .and_then(|stage_id| thread.stages.iter().find(|stage| stage.id == stage_id));
     lines.push("# Sessio workflow task".to_string());
     lines.push(String::new());
     lines.push("You are executing a workflow stage task from an Astra sequential plan. Use the live workflow snapshot below as the primary execution context for this run. Persisted planning snapshots are included later only as reference.".to_string());
@@ -798,12 +796,7 @@ fn render_process_plan_task_snapshot_prompt(
     ));
     lines.push(String::new());
     lines.push("## Live workflow snapshot".to_string());
-    push_stage_work_snapshot_lines(
-        &mut lines,
-        snapshot,
-        task.target_stage_id.as_deref(),
-        false,
-    );
+    push_stage_work_snapshot_lines(&mut lines, snapshot, task.target_stage_id.as_deref(), false);
     lines.push(String::new());
     lines.push("## Planning snapshots (reference)".to_string());
     if let Some(stage) = snapshot
@@ -847,12 +840,7 @@ fn render_process_plan_task_snapshot_prompt(
     if let Some(stage_id) = task.target_stage_id.as_deref() {
         attrs.push(("thread_stage_id", stage_id.to_string()));
     }
-    wrap_thread_prompt(
-        "astra_process_plan_task",
-        thread,
-        lines.join("\n"),
-        &attrs,
-    )
+    wrap_thread_prompt("astra_process_plan_task", thread, lines.join("\n"), &attrs)
 }
 
 fn render_teamwork_task_prompt(
@@ -1265,12 +1253,7 @@ fn render_stage_task_prompt(
     ));
     lines.push(String::new());
     lines.push("## Stage work snapshot".to_string());
-    push_stage_work_snapshot_lines(
-        &mut lines,
-        snapshot,
-        Some(focused_stage.id.as_str()),
-        false,
-    );
+    push_stage_work_snapshot_lines(&mut lines, snapshot, Some(focused_stage.id.as_str()), false);
     lines.push(String::new());
     lines.push("## Astra task".to_string());
     lines.push(format!("Task title: {}", task.title));
@@ -1333,8 +1316,8 @@ mod tests {
     use super::*;
     use crate::astra::{AstraRunStatus, AstraTaskResult, AstraTaskResultStatus, AstraTaskRisk};
     use crate::models::{
-        Agent, AssistantAgentInfo, ProjectStageType, SessionInfo, StageAssistantInfo,
-        StageInfo, ThreadAssistantInfo, ThreadKind,
+        Agent, AssistantAgentInfo, ProjectStageType, SessionInfo, StageAssistantInfo, StageInfo,
+        ThreadAssistantInfo, ThreadKind,
     };
 
     fn run() -> AstraRun {
@@ -1983,7 +1966,9 @@ mod tests {
         assert!(context.prompt.contains("## Live workflow snapshot"));
         assert!(context.prompt.contains("Draft written."));
         assert!(context.prompt.contains("joke-draft.md updated."));
-        assert!(context.prompt.contains("[codex:session-writing] Draft session"));
+        assert!(context
+            .prompt
+            .contains("[codex:session-writing] Draft session"));
         assert!(context.prompt.contains("## Planning snapshots (reference)"));
     }
 }

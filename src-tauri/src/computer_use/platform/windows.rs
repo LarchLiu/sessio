@@ -1310,10 +1310,10 @@ struct ShortcutResolver {
 impl ShortcutResolver {
     fn new() -> ProviderResult<Self> {
         let apartment = ComApartment::init()?;
-        let shortcut: IShellLinkW =
-            unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER) }.map_err(
-                |e| ProviderError::Failed(format!("create ShellLink COM instance: {e}")),
-            )?;
+        let shortcut: IShellLinkW = unsafe {
+            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+        }
+        .map_err(|e| ProviderError::Failed(format!("create ShellLink COM instance: {e}")))?;
         let persist: IPersistFile = shortcut
             .cast()
             .map_err(|e| ProviderError::Failed(format!("cast ShellLink to IPersistFile: {e}")))?;

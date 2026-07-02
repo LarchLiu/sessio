@@ -4,10 +4,12 @@ pub mod astra;
 pub mod cli;
 pub mod computer_use;
 pub mod config;
+pub mod config_watch;
 pub mod desktop_control;
 pub mod file_preview_watch;
 pub mod im_bridge;
 pub mod indexer;
+pub mod mcp;
 pub mod memory;
 pub mod models;
 pub mod network;
@@ -8369,6 +8371,21 @@ fn update_network_config(config: config::NetworkConfig) -> Result<config::Networ
 }
 
 #[tauri::command]
+fn get_mcp_settings(cache: State<'_, mcp::McpSettingsCache>) -> Result<mcp::McpSettings, String> {
+    Ok(cache.get())
+}
+
+#[tauri::command]
+fn update_mcp_settings(
+    settings: mcp::McpSettings,
+    cache: State<'_, mcp::McpSettingsCache>,
+) -> Result<mcp::McpSettings, String> {
+    let settings = mcp::save_settings(settings).map_err(|e| e.to_string())?;
+    cache.set(settings.clone());
+    Ok(settings)
+}
+
+#[tauri::command]
 fn get_appshot_config() -> Result<config::AppshotConfig, String> {
     config::load_config()
         .map(|config| config.appshot)
@@ -8490,9 +8507,11 @@ fn set_appshot_shortcut_recording(app: AppHandle, recording: bool) -> Result<(),
 fn update_computer_use_settings(
     settings: computer_use::settings::ComputerUseSettings,
     runtime: State<'_, RuntimeManager>,
+    mcp_cache: State<'_, mcp::McpSettingsCache>,
 ) -> Result<computer_use::settings::ComputerUseSettings, String> {
     let settings = computer_use::config::save_settings(settings).map_err(|e| e.to_string())?;
     runtime.update_computer_use_settings(settings.clone());
+    mcp_cache.refresh_from_disk().map_err(|e| e.to_string())?;
     Ok(settings)
 }
 
@@ -8706,10 +8725,13 @@ fn set_computer_use_app_approval(
     app_id: String,
     approved: bool,
     runtime: State<'_, RuntimeManager>,
+    mcp_cache: State<'_, mcp::McpSettingsCache>,
 ) -> Result<computer_use::settings::ComputerUseSettings, String> {
-    runtime
+    let settings = runtime
         .set_computer_use_app_approval(&sessio_runtime_session_id, &app_id, approved)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    mcp_cache.refresh_from_disk().map_err(|e| e.to_string())?;
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -9178,8 +9200,14 @@ pub fn run() {
             let memory_store: Arc<dyn MemoryStore> = sqlite;
             let store: Arc<dyn SessionStore> = Arc::new(CachedStore::new(inner)?);
             let app_config = config::load_config()?;
+            let mcp_settings_cache = mcp::McpSettingsCache::default();
+            mcp_settings_cache.set(mcp::merged_settings(
+                &app_config.mcp,
+                &app_config.computer_use,
+            ));
             app.manage(AppshotShortcutState::default());
             app.manage(ScreenshotOverlayState::default());
+            app.manage(mcp_settings_cache);
             if let Err(error) = update_appshot_shortcut_registration(
                 &app.handle().clone(),
                 &app_config.appshot.shortcut,
@@ -9192,6 +9220,8 @@ pub fn run() {
                 log::warn!("[computer-use:broker] failed to start at app startup: {error}");
             }
             app.manage(runtime.clone());
+            let config_watcher = config_watch::ConfigWatcher::new(app.handle().clone())?;
+            app.manage(config_watcher);
             app.manage(TerminalService::new(app.handle().clone()));
             let preview_file_watcher =
                 file_preview_watch::PreviewFileWatcher::new(app.handle().clone())?;
@@ -9437,6 +9467,8 @@ pub fn run() {
             get_debug_config,
             get_network_config,
             update_network_config,
+            get_mcp_settings,
+            update_mcp_settings,
             get_appshot_config,
             take_config_recovery_notice,
             get_computer_use_settings,

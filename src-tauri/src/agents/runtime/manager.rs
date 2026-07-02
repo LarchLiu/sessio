@@ -551,10 +551,10 @@ impl RuntimeManager {
         }
     }
 
-    /// If the session requested computer use and the agent is eligible (HTTP MCP
-    /// injection capable), start/reuse the desktop MCP server, issue a token,
-    /// and attach the injection to `config`. No-op otherwise.
-    fn attach_computer_use_injection(
+    /// Attach any configured MCP servers to this session config. Custom MCPs
+    /// are injected whenever the target agent supports their transport. Built-in
+    /// MCPs can additionally inspect session options before opting in.
+    fn attach_mcp_injections(
         &self,
         agent: Agent,
         sessio_runtime_session_id: &str,
@@ -562,6 +562,24 @@ impl RuntimeManager {
         config: &mut AgentRuntimeSessionConfig,
     ) {
         let capabilities = self.probed_capabilities(agent);
+        let settings = self
+            .inner
+            .app
+            .try_state::<crate::mcp::McpSettingsCache>()
+            .map(|cache| cache.get())
+            .unwrap_or_else(|| crate::mcp::load_settings().unwrap_or_default());
+        match crate::mcp::custom_session_servers(&settings, capabilities.as_ref()) {
+            Ok(mut servers) => {
+                config.mcp_servers.append(&mut servers);
+            }
+            Err(error) => {
+                log::warn!(
+                    "[sessio-runtime:mcp] failed to load custom MCP servers for session={}: {}",
+                    sessio_runtime_session_id,
+                    error
+                );
+            }
+        }
         if !super::computer_use_runtime::should_inject(options, capabilities.as_ref()) {
             return;
         }
@@ -573,7 +591,9 @@ impl RuntimeManager {
                     sessio_runtime_session_id,
                     agent
                 );
-                config.computer_use = Some(injection);
+                config
+                    .mcp_servers
+                    .push(crate::mcp::computer_use_runtime_server(&injection));
             }
             Err(error) => {
                 log::warn!(
@@ -653,13 +673,7 @@ impl RuntimeManager {
         let mut pi_rpc_worker = None;
         match transport {
             RuntimeTransportKind::Acp => {
-                // Computer-use injection applies only to ACP (HTTP MCP) sessions.
-                self.attach_computer_use_injection(
-                    req.agent,
-                    &id,
-                    &req.options,
-                    &mut runtime_config,
-                );
+                self.attach_mcp_injections(req.agent, &id, &req.options, &mut runtime_config);
                 let command = acp_transport::command_from_options(req.agent, &req.options);
                 let start = match (&req.source_session_id, req.source_agent) {
                     (Some(source_session_id), Some(source_agent)) if source_agent == req.agent => {
@@ -818,8 +832,7 @@ impl RuntimeManager {
         let mut pi_rpc_worker = None;
         match transport {
             RuntimeTransportKind::Acp => {
-                // Computer-use injection applies only to ACP (HTTP MCP) sessions.
-                self.attach_computer_use_injection(
+                self.attach_mcp_injections(
                     req.agent,
                     &req.sessio_runtime_session_id,
                     &req.options,
@@ -1900,9 +1913,7 @@ fn session_config_from_options(
                 .or_else(|| option_string(options, "permission_mode"))
                 .map(|mode| normalize_runtime_permission_mode(agent, &mode))
         },
-        // Injection endpoint is attached later by the computer-use runtime once
-        // the session is confirmed eligible and a server token is issued.
-        computer_use: None,
+        mcp_servers: Vec::new(),
     }
 }
 

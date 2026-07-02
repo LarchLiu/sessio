@@ -156,6 +156,35 @@ export interface NetworkProxyConfig {
   noProxy: string | null;
 }
 
+export interface McpSettings {
+  servers: McpServerConfig[];
+}
+
+export type McpServerSource = "builtin" | "custom";
+export type McpServerTransport = "http" | "sse" | "stdio";
+export type McpServerInjectionMode = "always" | "sessionOptIn";
+export type BuiltinMcpKind = "computerUse";
+
+export interface McpKeyValue {
+  name: string;
+  value: string;
+}
+
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  enabled: boolean;
+  source: McpServerSource;
+  transport: McpServerTransport;
+  injectionMode: McpServerInjectionMode;
+  builtinKind: BuiltinMcpKind | null;
+  url: string | null;
+  headers: McpKeyValue[];
+  command: string | null;
+  args: string[];
+  env: McpKeyValue[];
+}
+
 export interface AppshotConfig {
   shortcut: string;
 }
@@ -2606,6 +2635,14 @@ export async function getNetworkConfig(): Promise<NetworkConfig> {
 
 export async function updateNetworkConfig(config: NetworkConfig): Promise<NetworkConfig> {
   return invoke<NetworkConfig>("update_network_config", { config });
+}
+
+export async function getMcpSettings(): Promise<McpSettings> {
+  return invoke<McpSettings>("get_mcp_settings");
+}
+
+export async function updateMcpSettings(settings: McpSettings): Promise<McpSettings> {
+  return invoke<McpSettings>("update_mcp_settings", { settings });
 }
 
 export async function getAppshotConfig(): Promise<AppshotConfig> {

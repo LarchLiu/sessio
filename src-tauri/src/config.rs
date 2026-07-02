@@ -6,6 +6,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::app_paths;
 use crate::computer_use::settings::ComputerUseSettings;
+use crate::mcp::McpSettings;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppConfig {
@@ -13,6 +14,7 @@ pub struct AppConfig {
     pub memory: Option<MemoryConfig>,
     pub index: IndexConfig,
     pub network: NetworkConfig,
+    pub mcp: McpSettings,
     pub appshot: AppshotConfig,
     pub computer_use: ComputerUseSettings,
     pub debug: DebugConfig,
@@ -90,6 +92,7 @@ struct RawConfig {
     memory: Option<RawMemoryConfig>,
     index: RawIndexConfig,
     network: RawNetworkConfig,
+    mcp: RawMcpConfig,
     appshot: RawAppshotConfig,
     computer_use: RawComputerUseConfig,
     debug: RawDebugConfig,
@@ -110,6 +113,11 @@ struct RawNetworkProxyConfig {
     enabled: Option<bool>,
     url: Option<String>,
     no_proxy: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RawMcpConfig {
+    custom_servers: Option<Vec<crate::mcp::McpServerConfig>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -158,6 +166,10 @@ static CONFIG_RECOVERY_NOTICE: OnceLock<Mutex<Option<ConfigRecoveryNotice>>> = O
 
 pub fn load_config() -> Result<AppConfig> {
     load_config_from_path(&config_path()?)
+}
+
+pub(crate) fn load_config_strict() -> Result<AppConfig> {
+    load_config_from_path_strict(&config_path()?)
 }
 
 pub fn take_config_recovery_notice() -> Option<ConfigRecoveryNotice> {
@@ -217,6 +229,19 @@ fn load_config_from_path(path: &Path) -> Result<AppConfig> {
     finalize_loaded_config(path, Some(contents.as_str()), raw)
 }
 
+fn load_config_from_path_strict(path: &Path) -> Result<AppConfig> {
+    if !path.exists() {
+        write_default_config_file(path)?;
+    }
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
+    if contents.trim().is_empty() {
+        return finalize_loaded_config_strict(RawConfig::default());
+    }
+    let raw = parse_raw_config(&contents)?;
+    finalize_loaded_config_strict(raw)
+}
+
 fn finalize_loaded_config(
     path: &Path,
     contents: Option<&str>,
@@ -234,6 +259,11 @@ fn finalize_loaded_config(
         save_config(&resolve_app_config(raw, false)?)?;
     }
     Ok(config)
+}
+
+fn finalize_loaded_config_strict(raw: RawConfig) -> Result<AppConfig> {
+    let (raw, _) = raw_config_with_defaults(raw)?;
+    resolve_app_config(raw, true)
 }
 
 fn recover_invalid_config(
@@ -391,6 +421,18 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 "no_proxy" => raw.network.proxy.no_proxy = value,
                 other => bail!("line {line_number}: unknown key in [network.proxy]: {other}"),
             },
+            Section::Mcp => match key {
+                "custom_servers" => {
+                    raw.mcp.custom_servers = value
+                        .map(|value| {
+                            serde_json::from_str::<Vec<crate::mcp::McpServerConfig>>(&value)
+                                .map_err(anyhow::Error::from)
+                        })
+                        .transpose()
+                        .with_context(|| line_context(line_number, raw_line))?
+                }
+                other => bail!("line {line_number}: unknown key in [mcp]: {other}"),
+            },
             Section::Appshot => match key {
                 "shortcut" => raw.appshot.shortcut = value,
                 other => bail!("line {line_number}: unknown key in [appshot]: {other}"),
@@ -466,6 +508,7 @@ enum Section {
     MemoryBackendsQmd,
     Index,
     NetworkProxy,
+    Mcp,
     Appshot,
     ComputerUse,
     Debug,
@@ -490,6 +533,7 @@ fn parse_section(line: &str) -> Result<Option<Section>> {
         [a] if a == "memory" => Section::Memory,
         [a] if a == "index" => Section::Index,
         [a, b] if a == "network" && b == "proxy" => Section::NetworkProxy,
+        [a] if a == "mcp" => Section::Mcp,
         [a] if a == "appshot" => Section::Appshot,
         [a] if a == "computer_use" => Section::ComputerUse,
         [a, ..] if a == "astra" => Section::Ignored,
@@ -628,6 +672,7 @@ fn resolve_app_config(raw: RawConfig, apply_env: bool) -> Result<AppConfig> {
         memory,
         index: resolve_index_config(raw.clone()),
         network: resolve_network_config(raw.clone()),
+        mcp: resolve_mcp_config(raw.clone())?,
         appshot: resolve_appshot_config(raw.clone()),
         computer_use: resolve_computer_use_config(raw.clone()),
         debug: resolve_debug_config(raw),
@@ -649,6 +694,12 @@ fn resolve_network_config(raw: RawConfig) -> NetworkConfig {
             no_proxy: trimmed_string(proxy.no_proxy.as_deref()),
         },
     }
+}
+
+fn resolve_mcp_config(raw: RawConfig) -> Result<McpSettings> {
+    crate::mcp::normalize_custom_settings(McpSettings {
+        servers: raw.mcp.custom_servers.unwrap_or_default(),
+    })
 }
 
 fn resolve_appshot_config(raw: RawConfig) -> AppshotConfig {
@@ -806,6 +857,7 @@ fn default_app_config() -> Result<AppConfig> {
             poll_interval_seconds: 60,
         },
         network: NetworkConfig::default(),
+        mcp: McpSettings::default(),
         appshot: AppshotConfig::default(),
         computer_use: ComputerUseSettings::recommended(),
         debug: DebugConfig {
@@ -859,6 +911,10 @@ pub fn serialize_app_config(config: &AppConfig) -> String {
     out.push('\n');
     out.push_str(&serialize_network_config(&config.network));
     out.push('\n');
+    out.push_str(&serialize_mcp_config(&config.mcp));
+    if !config.mcp.servers.is_empty() {
+        out.push('\n');
+    }
     out.push_str(&serialize_appshot_config(&config.appshot));
     out.push('\n');
     out.push_str(&serialize_computer_use_config(&config.computer_use));
@@ -896,6 +952,20 @@ fn serialize_network_config(config: &NetworkConfig) -> String {
         out.push_str(&toml_string(no_proxy));
         out.push('\n');
     }
+    out
+}
+
+fn serialize_mcp_config(config: &McpSettings) -> String {
+    if config.servers.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str("[mcp]\n");
+    out.push_str("custom_servers = ");
+    out.push_str(&toml_string(
+        &serde_json::to_string(&config.servers).expect("serialize MCP custom servers"),
+    ));
+    out.push('\n');
     out
 }
 
@@ -1269,6 +1339,48 @@ mod tests {
         assert!(serialized.contains("app_route_preferences = "));
         assert!(!serialized.contains("allow_input_injection"));
         assert!(!serialized.contains("allow_foreground_takeover"));
+    }
+
+    #[test]
+    fn parses_custom_mcp_config() {
+        let servers_json = serde_json::to_string(&vec![crate::mcp::McpServerConfig {
+            id: "docs".to_string(),
+            name: "Docs".to_string(),
+            enabled: true,
+            source: crate::mcp::McpServerSource::Custom,
+            transport: crate::mcp::McpServerTransport::Stdio,
+            injection_mode: crate::mcp::McpServerInjectionMode::Always,
+            builtin_kind: None,
+            url: None,
+            headers: Vec::new(),
+            command: Some("~/bin/docs-mcp".to_string()),
+            args: vec!["serve".to_string()],
+            env: vec![crate::mcp::McpKeyValue {
+                name: "DOCS_ROOT".to_string(),
+                value: "/tmp/docs".to_string(),
+            }],
+        }])
+        .unwrap();
+        let raw = parse_raw_config(&format!(
+            r#"
+            [mcp]
+            custom_servers = {servers_json:?}
+            "#
+        ))
+        .unwrap();
+        let config = super::resolve_app_config(raw, false).unwrap();
+
+        assert_eq!(config.mcp.servers.len(), 1);
+        assert_eq!(config.mcp.servers[0].id, "docs");
+        assert_eq!(
+            config.mcp.servers[0].command.as_deref(),
+            Some("~/bin/docs-mcp")
+        );
+        assert_eq!(config.mcp.servers[0].args, vec!["serve".to_string()]);
+
+        let serialized = serialize_app_config(&config);
+        assert!(serialized.contains("[mcp]"));
+        assert!(serialized.contains("custom_servers = "));
     }
 
     #[test]

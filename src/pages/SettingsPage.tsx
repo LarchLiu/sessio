@@ -1,4 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import { QRCodeSVG } from "@rc-component/qrcode";
@@ -33,12 +34,13 @@ import {
   ZAI,
 } from "@lobehub/icons";
 import { ArrowLeft, AtSign, Bot, Check, Circle, Download, Eye, EyeOff, Globe2, GripVertical, Hash, Info, Languages, Link2, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Save, Server, Settings2, Shield, Sparkles, SquareKanban, Sun, Trash2, Workflow, X } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AstraConfig, AssistantInfo, ComputerUseSettings, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
+import type { Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AstraConfig, AssistantInfo, ComputerUseSettings, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, McpKeyValue, McpServerConfig, McpSettings, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
 import {
   createProcessTemplate,
   detectTelegramUserIds,
   getAppshotConfig,
   getComputerUseSettings,
+  getMcpSettings,
   getAstraConfig,
   getDesktopControlPermissionStatus,
   getImBridgeConfig,
@@ -60,6 +62,7 @@ import {
   updateAgentPreferences,
   updateAppshotConfig,
   updateComputerUseSettings,
+  updateMcpSettings,
   updateAstraConfig,
   updateImBridgeConfig,
   updateNetworkConfig,
@@ -880,6 +883,8 @@ function GeneralSettings({
 }) {
   const { t } = useI18n();
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
+  const [mcpSettings, setMcpSettings] = useState<McpSettings | null>(null);
+  const [savedCustomMcpServers, setSavedCustomMcpServers] = useState<McpServerConfig[]>([]);
   const [computerUseSettings, setComputerUseSettings] = useState<ComputerUseSettings | null>(null);
   const [desktopControlPermissionStatus, setDesktopControlPermissionStatus] = useState<import("../api").DesktopControlPermissionStatus | null>(null);
   const [proxyEnabled, setProxyEnabled] = useState(false);
@@ -889,6 +894,8 @@ function GeneralSettings({
   const [desktopControlEnabled, setDesktopControlEnabled] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
   const [proxySaveStatus, setProxySaveStatus] = useState<"idle" | "success" | "error">("idle");
+  const [savingMcp, setSavingMcp] = useState(false);
+  const [mcpSaveStatus, setMcpSaveStatus] = useState<"idle" | "success" | "error">("idle");
   const [savingAppshot, setSavingAppshot] = useState(false);
   const [savingDesktopControl, setSavingDesktopControl] = useState(false);
 
@@ -896,13 +903,16 @@ function GeneralSettings({
     let cancelled = false;
     Promise.all([
       getNetworkConfig(),
+      getMcpSettings(),
       getAppshotConfig(),
       getComputerUseSettings(),
       getDesktopControlPermissionStatus(),
     ])
-      .then(([config, nextAppshot, nextComputerUse, desktopStatus]) => {
+      .then(([config, nextMcpSettings, nextAppshot, nextComputerUse, desktopStatus]) => {
         if (cancelled) return;
         setNetworkConfig(config);
+        setMcpSettings(nextMcpSettings);
+        setSavedCustomMcpServers(extractCustomMcpServers(nextMcpSettings));
         setProxyEnabled(config.proxy.enabled);
         setProxyUrl(config.proxy.url ?? "");
         setNoProxy(config.proxy.noProxy ?? "");
@@ -979,6 +989,23 @@ function GeneralSettings({
     }
   };
 
+  const saveMcpConfig = async () => {
+    if (!mcpSettings || savingMcp) return;
+    setSavingMcp(true);
+    try {
+      const next = await updateMcpSettings(mcpSettings);
+      setMcpSettings(next);
+      setSavedCustomMcpServers(extractCustomMcpServers(next));
+      setMcpSaveStatus("success");
+      onError(null);
+    } catch (err) {
+      setMcpSaveStatus("error");
+      onError(String(err));
+    } finally {
+      setSavingMcp(false);
+    }
+  };
+
   const saveAppshotShortcut = async (nextShortcut: string) => {
     if (savingAppshot) return;
     setSavingAppshot(true);
@@ -1007,6 +1034,7 @@ function GeneralSettings({
         approvedApps: computerUseSettings?.approvedApps ?? [],
       });
       setComputerUseSettings(next);
+      setMcpSettings((current) => withBuiltinComputerUseEnabled(current, next.enabled));
       setDesktopControlEnabled(next.enabled);
       emitComputerUseSettingsChanged(next);
       onError(null);
@@ -1034,6 +1062,7 @@ function GeneralSettings({
     try {
       const next = await setComputerUseAppApproval("settings", appId, false);
       setComputerUseSettings(next);
+      setMcpSettings((current) => withBuiltinComputerUseEnabled(current, next.enabled));
       setDesktopControlEnabled(next.enabled);
       emitComputerUseSettingsChanged(next);
       onError(null);
@@ -1055,11 +1084,87 @@ function GeneralSettings({
   }, [proxyEnabled, proxyUrl, noProxy]);
 
   const approvedComputerUseApps = computerUseSettings?.approvedApps ?? [];
+  const builtinMcpServers = useMemo(
+    () => (mcpSettings?.servers ?? []).filter((server) => server.source === "builtin"),
+    [mcpSettings],
+  );
+  const customMcpServers = useMemo(
+    () => extractCustomMcpServers(mcpSettings),
+    [mcpSettings],
+  );
+  const mcpChanged = useMemo(
+    () => stableMcpServerJson(customMcpServers) !== stableMcpServerJson(savedCustomMcpServers),
+    [customMcpServers, savedCustomMcpServers],
+  );
+  useEffect(() => {
+    if (stableMcpServerJson(customMcpServers) !== stableMcpServerJson(savedCustomMcpServers)) {
+      setMcpSaveStatus("idle");
+    }
+  }, [customMcpServers, savedCustomMcpServers]);
+  useEffect(() => {
+    let disposed = false;
+    const unlistenPromise = listen("app_config_updated", () => {
+      if (disposed || proxyChanged || mcpChanged || savingProxy || savingMcp || savingDesktopControl || savingAppshot) {
+        return;
+      }
+      void Promise.all([
+        getNetworkConfig(),
+        getMcpSettings(),
+        getComputerUseSettings(),
+        getDesktopControlPermissionStatus(),
+      ])
+        .then(([config, nextMcpSettings, nextComputerUse, desktopStatus]) => {
+          if (disposed) return;
+          setNetworkConfig(config);
+          setMcpSettings(nextMcpSettings);
+          setSavedCustomMcpServers(extractCustomMcpServers(nextMcpSettings));
+          setProxyEnabled(config.proxy.enabled);
+          setProxyUrl(config.proxy.url ?? "");
+          setNoProxy(config.proxy.noProxy ?? "");
+          setComputerUseSettings(nextComputerUse);
+          setDesktopControlEnabled(nextComputerUse.enabled);
+          setDesktopControlPermissionStatus(desktopStatus);
+        })
+        .catch((err) => onError(String(err)));
+    });
+    return () => {
+      disposed = true;
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [mcpChanged, onError, proxyChanged, savingAppshot, savingDesktopControl, savingMcp, savingProxy]);
   const desktopControlPermission = desktopControlPermissionPresentation(desktopControlPermissionStatus);
   const shortcutPlatform = useMemo(
     () => resolveShortcutPlatform(desktopControlPermissionStatus?.platform),
     [desktopControlPermissionStatus?.platform],
   );
+
+  const updateCustomMcpServers = (updater: (servers: McpServerConfig[]) => McpServerConfig[]) => {
+    setMcpSettings((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        servers: replaceCustomMcpServers(current.servers, updater(extractCustomMcpServers(current))),
+      };
+    });
+  };
+
+  const addCustomMcpServer = () => {
+    updateCustomMcpServers((servers) => [...servers, createDefaultCustomMcpServer()]);
+  };
+
+  const updateCustomMcpServer = (
+    serverId: string,
+    updater: (server: McpServerConfig) => McpServerConfig,
+  ) => {
+    updateCustomMcpServers((servers) =>
+      servers.map((server) => (server.id === serverId ? updater(server) : server)),
+    );
+  };
+
+  const removeCustomMcpServer = (serverId: string) => {
+    updateCustomMcpServers((servers) => servers.filter((server) => server.id !== serverId));
+  };
+
   return (
     <section className="min-w-0 max-w-full">
       <SettingsGroup title={t("settings.appearance")} flush>
@@ -1215,6 +1320,74 @@ function GeneralSettings({
         <SettingsRow icon={<Globe2 className="h-4 w-4" />} label={t("settings.no_proxy")} description={t("settings.no_proxy_description")}>
           <input value={noProxy} onChange={(event) => setNoProxy(event.target.value)} placeholder="localhost,127.0.0.1" className={inputClassName + " w-[280px]"} />
         </SettingsRow>
+      </SettingsGroup>
+      <SettingsGroup
+        title={t("settings.mcp")}
+        action={
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={!mcpSettings}
+              onClick={addCustomMcpServer}
+              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-40"
+            >
+              <Plus className="h-4 w-4" />
+              {t("settings.mcp_add_server")}
+            </button>
+            <button
+              type="button"
+              disabled={savingMcp || !mcpChanged}
+              onClick={() => void saveMcpConfig()}
+              className={channelSaveButtonClass(mcpSaveStatus)}
+            >
+              {savingMcp
+                ? <LoaderCircle className="h-4 w-4 animate-spin" />
+                : mcpSaveStatus === "error"
+                  ? <X className="h-4 w-4" />
+                  : <Check className="h-4 w-4" />}
+              {savingMcp
+                ? t("project.save")
+                : mcpSaveStatus === "success"
+                  ? t("settings.saved")
+                  : mcpSaveStatus === "error"
+                    ? t("settings.save_failed")
+                    : t("project.save")}
+            </button>
+          </div>
+        }
+        flush
+      >
+        <SettingsStackedRow
+          icon={<Server className="h-4 w-4" />}
+          label={t("settings.mcp_builtin")}
+          description={t("settings.mcp_builtin_description")}
+        >
+          <div className="space-y-3">
+            {builtinMcpServers.map((server) => (
+              <McpBuiltinCard key={server.id} server={server} />
+            ))}
+          </div>
+        </SettingsStackedRow>
+        <SettingsStackedRow
+          icon={<Pencil className="h-4 w-4" />}
+          label={t("settings.mcp_custom")}
+          description={t("settings.mcp_custom_description")}
+        >
+          <div className="space-y-3">
+            {customMcpServers.length === 0 ? (
+              <EmptyState label={t("settings.mcp_custom_empty")} />
+            ) : (
+              customMcpServers.map((server) => (
+                <McpCustomServerCard
+                  key={server.id}
+                  server={server}
+                  onUpdate={(nextServer) => updateCustomMcpServer(server.id, () => nextServer)}
+                  onRemove={() => removeCustomMcpServer(server.id)}
+                />
+              ))
+            )}
+          </div>
+        </SettingsStackedRow>
       </SettingsGroup>
       <SettingsGroup title={t("settings.index")} flush>
         <SettingsRow icon={<RefreshCw className="h-4 w-4" />} label={t("sidebar.rebuild_index")} description={t("settings.rebuild_description")}>
@@ -4837,8 +5010,290 @@ function ThemeSelector({ mode, onChange }: { mode: ThemeMode; onChange: (mode: T
   );
 }
 
+function McpBuiltinCard({ server }: { server: McpServerConfig }) {
+  const { t } = useI18n();
+  return (
+    <div className="rounded-lg border border-card-border/[0.12] bg-card-chip/[0.04] px-3 py-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-body-sm font-medium text-ink">{server.name}</div>
+          <div className="mt-1 text-caption leading-relaxed text-ink/50">
+            {server.builtinKind === "computerUse"
+              ? t("settings.mcp_builtin_computer_use_note")
+              : t("settings.mcp_builtin_description")}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <McpBadge>{t("settings.mcp_builtin_badge")}</McpBadge>
+          <McpBadge>{mcpTransportLabel(t, server.transport)}</McpBadge>
+          <McpBadge>{t("settings.mcp_scope_session")}</McpBadge>
+          <McpStatusBadge enabled={server.enabled} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function McpCustomServerCard({
+  server,
+  onUpdate,
+  onRemove,
+}: {
+  server: McpServerConfig;
+  onUpdate: (server: McpServerConfig) => void;
+  onRemove: () => void;
+}) {
+  const { t } = useI18n();
+  const isStdio = server.transport === "stdio";
+
+  return (
+    <div className="rounded-lg border border-card-border/[0.12] bg-card-chip/[0.04] p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-body-sm font-medium text-ink">{server.name || t("settings.mcp_new_server")}</div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-caption text-ink/45">
+            <McpBadge>{t("settings.mcp_custom_badge")}</McpBadge>
+            <McpBadge>{mcpTransportLabel(t, server.transport)}</McpBadge>
+            <McpBadge>{t("settings.mcp_scope_global")}</McpBadge>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="text-caption text-ink/45">
+            {server.enabled ? t("settings.mcp_enabled") : t("settings.mcp_disabled")}
+          </span>
+          <SwitchControl
+            checked={server.enabled}
+            tooltip={t("settings.mcp_enabled")}
+            onToggle={() => onUpdate({ ...server, enabled: !server.enabled })}
+          />
+          <button
+            type="button"
+            onClick={onRemove}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-status-error/20 bg-status-error/[0.08] text-status-error transition hover:bg-status-error/[0.12]"
+            aria-label={t("sidebar.remove")}
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-2">
+        <label className="grid gap-1.5">
+          <span className="text-caption text-ink/45">{t("settings.mcp_name")}</span>
+          <input
+            value={server.name}
+            onChange={(event) => onUpdate({ ...server, name: event.target.value })}
+            placeholder={t("settings.mcp_name_placeholder")}
+            className={inputClassName}
+          />
+        </label>
+        <div className="grid gap-1.5">
+          <span className="text-caption text-ink/45">{t("settings.mcp_transport")}</span>
+          <SegmentedControl
+            value={server.transport}
+            options={[
+              { value: "http", label: "HTTP" },
+              { value: "sse", label: "SSE" },
+              { value: "stdio", label: "stdio" },
+            ]}
+            onChange={(value) => onUpdate(applyCustomMcpTransport(server, value as McpServerConfig["transport"]))}
+          />
+        </div>
+        {isStdio ? (
+          <label className="grid gap-1.5 md:col-span-2">
+            <span className="text-caption text-ink/45">{t("settings.mcp_command")}</span>
+            <input
+              value={server.command ?? ""}
+              onChange={(event) => onUpdate({ ...server, command: event.target.value })}
+              placeholder="npx @modelcontextprotocol/server-filesystem"
+              className={inputClassName}
+            />
+          </label>
+        ) : (
+          <label className="grid gap-1.5 md:col-span-2">
+            <span className="text-caption text-ink/45">{t("settings.mcp_url")}</span>
+            <input
+              value={server.url ?? ""}
+              onChange={(event) => onUpdate({ ...server, url: event.target.value })}
+              placeholder="http://127.0.0.1:3000/mcp"
+              className={inputClassName}
+            />
+          </label>
+        )}
+        {isStdio ? (
+          <>
+            <label className="grid gap-1.5">
+              <span className="text-caption text-ink/45">{t("settings.mcp_args")}</span>
+              <textarea
+                value={server.args.join("\n")}
+                onChange={(event) => onUpdate({ ...server, args: parseLineList(event.target.value) })}
+                rows={4}
+                placeholder={t("settings.mcp_args_placeholder")}
+                className={textareaClassName}
+              />
+            </label>
+            <label className="grid gap-1.5">
+              <span className="text-caption text-ink/45">{t("settings.mcp_env")}</span>
+              <textarea
+                value={keyValuesToText(server.env)}
+                onChange={(event) => onUpdate({ ...server, env: parseKeyValueText(event.target.value) })}
+                rows={4}
+                placeholder={t("settings.mcp_env_placeholder")}
+                className={textareaClassName}
+              />
+            </label>
+          </>
+        ) : (
+          <label className="grid gap-1.5 md:col-span-2">
+            <span className="text-caption text-ink/45">{t("settings.mcp_headers")}</span>
+            <textarea
+              value={keyValuesToText(server.headers)}
+              onChange={(event) => onUpdate({ ...server, headers: parseKeyValueText(event.target.value) })}
+              rows={4}
+              placeholder={t("settings.mcp_headers_placeholder")}
+              className={textareaClassName}
+            />
+          </label>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function McpBadge({ children }: { children: ReactNode }) {
+  return (
+    <span className="rounded-full bg-card-chip/[0.08] px-2 py-1 text-caption text-ink/55">
+      {children}
+    </span>
+  );
+}
+
+function McpStatusBadge({ enabled }: { enabled: boolean }) {
+  const { t } = useI18n();
+  return (
+    <span
+      className={
+        "rounded-full px-2 py-1 text-caption " +
+        (enabled
+          ? "bg-emerald/10 text-emerald"
+          : "bg-amber/10 text-amber")
+      }
+    >
+      {enabled ? t("settings.mcp_enabled") : t("settings.mcp_disabled")}
+    </span>
+  );
+}
+
 function EmptyState({ label }: { label: string }) {
   return <div className="rounded-md border border-dashed border-ink/10 py-8 text-center text-body-sm text-ink/35">{label}</div>;
+}
+
+function createDefaultCustomMcpServer(): McpServerConfig {
+  return {
+    id: `custom-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`,
+    name: "",
+    enabled: true,
+    source: "custom",
+    transport: "http",
+    injectionMode: "always",
+    builtinKind: null,
+    url: "",
+    headers: [],
+    command: null,
+    args: [],
+    env: [],
+  };
+}
+
+function extractCustomMcpServers(settings: McpSettings | null): McpServerConfig[] {
+  return (settings?.servers ?? []).filter((server) => server.source === "custom");
+}
+
+function replaceCustomMcpServers(
+  servers: McpServerConfig[],
+  nextCustomServers: McpServerConfig[],
+): McpServerConfig[] {
+  return [
+    ...servers.filter((server) => server.source !== "custom"),
+    ...nextCustomServers,
+  ];
+}
+
+function stableMcpServerJson(servers: McpServerConfig[]): string {
+  return JSON.stringify(servers);
+}
+
+function withBuiltinComputerUseEnabled(
+  settings: McpSettings | null,
+  enabled: boolean,
+): McpSettings | null {
+  if (!settings) return settings;
+  return {
+    ...settings,
+    servers: settings.servers.map((server) =>
+      server.source === "builtin" && server.builtinKind === "computerUse"
+        ? { ...server, enabled }
+        : server),
+  };
+}
+
+function applyCustomMcpTransport(
+  server: McpServerConfig,
+  transport: McpServerConfig["transport"],
+): McpServerConfig {
+  if (transport === "stdio") {
+    return {
+      ...server,
+      transport,
+      url: null,
+      headers: [],
+      command: server.command ?? "",
+    };
+  }
+  return {
+    ...server,
+    transport,
+    url: server.url ?? "",
+    command: null,
+    args: [],
+    env: [],
+  };
+}
+
+function keyValuesToText(entries: McpKeyValue[]): string {
+  return entries.map((entry) => `${entry.name}=${entry.value}`).join("\n");
+}
+
+function parseKeyValueText(value: string): McpKeyValue[] {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [name, ...rest] = line.split("=");
+      return {
+        name: name?.trim() ?? "",
+        value: rest.join("=").trim(),
+      };
+    })
+    .filter((entry) => entry.name.length > 0);
+}
+
+function parseLineList(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function mcpTransportLabel(
+  t: (key: string, values?: Record<string, string | number>) => string,
+  transport: McpServerConfig["transport"],
+): string {
+  return transport === "http"
+    ? t("settings.mcp_transport_http")
+    : transport === "sse"
+      ? t("settings.mcp_transport_sse")
+      : t("settings.mcp_transport_stdio");
 }
 
 const inputClassName = "h-9 min-w-0 rounded-md border border-input-border/[0.16] bg-input px-3 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30";
