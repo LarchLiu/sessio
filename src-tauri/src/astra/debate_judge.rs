@@ -598,7 +598,7 @@ rationale: 双方在延迟证据上仍有实质分歧。"#;
         assert!(prompt.contains("### Lane lane-a (agent codex, participant participant-a)"));
         assert!(prompt.contains("in the same language as the debate artifacts"));
         assert!(prompt.contains(long_output.trim()));
-        assert!(prompt.contains("sessio-thread-prompt:start"));
+        assert!(prompt.contains(crate::prompt_markers::sessio_prompt_markers().thread_prompt_start));
     }
 
     #[test]

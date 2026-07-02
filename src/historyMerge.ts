@@ -3,18 +3,9 @@ import type {
   AcpRenderBlock,
   LiveTurn,
 } from "./runtimeChat";
+import { getSessioPromptMarkers } from "./promptMarkers";
 
-const SESSIO_ATTACHMENT_MARKER = "__sessio_attachment__:";
-const SESSIO_THREAD_PROMPT_START = "<!-- sessio-thread-prompt:start";
-const SESSIO_THREAD_PROMPT_END = "<!-- sessio-thread-prompt:end";
-const SESSIO_ASSISTANT_PROMPT_START = "<!-- sessio-assistant-prompt:start";
-const SESSIO_ASSISTANT_PROMPT_END = "<!-- sessio-assistant-prompt:end";
-const SESSIO_COMPUTER_USE_PROMPT_START = "<!-- sessio-computer-use:start";
-const SESSIO_COMPUTER_USE_PROMPT_END = "<!-- sessio-computer-use:end";
-const SESSIO_SKILLS_PROMPT_START = "<!-- sessio-skills:start";
-const SESSIO_SKILLS_PROMPT_END = "<!-- sessio-skills:end";
-const SESSIO_WORK_STATE_SKILL_PROMPT_START = "<!-- sessio-work-state-skill:start";
-const SESSIO_WORK_STATE_SKILL_PROMPT_END = "<!-- sessio-work-state-skill:end";
+const PROMPT_MARKERS = getSessioPromptMarkers();
 
 export interface SessioThreadPromptBlockMeta {
   kind: string | null;
@@ -52,7 +43,7 @@ export function buildSessioThreadPromptBlock(
       /^[A-Za-z_][A-Za-z0-9_-]*$/.test(entry[0]) && Boolean(entry[1]?.trim()))
     .map(([key, value]) => ` ${key}="${htmlAttr(value)}"`)
     .join("");
-  return `${SESSIO_THREAD_PROMPT_START}${attrText} -->\n\n${body}\n\n${SESSIO_THREAD_PROMPT_END} nonce="${htmlAttr(nonce)}" -->`;
+  return `${PROMPT_MARKERS.threadPromptStart}${attrText} -->\n\n${body}\n\n${PROMPT_MARKERS.threadPromptEnd} nonce="${htmlAttr(nonce)}" -->`;
 }
 
 export function buildSessioAssistantPromptBlock(
@@ -70,7 +61,7 @@ export function buildSessioAssistantPromptBlock(
       /^[A-Za-z_][A-Za-z0-9_-]*$/.test(entry[0]) && Boolean(entry[1]?.trim()))
     .map(([key, value]) => ` ${key}="${htmlAttr(value)}"`)
     .join("");
-  return `${SESSIO_ASSISTANT_PROMPT_START}${attrText} -->\n\n${body}\n\n${SESSIO_ASSISTANT_PROMPT_END} nonce="${htmlAttr(nonce)}" -->`;
+  return `${PROMPT_MARKERS.assistantPromptStart}${attrText} -->\n\n${body}\n\n${PROMPT_MARKERS.assistantPromptEnd} nonce="${htmlAttr(nonce)}" -->`;
 }
 
 function threadPromptNonce(): string {
@@ -87,7 +78,7 @@ export function sessioThreadPromptBlockMetas(input: string): SessioThreadPromptB
   const metas: SessioThreadPromptBlockMeta[] = [];
   let cursor = 0;
   for (;;) {
-    const start = input.indexOf(SESSIO_THREAD_PROMPT_START, cursor);
+    const start = input.indexOf(PROMPT_MARKERS.threadPromptStart, cursor);
     if (start < 0) break;
     const startCommentEnd = input.indexOf("-->", start);
     if (startCommentEnd < 0) break;
@@ -97,7 +88,7 @@ export function sessioThreadPromptBlockMetas(input: string): SessioThreadPromptB
       cursor = startCommentEnd + "-->".length;
       continue;
     }
-    const endMarker = `${SESSIO_THREAD_PROMPT_END} nonce="${nonce}" -->`;
+    const endMarker = `${PROMPT_MARKERS.threadPromptEnd} nonce="${nonce}" -->`;
     const end = input.indexOf(endMarker, startCommentEnd + "-->".length);
     if (end < 0) {
       cursor = startCommentEnd + "-->".length;
@@ -120,7 +111,7 @@ export function stripSessioThreadPromptBlocks(input: string): string {
   let cursor = 0;
   let changed = false;
   for (;;) {
-    const start = input.indexOf(SESSIO_THREAD_PROMPT_START, cursor);
+    const start = input.indexOf(PROMPT_MARKERS.threadPromptStart, cursor);
     if (start < 0) {
       out += input.slice(cursor);
       break;
@@ -137,7 +128,7 @@ export function stripSessioThreadPromptBlocks(input: string): string {
       cursor = startCommentEnd + "-->".length;
       continue;
     }
-    const endMarker = `${SESSIO_THREAD_PROMPT_END} nonce="${nonce}" -->`;
+    const endMarker = `${PROMPT_MARKERS.threadPromptEnd} nonce="${nonce}" -->`;
     const end = input.indexOf(endMarker, startCommentEnd + "-->".length);
     if (end < 0) {
       out += input.slice(cursor, startCommentEnd + "-->".length);
@@ -159,7 +150,7 @@ export function sessioAssistantPromptBlockMetas(input: string): SessioAssistantP
   const metas: SessioAssistantPromptBlockMeta[] = [];
   let cursor = 0;
   for (;;) {
-    const start = input.indexOf(SESSIO_ASSISTANT_PROMPT_START, cursor);
+    const start = input.indexOf(PROMPT_MARKERS.assistantPromptStart, cursor);
     if (start < 0) break;
     const startCommentEnd = input.indexOf("-->", start);
     if (startCommentEnd < 0) break;
@@ -169,7 +160,7 @@ export function sessioAssistantPromptBlockMetas(input: string): SessioAssistantP
       cursor = startCommentEnd + "-->".length;
       continue;
     }
-    const endMarker = `${SESSIO_ASSISTANT_PROMPT_END} nonce="${nonce}" -->`;
+    const endMarker = `${PROMPT_MARKERS.assistantPromptEnd} nonce="${nonce}" -->`;
     const end = input.indexOf(endMarker, startCommentEnd + "-->".length);
     if (end < 0) {
       cursor = startCommentEnd + "-->".length;
@@ -189,7 +180,7 @@ export function stripSessioAssistantPromptBlocks(input: string): string {
   let cursor = 0;
   let changed = false;
   for (;;) {
-    const start = input.indexOf(SESSIO_ASSISTANT_PROMPT_START, cursor);
+    const start = input.indexOf(PROMPT_MARKERS.assistantPromptStart, cursor);
     if (start < 0) {
       out += input.slice(cursor);
       break;
@@ -206,7 +197,7 @@ export function stripSessioAssistantPromptBlocks(input: string): string {
       cursor = startCommentEnd + "-->".length;
       continue;
     }
-    const endMarker = `${SESSIO_ASSISTANT_PROMPT_END} nonce="${nonce}" -->`;
+    const endMarker = `${PROMPT_MARKERS.assistantPromptEnd} nonce="${nonce}" -->`;
     const end = input.indexOf(endMarker, startCommentEnd + "-->".length);
     if (end < 0) {
       out += input.slice(cursor, startCommentEnd + "-->".length);
@@ -270,24 +261,24 @@ function stripSessioNonceDelimitedPromptBlocks(
 export function stripSessioComputerUsePromptBlocks(input: string): string {
   return stripSessioNonceDelimitedPromptBlocks(
     input,
-    SESSIO_COMPUTER_USE_PROMPT_START,
-    SESSIO_COMPUTER_USE_PROMPT_END,
+    PROMPT_MARKERS.computerUsePromptStart,
+    PROMPT_MARKERS.computerUsePromptEnd,
   );
 }
 
 export function stripSessioSkillsPromptBlocks(input: string): string {
   return stripSessioNonceDelimitedPromptBlocks(
     input,
-    SESSIO_SKILLS_PROMPT_START,
-    SESSIO_SKILLS_PROMPT_END,
+    PROMPT_MARKERS.skillsPromptStart,
+    PROMPT_MARKERS.skillsPromptEnd,
   );
 }
 
 export function stripSessioWorkStateSkillPromptBlocks(input: string): string {
   return stripSessioNonceDelimitedPromptBlocks(
     input,
-    SESSIO_WORK_STATE_SKILL_PROMPT_START,
-    SESSIO_WORK_STATE_SKILL_PROMPT_END,
+    PROMPT_MARKERS.workStateSkillPromptStart,
+    PROMPT_MARKERS.workStateSkillPromptEnd,
   );
 }
 
@@ -337,9 +328,10 @@ export function stripInjectedContext(s: string): string {
     if (endIdx < 0) break;
     text = afterOpen.slice(endIdx + close.length);
   }
-  const MARKER = "## My request for Codex:";
-  const idx = text.indexOf(MARKER);
-  if (idx >= 0) text = text.slice(idx + MARKER.length);
+  const idx = text.indexOf(PROMPT_MARKERS.codexRequestMarker);
+  if (idx >= 0) {
+    text = text.slice(idx + PROMPT_MARKERS.codexRequestMarker.length);
+  }
   return stripSessioComputerUsePromptBlocks(
     stripSessioSkillsPromptBlocks(
       stripSessioWorkStateSkillPromptBlocks(
@@ -642,7 +634,7 @@ function parseXmlishAttrs(input: string): Record<string, string> {
 function fileMarker(name?: string | null, uri?: string | null, marked = false): string {
   const safeName = name?.trim() || "attachment";
   const safeUri = uri?.trim();
-  const displayName = marked ? `${SESSIO_ATTACHMENT_MARKER}${safeName}` : safeName;
+  const displayName = marked ? `${PROMPT_MARKERS.attachmentMarker}${safeName}` : safeName;
   return safeUri ? `[file: ${displayName}|${safeUri}]` : `[file: ${displayName}]`;
 }
 
@@ -657,7 +649,7 @@ function imageMarkdown(
         ? block.data.trim()
         : `data:${mimeType};base64,${block.data.trim()}`
       : "");
-  const label = marked ? `${SESSIO_ATTACHMENT_MARKER}${mimeType}` : mimeType;
+  const label = marked ? `${PROMPT_MARKERS.attachmentMarker}${mimeType}` : mimeType;
   return src ? `![${label}](${src})` : `[image: ${mimeType}]`;
 }
 

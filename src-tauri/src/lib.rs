@@ -14,6 +14,7 @@ pub mod memory;
 pub mod models;
 pub mod network;
 pub mod polling;
+pub mod prompt_markers;
 pub mod scheduled_tasks;
 mod screenshot;
 pub mod shell_env;

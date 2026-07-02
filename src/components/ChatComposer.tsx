@@ -33,9 +33,11 @@ import {
 } from "./imeInput";
 import { useI18n } from "../i18n";
 import type { ChatComposerController } from "../hooks/useChatComposer";
+import { getSessioPromptMarkers } from "../promptMarkers";
 
 const PROJECT_NAME_SCRAMBLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const CHAT_COMPOSER_COMPACT_BREAKPOINT = 400;
+const SESSIO_PROMPT_MARKERS = getSessioPromptMarkers();
 
 export default function ChatComposer({
   composer,
@@ -95,8 +97,12 @@ export default function ChatComposer({
     );
   const showContextMenuTrigger =
     composer.supportsAttachments || composer.availableSkills.length > 0;
-  const systemSkills = composer.availableSkills.filter((skill) => skill.source === "builtin");
-  const personalSkills = composer.availableSkills.filter((skill) => skill.source === "user");
+  const systemSkills = composer.availableSkills.filter(
+    (skill) => skill.source === SESSIO_PROMPT_MARKERS.skillSourceBuiltin,
+  );
+  const personalSkills = composer.availableSkills.filter(
+    (skill) => skill.source === SESSIO_PROMPT_MARKERS.skillSourceUser,
+  );
   const skillSubmenuOptions: PopupMenuOption<string>[] = [
     ...(composer.selectedSkillIds.length > 0
       ? [{

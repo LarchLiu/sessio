@@ -85,6 +85,7 @@ import { AiGenerate2Icon, ChannelShare24RegularIcon, DiscordLogoIcon, LarkLogoIc
 import { emitComputerUseSettingsChanged } from "../computerUseSettingsEvents";
 import { desktopControlPermissionPresentation } from "../desktopControlPermissionPresentation";
 import { type Lang, useI18n } from "../i18n";
+import { getSessioPromptMarkers } from "../promptMarkers";
 import type { ThemeMode } from "../theme";
 import { formatVersionLabel, type UpdateState } from "../updater";
 import acpMarkBlackUrl from "../../assets/acp_mark-black.svg?url";
@@ -92,6 +93,7 @@ import acpMarkWhiteUrl from "../../assets/acp_mark-white.svg?url";
 
 type SettingsSection = "general" | "agents" | "assistants" | "processTemplates" | "channels";
 type ChannelPlatform = "telegram" | "discord" | "feishu" | "wechat";
+const SESSIO_PROMPT_MARKERS = getSessioPromptMarkers();
 
 type AgentPreferencePatch = {
   displayName?: string | null;
@@ -1085,7 +1087,10 @@ function GeneralSettings({
 
   const approvedComputerUseApps = computerUseSettings?.approvedApps ?? [];
   const builtinMcpServers = useMemo(
-    () => (mcpSettings?.servers ?? []).filter((server) => server.source === "builtin"),
+    () =>
+      (mcpSettings?.servers ?? []).filter(
+        (server) => server.source === SESSIO_PROMPT_MARKERS.mcpSourceBuiltin,
+      ),
     [mcpSettings],
   );
   const customMcpServers = useMemo(
@@ -5018,7 +5023,7 @@ function McpBuiltinCard({ server }: { server: McpServerConfig }) {
         <div className="min-w-0">
           <div className="text-body-sm font-medium text-ink">{server.name}</div>
           <div className="mt-1 text-caption leading-relaxed text-ink/50">
-            {server.builtinKind === "computerUse"
+            {server.builtinKind === SESSIO_PROMPT_MARKERS.builtinMcpKindComputerUse
               ? t("settings.mcp_builtin_computer_use_note")
               : t("settings.mcp_builtin_description")}
           </div>
@@ -5192,7 +5197,7 @@ function createDefaultCustomMcpServer(): McpServerConfig {
     id: `custom-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`,
     name: "",
     enabled: true,
-    source: "custom",
+    source: SESSIO_PROMPT_MARKERS.mcpSourceCustom,
     transport: "http",
     injectionMode: "always",
     builtinKind: null,
@@ -5205,7 +5210,9 @@ function createDefaultCustomMcpServer(): McpServerConfig {
 }
 
 function extractCustomMcpServers(settings: McpSettings | null): McpServerConfig[] {
-  return (settings?.servers ?? []).filter((server) => server.source === "custom");
+  return (settings?.servers ?? []).filter(
+    (server) => server.source === SESSIO_PROMPT_MARKERS.mcpSourceCustom,
+  );
 }
 
 function replaceCustomMcpServers(
@@ -5213,7 +5220,9 @@ function replaceCustomMcpServers(
   nextCustomServers: McpServerConfig[],
 ): McpServerConfig[] {
   return [
-    ...servers.filter((server) => server.source !== "custom"),
+    ...servers.filter(
+      (server) => server.source !== SESSIO_PROMPT_MARKERS.mcpSourceCustom,
+    ),
     ...nextCustomServers,
   ];
 }
@@ -5230,7 +5239,8 @@ function withBuiltinComputerUseEnabled(
   return {
     ...settings,
     servers: settings.servers.map((server) =>
-      server.source === "builtin" && server.builtinKind === "computerUse"
+      server.source === SESSIO_PROMPT_MARKERS.mcpSourceBuiltin
+      && server.builtinKind === SESSIO_PROMPT_MARKERS.builtinMcpKindComputerUse
         ? { ...server, enabled }
         : server),
   };

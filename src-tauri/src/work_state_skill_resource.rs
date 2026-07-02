@@ -7,9 +7,10 @@
 
 use std::path::PathBuf;
 
+use crate::prompt_markers::sessio_prompt_markers;
+
 const BUNDLED_SKILL_RELATIVE_PATH: &str = "sessio-work-state-skill/SKILL.md";
 const DEV_SKILL_RELATIVE_PATH: &str = "docs/sessio-work-state-skill.md";
-const WORK_CONTEXT_KIND: &str = "work_context";
 const BUILTIN_WORK_STATE_SKILL_ID: &str = "builtin:sessio-work-state";
 
 /// Best-effort absolute path to the work-state skill the agent should read.
@@ -35,9 +36,12 @@ pub fn work_state_skill_prompt_note() -> String {
 /// prompts. Use the shared skills marker so history/display stripping can
 /// filter it the same way as other injected skill blocks.
 pub fn inject_work_state_skill_prompt_block(text: &str) -> String {
+    let markers = sessio_prompt_markers();
     let kinds = crate::models::sessio_thread_prompt_block_kinds(text);
-    if !kinds.iter().any(|kind| kind == WORK_CONTEXT_KIND)
-        || (text.contains("kind=\"builtin_skill\"")
+    if !kinds
+        .iter()
+        .any(|kind| kind == markers.thread_prompt_kind_work_context)
+        || (text.contains(&format!("kind=\"{}\"", markers.builtin_skill_prompt_kind))
             && text.contains(&format!("id: `{BUILTIN_WORK_STATE_SKILL_ID}`")))
     {
         return text.to_string();
@@ -139,20 +143,25 @@ mod tests {
 
     #[test]
     fn injects_skill_pointer_for_work_context() {
-        let prompt = concat!(
-            "<!-- sessio-thread-prompt:start nonce=\"abc\" kind=\"work_context\" -->\n",
-            "stage context\n",
-            "<!-- sessio-thread-prompt:end nonce=\"abc\" -->"
+        let markers = sessio_prompt_markers();
+        let prompt = format!(
+            "{} nonce=\"abc\" kind=\"{}\" -->\nstage context\n{} nonce=\"abc\" -->",
+            markers.thread_prompt_start,
+            markers.thread_prompt_kind_work_context,
+            markers.thread_prompt_end
         );
-        let output = inject_work_state_skill_prompt_block(prompt);
+        let output = inject_work_state_skill_prompt_block(&prompt);
 
-        assert!(output.contains("<!-- sessio-skills:start"));
-        assert!(output.contains("kind=\"builtin_skill\""));
+        assert!(output.contains(markers.skills_prompt_start));
+        assert!(output.contains(&format!("kind=\"{}\"", markers.builtin_skill_prompt_kind)));
         assert!(output.contains("id: `builtin:sessio-work-state`"));
-        assert!(output.contains("builtinKind: `workState`"));
+        assert!(output.contains(&format!(
+            "builtinKind: `{}`",
+            markers.builtin_skill_kind_work_state
+        )));
         assert!(output.contains("skillMdPath: `"));
         assert!(output.contains("~/.sessio/bin/sessio"));
-        assert!(output.ends_with(prompt));
+        assert!(output.ends_with(&prompt));
     }
 
     #[test]
@@ -164,16 +173,18 @@ mod tests {
 
     #[test]
     fn does_not_inject_twice() {
-        let prompt = concat!(
-            "<!-- sessio-skills:start nonce=\"skill\" kind=\"builtin_skill\" -->\n",
-            "id: `builtin:sessio-work-state`\n",
-            "<!-- sessio-skills:end nonce=\"skill\" -->\n\n",
-            "<!-- sessio-thread-prompt:start nonce=\"abc\" kind=\"work_context\" -->\n",
-            "stage context\n",
-            "<!-- sessio-thread-prompt:end nonce=\"abc\" -->"
+        let markers = sessio_prompt_markers();
+        let prompt = format!(
+            "{} nonce=\"skill\" kind=\"{}\" -->\nid: `builtin:sessio-work-state`\n{} nonce=\"skill\" -->\n\n{} nonce=\"abc\" kind=\"{}\" -->\nstage context\n{} nonce=\"abc\" -->",
+            markers.skills_prompt_start,
+            markers.builtin_skill_prompt_kind,
+            markers.skills_prompt_end,
+            markers.thread_prompt_start,
+            markers.thread_prompt_kind_work_context,
+            markers.thread_prompt_end
         );
 
-        assert_eq!(inject_work_state_skill_prompt_block(prompt), prompt);
+        assert_eq!(inject_work_state_skill_prompt_block(&prompt), prompt);
     }
 
     #[test]

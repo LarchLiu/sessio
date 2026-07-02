@@ -3541,13 +3541,14 @@ mod tests {
 
     #[test]
     fn history_user_thread_prompt_keeps_placeholder_meta_when_body_is_hidden() {
-        let prompt = concat!(
-            "<!-- sessio-thread-prompt:start nonce=\"abc\" kind=\"astra_plan_task\" task_title=\"Write joke\" target_agent=\"codex\" -->\n",
-            "hidden task prompt\n",
-            "<!-- sessio-thread-prompt:end nonce=\"abc\" -->"
+        let markers = crate::prompt_markers::sessio_prompt_markers();
+        let prompt = format!(
+            "{} nonce=\"abc\" kind=\"astra_plan_task\" task_title=\"Write joke\" target_agent=\"codex\" -->\nhidden task prompt\n{} nonce=\"abc\" -->",
+            markers.thread_prompt_start,
+            markers.thread_prompt_end
         );
         let turns = session_history_turns_from_acp_messages(&[row(
-            history_user_message(prompt, Some(10)),
+            history_user_message(&prompt, Some(10)),
             Some(10),
         )]);
 

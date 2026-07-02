@@ -6,6 +6,7 @@ use super::{
     AstraTaskCompletion, AstraTaskProposal, StageTaskContext,
 };
 use crate::models::{IssueStatus, SessionInfo, StageStatus, ThreadInfo, ThreadKind};
+use crate::prompt_markers::sessio_prompt_markers;
 
 const ASTRA_PROCESS_ORCHESTRATION_RESPONSE_CONTRACT: &str = r#"You are Astra Orchestrator.
 
@@ -68,8 +69,6 @@ Synthesis gate: before returning complete, dispatch one final round containing a
 
 Language: write summary and every task title, prompt, and expectedOutput in the language of the thread goal and userPrompt (for example, a Chinese-language thread gets Chinese tasks)."#;
 
-const SESSIO_THREAD_PROMPT_START: &str = "<!-- sessio-thread-prompt:start";
-const SESSIO_THREAD_PROMPT_END: &str = "<!-- sessio-thread-prompt:end";
 static THREAD_PROMPT_NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn astra_orchestration_response_contract(kind: ThreadKind) -> &'static str {
@@ -115,8 +114,11 @@ pub(super) fn wrap_thread_prompt(
         }
         attr_text.push_str(&format!(" {key}=\"{}\"", html_attr(value)));
     }
+    let markers = sessio_prompt_markers();
     format!(
-        "{SESSIO_THREAD_PROMPT_START}{attr_text} -->\n\n{body}\n\n{SESSIO_THREAD_PROMPT_END} nonce=\"{}\" -->",
+        "{}{attr_text} -->\n\n{body}\n\n{} nonce=\"{}\" -->",
+        markers.thread_prompt_start,
+        markers.thread_prompt_end,
         html_attr(&nonce)
     )
 }
@@ -1485,18 +1487,20 @@ mod tests {
 
     fn thread_prompt_body(prompt: &str) -> &str {
         let start = prompt.find("-->").map(|idx| idx + "-->".len()).unwrap_or(0);
+        let markers = sessio_prompt_markers();
         let end = prompt
-            .find(SESSIO_THREAD_PROMPT_END)
+            .find(markers.thread_prompt_end)
             .unwrap_or(prompt.len());
         prompt[start..end].trim()
     }
 
     #[test]
     fn wrapped_thread_prompt_requires_matching_nonce_to_strip() {
+        let markers = sessio_prompt_markers();
         let prompt = wrap_thread_prompt(
             "test",
             &thread(),
-            "before <!-- sessio-thread-prompt:end --> after".to_string(),
+            format!("before {} --> after", markers.thread_prompt_end),
             &[],
         );
 

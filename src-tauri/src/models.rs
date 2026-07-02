@@ -2,14 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::agents::runtime::types::{RuntimeCapabilitySet, RuntimeTransportKind};
-
-const SESSIO_ATTACHMENT_MARKER: &str = "__sessio_attachment__:";
-const SESSIO_THREAD_PROMPT_START: &str = "<!-- sessio-thread-prompt:start";
-const SESSIO_THREAD_PROMPT_END: &str = "<!-- sessio-thread-prompt:end";
-const SESSIO_COMPUTER_USE_PROMPT_START: &str = "<!-- sessio-computer-use:start";
-const SESSIO_COMPUTER_USE_PROMPT_END: &str = "<!-- sessio-computer-use:end";
-const SESSIO_SKILLS_PROMPT_START: &str = "<!-- sessio-skills:start";
-const SESSIO_SKILLS_PROMPT_END: &str = "<!-- sessio-skills:end";
+use crate::prompt_markers::sessio_prompt_markers;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -1225,11 +1218,11 @@ impl SessionContentBlock {
 }
 
 pub fn sessio_attachment_marker_name(name: &str) -> String {
-    format!("{SESSIO_ATTACHMENT_MARKER}{name}")
+    format!("{}{name}", sessio_prompt_markers().attachment_marker)
 }
 
 pub fn strip_sessio_attachment_marker_name(name: &str) -> Option<String> {
-    name.strip_prefix(SESSIO_ATTACHMENT_MARKER)
+    name.strip_prefix(sessio_prompt_markers().attachment_marker)
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
@@ -1832,9 +1825,9 @@ pub fn strip_injected_context(s: &str) -> String {
     // Codex-style: strip any preamble before the "## My request for Codex:"
     // header (e.g. "# Context from my IDE setup:", "# Files mentioned by the
     // user:"); the real user input follows the marker.
-    const MARKER: &str = "## My request for Codex:";
-    if let Some(i) = text.find(MARKER) {
-        text = &text[i + MARKER.len()..];
+    let codex_request_marker = sessio_prompt_markers().codex_request_marker;
+    if let Some(i) = text.find(codex_request_marker) {
+        text = &text[i + codex_request_marker.len()..];
     }
 
     strip_sessio_skills_prompt_blocks(&strip_sessio_computer_use_prompt_blocks(
@@ -1845,11 +1838,54 @@ pub fn strip_injected_context(s: &str) -> String {
 }
 
 pub fn strip_sessio_thread_prompt_blocks(input: &str) -> String {
+    let markers = sessio_prompt_markers();
+    let Some(out) = strip_nonce_delimited_prompt_blocks(
+        input,
+        markers.thread_prompt_start,
+        markers.thread_prompt_end,
+    ) else {
+        return input.to_string();
+    };
+    let cleaned = out.trim_start();
+    let cleaned = cleaned
+        .strip_prefix("---")
+        .map(str::trim_start)
+        .unwrap_or(cleaned);
+    cleaned.trim().to_string()
+}
+
+pub fn strip_sessio_computer_use_prompt_blocks(input: &str) -> String {
+    let markers = sessio_prompt_markers();
+    strip_nonce_delimited_prompt_blocks(
+        input,
+        markers.computer_use_prompt_start,
+        markers.computer_use_prompt_end,
+    )
+    .map(|out| collapse_blank_lines(&out).trim().to_string())
+    .unwrap_or_else(|| input.to_string())
+}
+
+pub fn strip_sessio_skills_prompt_blocks(input: &str) -> String {
+    let markers = sessio_prompt_markers();
+    strip_nonce_delimited_prompt_blocks(
+        input,
+        markers.skills_prompt_start,
+        markers.skills_prompt_end,
+    )
+    .map(|out| collapse_blank_lines(&out).trim().to_string())
+    .unwrap_or_else(|| input.to_string())
+}
+
+fn strip_nonce_delimited_prompt_blocks(
+    input: &str,
+    start_marker: &str,
+    end_marker_prefix: &str,
+) -> Option<String> {
     let mut out = String::with_capacity(input.len());
     let mut cursor = 0;
     let mut changed = false;
     loop {
-        let Some(start_rel) = input[cursor..].find(SESSIO_THREAD_PROMPT_START) else {
+        let Some(start_rel) = input[cursor..].find(start_marker) else {
             out.push_str(&input[cursor..]);
             break;
         };
@@ -1865,7 +1901,7 @@ pub fn strip_sessio_thread_prompt_blocks(input: &str) -> String {
             cursor = start_comment_end;
             continue;
         };
-        let end_marker = format!("{SESSIO_THREAD_PROMPT_END} nonce=\"{nonce}\" -->");
+        let end_marker = format!("{end_marker_prefix} nonce=\"{nonce}\" -->");
         let Some(end_rel) = input[start_comment_end..].find(&end_marker) else {
             out.push_str(&input[cursor..start_comment_end]);
             cursor = start_comment_end;
@@ -1877,88 +1913,9 @@ pub fn strip_sessio_thread_prompt_blocks(input: &str) -> String {
         cursor = end + end_marker.len();
     }
     if !changed {
-        return input.to_string();
+        return None;
     }
-    let cleaned = out.trim_start();
-    let cleaned = cleaned
-        .strip_prefix("---")
-        .map(str::trim_start)
-        .unwrap_or(cleaned);
-    cleaned.trim().to_string()
-}
-
-pub fn strip_sessio_computer_use_prompt_blocks(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut cursor = 0;
-    let mut changed = false;
-    loop {
-        let Some(start_rel) = input[cursor..].find(SESSIO_COMPUTER_USE_PROMPT_START) else {
-            out.push_str(&input[cursor..]);
-            break;
-        };
-        let start = cursor + start_rel;
-        let Some(start_comment_end_rel) = input[start..].find("-->") else {
-            out.push_str(&input[cursor..]);
-            break;
-        };
-        let start_comment_end = start + start_comment_end_rel + "-->".len();
-        let start_comment = &input[start..start_comment_end];
-        let Some(nonce) = comment_attr(start_comment, "nonce") else {
-            out.push_str(&input[cursor..start_comment_end]);
-            cursor = start_comment_end;
-            continue;
-        };
-        let end_marker = format!("{SESSIO_COMPUTER_USE_PROMPT_END} nonce=\"{nonce}\" -->");
-        let Some(end_rel) = input[start_comment_end..].find(&end_marker) else {
-            out.push_str(&input[cursor..start_comment_end]);
-            cursor = start_comment_end;
-            continue;
-        };
-        changed = true;
-        out.push_str(&input[cursor..start]);
-        cursor = start_comment_end + end_rel + end_marker.len();
-    }
-    if !changed {
-        return input.to_string();
-    }
-    collapse_blank_lines(&out).trim().to_string()
-}
-
-pub fn strip_sessio_skills_prompt_blocks(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut cursor = 0;
-    let mut changed = false;
-    loop {
-        let Some(start_rel) = input[cursor..].find(SESSIO_SKILLS_PROMPT_START) else {
-            out.push_str(&input[cursor..]);
-            break;
-        };
-        let start = cursor + start_rel;
-        let Some(start_comment_end_rel) = input[start..].find("-->") else {
-            out.push_str(&input[cursor..]);
-            break;
-        };
-        let start_comment_end = start + start_comment_end_rel + "-->".len();
-        let start_comment = &input[start..start_comment_end];
-        let Some(nonce) = comment_attr(start_comment, "nonce") else {
-            out.push_str(&input[cursor..start_comment_end]);
-            cursor = start_comment_end;
-            continue;
-        };
-        let end_marker = format!("{SESSIO_SKILLS_PROMPT_END} nonce=\"{nonce}\" -->");
-        let Some(end_rel) = input[start_comment_end..].find(&end_marker) else {
-            out.push_str(&input[cursor..start_comment_end]);
-            cursor = start_comment_end;
-            continue;
-        };
-        changed = true;
-        out.push_str(&input[cursor..start]);
-        cursor = start_comment_end + end_rel + end_marker.len();
-    }
-    if !changed {
-        return input.to_string();
-    }
-    collapse_blank_lines(&out).trim().to_string()
+    Some(out)
 }
 
 fn collapse_blank_lines(text: &str) -> String {
@@ -1988,9 +1945,10 @@ pub fn sessio_thread_prompt_block_kinds(input: &str) -> Vec<String> {
 }
 
 pub fn sessio_thread_prompt_block_metas(input: &str) -> Vec<Value> {
+    let markers = sessio_prompt_markers();
     let mut metas = Vec::new();
     let mut cursor = 0;
-    while let Some(start_rel) = input[cursor..].find(SESSIO_THREAD_PROMPT_START) {
+    while let Some(start_rel) = input[cursor..].find(markers.thread_prompt_start) {
         let start = cursor + start_rel;
         let Some(start_comment_end_rel) = input[start..].find("-->") else {
             break;
@@ -2001,7 +1959,7 @@ pub fn sessio_thread_prompt_block_metas(input: &str) -> Vec<Value> {
             cursor = start_comment_end;
             continue;
         };
-        let end_marker = format!("{SESSIO_THREAD_PROMPT_END} nonce=\"{nonce}\" -->");
+        let end_marker = format!("{} nonce=\"{nonce}\" -->", markers.thread_prompt_end);
         let Some(end_rel) = input[start_comment_end..].find(&end_marker) else {
             cursor = start_comment_end;
             continue;
@@ -2081,6 +2039,7 @@ mod tests {
         strip_sessio_computer_use_prompt_blocks, strip_sessio_skills_prompt_blocks,
         strip_sessio_thread_prompt_blocks, text_content_blocks,
     };
+    use crate::prompt_markers::sessio_prompt_markers;
 
     #[test]
     fn normalize_preview_limits_to_50_chars_plus_ellipsis() {
@@ -2151,77 +2110,92 @@ mod tests {
 
     #[test]
     fn text_content_blocks_does_not_extract_when_marked_attachments_are_only_code() {
-        let text = "`[file: __sessio_attachment__:test.md|file:///x]`\n`![__sessio_attachment__:image/png](file:///x.png)`\n\n```md\n[file: __sessio_attachment__:test.md|file:///x]\n![__sessio_attachment__:image/png](file:///x.png)\n```";
-        let blocks = text_content_blocks(text);
+        let attachment_marker = sessio_prompt_markers().attachment_marker;
+        let text = format!(
+            "`[file: {attachment_marker}test.md|file:///x]`\n`![{attachment_marker}image/png](file:///x.png)`\n\n```md\n[file: {attachment_marker}test.md|file:///x]\n![{attachment_marker}image/png](file:///x.png)\n```"
+        );
+        let blocks = text_content_blocks(&text);
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].kind, "text");
-        assert_eq!(blocks[0].text.as_deref(), Some(text));
+        assert_eq!(blocks[0].text.as_deref(), Some(text.as_str()));
     }
 
     #[test]
     fn text_content_blocks_keeps_marked_attachments_inside_unclosed_outer_fence_as_text() {
-        let text = "```\n`[file: __sessio_attachment__:test.md|file:///x]`\n`![__sessio_attachment__:image/png](file:///x.png)`\n\n```md\n[file: __sessio_attachment__:test.md|file:///x]\n![__sessio_attachment__:image/png](file:///x.png)\n```  这种下面的图片还是会被提取\n";
-        let blocks = text_content_blocks(text);
+        let attachment_marker = sessio_prompt_markers().attachment_marker;
+        let text = format!(
+            "```\n`[file: {attachment_marker}test.md|file:///x]`\n`![{attachment_marker}image/png](file:///x.png)`\n\n```md\n[file: {attachment_marker}test.md|file:///x]\n![{attachment_marker}image/png](file:///x.png)\n```  这种下面的图片还是会被提取\n"
+        );
+        let blocks = text_content_blocks(&text);
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].kind, "text");
-        assert_eq!(blocks[0].text.as_deref(), Some(text));
+        assert_eq!(blocks[0].text.as_deref(), Some(text.as_str()));
     }
 
     #[test]
     fn strip_sessio_thread_prompt_blocks_uses_matching_nonce() {
-        let input = concat!(
-            "visible\n",
-            "<!-- sessio-thread-prompt:start nonce=\"abc\" kind=\"work_context\" -->\n",
-            "hidden <!-- sessio-thread-prompt:end --> still hidden\n",
-            "<!-- sessio-thread-prompt:end nonce=\"abc\" -->\n",
-            "rest"
+        let markers = sessio_prompt_markers();
+        let input = format!(
+            "visible\n{} nonce=\"abc\" kind=\"{}\" -->\nhidden {} --> still hidden\n{} nonce=\"abc\" -->\nrest",
+            markers.thread_prompt_start,
+            markers.thread_prompt_kind_work_context,
+            markers.thread_prompt_end,
+            markers.thread_prompt_end
         );
 
-        assert_eq!(strip_sessio_thread_prompt_blocks(input), "visible\n\nrest");
+        assert_eq!(strip_sessio_thread_prompt_blocks(&input), "visible\n\nrest");
     }
 
     #[test]
     fn strip_sessio_thread_prompt_blocks_keeps_unmatched_user_marker() {
-        let input = "user says <!-- sessio-thread-prompt:start nonce=\"abc\" --> literally";
+        let input = format!(
+            "user says {} nonce=\"abc\" --> literally",
+            sessio_prompt_markers().thread_prompt_start
+        );
 
-        assert_eq!(strip_sessio_thread_prompt_blocks(input), input);
+        assert_eq!(strip_sessio_thread_prompt_blocks(&input), input);
     }
 
     #[test]
     fn strip_sessio_computer_use_prompt_blocks_removes_complete_block() {
-        let input = concat!(
-            "<!-- sessio-computer-use:start nonce=\"abc\" kind=\"computer_use\" -->\n",
-            "Use injected computer tools.\n",
-            "<!-- sessio-computer-use:end nonce=\"abc\" -->\n\n",
-            "click the button"
+        let markers = sessio_prompt_markers();
+        let input = format!(
+            "{} nonce=\"abc\" kind=\"{}\" -->\nUse injected computer tools.\n{} nonce=\"abc\" -->\n\nclick the button",
+            markers.computer_use_prompt_start,
+            markers.computer_use_prompt_kind,
+            markers.computer_use_prompt_end
         );
 
         assert_eq!(
-            strip_sessio_computer_use_prompt_blocks(input),
+            strip_sessio_computer_use_prompt_blocks(&input),
             "click the button"
         );
-        assert_eq!(strip_injected_context(input), "click the button");
+        assert_eq!(strip_injected_context(&input), "click the button");
     }
 
     #[test]
     fn strip_sessio_computer_use_prompt_blocks_keeps_unmatched_user_marker() {
-        let input = "show <!-- sessio-computer-use:start nonce=\"abc\" --> literally";
+        let input = format!(
+            "show {} nonce=\"abc\" --> literally",
+            sessio_prompt_markers().computer_use_prompt_start
+        );
 
-        assert_eq!(strip_sessio_computer_use_prompt_blocks(input), input);
+        assert_eq!(strip_sessio_computer_use_prompt_blocks(&input), input);
     }
 
     #[test]
     fn strip_sessio_skills_prompt_blocks_removes_complete_block() {
-        let input = concat!(
-            "<!-- sessio-skills:start nonce=\"abc\" kind=\"skills\" -->\n",
-            "Selected Sessio skills are available.\n",
-            "<!-- sessio-skills:end nonce=\"abc\" -->\n\n",
-            "finish the task"
+        let markers = sessio_prompt_markers();
+        let input = format!(
+            "{} nonce=\"abc\" kind=\"{}\" -->\nSelected Sessio skills are available.\n{} nonce=\"abc\" -->\n\nfinish the task",
+            markers.skills_prompt_start,
+            markers.selected_skills_prompt_kind,
+            markers.skills_prompt_end
         );
 
-        assert_eq!(strip_sessio_skills_prompt_blocks(input), "finish the task");
-        assert_eq!(strip_injected_context(input), "finish the task");
+        assert_eq!(strip_sessio_skills_prompt_blocks(&input), "finish the task");
+        assert_eq!(strip_injected_context(&input), "finish the task");
     }
 }

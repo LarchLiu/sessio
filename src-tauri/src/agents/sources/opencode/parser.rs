@@ -734,6 +734,7 @@ mod tests {
 
     #[test]
     fn sqlite_session_first_user_message_strips_computer_use_prompt_block() {
+        let markers = crate::prompt_markers::sessio_prompt_markers();
         let db = unique_db();
         let conn = create_test_db(&db);
         conn.execute(
@@ -748,7 +749,12 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO part VALUES ('part_1', 'ses_1', 'msg_1', 1000, ?)",
-            [r#"{"type":"text","text":"<!-- sessio-computer-use:start nonce=\"abc\" kind=\"computer_use\" -->\nUse injected computer tools.\n<!-- sessio-computer-use:end nonce=\"abc\" -->\n\nopen settings"}"#],
+            [format!(
+                r#"{{"type":"text","text":"{} nonce=\"abc\" kind=\"{}\" -->\nUse injected computer tools.\n{} nonce=\"abc\" -->\n\nopen settings"}}"#,
+                markers.computer_use_prompt_start,
+                markers.computer_use_prompt_kind,
+                markers.computer_use_prompt_end
+            )],
         )
         .unwrap();
         drop(conn);

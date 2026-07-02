@@ -2062,13 +2062,14 @@ mod tests {
 
     #[test]
     fn computer_use_prompt_layer_mentions_raise_recovery() {
+        let markers = crate::prompt_markers::sessio_prompt_markers();
         let mut options = RuntimeMetadata::new();
         options.insert("computerUse".into(), json!(true));
 
         let text = normalize_runtime_prompt_text("send the message", &options);
 
-        assert!(text.contains("<!-- sessio-skills:start"));
-        assert!(text.contains("kind=\"builtin_skill\""));
+        assert!(text.contains(markers.skills_prompt_start));
+        assert!(text.contains(&format!("kind=\"{}\"", markers.builtin_skill_prompt_kind)));
         assert!(text.contains("id: `builtin:computer-use`"));
         assert!(text.contains("computer_get_app_state"));
         assert!(text.contains("computer_raise_app"));
@@ -2079,18 +2080,20 @@ mod tests {
 
     #[test]
     fn work_state_skill_pointer_is_injected_for_work_context() {
-        let prompt = concat!(
-            "<!-- sessio-thread-prompt:start nonce=\"abc\" kind=\"work_context\" -->\n",
-            "stage context\n",
-            "<!-- sessio-thread-prompt:end nonce=\"abc\" -->"
+        let markers = crate::prompt_markers::sessio_prompt_markers();
+        let prompt = format!(
+            "{} nonce=\"abc\" kind=\"{}\" -->\nstage context\n{} nonce=\"abc\" -->",
+            markers.thread_prompt_start,
+            markers.thread_prompt_kind_work_context,
+            markers.thread_prompt_end
         );
 
-        let text = normalize_runtime_prompt_text(prompt, &RuntimeMetadata::new());
+        let text = normalize_runtime_prompt_text(&prompt, &RuntimeMetadata::new());
 
-        assert!(text.contains("kind=\"builtin_skill\""));
+        assert!(text.contains(&format!("kind=\"{}\"", markers.builtin_skill_prompt_kind)));
         assert!(text.contains("id: `builtin:sessio-work-state`"));
         assert!(text.contains("~/.sessio/bin/sessio"));
-        assert!(text.ends_with(prompt));
+        assert!(text.ends_with(&prompt));
     }
 
     #[test]

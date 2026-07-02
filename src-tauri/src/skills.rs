@@ -9,12 +9,12 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use walkdir::WalkDir;
 
+use crate::prompt_markers::sessio_prompt_markers;
+
 const SKILL_MD_FILE_NAME: &str = "SKILL.md";
 pub const SKILLS_UPDATED_EVENT: &str = "skills_updated";
 pub const SELECTED_SKILL_IDS_OPTION: &str = "selectedSkillIds";
 pub const SELECTED_SKILLS_OPTION: &str = "selectedSkills";
-const SESSIO_SKILLS_PROMPT_START: &str = "<!-- sessio-skills:start";
-const SESSIO_SKILLS_PROMPT_END: &str = "<!-- sessio-skills:end";
 
 const BUILTIN_COMPUTER_USE_SKILL_ID: &str = "builtin:computer-use";
 const BUILTIN_WORK_STATE_SKILL_ID: &str = "builtin:sessio-work-state";
@@ -154,6 +154,7 @@ pub fn inject_selected_skills_prompt_block(
     text: &str,
     options: &crate::agents::runtime::types::RuntimeMetadata,
 ) -> String {
+    let markers = sessio_prompt_markers();
     let Some(skills) = selected_skills_from_options(options) else {
         return text.to_string();
     };
@@ -162,7 +163,7 @@ pub fn inject_selected_skills_prompt_block(
     }
     prepend_skills_prompt_block(
         text,
-        "selected_skills",
+        markers.selected_skills_prompt_kind,
         "Selected Sessio skills are available for this conversation.\nUse the metadata below to decide which skill is relevant. When you need the full instructions, read the resolved `skillMdPath`. The canonical packaged layout is `rootDir/<skillDirName>/SKILL.md`.",
         &skills,
         None,
@@ -181,15 +182,18 @@ pub fn inject_builtin_skill_prompt_block(
     builtin_kind: BuiltinSkillKind,
     guidance: &str,
 ) -> String {
+    let markers = sessio_prompt_markers();
     let Some(skill) = builtin_skill_metadata(builtin_kind) else {
         return text.to_string();
     };
-    if text.contains("kind=\"builtin_skill\"") && text.contains(&format!("id: `{}`", skill.id)) {
+    if text.contains(&format!("kind=\"{}\"", markers.builtin_skill_prompt_kind))
+        && text.contains(&format!("id: `{}`", skill.id))
+    {
         return text.to_string();
     }
     prepend_skills_prompt_block(
         text,
-        "builtin_skill",
+        markers.builtin_skill_prompt_kind,
         "A built-in Sessio skill is active for this conversation.\nUse the metadata below to locate the original `SKILL.md`. Built-in skills may live under a different `rootDir` than user-installed skills, so prefer the resolved `skillMdPath` when loading the full instructions.",
         &[skill],
         Some(guidance),
@@ -529,9 +533,11 @@ fn prepend_skills_prompt_block(
     }
 
     let nonce = uuid::Uuid::new_v4().to_string();
+    let markers = sessio_prompt_markers();
     let mut block = String::new();
     block.push_str(&format!(
-        "{SESSIO_SKILLS_PROMPT_START} nonce=\"{nonce}\" kind=\"{kind}\" -->\n\n"
+        "{} nonce=\"{nonce}\" kind=\"{kind}\" -->\n\n",
+        markers.skills_prompt_start
     ));
     block.push_str(intro.trim());
     block.push_str("\n\n");
@@ -544,7 +550,8 @@ fn prepend_skills_prompt_block(
         block.push('\n');
     }
     block.push_str(&format!(
-        "\n{SESSIO_SKILLS_PROMPT_END} nonce=\"{nonce}\" -->"
+        "\n{} nonce=\"{nonce}\" -->",
+        markers.skills_prompt_end
     ));
     if text.trim().is_empty() {
         block
@@ -570,16 +577,18 @@ fn render_skill_metadata(skill: &SelectedSkillMetadata) -> String {
 }
 
 fn skill_source_label(source: SkillSource) -> &'static str {
+    let markers = sessio_prompt_markers();
     match source {
-        SkillSource::Builtin => "builtin",
-        SkillSource::User => "user",
+        SkillSource::Builtin => markers.skill_source_builtin,
+        SkillSource::User => markers.skill_source_user,
     }
 }
 
 fn builtin_skill_kind_label(kind: BuiltinSkillKind) -> &'static str {
+    let markers = sessio_prompt_markers();
     match kind {
-        BuiltinSkillKind::ComputerUse => "computerUse",
-        BuiltinSkillKind::WorkState => "workState",
+        BuiltinSkillKind::ComputerUse => markers.builtin_skill_kind_computer_use,
+        BuiltinSkillKind::WorkState => markers.builtin_skill_kind_work_state,
     }
 }
 
@@ -892,6 +901,7 @@ description: Recursive skill
 
     #[test]
     fn injects_selected_skills_prompt_block() {
+        let markers = sessio_prompt_markers();
         let mut options = crate::agents::runtime::types::RuntimeMetadata::new();
         options.insert(
             SELECTED_SKILLS_OPTION.to_string(),
@@ -909,8 +919,8 @@ description: Recursive skill
         let output = inject_selected_skills_prompt_block("solve the task", &options);
 
         assert!(output.contains("Selected Sessio skills are available"));
-        assert!(output.contains("kind=\"selected_skills\""));
-        assert!(output.contains("source: `user`"));
+        assert!(output.contains(&format!("kind=\"{}\"", markers.selected_skills_prompt_kind)));
+        assert!(output.contains(&format!("source: `{}`", markers.skill_source_user)));
         assert!(output.contains("rootDir/<skillDirName>/SKILL.md"));
         assert!(output.contains("skillDirName: `demo`"));
         assert!(output.contains("skillMdPath: `/tmp/skills/demo/SKILL.md`"));
@@ -919,17 +929,21 @@ description: Recursive skill
 
     #[test]
     fn injects_builtin_skill_prompt_block_with_shared_wrapper() {
+        let markers = sessio_prompt_markers();
         let output = inject_builtin_skill_prompt_block(
             "continue the task",
             BuiltinSkillKind::ComputerUse,
             "Use `computer_get_app_state` first.",
         );
 
-        assert!(output.contains("<!-- sessio-skills:start"));
-        assert!(output.contains("kind=\"builtin_skill\""));
+        assert!(output.contains(markers.skills_prompt_start));
+        assert!(output.contains(&format!("kind=\"{}\"", markers.builtin_skill_prompt_kind)));
         assert!(output.contains("id: `builtin:computer-use`"));
-        assert!(output.contains("source: `builtin`"));
-        assert!(output.contains("builtinKind: `computerUse`"));
+        assert!(output.contains(&format!("source: `{}`", markers.skill_source_builtin)));
+        assert!(output.contains(&format!(
+            "builtinKind: `{}`",
+            markers.builtin_skill_kind_computer_use
+        )));
         assert!(output.contains("computer_get_app_state"));
         assert!(output.ends_with("continue the task"));
     }

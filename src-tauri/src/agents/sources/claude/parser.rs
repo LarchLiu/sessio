@@ -1681,11 +1681,16 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let path = dir.join("truncated-hidden-last-prompt-session.jsonl");
+        let markers = crate::prompt_markers::sessio_prompt_markers();
         fs::write(
             &path,
-            r#"{"type":"user","timestamp":"2026-05-18T05:09:15.000Z","cwd":"/tmp/project","message":{"role":"user","content":"<!-- sessio-computer-use:start nonce=\"abc\" kind=\"computer_use\" -->\nUse injected computer tools.\n<!-- sessio-computer-use:end nonce=\"abc\" -->\n\n使用网易云音乐打开私人雷达然后播放"}}
-{"type":"last-prompt","lastPrompt":"<!-- sessio-computer-use:start nonce=\"abc...","leafUuid":"leaf","sessionId":"truncated-hidden-last-prompt-session"}
-"#,
+            format!(
+                "{{\"type\":\"user\",\"timestamp\":\"2026-05-18T05:09:15.000Z\",\"cwd\":\"/tmp/project\",\"message\":{{\"role\":\"user\",\"content\":\"{} nonce=\\\"abc\\\" kind=\\\"{}\\\" -->\\nUse injected computer tools.\\n{} nonce=\\\"abc\\\" -->\\n\\n使用网易云音乐打开私人雷达然后播放\"}}}}\n{{\"type\":\"last-prompt\",\"lastPrompt\":\"{} nonce=\\\"abc...\",\"leafUuid\":\"leaf\",\"sessionId\":\"truncated-hidden-last-prompt-session\"}}\n",
+                markers.computer_use_prompt_start,
+                markers.computer_use_prompt_kind,
+                markers.computer_use_prompt_end,
+                markers.computer_use_prompt_start
+            ),
         )
         .unwrap();
 

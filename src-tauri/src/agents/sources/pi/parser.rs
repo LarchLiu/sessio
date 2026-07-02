@@ -883,10 +883,13 @@ mod tests {
 
     #[test]
     fn pi_session_first_user_message_strips_computer_use_prompt_block() {
+        let markers = crate::prompt_markers::sessio_prompt_markers();
         let path = unique_temp_jsonl_path("pi-computer-use-preview");
-        let content = concat!(
-            "{\"type\":\"session\",\"id\":\"session-1\",\"timestamp\":\"2026-06-25T18:48:15.425Z\",\"cwd\":\"/tmp/project\"}\n",
-            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<!-- sessio-computer-use:start nonce=\\\"abc\\\" kind=\\\"computer_use\\\" -->\\nUse injected computer tools.\\n<!-- sessio-computer-use:end nonce=\\\"abc\\\" -->\\n\\nclick the button\"}],\"timestamp\":1000}}\n",
+        let content = format!(
+            "{{\"type\":\"session\",\"id\":\"session-1\",\"timestamp\":\"2026-06-25T18:48:15.425Z\",\"cwd\":\"/tmp/project\"}}\n{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"{} nonce=\\\"abc\\\" kind=\\\"{}\\\" -->\\nUse injected computer tools.\\n{} nonce=\\\"abc\\\" -->\\n\\nclick the button\"}}],\"timestamp\":1000}}}}\n",
+            markers.computer_use_prompt_start,
+            markers.computer_use_prompt_kind,
+            markers.computer_use_prompt_end
         );
         std::fs::write(&path, content).expect("write temp pi jsonl");
 

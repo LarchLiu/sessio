@@ -125,13 +125,17 @@ mod tests {
 
     #[test]
     fn prompt_block_includes_skill_path_and_recovery_rules() {
+        let markers = crate::prompt_markers::sessio_prompt_markers();
         let block = computer_use_prompt_block();
 
-        assert!(block.contains("<!-- sessio-skills:start"));
-        assert!(block.contains("kind=\"builtin_skill\""));
+        assert!(block.contains(markers.skills_prompt_start));
+        assert!(block.contains(&format!("kind=\"{}\"", markers.builtin_skill_prompt_kind)));
         assert!(block.contains("id: `builtin:computer-use`"));
-        assert!(block.contains("builtinKind: `computerUse`"));
-        assert!(block.contains("<!-- sessio-skills:end"));
+        assert!(block.contains(&format!(
+            "builtinKind: `{}`",
+            markers.builtin_skill_kind_computer_use
+        )));
+        assert!(block.contains(markers.skills_prompt_end));
         assert!(block.contains("skillMdPath: `"));
         assert!(block.contains("computer_get_app_state"));
         assert!(block.contains("computer_raise_app"));

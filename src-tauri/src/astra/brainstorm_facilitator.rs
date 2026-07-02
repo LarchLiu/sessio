@@ -826,7 +826,7 @@ rationale: 渐进迁移兼顾速度与稳定性。"#;
         assert!(prompt.contains("### From participant participant-a (agent codex"));
         assert!(prompt.contains("in the same language as the opinions"));
         assert!(prompt.contains(long_opinion.trim()));
-        assert!(prompt.contains("sessio-thread-prompt:start"));
+        assert!(prompt.contains(crate::prompt_markers::sessio_prompt_markers().thread_prompt_start));
         assert!(!prompt.contains("## Previous shared board"));
     }
 
