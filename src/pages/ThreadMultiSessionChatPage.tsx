@@ -105,6 +105,7 @@ import {
   AcpRenderItems,
   ImagePreviewOverlay,
   liveWorkingIndicatorTurn,
+  mergeHistoryAndLiveViewModels,
   type MarkdownImage,
 } from "./ChatPage";
 import ChatCanvasView from "../components/ChatCanvasView";
@@ -192,6 +193,7 @@ export default function ThreadMultiSessionChatPage({
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<AcpAvailableCommand | null>(null);
   const [selectedAssistant, setSelectedAssistant] = useState<AssistantInfo | null>(null);
   const [previewImage, setPreviewImage] = useState<MarkdownImage | null>(null);
+  const [threadFileHistoryTurnsByLane, setThreadFileHistoryTurnsByLane] = useState<Record<string, LiveTurn[]>>({});
   const composer = useChatComposer({
     runtimeAgents,
     lastRuntimeAgentSelection,
@@ -391,13 +393,79 @@ export default function ThreadMultiSessionChatPage({
   const isFilesView = chatView === "file";
   const isCanvasView = chatView === "canvas";
   const selectedProjectFilePath = selectedProjectFileRequest?.path.trim() || null;
+  const threadFileHistoryLaneSpecs = useMemo(
+    () =>
+      isFilesView || isCanvasView
+        ? lanes.flatMap((lane) => {
+            const key = threadFileHistoryLaneKey(lane);
+            if (!key || !lane.session) return [];
+            return [{
+              key,
+              agent: lane.agent,
+              sessionId: lane.sessionId,
+              filePath: lane.session.filePath,
+            }];
+          })
+        : [],
+    [isCanvasView, isFilesView, lanes],
+  );
+  const threadFileHistoryLaneSpecsKey = useMemo(
+    () => threadFileHistoryLaneSpecs.map((spec) => spec.key).join("\n"),
+    [threadFileHistoryLaneSpecs],
+  );
+  useEffect(() => {
+    if (threadFileHistoryLaneSpecs.length === 0) {
+      setThreadFileHistoryTurnsByLane((prev) =>
+        Object.keys(prev).length === 0 ? prev : {},
+      );
+      return;
+    }
+
+    let cancelled = false;
+    const activeKeys = new Set(threadFileHistoryLaneSpecs.map((spec) => spec.key));
+    setThreadFileHistoryTurnsByLane((prev) => {
+      const next: Record<string, LiveTurn[]> = {};
+      let changed = false;
+      for (const [key, turns] of Object.entries(prev)) {
+        if (activeKeys.has(key)) {
+          next[key] = turns;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+
+    threadFileHistoryLaneSpecs.forEach((spec) => {
+      getSessionHistory(spec.agent, spec.filePath, spec.sessionId)
+        .then((result) => {
+          if (cancelled) return;
+          const turns = normalizeSessionHistoryTurns(result.turns);
+          setThreadFileHistoryTurnsByLane((prev) => {
+            if (prev[spec.key] === turns) return prev;
+            return {
+              ...prev,
+              [spec.key]: turns,
+            };
+          });
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          console.warn("load thread file history failed", err);
+        });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [threadFileHistoryLaneSpecsKey]);
   const threadFileEdits = useMemo(
-    () => aggregateThreadLaneFileEdits(lanes, "all"),
-    [lanes],
+    () => aggregateThreadLaneFileEdits(lanes, threadFileHistoryTurnsByLane, "all"),
+    [lanes, threadFileHistoryTurnsByLane],
   );
   const currentThreadFileEdits = useMemo(
-    () => aggregateThreadLaneFileEdits(lanes, "current"),
-    [lanes],
+    () => aggregateThreadLaneFileEdits(lanes, threadFileHistoryTurnsByLane, "current"),
+    [lanes, threadFileHistoryTurnsByLane],
   );
   const fileViewEdits = useMemo(() => {
     if (!selectedProjectFilePath) return threadFileEdits.edits;
@@ -1370,6 +1438,7 @@ function ThreadMultiSessionEmpty({
 
 function aggregateThreadLaneFileEdits(
   lanes: ThreadSessionLane[],
+  historyTurnsByLane: Record<string, LiveTurn[]>,
   mode: "all" | "current",
 ): {
   edits: FileEditItem[];
@@ -1378,13 +1447,13 @@ function aggregateThreadLaneFileEdits(
 } {
   const edits: FileEditItem[] = [];
   for (const lane of lanes) {
-    if (!lane.liveSession) continue;
-    const viewModel = liveSessionToAcpViewModel(lane.liveSession);
+    const laneView = threadLaneFileViewModel(lane, historyTurnsByLane);
+    if (!laneView) continue;
     const summary = mode === "all"
-      ? aggregateSessionFileEdits(viewModel)
+      ? aggregateSessionFileEdits(laneView.viewModel)
       : liveOrLatestTurnFileEdits(
-          viewModel,
-          new Set(lane.liveSession.turns.map((turn) => turn.turnId)),
+          laneView.viewModel,
+          laneView.liveTurnIds,
         );
     appendThreadFileEdits(edits, summary.edits);
   }
@@ -1393,6 +1462,57 @@ function aggregateThreadLaneFileEdits(
     additions: edits.reduce((total, edit) => total + (edit.additions ?? 0), 0),
     deletions: edits.reduce((total, edit) => total + (edit.deletions ?? 0), 0),
   };
+}
+
+function threadLaneFileViewModel(
+  lane: ThreadSessionLane,
+  historyTurnsByLane: Record<string, LiveTurn[]>,
+): {
+  viewModel: AcpViewModel;
+  liveTurnIds: Set<string>;
+} | null {
+  const liveViewModel = lane.liveSession ? liveSessionToAcpViewModel(lane.liveSession) : null;
+  const liveTurnIds = new Set(lane.liveSession?.turns.map((turn) => turn.turnId) ?? []);
+  const historyKey = threadFileHistoryLaneKey(lane);
+  const historyTurns = historyKey ? historyTurnsByLane[historyKey] : undefined;
+  const hasHistoryTurns = Array.isArray(historyTurns);
+  const historyViewModel = hasHistoryTurns
+    ? historyTurnsToAcpViewModel(historyTurns)
+    : null;
+
+  if (liveViewModel && historyViewModel) {
+    return {
+      viewModel: mergeHistoryAndLiveViewModels(historyViewModel, liveViewModel),
+      liveTurnIds,
+    };
+  }
+  if (liveViewModel) {
+    return {
+      viewModel: liveViewModel,
+      liveTurnIds,
+    };
+  }
+  if (historyViewModel) {
+    return {
+      viewModel: historyViewModel,
+      liveTurnIds,
+    };
+  }
+  return null;
+}
+
+function threadFileHistoryLaneKey(lane: ThreadSessionLane): string | null {
+  const session = lane.session;
+  if (!session) return null;
+  if (!isPersistedSession(session)) return null;
+  const filePath = session.filePath.trim();
+  if (!filePath) return null;
+  return [
+    lane.agent,
+    lane.sessionId,
+    filePath,
+    session.messageCount,
+  ].join("\u0001");
 }
 
 function appendThreadFileEdits(target: FileEditItem[], incoming: FileEditItem[]) {
