@@ -758,6 +758,31 @@ function collectWorkflowOverlayCardContexts(
   return contexts;
 }
 
+function workflowCardThreadId(model: WorkflowCardBlockModel): string {
+  const direct = model.threadId?.trim();
+  if (direct) return direct;
+  const snapshotJson = model.workflowSnapshotJson?.trim();
+  if (!snapshotJson) return "";
+  try {
+    const snapshot = JSON.parse(snapshotJson) as ThreadWorkSnapshot;
+    return snapshot.threadId?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function workflowCardsForThread(
+  doc: ReturnType<typeof createBlockSuiteDoc>["doc"],
+  threadId: string,
+): WorkflowCardBlockModel[] {
+  const targetThreadId = threadId.trim();
+  if (!targetThreadId) return [];
+  return doc
+    .getBlocksByFlavour(["sessio:workflow-card"])
+    .map((block) => block.model as WorkflowCardBlockModel)
+    .filter((model) => workflowCardThreadId(model) === targetThreadId);
+}
+
 function isTerminalRuntimeTurnStatus(status: RuntimeTurnStatus): boolean {
   return status === "completed" || status === "failed" || status === "cancelled";
 }
@@ -969,6 +994,7 @@ export default function BlockSuiteCanvasHost({
   const workflowTerminalFetchKeysRef = useRef<Set<string>>(new Set());
   const workflowTerminalInFlightKeysRef = useRef<Set<string>>(new Set());
   const workflowTerminalRetainOverlayBlockIdsRef = useRef<Set<string>>(new Set());
+  const autoWorkflowCardSeedRef = useRef<string | null>(null);
   const addMenuButtonRef = useRef<HTMLButtonElement>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [status, setStatus] = useState("Initializing BlockSuite canvas…");
@@ -1772,39 +1798,141 @@ export default function BlockSuiteCanvasHost({
     }
   }, [getDoc, getEditor, getRootService, onError, scheduleSyncBlocks]);
 
-  const addWorkflowCard = useCallback(async () => {
+  const insertWorkflowCardForSnapshot = useCallback(async (
+    snapshot: ThreadWorkSnapshot | null,
+    options?: {
+      threadId?: string | null;
+      stageId?: string | null;
+      focus?: boolean;
+    },
+  ) => {
     const doc = getDoc();
-    const rootService = getRootService();
-    if (!doc || !rootService) return;
+    const rootService = await waitForRootService();
+    if (!doc || !rootService) return false;
+    const threadId = options?.threadId?.trim() || snapshot?.threadId?.trim() || sessionThreadId || "";
+    const stageId = options?.stageId?.trim() ?? "";
     const snapshotResult = canvasKey.kind === "session"
       ? await getThreadWorkSnapshot(sessionAgent, canvasKey.id).catch(() => null)
       : null;
-    const snapshot = snapshotResult?.snapshot ?? fallbackWorkflowSnapshot ?? null;
-    const title = snapshot?.goal?.trim() || "Workflow";
-    const summaryMarkdown = workflowSnapshotToMarkdown(snapshot);
+    const resolvedSnapshot = snapshotResult?.snapshot ?? snapshot ?? null;
+    const resolvedThreadId = snapshotResult?.threadId ?? threadId;
+    const resolvedStageId = snapshotResult?.stageId ?? stageId;
+    const title = resolvedSnapshot?.goal?.trim() || "Workflow";
+    const summaryMarkdown = workflowSnapshotToMarkdown(resolvedSnapshot);
     const [bound] = placeCanvasNodes(doc, rootService, [{
       width: DEFAULT_WORKFLOW_CARD_WIDTH,
       height: DEFAULT_WORKFLOW_CARD_HEIGHT,
     }]);
-    insertEdgelessBlock(
+    const blockId = insertEdgelessBlock(
       "sessio:workflow-card",
       {
         title,
-        threadId: snapshotResult?.threadId ?? snapshot?.threadId ?? sessionThreadId ?? "",
-        threadStageId: snapshotResult?.stageId ?? "",
+        threadId: resolvedThreadId,
+        threadStageId: resolvedStageId,
         sourceType: "workflow_definition",
         workflowSummaryMarkdown: summaryMarkdown,
         executionState: "idle",
         lastRunId: "",
-        workflowSnapshotJson: snapshot ? JSON.stringify(snapshot) : "",
-        threadGoal: snapshot?.goal ?? "",
+        workflowSnapshotJson: resolvedSnapshot ? JSON.stringify(resolvedSnapshot) : "",
+        threadGoal: resolvedSnapshot?.goal ?? "",
         status: "ready",
         xywh: bound.serialize(),
       },
     );
+    if (options?.focus ?? true) {
+      focusBlocksInViewport(rootService, doc, [blockId]);
+    }
+    const snapshotJson = snapshotToJson(doc);
+    if (snapshotJson) {
+      await flushSaveRef.current(snapshotJson);
+    }
     await syncCanvasBlocks(doc);
     updateSelectionState();
-  }, [canvasKey.id, canvasKey.kind, fallbackWorkflowSnapshot, getDoc, getRootService, insertEdgelessBlock, sessionAgent, sessionThreadId, syncCanvasBlocks, updateSelectionState]);
+    return true;
+  }, [canvasKey.id, canvasKey.kind, getDoc, insertEdgelessBlock, sessionAgent, sessionThreadId, syncCanvasBlocks, updateSelectionState, waitForRootService]);
+
+  const addWorkflowCard = useCallback(async () => {
+    await insertWorkflowCardForSnapshot(fallbackWorkflowSnapshot);
+  }, [fallbackWorkflowSnapshot, insertWorkflowCardForSnapshot]);
+
+  const syncThreadWorkflowCard = useCallback(async () => {
+    if (!isReady || canvasKey.kind !== "thread" || !fallbackWorkflowSnapshot) return;
+    const doc = getDoc();
+    if (!doc) return;
+    const threadId = fallbackWorkflowSnapshot.threadId?.trim() || sessionThreadId || canvasKey.id;
+    if (!threadId) return;
+
+    const seedKey = `${canvasKeySignature}:${threadId}`;
+    const cards = workflowCardsForThread(doc, threadId);
+    if (cards.length === 0) {
+      if (autoWorkflowCardSeedRef.current === seedKey) return;
+      const inserted = await insertWorkflowCardForSnapshot(fallbackWorkflowSnapshot, {
+        threadId,
+        stageId: "",
+        focus: true,
+      });
+      if (inserted) {
+        autoWorkflowCardSeedRef.current = seedKey;
+      }
+      return;
+    }
+
+    autoWorkflowCardSeedRef.current = seedKey;
+    const nextSnapshotJson = JSON.stringify(fallbackWorkflowSnapshot);
+    const nextSnapshotDiff = canonicalWorkflowSnapshotForDiff(fallbackWorkflowSnapshot);
+    const nextSummary = workflowSnapshotToMarkdown(fallbackWorkflowSnapshot);
+    const nextTitle = fallbackWorkflowSnapshot.goal?.trim() || "Workflow";
+    let changed = false;
+
+    for (const model of cards) {
+      const patch: Record<string, unknown> = {};
+      if ((model.threadId || "") !== threadId) {
+        patch.threadId = threadId;
+      }
+      if ((model.threadGoal || "") !== (fallbackWorkflowSnapshot.goal ?? "")) {
+        patch.threadGoal = fallbackWorkflowSnapshot.goal ?? "";
+      }
+      if ((model.title || "") !== nextTitle) {
+        patch.title = nextTitle;
+      }
+      if ((model.workflowSummaryMarkdown || "") !== nextSummary) {
+        patch.workflowSummaryMarkdown = nextSummary;
+      }
+      if (canonicalWorkflowSnapshotJsonForDiff(model.workflowSnapshotJson || "") !== nextSnapshotDiff) {
+        patch.workflowSnapshotJson = nextSnapshotJson;
+      }
+      if (Object.keys(patch).length === 0) continue;
+      doc.updateBlock(model, patch);
+      changed = true;
+    }
+
+    if (!changed) return;
+    const snapshotJson = snapshotToJson(doc);
+    if (snapshotJson) {
+      await flushSaveRef.current(snapshotJson);
+    }
+    await syncCanvasBlocks(doc);
+    rebuildWorkflowOverlayCardContexts(doc);
+    updateSelectionState();
+  }, [
+    canvasKey.id,
+    canvasKey.kind,
+    canvasKeySignature,
+    fallbackWorkflowSnapshot,
+    getDoc,
+    insertWorkflowCardForSnapshot,
+    isReady,
+    rebuildWorkflowOverlayCardContexts,
+    sessionThreadId,
+    syncCanvasBlocks,
+    updateSelectionState,
+  ]);
+
+  useEffect(() => {
+    void syncThreadWorkflowCard().catch((error) => {
+      onError(`Failed to sync workflow card: ${String(error)}`);
+    });
+  }, [onError, syncThreadWorkflowCard]);
 
   const groupSelection = useCallback(() => {
     const rootService = getRootService();
@@ -2281,6 +2409,7 @@ export default function BlockSuiteCanvasHost({
   useEffect(() => {
     autoAddedEditedFilesHydratedRef.current = false;
     previousEditedFileKeysRef.current = new Set();
+    autoWorkflowCardSeedRef.current = null;
   }, [canvasKeySignature, initialState.document.id]);
 
   useEffect(() => {
