@@ -14,6 +14,7 @@ import {
   Square,
   Sparkles,
   Trash2,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -160,8 +161,18 @@ export default function ChatComposer({
         }
       >
         {composer.composerError && (
-          <div className="border-b border-status-error/20 bg-status-error/10 px-3.5 py-2 text-body-sm text-status-error">
-            {composer.composerError}
+          <div className="flex items-start gap-2 border-b border-status-error/20 bg-status-error/10 px-3.5 py-2 text-body-sm text-status-error">
+            <div className="min-w-0 flex-1 break-words">
+              {composer.composerError}
+            </div>
+            <button
+              type="button"
+              aria-label="Dismiss error"
+              onClick={() => composer.setComposerError(null)}
+              className="-mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-status-error/55 transition hover:bg-status-error/10 hover:text-status-error focus-visible:bg-status-error/10 focus-visible:text-status-error focus-visible:outline-none"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
           </div>
         )}
         {composer.attachmentPreview}
