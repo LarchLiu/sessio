@@ -482,6 +482,8 @@ export interface AssistantInfo {
   agent: AssistantAgentInfo;
   systemPrompt: string | null;
   color: string | null;
+  selectedSkillIds: string[];
+  selectedMcpIds: string[];
   type: AssistantType;
   processTemplateId: string | null;
   projectId: string | null;
@@ -496,6 +498,8 @@ export interface StageAssistantInfo {
   color: string | null;
   agent: AssistantAgentInfo;
   systemPrompt?: string | null;
+  selectedSkillIds?: string[];
+  selectedMcpIds?: string[];
   order: number;
 }
 
@@ -507,6 +511,8 @@ export interface ThreadAssistantInfo {
   color: string | null;
   agent: AssistantAgentInfo;
   systemPrompt?: string | null;
+  selectedSkillIds?: string[];
+  selectedMcpIds?: string[];
   order: number;
 }
 
@@ -1760,6 +1766,8 @@ export async function createAssistant(input: {
   name: string;
   systemPrompt?: string | null;
   color?: string | null;
+  selectedSkillIds?: string[];
+  selectedMcpIds?: string[];
   type: AssistantType;
   processTemplateId?: string | null;
   projectId?: string | null;
@@ -1770,6 +1778,8 @@ export async function createAssistant(input: {
       agent: input.agent,
       systemPrompt: input.systemPrompt ?? null,
       color: input.color ?? null,
+      selectedSkillIds: input.selectedSkillIds ?? [],
+      selectedMcpIds: input.selectedMcpIds ?? [],
       assistantType: input.type,
       processTemplateId: input.processTemplateId ?? null,
       projectId: input.projectId ?? null,
@@ -1784,6 +1794,8 @@ export async function updateAssistant(
     agent?: AssistantAgentInfo | null;
     systemPrompt?: string | null;
     color?: string | null;
+    selectedSkillIds?: string[] | null;
+    selectedMcpIds?: string[] | null;
     enabled?: boolean | null;
   },
 ): Promise<AssistantInfo> {
@@ -1793,6 +1805,14 @@ export async function updateAssistant(
       name: patch.name ?? null,
       agent: patch.agent ?? null,
       enabled: patch.enabled ?? null,
+      selectedSkillIds:
+        Object.prototype.hasOwnProperty.call(patch, "selectedSkillIds")
+          ? patch.selectedSkillIds ?? []
+          : null,
+      selectedMcpIds:
+        Object.prototype.hasOwnProperty.call(patch, "selectedMcpIds")
+          ? patch.selectedMcpIds ?? []
+          : null,
       color:
         Object.prototype.hasOwnProperty.call(patch, "color")
           ? patch.color === null

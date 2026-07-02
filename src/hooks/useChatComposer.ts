@@ -36,6 +36,7 @@ import {
   useComposerAttachments,
 } from "../components/ComposerAttachments";
 import { RuntimeEffortControl, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
+import { mergeRuntimeResourceOptions } from "../assistantResources";
 import { buildSessioAssistantPromptBlock } from "../historyMerge";
 import type { PendingNewChatSession } from "../navigation";
 import { dispatchSessionStartedFallback, type LiveRuntimeAction, type LiveRuntimeState } from "../runtimeChat";
@@ -62,6 +63,7 @@ export interface ChatComposerStartOptions {
   projectName: string;
   extraContext?: string | null;
   assistantPrompt?: string | null;
+  runtimeOptions?: Record<string, unknown>;
   clearComposerOnSuccess?: boolean;
   pendingSession?: PendingSessionExtras;
   onPendingCreated?: (session: PendingNewChatSession) => void;
@@ -403,10 +405,8 @@ export function useChatComposer({
     setComposerError(null);
     onError(null);
     try {
-      const handle = await startAgentSession({
-        agent,
-        workspacePath: options.workspacePath,
-        options: runtimeSessionOptions(
+      const sessionOptions = mergeRuntimeResourceOptions(
+        runtimeSessionOptions(
           model,
           permissionMode,
           effort,
@@ -414,6 +414,12 @@ export function useChatComposer({
           selectedSkillIds,
           selectedMcpIds,
         ),
+        options.runtimeOptions,
+      );
+      const handle = await startAgentSession({
+        agent,
+        workspacePath: options.workspacePath,
+        options: sessionOptions,
       });
       if (computerUseEnabled) {
         await setComputerUseSessionApproval(handle.sessioRuntimeSessionId, true);
@@ -431,14 +437,7 @@ export function useChatComposer({
         liveState,
         sequenceRef: fallbackRuntimeSequenceRef,
         timestamp,
-        metadata: runtimeSessionOptions(
-          model,
-          permissionMode,
-          effort,
-          computerUseEnabled,
-          selectedSkillIds,
-          selectedMcpIds,
-        ),
+        metadata: sessionOptions,
       });
       const pendingSession: PendingNewChatSession = {
         ...(options.pendingSession ?? {}),

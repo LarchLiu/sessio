@@ -30,6 +30,7 @@ function supportsMcpTransport(
 
 export function useSelectableMcpServers(
   capabilities: RuntimeCapabilitySet | null | undefined,
+  options: { filterByCapabilities?: boolean } = {},
 ) {
   const [servers, setServers] = useState<McpServerConfig[]>([]);
   const [selectedMcpIds, setSelectedMcpIds] = useState<string[]>([]);
@@ -64,12 +65,15 @@ export function useSelectableMcpServers(
         .filter((server) =>
           server.source === SESSIO_PROMPT_MARKERS.mcpSourceCustom
           && server.enabled
-          && supportsMcpTransport(server, capabilities),
+          && (
+            options.filterByCapabilities === false
+            || supportsMcpTransport(server, capabilities)
+          ),
         )
         .sort((left, right) =>
           `${left.name}:${left.id}`.localeCompare(`${right.name}:${right.id}`),
         ),
-    [capabilities, servers],
+    [capabilities, options.filterByCapabilities, servers],
   );
 
   useEffect(() => {

@@ -14,10 +14,12 @@ use crate::agents::runtime::types::{
     StartAgentSession,
 };
 use crate::agents::runtime::{RuntimeCleanupReport, RuntimeManager};
+use crate::mcp::SELECTED_MCP_IDS_OPTION;
 use crate::models::{
     Agent, AgentInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageStatus, ThreadInfo, ThreadKind,
 };
+use crate::skills::SELECTED_SKILL_IDS_OPTION;
 use crate::store::{
     AstraRunRecord, AstraRunSessionRecord, NewPlanRound, NewPlanTask, NewPlanTaskSession,
     PlanTaskStatusPatch, SessionStore, ThreadWorkSnapshotRecord,
@@ -946,6 +948,13 @@ impl AstraService {
         let mut options = RuntimeMetadata::default();
         options.insert("astraRunId".to_string(), Value::String(run.run_id.clone()));
         options.insert("astraTaskId".to_string(), Value::String(task.id.clone()));
+        if let Some(plan_task) = plan_task.as_ref() {
+            insert_assistant_resource_options_from_json(
+                &mut options,
+                plan_task.assistant_snapshot_json.as_deref(),
+            );
+        }
+        insert_assistant_resource_options_from_thread(&mut options, thread, task);
         if let Some(assistant_id) = task.assistant_id.as_deref() {
             options.insert(
                 "astraAssistantId".to_string(),
@@ -2718,6 +2727,91 @@ fn insert_option_if_missing(options: &mut RuntimeMetadata, key: &str, value: Opt
     }
 }
 
+fn insert_assistant_resource_options_from_thread(
+    options: &mut RuntimeMetadata,
+    thread: &ThreadInfo,
+    task: &AstraTaskProposal,
+) {
+    if options.contains_key(SELECTED_SKILL_IDS_OPTION)
+        && options.contains_key(SELECTED_MCP_IDS_OPTION)
+    {
+        return;
+    }
+    let snapshot = task
+        .assistant_id
+        .as_deref()
+        .and_then(|assistant_id| {
+            thread
+                .assistants
+                .iter()
+                .find(|assistant| assistant.assistant_id == assistant_id)
+                .and_then(|assistant| serde_json::to_value(assistant).ok())
+        })
+        .or_else(|| {
+            thread
+                .stages
+                .iter()
+                .flat_map(|stage| stage.assistants.iter())
+                .find(|assistant| assistant.agent.id == task.target_agent.as_str())
+                .and_then(|assistant| serde_json::to_value(assistant).ok())
+        });
+    if let Some(snapshot) = snapshot {
+        insert_assistant_resource_options_from_value(options, &snapshot);
+    }
+}
+
+fn insert_assistant_resource_options_from_json(
+    options: &mut RuntimeMetadata,
+    assistant_snapshot_json: Option<&str>,
+) {
+    let Some(snapshot) =
+        assistant_snapshot_json.and_then(|value| serde_json::from_str::<Value>(value).ok())
+    else {
+        return;
+    };
+    insert_assistant_resource_options_from_value(options, &snapshot);
+}
+
+fn insert_assistant_resource_options_from_value(options: &mut RuntimeMetadata, snapshot: &Value) {
+    insert_string_array_option_if_missing(
+        options,
+        SELECTED_SKILL_IDS_OPTION,
+        snapshot.get("selectedSkillIds"),
+    );
+    insert_string_array_option_if_missing(
+        options,
+        SELECTED_MCP_IDS_OPTION,
+        snapshot.get("selectedMcpIds"),
+    );
+}
+
+fn insert_string_array_option_if_missing(
+    options: &mut RuntimeMetadata,
+    key: &str,
+    value: Option<&Value>,
+) {
+    if options.contains_key(key) {
+        return;
+    }
+    let Some(values) = value.and_then(Value::as_array) else {
+        return;
+    };
+    let values = values
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .fold(Vec::<Value>::new(), |mut out, value| {
+            if !out.iter().any(|existing| existing.as_str() == Some(value)) {
+                out.push(Value::String(value.to_string()));
+            }
+            out
+        });
+    if !values.is_empty() {
+        options.insert(key.to_string(), Value::Array(values));
+    }
+}
+
 fn non_empty_option(value: String) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
@@ -3648,6 +3742,8 @@ mod tests {
                 },
                 system_prompt: Some("Build carefully."),
                 color: Some("#3366ff"),
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: Some(&project.id),
@@ -3859,6 +3955,8 @@ mod tests {
                 },
                 system_prompt: Some("Build carefully."),
                 color: Some("#3366ff"),
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: Some(&project.id),
@@ -4110,6 +4208,8 @@ mod tests {
                 },
                 system_prompt: Some("Build from shared teamwork context."),
                 color: Some("#3366ff"),
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: Some(&project.id),
@@ -4627,6 +4727,8 @@ mod tests {
                         effort: "medium".to_string(),
                     },
                     system_prompt: Some("Use the stage builder instructions.".to_string()),
+                    selected_skill_ids: Vec::new(),
+                    selected_mcp_ids: Vec::new(),
                     order: 0,
                 },
                 StageAssistantInfo {
@@ -4641,6 +4743,8 @@ mod tests {
                         effort: "medium".to_string(),
                     },
                     system_prompt: Some("Do not include these review instructions.".to_string()),
+                    selected_skill_ids: Vec::new(),
+                    selected_mcp_ids: Vec::new(),
                     order: 1,
                 },
             ],
@@ -4792,6 +4896,8 @@ mod tests {
                     effort: "medium".to_string(),
                 },
                 system_prompt: None,
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 order: 0,
             }];
         }
@@ -4826,6 +4932,8 @@ mod tests {
                     effort: "medium".to_string(),
                 },
                 system_prompt: Some("Build carefully.".to_string()),
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 order: 1,
             },
             crate::models::ThreadAssistantInfo {
@@ -4840,6 +4948,8 @@ mod tests {
                     effort: "medium".to_string(),
                 },
                 system_prompt: Some("Review carefully.".to_string()),
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 order: 0,
             },
         ];

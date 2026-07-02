@@ -1357,6 +1357,8 @@ mod tests {
                 effort: String::new(),
             },
             system_prompt: None,
+            selected_skill_ids: Vec::new(),
+            selected_mcp_ids: Vec::new(),
             order: 0,
         };
         ThreadInfo {
@@ -1434,6 +1436,8 @@ mod tests {
                     effort: "medium".to_string(),
                 },
                 system_prompt: Some("Build carefully from shared context.".to_string()),
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 order: 0,
             },
             ThreadAssistantInfo {
@@ -1448,6 +1452,8 @@ mod tests {
                     effort: "medium".to_string(),
                 },
                 system_prompt: Some("Review carefully from shared context.".to_string()),
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 order: 1,
             },
         ];
@@ -1852,6 +1858,8 @@ mod tests {
                 effort: String::new(),
             },
             system_prompt: None,
+            selected_skill_ids: Vec::new(),
+            selected_mcp_ids: Vec::new(),
             order: 0,
         };
         let prior_session = SessionInfo {

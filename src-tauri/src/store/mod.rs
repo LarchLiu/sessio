@@ -54,6 +54,8 @@ pub struct NewAssistant<'a> {
     pub agent: AssistantAgentInfo,
     pub system_prompt: Option<&'a str>,
     pub color: Option<&'a str>,
+    pub selected_skill_ids: Vec<String>,
+    pub selected_mcp_ids: Vec<String>,
     pub assistant_type: AssistantType,
     pub process_template_id: Option<String>,
     pub project_id: Option<&'a str>,
@@ -448,6 +450,8 @@ pub trait SessionStore: Send + Sync {
         agent: Option<AssistantAgentInfo>,
         system_prompt: Option<Option<&str>>,
         color: Option<Option<&str>>,
+        selected_skill_ids: Option<Vec<String>>,
+        selected_mcp_ids: Option<Vec<String>>,
         enabled: Option<bool>,
     ) -> Result<AssistantInfo>;
     fn delete_assistant(&self, assistant_id: &str) -> Result<()>;

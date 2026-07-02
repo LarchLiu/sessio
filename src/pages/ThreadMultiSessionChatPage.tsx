@@ -61,6 +61,7 @@ import {
   useComposerCommandMenuState,
 } from "../composerCommands";
 import { useChatComposer } from "../hooks/useChatComposer";
+import { assistantResourceRuntimeOptions } from "../assistantResources";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession } from "../navigation";
 import { useAppshotComposerRegistration } from "../appshot";
@@ -651,6 +652,9 @@ export default function ThreadMultiSessionChatPage({
     let manualTask: PlanTaskInfo | null = null;
     let pendingRuntimeCreated = false;
     try {
+      const stageTaskAssistant = stageTaskMode && stageId
+        ? stageTaskAssistantSelection(thread, activeStage!, composer.selectedAgent!)
+        : null;
       manualTask = stageTaskMode && stageId
         ? await createManualStagePlanTask({
           thread,
@@ -672,6 +676,7 @@ export default function ThreadMultiSessionChatPage({
         workspacePath: project.path,
         projectName: project.name,
         assistantPrompt: selectedAssistant?.systemPrompt?.trim() || undefined,
+        runtimeOptions: assistantResourceRuntimeOptions(selectedAssistant ?? stageTaskAssistant),
         extraContext,
         pendingSession: {
           suppressAutoSelect: true,
@@ -2807,6 +2812,20 @@ async function createManualStagePlanTask({
     throw new Error("Manual plan round did not create a task");
   }
   return task;
+}
+
+function stageTaskAssistantSelection(
+  thread: ThreadInfo,
+  stage: StageInfo,
+  targetAgent: Agent,
+) {
+  const stageAssistant =
+    stage.assistants.find((assistant) => assistant.agent.id === targetAgent)
+    ?? stage.assistants[0]
+    ?? null;
+  if (!stageAssistant) return null;
+  return thread.assistants.find((assistant) => assistant.assistantId === stageAssistant.assistantId)
+    ?? stageAssistant;
 }
 
 function manualStageTaskTitle(stage: StageInfo, prompt: string): string {

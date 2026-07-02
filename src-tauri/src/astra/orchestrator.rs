@@ -1283,6 +1283,8 @@ mod tests {
                 effort: "medium".to_string(),
             },
             system_prompt: None,
+            selected_skill_ids: Vec::new(),
+            selected_mcp_ids: Vec::new(),
             order: 0,
         }
     }

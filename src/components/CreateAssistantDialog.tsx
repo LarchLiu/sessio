@@ -7,6 +7,7 @@ import { useI18n } from "../i18n";
 import AssistantAgentSelector, { dbAgentsAsRuntimeAgents, defaultAssistantAgent } from "./AssistantAgentSelector";
 import AssistantColorPicker from "./AssistantColorPicker";
 import AssistantBotIcon from "./AssistantBotIcon";
+import AssistantResourceSelector from "./AssistantResourceSelector";
 
 const nameInputClassName = "h-full min-w-0 flex-1 bg-transparent text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35";
 const textareaClassName = "min-w-0 resize-none rounded-md border border-input-border/[0.16] bg-input px-3 py-2 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30";
@@ -30,6 +31,8 @@ export default function CreateAssistantDialog({
   const [name, setName] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [color, setColor] = useState<string | null>(null);
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+  const [selectedMcpIds, setSelectedMcpIds] = useState<string[]>([]);
   const [agentDraft, setAgentDraft] = useState<AssistantAgentInfo>(() => defaultAssistantAgent(runtimeAgents[0] ?? null));
 
   useEffect(() => {
@@ -46,6 +49,8 @@ export default function CreateAssistantDialog({
         agent: agentDraft,
         systemPrompt,
         color,
+        selectedSkillIds,
+        selectedMcpIds,
         type: "custom" satisfies AssistantType,
         projectId,
       });
@@ -58,7 +63,7 @@ export default function CreateAssistantDialog({
 
   return createPortal(
     <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/35 px-4" onClick={onClose}>
-      <div className="w-full max-w-[720px] rounded-xl border border-ink/10 bg-surface-panel p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+      <div className="max-h-[calc(100vh-48px)] w-full max-w-[720px] overflow-y-auto rounded-xl border border-ink/10 bg-surface-panel p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="text-body font-medium text-ink">{t("assistant.add")}</div>
           <button
@@ -80,6 +85,12 @@ export default function CreateAssistantDialog({
           </label>
           <textarea value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} placeholder={t("assistant.system_prompt")} rows={4} className={textareaClassName} />
           <AssistantAgentSelector agent={agentDraft} agents={agents} onChange={setAgentDraft} />
+          <AssistantResourceSelector
+            selectedSkillIds={selectedSkillIds}
+            selectedMcpIds={selectedMcpIds}
+            onSelectedSkillIdsChange={setSelectedSkillIds}
+            onSelectedMcpIdsChange={setSelectedMcpIds}
+          />
           <div className="flex justify-end gap-2">
             <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-body-sm text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
             <button type="button" onClick={() => void create()} disabled={!name.trim() || !agentDraft.id} className={actionButtonClassName}>

@@ -347,6 +347,8 @@ CREATE TABLE IF NOT EXISTS assistants (
     agent_json      TEXT NOT NULL,
     system_prompt   TEXT,
     color           TEXT,
+    selected_skill_ids_json TEXT NOT NULL DEFAULT '[]',
+    selected_mcp_ids_json   TEXT NOT NULL DEFAULT '[]',
     type            TEXT NOT NULL,
     process_template_id    TEXT,
     project_id      TEXT,
@@ -926,12 +928,36 @@ fn unique_suffix() -> String {
     unique_nonce()
 }
 
+fn ensure_column(conn: &Connection, table: &str, column: &str, alter_sql: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(());
+        }
+    }
+    conn.execute(alter_sql, [])?;
+    Ok(())
+}
+
 fn initialize_schema(conn: &Connection) -> Result<()> {
     conn.execute("DROP TABLE IF EXISTS canvas_shape_refs", [])?;
     conn.execute("DROP TABLE IF EXISTS canvas_context_anchors", [])?;
     conn.execute_batch(SCHEMA_SESSIONS)?;
     conn.execute_batch(SCHEMA_MEMORY)?;
     conn.execute_batch(SCHEMA_APP)?;
+    ensure_column(
+        conn,
+        "assistants",
+        "selected_skill_ids_json",
+        "ALTER TABLE assistants ADD COLUMN selected_skill_ids_json TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    ensure_column(
+        conn,
+        "assistants",
+        "selected_mcp_ids_json",
+        "ALTER TABLE assistants ADD COLUMN selected_mcp_ids_json TEXT NOT NULL DEFAULT '[]'",
+    )?;
     seed_builtins(conn)?;
     seed_opencode_builtin_agent(conn, now_ms())?;
     Ok(())
@@ -2741,8 +2767,10 @@ fn runtime_agent_session_config_from_row(
 
 fn assistant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantInfo> {
     let agent_json: String = row.get(2)?;
-    let assistant_type_raw: String = row.get(5)?;
-    let process_template_id_raw: Option<String> = row.get(6)?;
+    let selected_skill_ids_json: String = row.get(5)?;
+    let selected_mcp_ids_json: String = row.get(6)?;
+    let assistant_type_raw: String = row.get(7)?;
+    let process_template_id_raw: Option<String> = row.get(8)?;
     Ok(AssistantInfo {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -2757,14 +2785,47 @@ fn assistant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantInfo
         }),
         system_prompt: row.get(3)?,
         color: row.get(4)?,
+        selected_skill_ids: parse_string_array_json(&selected_skill_ids_json),
+        selected_mcp_ids: parse_string_array_json(&selected_mcp_ids_json),
         assistant_type: AssistantType::from_db_str(&assistant_type_raw)
             .unwrap_or(AssistantType::Custom),
         process_template_id: process_template_id_raw,
-        project_id: row.get(7)?,
-        enabled: row.get::<_, i64>(8)? != 0,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        project_id: row.get(9)?,
+        enabled: row.get::<_, i64>(10)? != 0,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
+}
+
+fn parse_string_array_json(value: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(value)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .fold(Vec::<String>::new(), |mut out, item| {
+            if !out.contains(&item) {
+                out.push(item);
+            }
+            out
+        })
+}
+
+fn normalize_string_ids(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .fold(Vec::<String>::new(), |mut out, item| {
+            if !out.contains(&item) {
+                out.push(item);
+            }
+            out
+        })
+}
+
+fn string_ids_json(values: Vec<String>) -> Result<String> {
+    Ok(serde_json::to_string(&normalize_string_ids(values))?)
 }
 
 fn project_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectStageInfo> {
@@ -3328,7 +3389,7 @@ fn replace_astra_run_sessions(
 
 fn load_assistant_by_id(conn: &Connection, assistant_id: &str) -> Result<AssistantInfo> {
     conn.query_row(
-        "SELECT id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
+        "SELECT id, name, agent_json, system_prompt, color, selected_skill_ids_json, selected_mcp_ids_json, type, process_template_id, project_id, enabled, created_at, updated_at
          FROM assistants
          WHERE id = ?",
         params![assistant_id],
@@ -3731,7 +3792,7 @@ fn instantiate_project_assistants(
     now: i64,
 ) -> Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
+        "SELECT id, name, agent_json, system_prompt, color, selected_skill_ids_json, selected_mcp_ids_json, type, process_template_id, project_id, enabled, created_at, updated_at
          FROM assistants
          WHERE project_id IS NULL
            AND enabled = 1
@@ -3748,9 +3809,9 @@ fn instantiate_project_assistants(
         let id = stable_project_assistant_id(project_id, &template.id);
         conn.execute(
             "INSERT OR IGNORE INTO assistants (
-                id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
+                id, name, agent_json, system_prompt, color, selected_skill_ids_json, selected_mcp_ids_json, type, process_template_id, project_id, enabled, created_at, updated_at
              )
-             SELECT ?, name, agent_json, system_prompt, color, type, process_template_id, ?, 1, ?, ?
+             SELECT ?, name, agent_json, system_prompt, color, selected_skill_ids_json, selected_mcp_ids_json, type, process_template_id, ?, 1, ?, ?
              FROM assistants
              WHERE id = ?",
             params![id, project_id, now, now, template.id],
@@ -4209,7 +4270,7 @@ fn load_stage_assistants(
     thread_stage_id: &str,
 ) -> Result<Vec<StageAssistantInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT tsa.assistant_id, a.name, a.color, tsa.agent_json, a.system_prompt, tsa.sort_order
+        "SELECT tsa.assistant_id, a.name, a.color, tsa.agent_json, a.system_prompt, a.selected_skill_ids_json, a.selected_mcp_ids_json, tsa.sort_order
          FROM thread_stage_assistants tsa
          INNER JOIN assistants a ON a.id = tsa.assistant_id
          WHERE tsa.thread_stage_id = ?
@@ -4231,7 +4292,9 @@ fn load_stage_assistants(
                 }
             }),
             system_prompt: row.get(4)?,
-            order: row.get(5)?,
+            selected_skill_ids: parse_string_array_json(&row.get::<_, String>(5)?),
+            selected_mcp_ids: parse_string_array_json(&row.get::<_, String>(6)?),
+            order: row.get(7)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -4242,7 +4305,7 @@ fn load_project_stage_assistants(
     stage_id: &str,
 ) -> Result<Vec<StageAssistantInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT sa.assistant_id, a.name, a.color, a.agent_json, a.system_prompt, sa.sort_order
+        "SELECT sa.assistant_id, a.name, a.color, a.agent_json, a.system_prompt, a.selected_skill_ids_json, a.selected_mcp_ids_json, sa.sort_order
          FROM stage_assistants sa
          INNER JOIN assistants a ON a.id = sa.assistant_id
          WHERE sa.stage_id = ?
@@ -4264,7 +4327,9 @@ fn load_project_stage_assistants(
                 }
             }),
             system_prompt: row.get(4)?,
-            order: row.get(5)?,
+            selected_skill_ids: parse_string_array_json(&row.get::<_, String>(5)?),
+            selected_mcp_ids: parse_string_array_json(&row.get::<_, String>(6)?),
+            order: row.get(7)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -4272,7 +4337,7 @@ fn load_project_stage_assistants(
 
 fn load_thread_assistants(conn: &Connection, thread_id: &str) -> Result<Vec<ThreadAssistantInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT ta.assistant_id, a.name, a.color, a.agent_json, a.system_prompt, ta.sort_order
+        "SELECT ta.assistant_id, a.name, a.color, a.agent_json, a.system_prompt, a.selected_skill_ids_json, a.selected_mcp_ids_json, ta.sort_order
          FROM thread_assistants ta
          INNER JOIN assistants a ON a.id = ta.assistant_id
          WHERE ta.thread_id = ?
@@ -4294,7 +4359,9 @@ fn load_thread_assistants(conn: &Connection, thread_id: &str) -> Result<Vec<Thre
                 }
             }),
             system_prompt: row.get(4)?,
-            order: row.get(5)?,
+            selected_skill_ids: parse_string_array_json(&row.get::<_, String>(5)?),
+            selected_mcp_ids: parse_string_array_json(&row.get::<_, String>(6)?),
+            order: row.get(7)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -4330,6 +4397,8 @@ fn stage_assistant_from_assistant(assistant: AssistantInfo, order: i64) -> Stage
         color: assistant.color,
         agent: assistant.agent,
         system_prompt: assistant.system_prompt,
+        selected_skill_ids: assistant.selected_skill_ids,
+        selected_mcp_ids: assistant.selected_mcp_ids,
         order,
     }
 }
@@ -4546,9 +4615,9 @@ fn seed_process_template_builtin_assistant(
         stable_process_template_builtin_assistant_id(process_template_id, source_assistant_id);
     conn.execute(
         "INSERT INTO assistants (
-            id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
+            id, name, agent_json, system_prompt, color, selected_skill_ids_json, selected_mcp_ids_json, type, process_template_id, project_id, enabled, created_at, updated_at
          )
-         SELECT ?, name, agent_json, system_prompt, color, type, ?, NULL, enabled, ?, ?
+         SELECT ?, name, agent_json, system_prompt, color, selected_skill_ids_json, selected_mcp_ids_json, type, ?, NULL, enabled, ?, ?
          FROM assistants
          WHERE id = ?
          ON CONFLICT(id) DO NOTHING",
@@ -6591,7 +6660,7 @@ impl SessionStore for SqliteStore {
         let assistants = if let Some(project_id) = project_id {
             load_project_by_id(&conn, project_id)?;
             let mut stmt = conn.prepare(
-                "SELECT id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
+                "SELECT id, name, agent_json, system_prompt, color, selected_skill_ids_json, selected_mcp_ids_json, type, process_template_id, project_id, enabled, created_at, updated_at
                  FROM assistants
                  WHERE project_id = ?
                  ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
@@ -6600,7 +6669,7 @@ impl SessionStore for SqliteStore {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             let mut stmt = conn.prepare(
-                "SELECT id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
+                "SELECT id, name, agent_json, system_prompt, color, selected_skill_ids_json, selected_mcp_ids_json, type, process_template_id, project_id, enabled, created_at, updated_at
                  FROM assistants
                  ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
             )?;
@@ -6616,6 +6685,8 @@ impl SessionStore for SqliteStore {
             agent,
             system_prompt,
             color,
+            selected_skill_ids,
+            selected_mcp_ids,
             assistant_type,
             process_template_id,
             project_id,
@@ -6679,16 +6750,20 @@ impl SessionStore for SqliteStore {
             now,
         );
         let agent_json = serde_json::to_string(&agent)?;
+        let selected_skill_ids_json = string_ids_json(selected_skill_ids)?;
+        let selected_mcp_ids_json = string_ids_json(selected_mcp_ids)?;
         conn.execute(
             "INSERT INTO assistants (
-                id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                id, name, agent_json, system_prompt, color, selected_skill_ids_json, selected_mcp_ids_json, type, process_template_id, project_id, enabled, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
             params![
                 id,
                 name,
                 agent_json,
                 system_prompt,
                 color,
+                selected_skill_ids_json,
+                selected_mcp_ids_json,
                 assistant_type.as_str(),
                 resolved_process_template_id.as_deref(),
                 project_id,
@@ -6706,6 +6781,8 @@ impl SessionStore for SqliteStore {
         agent: Option<AssistantAgentInfo>,
         system_prompt: Option<Option<&str>>,
         color: Option<Option<&str>>,
+        selected_skill_ids: Option<Vec<String>>,
+        selected_mcp_ids: Option<Vec<String>>,
         enabled: Option<bool>,
     ) -> Result<AssistantInfo> {
         let conn = self.conn.lock().unwrap();
@@ -6768,19 +6845,25 @@ impl SessionStore for SqliteStore {
             None => current.color,
         };
         let next_enabled = enabled.unwrap_or(current.enabled);
+        let next_selected_skill_ids = selected_skill_ids.unwrap_or(current.selected_skill_ids);
+        let next_selected_mcp_ids = selected_mcp_ids.unwrap_or(current.selected_mcp_ids);
         if current.enabled && !next_enabled {
             ensure_assistant_can_be_disabled(&conn, assistant_id)?;
         }
         let next_agent_json = serde_json::to_string(&next_agent)?;
+        let next_selected_skill_ids_json = string_ids_json(next_selected_skill_ids)?;
+        let next_selected_mcp_ids_json = string_ids_json(next_selected_mcp_ids)?;
         conn.execute(
             "UPDATE assistants
-             SET name = ?, agent_json = ?, system_prompt = ?, color = ?, enabled = ?, updated_at = ?
+             SET name = ?, agent_json = ?, system_prompt = ?, color = ?, selected_skill_ids_json = ?, selected_mcp_ids_json = ?, enabled = ?, updated_at = ?
              WHERE id = ?",
             params![
                 next_name,
                 next_agent_json,
                 next_system_prompt,
                 next_color,
+                next_selected_skill_ids_json,
+                next_selected_mcp_ids_json,
                 next_enabled as i64,
                 now_ms(),
                 assistant_id,
@@ -12140,6 +12223,8 @@ mod schema_tests {
                 },
                 system_prompt: None,
                 color: None,
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: Some(&project.id),
@@ -12408,6 +12493,8 @@ mod schema_tests {
                 },
                 system_prompt: None,
                 color: None,
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: Some("code".to_string()),
                 project_id: None,
@@ -12425,6 +12512,8 @@ mod schema_tests {
                 },
                 system_prompt: None,
                 color: None,
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: Some("writing".to_string()),
                 project_id: None,
@@ -12442,6 +12531,8 @@ mod schema_tests {
                 },
                 system_prompt: None,
                 color: None,
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: None,
@@ -12485,6 +12576,12 @@ mod schema_tests {
                 },
                 system_prompt: None,
                 color: None,
+                selected_skill_ids: vec![
+                    "skill-a".to_string(),
+                    "skill-a".to_string(),
+                    " skill-b ".to_string(),
+                ],
+                selected_mcp_ids: vec!["mcp-a".to_string(), String::new(), "mcp-b".to_string()],
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: None,
@@ -12493,6 +12590,31 @@ mod schema_tests {
         assert_eq!(assistant.process_template_id, None);
         assert_eq!(assistant.project_id, None);
         assert_eq!(assistant.assistant_type, AssistantType::Custom);
+        assert_eq!(assistant.selected_skill_ids, vec!["skill-a", "skill-b"]);
+        assert_eq!(assistant.selected_mcp_ids, vec!["mcp-a", "mcp-b"]);
+
+        let updated = store
+            .update_assistant(
+                &assistant.id,
+                None,
+                None,
+                None,
+                None,
+                Some(vec!["skill-c".to_string()]),
+                Some(vec!["mcp-c".to_string(), "mcp-c".to_string()]),
+                None,
+            )
+            .unwrap();
+        assert_eq!(updated.selected_skill_ids, vec!["skill-c"]);
+        assert_eq!(updated.selected_mcp_ids, vec!["mcp-c"]);
+        let listed = store
+            .list_assistants(None)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == assistant.id)
+            .unwrap();
+        assert_eq!(listed.selected_skill_ids, vec!["skill-c"]);
+        assert_eq!(listed.selected_mcp_ids, vec!["mcp-c"]);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -12520,6 +12642,8 @@ mod schema_tests {
                 },
                 system_prompt: Some("Review from global context"),
                 color: None,
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: None,
@@ -12823,6 +12947,8 @@ mod schema_tests {
                 },
                 system_prompt: Some("Plan carefully"),
                 color: Some("#22c55e"),
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: Some(&project.id),
@@ -12996,6 +13122,8 @@ mod schema_tests {
                 Some("Planner Renamed"),
                 None,
                 Some(Some("New prompt")),
+                None,
+                None,
                 None,
                 None,
             )
@@ -13214,6 +13342,8 @@ mod schema_tests {
                 },
                 system_prompt: Some("Keep traceable notes"),
                 color: Some("#22c55e"),
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: Some(&project.id),
@@ -13503,6 +13633,8 @@ mod schema_tests {
                 },
                 system_prompt: None,
                 color: None,
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: Some(&project.id),
@@ -13754,6 +13886,8 @@ mod schema_tests {
                 },
                 system_prompt: Some("Build carefully"),
                 color: Some("#22c55e"),
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: Some(&project.id),
@@ -13771,6 +13905,8 @@ mod schema_tests {
                 },
                 system_prompt: None,
                 color: Some("#60a5fa"),
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: Some(&project.id),
@@ -13975,7 +14111,7 @@ mod schema_tests {
         );
 
         let disable_error = store
-            .update_assistant(&builder.id, None, None, None, None, Some(false))
+            .update_assistant(&builder.id, None, None, None, None, None, None, Some(false))
             .unwrap_err()
             .to_string();
         assert!(disable_error.contains("thread assistant binding(s)"));
@@ -14173,6 +14309,8 @@ mod schema_tests {
                 },
                 system_prompt: Some("Build carefully"),
                 color: None,
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: Some(&project.id),
@@ -14211,6 +14349,8 @@ mod schema_tests {
                 },
                 system_prompt: None,
                 color: None,
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: Some(&project.id),
@@ -14259,7 +14399,16 @@ mod schema_tests {
         assert_eq!(default_stage.assistants.len(), 1);
         assert_eq!(default_stage.assistants[0].assistant_id, assistant.id);
         let assistant_stage_binding_error = store
-            .update_assistant(&assistant.id, None, None, None, None, Some(false))
+            .update_assistant(
+                &assistant.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+            )
             .unwrap_err()
             .to_string();
         assert!(assistant_stage_binding_error.contains("project stage assistant binding(s)"));
@@ -14282,7 +14431,16 @@ mod schema_tests {
             .stage_id
             .is_none());
         let assistant_disable_error = store
-            .update_assistant(&assistant.id, None, None, None, None, Some(false))
+            .update_assistant(
+                &assistant.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+            )
             .unwrap_err()
             .to_string();
         assert!(assistant_disable_error.contains("project stage assistant binding(s)"));
@@ -14720,6 +14878,8 @@ mod schema_tests {
                 Some(None),
                 None,
                 None,
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(edited_assistant.name, "Builder Prime");
@@ -14769,6 +14929,8 @@ mod schema_tests {
                 },
                 system_prompt: None,
                 color: None,
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: Some(&other_project.id),
@@ -14828,6 +14990,8 @@ mod schema_tests {
                 },
                 system_prompt: None,
                 color: None,
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Custom,
                 process_template_id: None,
                 project_id: Some(&project.id),
@@ -14845,6 +15009,8 @@ mod schema_tests {
                 },
                 system_prompt: None,
                 color: None,
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
                 assistant_type: AssistantType::Builtin,
                 process_template_id: None,
                 project_id: Some(&project.id),

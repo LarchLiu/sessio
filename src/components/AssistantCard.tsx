@@ -9,9 +9,11 @@ import SwitchControl from "./SwitchControl";
 import TruncatedTooltipText from "./TruncatedTooltipText";
 import Tooltip from "./Tooltip";
 import { useI18n } from "../i18n";
+import AssistantResourceSelector from "./AssistantResourceSelector";
 
 const inputClassName = "h-9 min-w-0 rounded-md border border-input-border/[0.16] bg-input px-3 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30";
 const textareaClassName = "min-w-0 resize-none rounded-md border border-input-border/[0.16] bg-input px-3 py-2 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30";
+const resourceBadgeClassName = "inline-flex h-6 items-center rounded-full border border-card-border/[0.14] bg-card-chip/[0.08] px-2 text-caption text-card-muted/65";
 
 export default function AssistantCard({
   assistant,
@@ -35,15 +37,24 @@ export default function AssistantCard({
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(assistant.name);
   const [systemPrompt, setSystemPrompt] = useState(assistant.systemPrompt ?? "");
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>(assistant.selectedSkillIds ?? []);
+  const [selectedMcpIds, setSelectedMcpIds] = useState<string[]>(assistant.selectedMcpIds ?? []);
 
   useEffect(() => {
     setName(assistant.name);
     setSystemPrompt(assistant.systemPrompt ?? "");
+    setSelectedSkillIds(assistant.selectedSkillIds ?? []);
+    setSelectedMcpIds(assistant.selectedMcpIds ?? []);
   }, [assistant]);
 
   const save = async () => {
     try {
-      onUpdated(await updateAssistant(assistant.id, { name, systemPrompt }));
+      onUpdated(await updateAssistant(assistant.id, {
+        name,
+        systemPrompt,
+        selectedSkillIds,
+        selectedMcpIds,
+      }));
       setEditing(false);
     } catch (err) {
       onError(String(err));
@@ -85,6 +96,12 @@ export default function AssistantCard({
         <div className="grid gap-2">
           <input value={name} onChange={(event) => setName(event.target.value)} className={inputClassName} />
           <textarea value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} rows={4} className={textareaClassName} />
+          <AssistantResourceSelector
+            selectedSkillIds={selectedSkillIds}
+            selectedMcpIds={selectedMcpIds}
+            onSelectedSkillIdsChange={setSelectedSkillIds}
+            onSelectedMcpIdsChange={setSelectedMcpIds}
+          />
           <div className="flex justify-end gap-2">
             <button type="button" onClick={() => setEditing(false)} className="rounded-md px-3 py-1.5 text-body-sm text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
             <button type="button" onClick={() => void save()} className="rounded-md bg-ink px-3 py-1.5 text-body-sm text-[rgb(var(--color-bg-panel))]">{t("project.save")}</button>
@@ -113,6 +130,20 @@ export default function AssistantCard({
               </div>
             </div>
             {assistant.systemPrompt && <TruncatedTooltipText text={assistant.systemPrompt} className="ml-6 mt-2 line-clamp-3 whitespace-pre-wrap text-caption leading-relaxed text-card-muted/60" />}
+            {(assistant.selectedSkillIds.length > 0 || assistant.selectedMcpIds.length > 0) && (
+              <div className="ml-6 mt-2 flex flex-wrap gap-1.5">
+                {assistant.selectedSkillIds.length > 0 && (
+                  <span className={resourceBadgeClassName}>
+                    {t("assistant.skills_selected", { count: assistant.selectedSkillIds.length })}
+                  </span>
+                )}
+                {assistant.selectedMcpIds.length > 0 && (
+                  <span className={resourceBadgeClassName}>
+                    {t("assistant.mcps_selected", { count: assistant.selectedMcpIds.length })}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="ml-6 mt-2 flex min-w-0 max-w-full">
               <AssistantAgentSelector agent={assistant.agent} agents={agents} compact={compactMode} onChange={(agent) => void updateAgent(agent)} />
             </div>

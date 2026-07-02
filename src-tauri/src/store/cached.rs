@@ -443,10 +443,20 @@ impl SessionStore for CachedStore {
         agent: Option<AssistantAgentInfo>,
         system_prompt: Option<Option<&str>>,
         color: Option<Option<&str>>,
+        selected_skill_ids: Option<Vec<String>>,
+        selected_mcp_ids: Option<Vec<String>>,
         enabled: Option<bool>,
     ) -> Result<AssistantInfo> {
-        self.inner
-            .update_assistant(assistant_id, name, agent, system_prompt, color, enabled)
+        self.inner.update_assistant(
+            assistant_id,
+            name,
+            agent,
+            system_prompt,
+            color,
+            selected_skill_ids,
+            selected_mcp_ids,
+            enabled,
+        )
     }
 
     fn delete_assistant(&self, assistant_id: &str) -> Result<()> {

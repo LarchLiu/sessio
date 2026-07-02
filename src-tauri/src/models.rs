@@ -339,6 +339,10 @@ pub struct AssistantInfo {
     pub agent: AssistantAgentInfo,
     pub system_prompt: Option<String>,
     pub color: Option<String>,
+    #[serde(default)]
+    pub selected_skill_ids: Vec<String>,
+    #[serde(default)]
+    pub selected_mcp_ids: Vec<String>,
     #[serde(rename = "type")]
     pub assistant_type: AssistantType,
     pub process_template_id: Option<String>,
@@ -357,6 +361,10 @@ pub struct StageAssistantInfo {
     pub agent: AssistantAgentInfo,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub selected_skill_ids: Vec<String>,
+    #[serde(default)]
+    pub selected_mcp_ids: Vec<String>,
     pub order: i64,
 }
 
@@ -642,6 +650,10 @@ pub struct ThreadAssistantInfo {
     pub agent: AssistantAgentInfo,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub selected_skill_ids: Vec<String>,
+    #[serde(default)]
+    pub selected_mcp_ids: Vec<String>,
     pub order: i64,
 }
 

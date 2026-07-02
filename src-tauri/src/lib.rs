@@ -459,6 +459,10 @@ struct CreateAssistantRequest {
     agent: AssistantAgentInfo,
     system_prompt: Option<String>,
     color: Option<String>,
+    #[serde(default)]
+    selected_skill_ids: Vec<String>,
+    #[serde(default)]
+    selected_mcp_ids: Vec<String>,
     assistant_type: AssistantType,
     process_template_id: Option<String>,
     project_id: Option<String>,
@@ -484,6 +488,8 @@ struct UpdateAssistantRequest {
     agent: Option<AssistantAgentInfo>,
     system_prompt: Option<Option<String>>,
     color: Option<Option<String>>,
+    selected_skill_ids: Option<Vec<String>>,
+    selected_mcp_ids: Option<Vec<String>>,
     enabled: Option<bool>,
 }
 
@@ -1070,6 +1076,8 @@ fn create_assistant(
         agent,
         system_prompt,
         color,
+        selected_skill_ids,
+        selected_mcp_ids,
         assistant_type,
         process_template_id,
         project_id,
@@ -1080,6 +1088,8 @@ fn create_assistant(
             agent,
             system_prompt: system_prompt.as_deref(),
             color: color.as_deref(),
+            selected_skill_ids,
+            selected_mcp_ids,
             assistant_type,
             process_template_id,
             project_id: project_id.as_deref(),
@@ -1102,6 +1112,8 @@ fn update_assistant(
         agent,
         system_prompt,
         color,
+        selected_skill_ids,
+        selected_mcp_ids,
         enabled,
     } = req;
     let system_prompt_ref = system_prompt.as_ref().map(|value| value.as_deref());
@@ -1113,6 +1125,8 @@ fn update_assistant(
             agent,
             system_prompt_ref,
             color_ref,
+            selected_skill_ids,
+            selected_mcp_ids,
             enabled,
         )
         .map_err(|e| e.to_string())?;

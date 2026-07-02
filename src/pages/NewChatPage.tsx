@@ -57,6 +57,7 @@ import {
   useComposerCommandMenuState,
 } from "../composerCommands";
 import { useChatComposer } from "../hooks/useChatComposer";
+import { assistantResourceRuntimeOptions } from "../assistantResources";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession, ProjectGroup } from "../navigation";
 import { useAppshotComposerRegistration } from "../appshot";
@@ -363,6 +364,7 @@ export default function NewChatPage({
         workspacePath,
         projectName: project.label,
         assistantPrompt: selectedAssistant?.systemPrompt?.trim() || undefined,
+        runtimeOptions: assistantResourceRuntimeOptions(selectedAssistant),
         clearComposerOnSuccess: false,
         pendingSession: {
           origin: "new_chat",

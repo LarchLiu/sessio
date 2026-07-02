@@ -92,6 +92,10 @@ import { useComputerUseFeatureEnabled } from "../hooks/useComputerUseFeatureEnab
 import type { ChatComposerController } from "../hooks/useChatComposer";
 import { normalizeSelectedMcpIds, useSelectableMcpServers } from "../hooks/useSelectableMcpServers";
 import { useSelectableSkills } from "../hooks/useSelectableSkills";
+import {
+  assistantResourceRuntimeOptions,
+  mergeRuntimeResourceOptions,
+} from "../assistantResources";
 import { localeTag, useI18n } from "../i18n";
 import type { ChatView, ViewMode } from "../navigation";
 import {
@@ -1346,14 +1350,18 @@ export function AcpTranscriptPanel({
     const sameAgent = targetAgent === agent;
     const desiredComputerUseEnabled = Boolean(composerComputerUseEligible && computerUseEnabled);
     const normalizedSelectedMcpIds = normalizeSelectedMcpIds(selectedMcpIds);
-    const sessionOptions = buildRuntimeSessionOptions(
-      composerModel,
-      composerPermissionMode,
-      composerEffort,
-      desiredComputerUseEnabled,
-      selectedSkillIds,
-      normalizedSelectedMcpIds,
+    const sessionOptions = mergeRuntimeResourceOptions(
+      buildRuntimeSessionOptions(
+        composerModel,
+        composerPermissionMode,
+        composerEffort,
+        desiredComputerUseEnabled,
+        selectedSkillIds,
+        normalizedSelectedMcpIds,
+      ),
+      runtimeOptions,
     );
+    const effectiveSelectedMcpIds = runtimeMetadataSelectedMcpIds(sessionOptions);
     const existingRuntimeSession = sameAgent ? liveState.sessions[runtimeSessionId] : null;
     const existingComputerUseAttached = Boolean(
       existingRuntimeSession && !existingRuntimeSession.ended && existingRuntimeSession.metadata?.computerUse,
@@ -1364,7 +1372,7 @@ export function AcpTranscriptPanel({
       existingComputerUseAttached !== desiredComputerUseEnabled;
     const shouldRecreateForSelectedMcps =
       Boolean(existingRuntimeSession && !existingRuntimeSession.ended) &&
-      !sameNormalizedStringList(existingSelectedMcpIds, normalizedSelectedMcpIds);
+      !sameNormalizedStringList(existingSelectedMcpIds, effectiveSelectedMcpIds);
     const shouldRecreateRuntimeSession =
       shouldRecreateForComputerUse || shouldRecreateForSelectedMcps;
     console.info("[sessio-runtime:frontend:send]", {
@@ -1503,11 +1511,10 @@ export function AcpTranscriptPanel({
               turns: parentSnapshotTurns,
             }),
           ];
-      const turnRuntimeOptions = {
+      const turnRuntimeOptions = mergeRuntimeResourceOptions({
         selectedSkillIds,
         selectedMcpIds: normalizedSelectedMcpIds,
-        ...(runtimeOptions ?? {}),
-      };
+      }, runtimeOptions);
       const turn = await sendAgentInput(handle.sessioRuntimeSessionId, {
         text,
         attachments: inputAttachmentsWithContext,
@@ -1567,7 +1574,12 @@ export function AcpTranscriptPanel({
     const prompt = selectedAssistant?.systemPrompt?.trim()
       ? `${buildSessioAssistantPromptBlock(selectedAssistant.systemPrompt.trim(), { source: "assistant" })}\n\n---\n\n${composerText}`
       : composerText;
-    await handleSendText(prompt, true, attachments);
+    await handleSendText(
+      prompt,
+      true,
+      attachments,
+      assistantResourceRuntimeOptions(selectedAssistant),
+    );
     setSelectedAssistant(null);
   }, [attachments, composerText, handleSendText, selectedAssistant]);
 
