@@ -64,6 +64,7 @@ import {
   type CanvasSnapshotSelectionEventDetail,
 } from "../../lib/blocksuite/toolbar";
 import {
+  applyWorkflowOverlayStoreProjection,
   buildSessionThreadStageMap,
   createWorkflowOverlayCardContext,
   createWorkflowOverlayStore,
@@ -964,6 +965,7 @@ export default function BlockSuiteCanvasHost({
   const workflowTurnStatusRef = useRef<Map<string, RuntimeTurnStatus>>(new Map());
   const workflowTerminalFetchKeysRef = useRef<Set<string>>(new Set());
   const workflowTerminalInFlightKeysRef = useRef<Set<string>>(new Set());
+  const workflowTerminalRetainOverlayBlockIdsRef = useRef<Set<string>>(new Set());
   const addMenuButtonRef = useRef<HTMLButtonElement>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [status, setStatus] = useState("Initializing BlockSuite canvas…");
@@ -1338,18 +1340,12 @@ export default function BlockSuiteCanvasHost({
       runtimeSessionAliases: runtimeSessionAliasesRef.current,
       liveState: liveStateRef.current,
     });
-    const knownBlockIds = new Set(contexts.map((context) => context.blockId));
-    for (const blockId of knownBlockIds) {
-      const overlay = overlays.get(blockId);
-      if (overlay) {
-        store.set(blockId, overlay);
-      } else {
-        store.delete(blockId);
-      }
-    }
-    for (const blockId of store.keys()) {
-      if (!knownBlockIds.has(blockId)) store.delete(blockId);
-    }
+    applyWorkflowOverlayStoreProjection({
+      store,
+      contexts,
+      overlays,
+      retainedBlockIds: workflowTerminalRetainOverlayBlockIdsRef.current,
+    });
   }, []);
 
   const scheduleWorkflowLiveProjection = useCallback(() => {
@@ -1390,9 +1386,13 @@ export default function BlockSuiteCanvasHost({
     const nextSummary = workflowSnapshotToMarkdown(snapshot);
     const nextStatus = terminalWorkflowCardStatus(terminalStatus);
     let changed = false;
+    const reconciledBlockIds: string[] = [];
     for (const blockId of blockIds) {
       const model = doc.getModelById(blockId) as WorkflowCardBlockModel | null;
-      if (!model) continue;
+      if (!model) {
+        reconciledBlockIds.push(blockId);
+        continue;
+      }
       const patch: Record<string, unknown> = {};
       if (canonicalWorkflowSnapshotJsonForDiff(model.workflowSnapshotJson || "") !== nextSnapshotDiff) {
         patch.workflowSnapshotJson = nextSnapshotJson;
@@ -1410,11 +1410,16 @@ export default function BlockSuiteCanvasHost({
         doc.updateBlock(model, patch);
         changed = true;
       }
+      reconciledBlockIds.push(blockId);
+    }
+    if (changed) {
+      await syncCanvasBlocks(doc);
+      updateSelectionState();
+    }
+    for (const blockId of reconciledBlockIds) {
+      workflowTerminalRetainOverlayBlockIdsRef.current.delete(blockId);
       workflowOverlayStoreRef.current?.delete(blockId);
     }
-    if (!changed) return;
-    await syncCanvasBlocks(doc);
-    updateSelectionState();
   }, [getDoc, syncCanvasBlocks, updateSelectionState]);
 
   const reconcileTerminalWorkflowTurn = useCallback((
@@ -1428,6 +1433,9 @@ export default function BlockSuiteCanvasHost({
   ) => {
     if (workflowTerminalFetchKeysRef.current.has(fetchKey)) return;
     if (workflowTerminalInFlightKeysRef.current.has(fetchKey)) return;
+    for (const blockId of blockIds) {
+      workflowTerminalRetainOverlayBlockIdsRef.current.add(blockId);
+    }
     workflowTerminalInFlightKeysRef.current.add(fetchKey);
     void getThreadWorkSnapshot(route.agent, route.childSessionId)
       .then(async (snapshotResult) => {
@@ -1490,6 +1498,7 @@ export default function BlockSuiteCanvasHost({
     workflowTurnStatusRef.current.clear();
     workflowTerminalFetchKeysRef.current.clear();
     workflowTerminalInFlightKeysRef.current.clear();
+    workflowTerminalRetainOverlayBlockIdsRef.current.clear();
     {
       const subscription = doc.slots.blockUpdated.subscribe((payload) => {
         if (payload?.type === "delete") {
@@ -1936,6 +1945,7 @@ export default function BlockSuiteCanvasHost({
       workflowTurnStatusRef.current.clear();
       workflowTerminalFetchKeysRef.current.clear();
       workflowTerminalInFlightKeysRef.current.clear();
+      workflowTerminalRetainOverlayBlockIdsRef.current.clear();
       clearBoxSelectingObserver();
     };
   }, [clearBoxSelectingObserver]);
@@ -2035,6 +2045,7 @@ export default function BlockSuiteCanvasHost({
       workflowTurnStatusRef.current.clear();
       workflowTerminalFetchKeysRef.current.clear();
       workflowTerminalInFlightKeysRef.current.clear();
+      workflowTerminalRetainOverlayBlockIdsRef.current.clear();
       blockUpdatedDisposeRef.current?.dispose();
       blockUpdatedDisposeRef.current = null;
       selectionUpdatedDisposeRef.current?.dispose();

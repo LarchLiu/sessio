@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { ThreadWorkSnapshot } from "../src/api";
 import type { LiveRuntimeSession, LiveRuntimeState } from "../src/runtimeChat";
 import {
+  applyWorkflowOverlayStoreProjection,
   buildSessionThreadStageMap,
+  createWorkflowOverlayStore,
   createWorkflowOverlayCardContext,
   projectWorkflowLiveOverlays,
+  type WorkflowOverlay,
 } from "../src/lib/blocksuite/workflowLiveProjection";
 
 function snapshot(): ThreadWorkSnapshot {
@@ -166,6 +169,42 @@ function liveSession(
 }
 
 describe("workflow live projection", () => {
+  it("retains existing overlays while terminal reconciliation is pending", () => {
+    const store = createWorkflowOverlayStore();
+    const overlay: WorkflowOverlay = {
+      stages: {
+        "stage-build": {
+          active: true,
+          status: "in_progress",
+          activeAssistantIds: ["assistant-codex"],
+          currentAction: "Running tests",
+          updatedAt: 10,
+        },
+      },
+      currentAction: "Running tests",
+      activeCount: 1,
+      updatedAt: 10,
+    };
+    store.set("build-card", overlay);
+
+    applyWorkflowOverlayStoreProjection({
+      store,
+      contexts: [{ blockId: "build-card" }],
+      overlays: new Map(),
+      retainedBlockIds: new Set(["build-card"]),
+    });
+
+    expect(store.get("build-card")?.overlay).toEqual(overlay);
+
+    applyWorkflowOverlayStoreProjection({
+      store,
+      contexts: [{ blockId: "build-card" }],
+      overlays: new Map(),
+    });
+
+    expect(store.get("build-card")).toBeNull();
+  });
+
   it("routes live stage sessions to thread and matching stage cards", () => {
     const cards = [
       card("thread-card", null),

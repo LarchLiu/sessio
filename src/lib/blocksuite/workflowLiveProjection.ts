@@ -196,6 +196,31 @@ export function projectWorkflowLiveOverlays({
   return overlays;
 }
 
+export function applyWorkflowOverlayStoreProjection({
+  store,
+  contexts,
+  overlays,
+  retainedBlockIds = new Set(),
+}: {
+  store: WorkflowOverlayStore;
+  contexts: Pick<WorkflowOverlayCardContext, "blockId">[];
+  overlays: Map<string, WorkflowOverlay>;
+  retainedBlockIds?: ReadonlySet<string>;
+}) {
+  const knownBlockIds = new Set(contexts.map((context) => context.blockId));
+  for (const blockId of knownBlockIds) {
+    const overlay = overlays.get(blockId);
+    if (overlay) {
+      store.set(blockId, overlay);
+    } else if (!retainedBlockIds.has(blockId)) {
+      store.delete(blockId);
+    }
+  }
+  for (const blockId of store.keys()) {
+    if (!knownBlockIds.has(blockId)) store.delete(blockId);
+  }
+}
+
 function liveSessionWorkflowRoute(
   liveSession: LiveRuntimeSession,
   sessionMap: SessionThreadStageMap,
