@@ -1,5 +1,5 @@
 import type { Agent, ThreadWorkSnapshot, ThreadWorkSnapshotSessionRef } from "../../api";
-import type { LiveRuntimeState, LiveTurn } from "../../runtimeChat";
+import type { LiveRuntimeSession, LiveRuntimeState, LiveTurn } from "../../runtimeChat";
 
 export interface WorkflowOverlayStage {
   active: boolean;
@@ -161,8 +161,7 @@ export function projectWorkflowLiveOverlays({
   const sessionMap = buildSessionThreadStageMap(cards, runtimeSessionAliases);
   const overlays = new Map<string, WorkflowOverlay>();
   for (const liveSession of Object.values(liveState.sessions)) {
-    const route = sessionMap.bySessioRuntimeId.get(liveSession.sessioRuntimeSessionId)
-      ?? sessionMap.bySessioRuntimeId.get(liveSession.agentRuntimeSessionId);
+    const route = liveSessionWorkflowRoute(liveSession, sessionMap);
     if (!route?.threadId) continue;
     const activeTurns = liveSession.turns.filter(isActiveTurn);
     if (activeTurns.length === 0) continue;
@@ -195,6 +194,29 @@ export function projectWorkflowLiveOverlays({
     }
   }
   return overlays;
+}
+
+function liveSessionWorkflowRoute(
+  liveSession: LiveRuntimeSession,
+  sessionMap: SessionThreadStageMap,
+): WorkflowSessionRoute | null {
+  const explicitRoute = sessionMap.bySessioRuntimeId.get(liveSession.sessioRuntimeSessionId)
+    ?? sessionMap.bySessioRuntimeId.get(liveSession.agentRuntimeSessionId);
+  if (explicitRoute) return explicitRoute;
+
+  const metadata = liveSession.metadata ?? {};
+  const threadId = stringMeta(metadata, "astraThreadId") ?? stringMeta(metadata, "threadId");
+  if (!threadId || !sessionMap.blockIdsByThread.has(threadId)) return null;
+  if (stringMeta(metadata, "astraPurpose") !== "orchestration" && !(metadata.astraInternal && stringMeta(metadata, "astraRunId"))) {
+    return null;
+  }
+  return {
+    agent: liveSession.agent,
+    childSessionId: liveSession.agentRuntimeSessionId || liveSession.sessioRuntimeSessionId,
+    threadId,
+    stageId: null,
+    assistantId: null,
+  };
 }
 
 function parseThreadWorkSnapshot(workflowSnapshotJson: string | null | undefined): ThreadWorkSnapshot | null {
@@ -327,6 +349,11 @@ function dedupeStrings(values: string[]): string[] {
 
 function workflowOverlayEquals(a: WorkflowOverlay, b: WorkflowOverlay): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function stringMeta(metadata: Record<string, unknown>, key: string): string | null {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function sessionIdentity(agent: Agent, sessionId: string): string {

@@ -107,6 +107,7 @@ function liveSession(
   agentRuntimeSessionId: string,
   updatedAt: number,
   action = "Running tests",
+  metadata: Record<string, unknown> = {},
 ): LiveRuntimeSession {
   return {
     sessioRuntimeSessionId,
@@ -127,7 +128,7 @@ function liveSession(
       supportsEmbeddedContext: true,
       supportsAttachments: true,
     },
-    metadata: {},
+    metadata,
     turns: [{
       turnId: `turn-${sessioRuntimeSessionId}`,
       status: "streaming",
@@ -218,6 +219,36 @@ describe("workflow live projection", () => {
     expect(overlays.get("thread-card")).toMatchObject({
       activeCount: 1,
       currentAction: "Planning next stage",
+      stages: {},
+    });
+    expect(overlays.has("build-card")).toBe(false);
+  });
+
+  it("routes Astra planner live sessions by thread metadata to thread cards", () => {
+    const cards = [
+      card("thread-card", null),
+      card("build-card", "stage-build"),
+    ];
+    const liveState: LiveRuntimeState = {
+      sessions: {
+        "runtime-astra": liveSession("runtime-astra", "astra-session", 14, "Planning delegated work", {
+          astraThreadId: "thread-1",
+          astraPurpose: "orchestration",
+          astraRunId: "run-1",
+        }),
+      },
+      lastSequence: 1,
+    };
+
+    const overlays = projectWorkflowLiveOverlays({
+      cards,
+      runtimeSessionAliases: {},
+      liveState,
+    });
+
+    expect(overlays.get("thread-card")).toMatchObject({
+      activeCount: 1,
+      currentAction: "Planning delegated work",
       stages: {},
     });
     expect(overlays.has("build-card")).toBe(false);
