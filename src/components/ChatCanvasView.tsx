@@ -1,8 +1,9 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { AlertCircle, LoaderCircle, RefreshCcw } from "lucide-react";
-import type { CanvasDocumentState } from "../canvasTypes";
+import type { CanvasDocumentState, CanvasKey } from "../canvasTypes";
 import {
-  getSessionCanvas,
+  getCanvas,
+  type ThreadWorkSnapshot,
 } from "../api";
 import type { ChatComposerController } from "../hooks/useChatComposer";
 import type { LiveRuntimeState } from "../runtimeChat";
@@ -10,7 +11,7 @@ import type { LiveRuntimeState } from "../runtimeChat";
 const BlockSuiteCanvasHost = lazy(() => import("./blocksuite/BlockSuiteCanvasHost"));
 
 export interface ChatCanvasViewProps {
-  sessionId: string;
+  canvasKey: CanvasKey;
   sessionAgent: "pi" | "codex" | "claude" | "opencode";
   sessionTitle: string;
   workspacePath: string | null;
@@ -20,6 +21,7 @@ export interface ChatCanvasViewProps {
   latestEditedFiles?: string[];
   liveState: LiveRuntimeState;
   runtimeSessionAliases: Record<string, string>;
+  fallbackWorkflowSnapshot?: ThreadWorkSnapshot | null;
   selectedCanvasFileRequest?: {
     paths: string[];
     requestId: number;
@@ -31,7 +33,7 @@ export interface ChatCanvasViewProps {
 }
 
 export default function ChatCanvasView({
-  sessionId,
+  canvasKey,
   sessionAgent,
   sessionTitle,
   workspacePath,
@@ -41,6 +43,7 @@ export default function ChatCanvasView({
   latestEditedFiles = [],
   liveState,
   runtimeSessionAliases,
+  fallbackWorkflowSnapshot = null,
   selectedCanvasFileRequest = null,
   composer,
   onError,
@@ -51,12 +54,13 @@ export default function ChatCanvasView({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const canvasKeySignature = `${canvasKey.kind}:${canvasKey.id}`;
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setLoadError(null);
-    getSessionCanvas(sessionId)
+    getCanvas(canvasKey)
       .then((next) => {
         if (cancelled) return;
         setState(next);
@@ -72,7 +76,7 @@ export default function ChatCanvasView({
     return () => {
       cancelled = true;
     };
-  }, [onError, reloadKey, sessionId]);
+  }, [canvasKey.kind, canvasKey.id, canvasKeySignature, onError, reloadKey]);
 
   const initialSnapshot = useMemo(() => {
     if (!state) return null;
@@ -126,7 +130,7 @@ export default function ChatCanvasView({
           }
         >
           <BlockSuiteCanvasHost
-            sessionId={sessionId}
+            canvasKey={canvasKey}
             sessionAgent={sessionAgent}
             workspacePath={workspacePath}
             sessionThreadId={sessionThreadId}
@@ -135,6 +139,7 @@ export default function ChatCanvasView({
             latestEditedFiles={latestEditedFiles}
             liveState={liveState}
             runtimeSessionAliases={runtimeSessionAliases}
+            fallbackWorkflowSnapshot={fallbackWorkflowSnapshot}
             selectedFileRequest={selectedCanvasFileRequest}
             initialState={state}
             initialSnapshot={initialSnapshot}

@@ -4,6 +4,7 @@ import type {
   CanvasAnchorInfo,
   CanvasBlockRecord,
   CanvasDocumentState,
+  CanvasKey,
   CanvasRevisionInfo,
   SaveCanvasDraftRequest,
   SaveCanvasRevisionRequest,
@@ -2537,8 +2538,8 @@ export async function writeCrossPrompt(
   return invoke<string>("write_cross_prompt", { sessionId, content });
 }
 
-export async function getSessionCanvas(sessionId: string): Promise<CanvasDocumentState> {
-  return invoke<CanvasDocumentState>("get_session_canvas", { sessionId });
+export async function getCanvas(canvasKey: CanvasKey): Promise<CanvasDocumentState> {
+  return invoke<CanvasDocumentState>("get_canvas", { canvasKey });
 }
 
 export async function saveCanvasDraft(

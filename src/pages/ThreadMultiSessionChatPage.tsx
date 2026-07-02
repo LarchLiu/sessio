@@ -107,11 +107,19 @@ import {
   liveWorkingIndicatorTurn,
   type MarkdownImage,
 } from "./ChatPage";
+import ChatCanvasView from "../components/ChatCanvasView";
+import ChatFilesView, { type ChatFilesSubview } from "../components/ChatFilesView";
 import {
   acpViewModelToRenderItems,
+  aggregateSessionFileEdits,
+  fileEditKey,
+  fileEditMatchesPath,
+  liveOrLatestTurnFileEdits,
   renderItemKeys,
   type AcpRenderItem,
+  type FileEditItem,
 } from "../acpRenderItems";
+import type { ChatView } from "../navigation";
 
 const THREAD_REFRESH_ASTRA_EVENTS = new Set(["delegated", "stage_update_result", "task_dispatch"]);
 const THREAD_CONTEXT_NAV_SETTLE_MS = 140;
@@ -120,6 +128,14 @@ export default function ThreadMultiSessionChatPage({
   project,
   assistants,
   threadId,
+  chatView,
+  filesSubview,
+  onFilesSubviewChange,
+  projectFilesReloadKey = 0,
+  selectedProjectFileRequest = null,
+  selectedCanvasFileRequest = null,
+  onOpenProjectFile,
+  onOpenThreadMultiSessionChat,
   liveState,
   runtimeAgents,
   lastRuntimeAgentSelection,
@@ -133,6 +149,20 @@ export default function ThreadMultiSessionChatPage({
   project: ProjectInfo;
   assistants: AssistantInfo[];
   threadId: string;
+  chatView: ChatView;
+  filesSubview: ChatFilesSubview;
+  onFilesSubviewChange: (subview: ChatFilesSubview) => void;
+  projectFilesReloadKey?: number;
+  selectedProjectFileRequest?: {
+    path: string;
+    requestId: number;
+  } | null;
+  selectedCanvasFileRequest?: {
+    paths: string[];
+    requestId: number;
+  } | null;
+  onOpenProjectFile?: (path: string) => void;
+  onOpenThreadMultiSessionChat?: (threadId: string) => void;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
   lastRuntimeAgentSelection: RuntimeAgentSelection | null;
@@ -346,6 +376,55 @@ export default function ThreadMultiSessionChatPage({
       || thread.kind === "brainstorm"
       || thread.kind === "debate"
     ));
+  const isFilesView = chatView === "file";
+  const isCanvasView = chatView === "canvas";
+  const selectedProjectFilePath = selectedProjectFileRequest?.path.trim() || null;
+  const threadFileEdits = useMemo(
+    () => aggregateThreadLaneFileEdits(lanes, "all"),
+    [lanes],
+  );
+  const currentThreadFileEdits = useMemo(
+    () => aggregateThreadLaneFileEdits(lanes, "current"),
+    [lanes],
+  );
+  const fileViewEdits = useMemo(() => {
+    if (!selectedProjectFilePath) return threadFileEdits.edits;
+    const exists = threadFileEdits.edits.some((edit) =>
+      fileEditMatchesPath(edit, selectedProjectFilePath),
+    );
+    if (exists) return threadFileEdits.edits;
+    return [
+      {
+        path: selectedProjectFilePath,
+        displayPath: selectedProjectFilePath,
+      },
+      ...threadFileEdits.edits,
+    ];
+  }, [selectedProjectFilePath, threadFileEdits.edits]);
+  const threadEditedFilePaths = useMemo(
+    () => threadFileEdits.edits
+      .map((edit) => edit.path ?? edit.displayPath)
+      .filter((path): path is string => Boolean(path)),
+    [threadFileEdits.edits],
+  );
+  const currentThreadEditedFilePaths = useMemo(
+    () => currentThreadFileEdits.edits
+      .map((edit) => edit.path ?? edit.displayPath)
+      .filter((path): path is string => Boolean(path)),
+    [currentThreadFileEdits.edits],
+  );
+  const threadWorkflowSnapshot = useMemo(
+    () => thread
+      ? withThreadChatSessions(
+          buildThreadWorkSnapshot(thread, null, Date.now()),
+          threadChatSessions,
+        )
+      : null,
+    [thread, threadChatSessions],
+  );
+  const threadWorkActive =
+    Boolean(activeAstraRun) ||
+    lanes.some((lane) => lane.status === "live" || lane.status === "pending");
 
   const updateScrollToBottomButton = useCallback((vp: HTMLDivElement | null = viewportRef.current) => {
     if (!vp) return;
@@ -595,62 +674,103 @@ export default function ThreadMultiSessionChatPage({
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-surface-panel">
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <ScrollArea
-          ref={viewportRef}
-          className="min-h-0 flex-1"
-          viewportClassName="px-14 py-4 session-chat-scroll-viewport"
-          onScroll={handleTimelineScroll}
-        >
-          {loading ? (
-            <div className="flex items-center justify-center gap-2 py-16 text-body-sm text-ink/45">
-              <LoaderCircle className="h-4 w-4 animate-spin" />
-              {t("thread.multi_session_loading")}
-            </div>
-          ) : loadError && !thread ? (
-            <ThreadMultiSessionEmpty
-              icon={<AlertCircle className="h-5 w-5 text-status-error" />}
-              title={t("thread.multi_session_load_failed")}
-              detail={loadError}
-            />
-          ) : !thread ? (
-            <ThreadMultiSessionEmpty
-              icon={<HashIcon className="h-5 w-5 text-ink/35" />}
-              title={t("thread.not_found")}
-            />
-          ) : (
-            <div ref={timelineContentRef} className="relative grid min-h-full gap-3">
-              {timelineRows.length === 0 ? (
+        {isFilesView ? (
+          <ChatFilesView
+            edits={fileViewEdits}
+            latestEditedEdits={currentThreadFileEdits.edits}
+            workspacePath={project.path}
+            subview={filesSubview}
+            onSubviewChange={onFilesSubviewChange}
+            editingLocked={threadWorkActive}
+            reloadKey={projectFilesReloadKey}
+            requestedSelection={
+              selectedProjectFilePath
+                ? {
+                    key: selectedProjectFilePath,
+                    requestId: selectedProjectFileRequest?.requestId ?? 0,
+                  }
+                : null
+            }
+          />
+        ) : isCanvasView ? (
+          <ChatCanvasView
+            canvasKey={{ kind: "thread", id: threadId }}
+            sessionAgent={composer.selectedAgent ?? "codex"}
+            sessionTitle={thread?.goal ?? threadId}
+            workspacePath={project.path}
+            sessionThreadId={threadId}
+            editedFiles={threadEditedFilePaths}
+            autoAddedEditedFiles={threadEditedFilePaths}
+            latestEditedFiles={currentThreadEditedFilePaths}
+            liveState={liveState}
+            runtimeSessionAliases={runtimeSessionAliases}
+            fallbackWorkflowSnapshot={threadWorkflowSnapshot}
+            selectedCanvasFileRequest={selectedCanvasFileRequest}
+            composer={composer}
+            onError={composer.setComposerError}
+            onOpenProjectFile={onOpenProjectFile}
+            onOpenThreadMultiSessionChat={onOpenThreadMultiSessionChat}
+          />
+        ) : (
+          <>
+            <ScrollArea
+              ref={viewportRef}
+              className="min-h-0 flex-1"
+              viewportClassName="px-14 py-4 session-chat-scroll-viewport"
+              onScroll={handleTimelineScroll}
+            >
+              {loading ? (
+                <div className="flex items-center justify-center gap-2 py-16 text-body-sm text-ink/45">
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                  {t("thread.multi_session_loading")}
+                </div>
+              ) : loadError && !thread ? (
                 <ThreadMultiSessionEmpty
-                  icon={<MessagesSquare className="h-5 w-5 text-ink/35" />}
-                  title={t("thread.multi_session_empty")}
-                  detail={replay ? t("thread.no_chats") : t("thread.history_pending")}
+                  icon={<AlertCircle className="h-5 w-5 text-status-error" />}
+                  title={t("thread.multi_session_load_failed")}
+                  detail={loadError}
+                />
+              ) : !thread ? (
+                <ThreadMultiSessionEmpty
+                  icon={<HashIcon className="h-5 w-5 text-ink/35" />}
+                  title={t("thread.not_found")}
                 />
               ) : (
-                <ThreadTimeline
-                  rows={timelineRows}
-                  thread={thread}
-                  laneRefs={laneRefs}
-                />
+                <div ref={timelineContentRef} className="relative grid min-h-full gap-3">
+                  {timelineRows.length === 0 ? (
+                    <ThreadMultiSessionEmpty
+                      icon={<MessagesSquare className="h-5 w-5 text-ink/35" />}
+                      title={t("thread.multi_session_empty")}
+                      detail={replay ? t("thread.no_chats") : t("thread.history_pending")}
+                    />
+                  ) : (
+                    <ThreadTimeline
+                      rows={timelineRows}
+                      thread={thread}
+                      laneRefs={laneRefs}
+                    />
+                  )}
+                </div>
               )}
-            </div>
-          )}
-        </ScrollArea>
-        {showTimelineNav && (
-          <ThreadContextNav
-            items={timelineNavItems}
-            laneRefs={laneRefs}
-            viewportRef={viewportRef}
-          />
-        )}
-        {showScrollToBottom && (
-          <button
-            type="button"
-            onClick={() => scrollTimelineToBottom("smooth")}
-            className="absolute bottom-3 left-1/2 z-20 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-ink/15 bg-surface-panel/95 text-ink/85 shadow-sm transition hover:border-ink/25 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20"
-            aria-label="Scroll to bottom"
-          >
-            <ArrowDownToLine className="h-5 w-5" />
-          </button>
+            </ScrollArea>
+            {showTimelineNav && (
+              <ThreadContextNav
+                items={timelineNavItems}
+                laneRefs={laneRefs}
+                viewportRef={viewportRef}
+              />
+            )}
+            {showScrollToBottom && (
+              <button
+                type="button"
+                onClick={() => scrollTimelineToBottom("smooth")}
+                className="absolute bottom-3 left-1/2 z-20 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-ink/15 bg-surface-panel/95 text-ink/85 shadow-sm transition hover:border-ink/25 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20"
+                aria-label="Scroll to bottom"
+              >
+                <ArrowDownToLine className="h-5 w-5" />
+              </button>
+            )}
+          </>
         )}
       </div>
       <div className="shrink-0 bg-gradient-to-t from-surface-panel via-surface-panel to-surface-panel/80 px-14 pb-4">
@@ -1234,6 +1354,48 @@ function ThreadMultiSessionEmpty({
       </div>
     </div>
   );
+}
+
+function aggregateThreadLaneFileEdits(
+  lanes: ThreadSessionLane[],
+  mode: "all" | "current",
+): {
+  edits: FileEditItem[];
+  additions: number;
+  deletions: number;
+} {
+  const edits: FileEditItem[] = [];
+  for (const lane of lanes) {
+    if (!lane.liveSession) continue;
+    const viewModel = liveSessionToAcpViewModel(lane.liveSession);
+    const summary = mode === "all"
+      ? aggregateSessionFileEdits(viewModel)
+      : liveOrLatestTurnFileEdits(
+          viewModel,
+          new Set(lane.liveSession.turns.map((turn) => turn.turnId)),
+        );
+    appendThreadFileEdits(edits, summary.edits);
+  }
+  return {
+    edits,
+    additions: edits.reduce((total, edit) => total + (edit.additions ?? 0), 0),
+    deletions: edits.reduce((total, edit) => total + (edit.deletions ?? 0), 0),
+  };
+}
+
+function appendThreadFileEdits(target: FileEditItem[], incoming: FileEditItem[]) {
+  for (const edit of incoming) {
+    const key = fileEditKey(edit);
+    const index = target.findIndex((existing) => fileEditMatchesPath(existing, key));
+    if (index >= 0) {
+      target[index] = {
+        ...target[index],
+        ...edit,
+      };
+    } else {
+      target.push(edit);
+    }
+  }
 }
 
 function ThreadTimeline({

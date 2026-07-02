@@ -94,6 +94,7 @@ import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTabs";
 import { projectStageIcon, projectStageLabel, stageStatusVisual } from "../utils/stageDisplay";
 import { sessionDisplayTitle } from "../appUtils";
+import type { CanvasKey } from "../canvasTypes";
 
 const CANVAS_ADD_FILES_EVENT = "sessio:canvas-add-files";
 
@@ -404,7 +405,7 @@ export function ProjectWorkbenchPage({
   onViewChange,
   hideTabs = false,
   filesReloadKey = 0,
-  activeCanvasSessionId = null,
+  activeCanvasKey = null,
   onOpenFile,
   onAddFileToCanvas,
   projectHasGit,
@@ -417,7 +418,7 @@ export function ProjectWorkbenchPage({
   onViewChange?: (view: ProjectView) => void;
   hideTabs?: boolean;
   filesReloadKey?: number;
-  activeCanvasSessionId?: string | null;
+  activeCanvasKey?: CanvasKey | null;
   onOpenFile?: (path: string) => void;
   onAddFileToCanvas?: (paths: string[] | string) => void;
   projectHasGit?: boolean;
@@ -546,7 +547,7 @@ export function ProjectWorkbenchPage({
           <ProjectFilesPanel
             project={project}
             reloadKey={filesReloadKey}
-            activeCanvasSessionId={activeCanvasSessionId}
+            activeCanvasKey={activeCanvasKey}
             onOpenFile={onOpenFile}
             onAddFileToCanvas={onAddFileToCanvas}
             projectHasGit={projectHasGit}
@@ -643,7 +644,7 @@ export function ProjectWorkbenchPage({
 function ProjectFilesPanel({
   project,
   reloadKey = 0,
-  activeCanvasSessionId = null,
+  activeCanvasKey = null,
   onOpenFile,
   onAddFileToCanvas,
   projectHasGit,
@@ -651,7 +652,7 @@ function ProjectFilesPanel({
 }: {
   project: ProjectInfo;
   reloadKey?: number;
-  activeCanvasSessionId?: string | null;
+  activeCanvasKey?: CanvasKey | null;
   onOpenFile?: (path: string) => void;
   onAddFileToCanvas?: (paths: string[] | string) => void;
   projectHasGit?: boolean;
@@ -756,7 +757,7 @@ function ProjectFilesPanel({
           gitStatus={gitStatus}
           refreshing={refreshing}
           error={error}
-          activeCanvasSessionId={activeCanvasSessionId}
+          activeCanvasKey={activeCanvasKey}
           onRefresh={() => {
             void loadProjectFiles({ background: pathsRef.current !== null, detectGit: true });
           }}
@@ -773,7 +774,7 @@ function ProjectFilesTree({
   gitStatus,
   refreshing,
   error,
-  activeCanvasSessionId,
+  activeCanvasKey,
   onRefresh,
   onOpenFile,
   onAddFileToCanvas,
@@ -782,7 +783,7 @@ function ProjectFilesTree({
   gitStatus: ProjectGitStatusEntry[];
   refreshing: boolean;
   error: string | null;
-  activeCanvasSessionId: string | null;
+  activeCanvasKey: CanvasKey | null;
   onRefresh: () => void;
   onOpenFile?: (path: string) => void;
   onAddFileToCanvas?: (paths: string[] | string) => void;
@@ -906,7 +907,7 @@ function ProjectFilesTree({
               <ProjectFileTreeContextMenu
                 path={item.path}
                 context={context}
-                activeCanvasSessionId={activeCanvasSessionId}
+                activeCanvasKey={activeCanvasKey}
                 onOpenFile={onOpenFile}
                 onAddFileToCanvas={onAddFileToCanvas}
               />
@@ -926,7 +927,7 @@ function ProjectFilesTree({
 function ProjectFileTreeContextMenu({
   path,
   context,
-  activeCanvasSessionId,
+  activeCanvasKey,
   onOpenFile,
   onAddFileToCanvas,
 }: {
@@ -935,7 +936,7 @@ function ProjectFileTreeContextMenu({
     anchorElement: HTMLElement;
     close: (options?: { restoreFocus?: boolean }) => void;
   };
-  activeCanvasSessionId: string | null;
+  activeCanvasKey: CanvasKey | null;
   onOpenFile?: (path: string) => void;
   onAddFileToCanvas?: (paths: string[] | string) => void;
 }) {
@@ -982,10 +983,10 @@ function ProjectFileTreeContextMenu({
           role="menuitem"
           onClick={() => {
             context.close({ restoreFocus: false });
-            if (activeCanvasSessionId) {
+            if (activeCanvasKey) {
               window.dispatchEvent(
                 new CustomEvent(CANVAS_ADD_FILES_EVENT, {
-                  detail: { paths: [path], sessionId: activeCanvasSessionId },
+                  detail: { paths: [path], canvasKey: activeCanvasKey },
                 }),
               );
             }

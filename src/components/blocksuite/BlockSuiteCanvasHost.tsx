@@ -14,6 +14,7 @@ import type { ComposerAttachment } from "../ComposerAttachments";
 import PopupMenu, { type PopupMenuOption } from "../PopupMenu";
 import ScrollArea from "../ScrollArea";
 import type {
+  CanvasKey,
   CanvasDocumentState,
 } from "../../canvasTypes";
 import {
@@ -581,7 +582,7 @@ function getSelectedCanvasElements(
 }
 
 export interface BlockSuiteCanvasHostProps {
-  sessionId: string;
+  canvasKey: CanvasKey;
   sessionAgent: Agent;
   workspacePath: string | null;
   sessionThreadId?: string | null;
@@ -590,6 +591,7 @@ export interface BlockSuiteCanvasHostProps {
   latestEditedFiles?: string[];
   liveState: LiveRuntimeState;
   runtimeSessionAliases: Record<string, string>;
+  fallbackWorkflowSnapshot?: ThreadWorkSnapshot | null;
   selectedFileRequest?: {
     paths: string[];
     requestId: number;
@@ -911,7 +913,7 @@ function readBlobImageSize(blob: Blob): Promise<{ width: number; height: number 
 }
 
 export default function BlockSuiteCanvasHost({
-  sessionId,
+  canvasKey,
   sessionAgent,
   workspacePath,
   sessionThreadId = null,
@@ -920,6 +922,7 @@ export default function BlockSuiteCanvasHost({
   latestEditedFiles = [],
   liveState,
   runtimeSessionAliases,
+  fallbackWorkflowSnapshot = null,
   selectedFileRequest = null,
   initialState,
   initialSnapshot,
@@ -978,6 +981,11 @@ export default function BlockSuiteCanvasHost({
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [editedFilesPickerOpen, setEditedFilesPickerOpen] = useState(false);
   const [pendingEditedFiles, setPendingEditedFiles] = useState<string[]>([]);
+  const canvasKeySignature = `${canvasKey.kind}:${canvasKey.id}`;
+  const requestCanvasKey = useMemo<CanvasKey>(
+    () => ({ kind: canvasKey.kind, id: canvasKey.id }),
+    [canvasKey.id, canvasKey.kind],
+  );
   const [canvasBlockRecords, setCanvasBlockRecords] = useState(initialState.blockRecords);
   const [localCanvasFileKeys, setLocalCanvasFileKeys] = useState<Set<string>>(() => {
     const keys = new Set<string>();
@@ -1258,7 +1266,7 @@ export default function BlockSuiteCanvasHost({
       : [];
     try {
       const saved = await updateCanvasBlocks({
-        sessionId,
+        canvasKey: requestCanvasKey,
         blocks: [...records, ...surfaceRecords],
       });
       setCanvasBlockRecords(saved);
@@ -1277,7 +1285,7 @@ export default function BlockSuiteCanvasHost({
     } finally {
       updateSelectionState();
     }
-  }, [onError, onStateLoaded, sessionId, updateSelectionState]);
+  }, [canvasKeySignature, onError, onStateLoaded, requestCanvasKey, updateSelectionState]);
 
   const scheduleSyncBlocks = useCallback(() => {
     const doc = getDoc();
@@ -1768,8 +1776,10 @@ export default function BlockSuiteCanvasHost({
     const doc = getDoc();
     const rootService = getRootService();
     if (!doc || !rootService) return;
-    const snapshotResult = await getThreadWorkSnapshot(sessionAgent, sessionId).catch(() => null);
-    const snapshot = snapshotResult?.snapshot ?? null;
+    const snapshotResult = canvasKey.kind === "session"
+      ? await getThreadWorkSnapshot(sessionAgent, canvasKey.id).catch(() => null)
+      : null;
+    const snapshot = snapshotResult?.snapshot ?? fallbackWorkflowSnapshot ?? null;
     const title = snapshot?.goal?.trim() || "Workflow";
     const summaryMarkdown = workflowSnapshotToMarkdown(snapshot);
     const [bound] = placeCanvasNodes(doc, rootService, [{
@@ -1780,7 +1790,7 @@ export default function BlockSuiteCanvasHost({
       "sessio:workflow-card",
       {
         title,
-        threadId: snapshotResult?.threadId ?? "",
+        threadId: snapshotResult?.threadId ?? snapshot?.threadId ?? sessionThreadId ?? "",
         threadStageId: snapshotResult?.stageId ?? "",
         sourceType: "workflow_definition",
         workflowSummaryMarkdown: summaryMarkdown,
@@ -1794,7 +1804,7 @@ export default function BlockSuiteCanvasHost({
     );
     await syncCanvasBlocks(doc);
     updateSelectionState();
-  }, [getDoc, getRootService, insertEdgelessBlock, sessionAgent, sessionId, syncCanvasBlocks, updateSelectionState]);
+  }, [canvasKey.id, canvasKey.kind, fallbackWorkflowSnapshot, getDoc, getRootService, insertEdgelessBlock, sessionAgent, sessionThreadId, syncCanvasBlocks, updateSelectionState]);
 
   const groupSelection = useCallback(() => {
     const rootService = getRootService();
@@ -1926,7 +1936,7 @@ export default function BlockSuiteCanvasHost({
 
   useEffect(() => {
     currentSnapshotRef.current = initialSnapshot;
-  }, [initialSnapshot, sessionId]);
+  }, [canvasKeySignature, initialSnapshot]);
 
   useEffect(() => {
     return () => {
@@ -1974,7 +1984,7 @@ export default function BlockSuiteCanvasHost({
       setIsSaving(true);
       try {
         const saved = await saveCanvasDraft({
-          sessionId,
+          canvasKey: requestCanvasKey,
           title: documentTitle,
           snapshotJson,
         });
@@ -2062,7 +2072,8 @@ export default function BlockSuiteCanvasHost({
     initialState.document.title,
     onError,
     onStateLoaded,
-    sessionId,
+    canvasKeySignature,
+    requestCanvasKey,
     syncCanvasBlocks,
   ]);
 
@@ -2077,7 +2088,7 @@ export default function BlockSuiteCanvasHost({
     setIsSaving(true);
     try {
       const saved = await saveCanvasRevision({
-        sessionId,
+        canvasKey: requestCanvasKey,
         title: initialState.document.title,
         snapshotJson,
         source: "manual",
@@ -2258,19 +2269,19 @@ export default function BlockSuiteCanvasHost({
   useEffect(() => {
     const requestId = selectedFileRequest?.requestId ?? null;
     if (!selectedFileRequest || requestId === null || !isReady) return;
-    const requestKey = `${sessionId}:${requestId}`;
+    const requestKey = `${canvasKeySignature}:${requestId}`;
     if (handledFileRequestRef.current === requestKey) return;
     void addFileCards(selectedFileRequest.paths).then((added) => {
       if (added) {
         handledFileRequestRef.current = requestKey;
       }
     });
-  }, [addFileCards, isReady, selectedFileRequest, sessionId]);
+  }, [addFileCards, canvasKeySignature, isReady, selectedFileRequest]);
 
   useEffect(() => {
     autoAddedEditedFilesHydratedRef.current = false;
     previousEditedFileKeysRef.current = new Set();
-  }, [initialState.document.id, sessionId]);
+  }, [canvasKeySignature, initialState.document.id]);
 
   useEffect(() => {
     if (!isReady || !workspacePath) return;
@@ -2298,13 +2309,19 @@ export default function BlockSuiteCanvasHost({
 
   useEffect(() => {
     const handleCanvasAddFiles = (event: Event) => {
-      const detail = (event as CustomEvent<{ paths?: string[]; sessionId?: string | null }>).detail;
-      if (!detail || detail.sessionId !== sessionId || !Array.isArray(detail.paths)) return;
+      const detail = (event as CustomEvent<{ paths?: string[]; canvasKey?: CanvasKey | null }>).detail;
+      if (
+        !detail ||
+        !detail.canvasKey ||
+        detail.canvasKey.kind !== canvasKey.kind ||
+        detail.canvasKey.id !== canvasKey.id ||
+        !Array.isArray(detail.paths)
+      ) return;
       void addFileCards(detail.paths);
     };
     window.addEventListener(CANVAS_ADD_FILES_EVENT, handleCanvasAddFiles);
     return () => window.removeEventListener(CANVAS_ADD_FILES_EVENT, handleCanvasAddFiles);
-  }, [addFileCards, sessionId]);
+  }, [addFileCards, canvasKey.id, canvasKey.kind]);
 
   useEffect(() => {
     if (!isReady) return;

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType } from "react";
 import { FolderTree, GitBranch, Info, PanelRightOpen, Workflow, type LucideIcon } from "lucide-react";
 import type { ProjectInfo, SessionInfo } from "../api";
+import type { CanvasKey } from "../canvasTypes";
 import { useI18n } from "../i18n";
 import type { LiveRuntimeState } from "../runtimeChat";
 import ThreadPage from "../pages/ThreadPage";
@@ -21,7 +22,7 @@ interface AppRightSidebarProps {
   selectedThreadProject: ProjectInfo | null;
   open: boolean;
   isCanvasViewActive: boolean;
-  activeCanvasSessionId: string | null;
+  activeCanvasKey: CanvasKey | null;
   liveState: LiveRuntimeState;
   filesReloadKey: number;
   projectGitRepos: Record<string, boolean>;
@@ -47,7 +48,7 @@ export default function AppRightSidebar({
   selectedThreadProject,
   open,
   isCanvasViewActive,
-  activeCanvasSessionId,
+  activeCanvasKey,
   liveState,
   filesReloadKey,
   projectGitRepos,
@@ -265,7 +266,7 @@ export default function AppRightSidebar({
             view={activeTab.view}
             hideTabs
             filesReloadKey={filesReloadKey + liveFilesReloadKey}
-            activeCanvasSessionId={activeCanvasSessionId}
+            activeCanvasKey={activeCanvasKey}
             onOpenFile={onOpenProjectFile}
             onAddFileToCanvas={isCanvasViewActive ? onAddProjectFileToCanvas : undefined}
             projectHasGit={project.path ? projectGitRepos[project.path] === true : false}

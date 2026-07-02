@@ -1806,7 +1806,7 @@ export function AcpTranscriptPanel({
           </div>
         ) : isCanvasView ? (
           <ChatCanvasView
-            sessionId={sessionId}
+            canvasKey={{ kind: "session", id: sessionId }}
             sessionAgent={agent}
             sessionTitle={sessionId}
             workspacePath={workspacePath}

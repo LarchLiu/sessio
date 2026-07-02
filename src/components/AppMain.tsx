@@ -180,6 +180,23 @@ export default function AppMain({
             project={activeProject}
             assistants={projectAssistants[activeProject.id] ?? []}
             threadId={selectedThreadId}
+            chatView={chatView}
+            filesSubview={filesSubview}
+            onFilesSubviewChange={onFilesSubviewChange}
+            projectFilesReloadKey={projectFilesReloadKey}
+            selectedProjectFileRequest={selectedProjectFileRequest}
+            selectedCanvasFileRequest={selectedCanvasFileRequest}
+            onOpenProjectFile={onOpenProjectFile}
+            onOpenThreadMultiSessionChat={(threadId) => {
+              setSelected(null);
+              setSelectedProject(null);
+              setSelectedThread({
+                projectId: activeProject.id,
+                threadId,
+                goal: "Thread",
+              });
+              setDetailMode("threadMultiSessionChat");
+            }}
             liveState={liveState}
             runtimeAgents={runtimeAgents}
             lastRuntimeAgentSelection={lastRuntimeAgentSelection}

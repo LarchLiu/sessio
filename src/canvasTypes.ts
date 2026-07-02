@@ -70,6 +70,13 @@ export interface CanvasDocumentState {
   anchors: CanvasAnchorInfo[];
 }
 
+export type CanvasKeyKind = "session" | "thread";
+
+export interface CanvasKey {
+  kind: CanvasKeyKind;
+  id: string;
+}
+
 export interface UpsertCanvasBlockRecordInput {
   blockId: string;
   blockKind: CanvasBlockKind;
@@ -80,25 +87,25 @@ export interface UpsertCanvasBlockRecordInput {
 }
 
 export interface SaveCanvasDraftRequest {
-  sessionId: string;
+  canvasKey: CanvasKey;
   title?: string | null;
   snapshotJson: string;
 }
 
 export interface SaveCanvasRevisionRequest {
-  sessionId: string;
+  canvasKey: CanvasKey;
   title?: string | null;
   snapshotJson: string;
   source: string;
 }
 
 export interface UpdateCanvasBlocksRequest {
-  sessionId: string;
+  canvasKey: CanvasKey;
   blocks: UpsertCanvasBlockRecordInput[];
 }
 
 export interface UpsertCanvasAnchorRequest {
-  sessionId: string;
+  canvasKey: CanvasKey;
   anchorBlockId?: string | null;
   selectionBlockIdsJson: string;
   selectionElementIdsJson: string;
@@ -126,7 +133,7 @@ export interface CanvasContextOption {
 }
 
 export interface BuildCanvasContextFileRequest {
-  sessionId: string;
+  canvasKey: CanvasKey;
   kind: "selection" | "workflow";
   fileNamePrefix: string;
   content: string;

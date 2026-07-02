@@ -40,6 +40,7 @@ import UpdateConfirmDialog from "./components/UpdateConfirmDialog";
 import SettingsPage from "./pages/SettingsPage";
 import AutoTasksPage from "./pages/AutoTasksPage";
 import type { ToastStackMessage } from "./components/ToastStack";
+import type { CanvasKey } from "./canvasTypes";
 import { useAppData } from "./hooks/useAppData";
 import { usePendingNewChats } from "./hooks/usePendingNewChats";
 import { usePlanTaskRuntimeCompletion } from "./hooks/usePlanTaskRuntimeCompletion";
@@ -994,7 +995,8 @@ export default function App() {
 
   const currentChatView: ChatView = chatView;
   const chatViewToggleVisible =
-    Boolean(selected) && detailMode === "chat";
+    (Boolean(selected) && detailMode === "chat") ||
+    (Boolean(selectedThreadId) && detailMode === "threadMultiSessionChat");
   const terminalDockVisible = !autoTasksOpen;
   const handleChatViewChange = useCallback(
     (next: ChatView) => {
@@ -1002,16 +1004,31 @@ export default function App() {
     },
     [],
   );
-  const currentSessionIdentity = selected ? sessionIdentityKey(selected) : null;
+  const currentSessionIdentity = selected
+    ? sessionIdentityKey(selected)
+    : selectedThreadId && detailMode === "threadMultiSessionChat"
+      ? selectedThreadId
+      : null;
+  const activeCanvasKey: CanvasKey | null = selected
+    ? { kind: "session", id: selected.id }
+    : selectedThreadId && detailMode === "threadMultiSessionChat"
+      ? { kind: "thread", id: selectedThreadId }
+      : null;
   const currentProjectFileSelection =
     currentSessionIdentity ? projectFileSelectionBySession[currentSessionIdentity] ?? null : null;
   const currentCanvasFileSelection =
     currentSessionIdentity ? canvasFileSelectionBySession[currentSessionIdentity] ?? null : null;
   const handleOpenProjectFile = useCallback(
     (path: string) => {
-      if (!selected || (detailMode !== "chat" && detailMode !== "threadChat")) return;
+      const identity = selected
+        ? sessionIdentityKey(selected)
+        : selectedThreadId && activeThreadProject && detailMode === "threadMultiSessionChat"
+          ? selectedThreadId
+          : null;
+      if (!identity) return;
+      if (!selected && detailMode !== "threadMultiSessionChat") return;
+      if (selected && detailMode !== "chat" && detailMode !== "threadChat") return;
       if (currentChatView !== "file") setChatView("file");
-      const identity = sessionIdentityKey(selected);
       setProjectFileSelectionBySession((prev) => {
         const currentSelection = prev[identity];
         return {
@@ -1023,15 +1040,21 @@ export default function App() {
         };
       });
     },
-    [currentChatView, detailMode, selected],
+    [activeThreadProject, currentChatView, detailMode, selected, selectedThreadId],
   );
   const handleAddProjectFileToCanvas = useCallback(
     (paths: string[] | string) => {
-      if (!selected || (detailMode !== "chat" && detailMode !== "threadChat")) return;
+      const identity = selected
+        ? sessionIdentityKey(selected)
+        : selectedThreadId && activeThreadProject && detailMode === "threadMultiSessionChat"
+          ? selectedThreadId
+          : null;
+      if (!identity) return;
+      if (!selected && detailMode !== "threadMultiSessionChat") return;
+      if (selected && detailMode !== "chat" && detailMode !== "threadChat") return;
       const nextPaths = (Array.isArray(paths) ? paths : [paths]).map((path) => path.trim()).filter(Boolean);
       if (nextPaths.length === 0) return;
       if (currentChatView !== "canvas") setChatView("canvas");
-      const identity = sessionIdentityKey(selected);
       setCanvasFileSelectionBySession((prev) => {
         const currentSelection = prev[identity];
         return {
@@ -1043,7 +1066,7 @@ export default function App() {
         };
       });
     },
-    [currentChatView, detailMode, selected],
+    [activeThreadProject, currentChatView, detailMode, selected, selectedThreadId],
   );
 
   const header = (
@@ -1192,7 +1215,7 @@ export default function App() {
             selectedThreadProject={activeThreadProject}
             open={rightSidebarOpen}
             isCanvasViewActive={currentChatView === "canvas"}
-            activeCanvasSessionId={selected?.id ?? null}
+            activeCanvasKey={activeCanvasKey}
             liveState={liveRuntimeState}
             filesReloadKey={rightSidebarFilesReloadKey}
             projectGitRepos={projectGitRepos}

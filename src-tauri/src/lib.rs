@@ -336,8 +336,36 @@ struct ScreenshotOverlayCaptureRequest {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CanvasKey {
+    kind: CanvasKeyKind,
+    id: String,
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum CanvasKeyKind {
+    Session,
+    Thread,
+}
+
+impl CanvasKey {
+    fn storage_key(&self) -> Result<String, String> {
+        let id = self.id.trim();
+        if id.is_empty() {
+            return Err("Canvas key id cannot be empty".to_string());
+        }
+        let kind = match self.kind {
+            CanvasKeyKind::Session => "session",
+            CanvasKeyKind::Thread => "thread",
+        };
+        Ok(format!("{kind}:{id}"))
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SaveCanvasDraftRequest {
-    session_id: String,
+    canvas_key: CanvasKey,
     title: Option<String>,
     snapshot_json: String,
 }
@@ -345,7 +373,7 @@ struct SaveCanvasDraftRequest {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SaveCanvasRevisionRequest {
-    session_id: String,
+    canvas_key: CanvasKey,
     title: Option<String>,
     snapshot_json: String,
     source: String,
@@ -365,14 +393,14 @@ struct UpsertCanvasBlockRecordInput {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateCanvasBlocksRequest {
-    session_id: String,
+    canvas_key: CanvasKey,
     blocks: Vec<UpsertCanvasBlockRecordInput>,
 }
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpsertCanvasAnchorRequest {
-    session_id: String,
+    canvas_key: CanvasKey,
     anchor_block_id: Option<String>,
     selection_block_ids_json: String,
     selection_element_ids_json: String,
@@ -383,7 +411,7 @@ struct UpsertCanvasAnchorRequest {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BuildCanvasContextFileRequest {
-    session_id: String,
+    canvas_key: CanvasKey,
     kind: String,
     file_name_prefix: String,
     content: String,
@@ -7698,20 +7726,20 @@ fn safe_canvas_file_component(raw: &str, fallback: &str) -> String {
     }
 }
 
-fn canvas_draft_path(session_id: &str) -> Result<PathBuf, String> {
-    Ok(session_canvas_dir(session_id)
+fn canvas_draft_path(canvas_storage_key: &str) -> Result<PathBuf, String> {
+    Ok(session_canvas_dir(canvas_storage_key)
         .map_err(|e| e.to_string())?
         .join("draft.canvas.json"))
 }
 
-fn canvas_revisions_dir(session_id: &str) -> Result<PathBuf, String> {
-    Ok(session_canvas_dir(session_id)
+fn canvas_revisions_dir(canvas_storage_key: &str) -> Result<PathBuf, String> {
+    Ok(session_canvas_dir(canvas_storage_key)
         .map_err(|e| e.to_string())?
         .join("revisions"))
 }
 
-fn canvas_context_dir(session_id: &str) -> Result<PathBuf, String> {
-    Ok(session_canvas_dir(session_id)
+fn canvas_context_dir(canvas_storage_key: &str) -> Result<PathBuf, String> {
+    Ok(session_canvas_dir(canvas_storage_key)
         .map_err(|e| e.to_string())?
         .join("context"))
 }
@@ -7745,8 +7773,8 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     })
 }
 
-fn prune_canvas_context_files(session_id: &str, keep_latest: usize) -> Result<(), String> {
-    let dir = canvas_context_dir(session_id)?;
+fn prune_canvas_context_files(canvas_storage_key: &str, keep_latest: usize) -> Result<(), String> {
+    let dir = canvas_context_dir(canvas_storage_key)?;
     let entries = std::fs::read_dir(&dir);
     let Ok(entries) = entries else {
         return Ok(());
@@ -8119,12 +8147,13 @@ fn write_cross_prompt(session_id: String, content: String) -> Result<String, Str
 }
 
 #[tauri::command]
-fn get_session_canvas(
-    session_id: String,
+fn get_canvas(
+    canvas_key: CanvasKey,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<CanvasDocumentState, String> {
+    let canvas_storage_key = canvas_key.storage_key()?;
     let mut state = store
-        .get_canvas_document_state(&session_id)
+        .get_canvas_document_state(&canvas_storage_key)
         .map_err(|e| e.to_string())?;
     state.draft_snapshot = read_optional_text_file(state.document.draft_snapshot_path.as_deref());
     state.saved_snapshot = read_optional_text_file(
@@ -8141,12 +8170,13 @@ fn save_canvas_draft(
     req: SaveCanvasDraftRequest,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<SavedCanvasDraft, String> {
-    let path = canvas_draft_path(&req.session_id)?;
+    let canvas_storage_key = req.canvas_key.storage_key()?;
+    let path = canvas_draft_path(&canvas_storage_key)?;
     write_atomic_bytes(&path, req.snapshot_json.as_bytes())?;
     let hash = sha256_hex(req.snapshot_json.as_bytes());
     let document = store
         .save_canvas_draft(
-            &req.session_id,
+            &canvas_storage_key,
             req.title.as_deref(),
             &path.to_string_lossy(),
             &hash,
@@ -8160,19 +8190,20 @@ fn save_canvas_revision(
     req: SaveCanvasRevisionRequest,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<SavedCanvasRevision, String> {
-    let revisions_dir = canvas_revisions_dir(&req.session_id)?;
+    let canvas_storage_key = req.canvas_key.storage_key()?;
+    let revisions_dir = canvas_revisions_dir(&canvas_storage_key)?;
     std::fs::create_dir_all(&revisions_dir).map_err(|e| e.to_string())?;
     let snapshot_bytes = req.snapshot_json.into_bytes();
     let hash = sha256_hex(&snapshot_bytes);
     let current = store
-        .get_canvas_document_state(&req.session_id)
+        .get_canvas_document_state(&canvas_storage_key)
         .map_err(|e| e.to_string())?;
     let next_revision = current.document.current_saved_revision.unwrap_or(0) + 1;
     let path = revisions_dir.join(format!("{next_revision:06}.canvas.json"));
     write_atomic_bytes(&path, &snapshot_bytes)?;
     let (document, revision) = store
         .save_canvas_revision(
-            &req.session_id,
+            &canvas_storage_key,
             req.title.as_deref(),
             &path.to_string_lossy(),
             &hash,
@@ -8181,7 +8212,7 @@ fn save_canvas_revision(
         )
         .map_err(|e| e.to_string())?;
     let stale_paths = store
-        .prune_canvas_revisions(&req.session_id, CANVAS_REVISION_RETENTION_LIMIT)
+        .prune_canvas_revisions(&canvas_storage_key, CANVAS_REVISION_RETENTION_LIMIT)
         .map_err(|e| e.to_string())?;
     for stale_path in stale_paths {
         let _ = std::fs::remove_file(stale_path);
@@ -8194,6 +8225,7 @@ fn update_canvas_blocks(
     req: UpdateCanvasBlocksRequest,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<Vec<CanvasBlockRecord>, String> {
+    let canvas_storage_key = req.canvas_key.storage_key()?;
     let blocks = req
         .blocks
         .into_iter()
@@ -8207,13 +8239,14 @@ fn update_canvas_blocks(
         })
         .collect::<Vec<_>>();
     store
-        .replace_canvas_blocks(&req.session_id, &blocks)
+        .replace_canvas_blocks(&canvas_storage_key, &blocks)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn create_canvas_context_file(req: BuildCanvasContextFileRequest) -> Result<String, String> {
-    let dir = canvas_context_dir(&req.session_id)?;
+    let canvas_storage_key = req.canvas_key.storage_key()?;
+    let dir = canvas_context_dir(&canvas_storage_key)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let prefix = safe_canvas_file_component(&req.file_name_prefix, "canvas");
     let kind = safe_canvas_file_component(&req.kind, "selection");
@@ -8231,7 +8264,7 @@ fn create_canvas_context_file(req: BuildCanvasContextFileRequest) -> Result<Stri
             file.write_all(req.content.as_bytes())
         })
         .map_err(|e| e.to_string())?;
-    prune_canvas_context_files(&req.session_id, CANVAS_CONTEXT_FILE_RETENTION_LIMIT)?;
+    prune_canvas_context_files(&canvas_storage_key, CANVAS_CONTEXT_FILE_RETENTION_LIMIT)?;
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -8240,9 +8273,10 @@ fn create_canvas_anchor(
     req: UpsertCanvasAnchorRequest,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<CanvasContextAnchor, String> {
+    let canvas_storage_key = req.canvas_key.storage_key()?;
     store
         .create_canvas_context_anchor(
-            &req.session_id,
+            &canvas_storage_key,
             req.anchor_block_id.as_deref(),
             &req.selection_block_ids_json,
             &req.selection_element_ids_json,
@@ -9372,7 +9406,7 @@ pub fn run() {
             read_local_text_file,
             read_workspace_text_file,
             write_workspace_text_file,
-            get_session_canvas,
+            get_canvas,
             save_canvas_draft,
             save_canvas_revision,
             update_canvas_blocks,
