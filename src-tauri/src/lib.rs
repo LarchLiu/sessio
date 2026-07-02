@@ -916,6 +916,56 @@ fn runtime_agent_session_config_to_dto(
     }
 }
 
+fn resolve_runtime_agent_session_config_record(
+    agent: Agent,
+    cache: &[RuntimeAgentMetadata],
+    store: &Arc<dyn SessionStore>,
+) -> Result<Option<store::RuntimeAgentSessionConfigRecord>, String> {
+    let mut preferred_versions = Vec::new();
+    let mut seen = HashSet::new();
+
+    let push_version = |versions: &mut Vec<String>, seen: &mut HashSet<String>, value: &str| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let normalized = trimmed.to_string();
+        if seen.insert(normalized.clone()) {
+            versions.push(normalized);
+        }
+    };
+
+    if let Some(detected_version) = cache
+        .iter()
+        .find(|item| item.agent == agent)
+        .and_then(|item| item.detected_version.as_deref())
+    {
+        push_version(&mut preferred_versions, &mut seen, detected_version);
+    }
+
+    if let Some(capability_version) = store
+        .get_runtime_agent_capability(agent)
+        .map_err(|e| e.to_string())?
+        .and_then(|record| record.version)
+    {
+        push_version(&mut preferred_versions, &mut seen, &capability_version);
+    }
+
+    for adapter_version in preferred_versions {
+        if let Some(record) = store
+            .get_runtime_agent_session_config(agent, &adapter_version)
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(Some(record));
+        }
+    }
+
+    store
+        .list_runtime_agent_session_configs(agent)
+        .map(|records| records.into_iter().next())
+        .map_err(|e| e.to_string())
+}
+
 fn db_runtime_agents(
     store: &Arc<dyn SessionStore>,
     cache: &[RuntimeAgentMetadata],
@@ -2616,6 +2666,85 @@ mod ancestor_tests {
             value["turns"][0]["blocks"][0]["blocks"][1]["type"],
             "resource"
         );
+    }
+
+    #[test]
+    fn runtime_session_config_falls_back_to_capability_version_from_db() {
+        let workspace = temp_workspace("runtime-session-config-capability-fallback");
+        let db_path = workspace.join("sessio-index.db");
+        let sqlite = Arc::new(SqliteStore::open(&db_path).expect("open sqlite"));
+        sqlite.init().expect("init sqlite");
+        sqlite
+            .upsert_runtime_agent_capability(&store::RuntimeAgentCapabilityRecord {
+                agent: Agent::Codex,
+                transport: agents::runtime::types::RuntimeTransportKind::Acp,
+                version: Some("1.0.2".to_string()),
+                protocol_version: Some("1".to_string()),
+                raw_initialize_response_json: "{}".to_string(),
+                raw_capabilities_json: "{}".to_string(),
+                updated_at: 20,
+            })
+            .expect("upsert capability");
+        sqlite
+            .upsert_runtime_agent_session_config(&store::RuntimeAgentSessionConfigRecord {
+                agent: Agent::Codex,
+                adapter_version: "1.0.2".to_string(),
+                available_commands_json: r#"[{"name":"mcp"}]"#.to_string(),
+                config_options_json: "[]".to_string(),
+                created_at: 10,
+                updated_at: 20,
+            })
+            .expect("upsert session config");
+        let store: Arc<dyn SessionStore> = sqlite;
+
+        let record =
+            resolve_runtime_agent_session_config_record(Agent::Codex, &[], &store).expect("load");
+
+        assert_eq!(
+            record.expect("record").available_commands_json,
+            r#"[{"name":"mcp"}]"#
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn runtime_session_config_falls_back_to_latest_db_record_without_detected_version() {
+        let workspace = temp_workspace("runtime-session-config-latest-fallback");
+        let db_path = workspace.join("sessio-index.db");
+        let sqlite = Arc::new(SqliteStore::open(&db_path).expect("open sqlite"));
+        sqlite.init().expect("init sqlite");
+        sqlite
+            .upsert_runtime_agent_session_config(&store::RuntimeAgentSessionConfigRecord {
+                agent: Agent::Claude,
+                adapter_version: "0.53.0".to_string(),
+                available_commands_json: r#"[{"name":"legacy"}]"#.to_string(),
+                config_options_json: "[]".to_string(),
+                created_at: 10,
+                updated_at: 10,
+            })
+            .expect("upsert old session config");
+        sqlite
+            .upsert_runtime_agent_session_config(&store::RuntimeAgentSessionConfigRecord {
+                agent: Agent::Claude,
+                adapter_version: "0.54.1".to_string(),
+                available_commands_json: r#"[{"name":"deep-research"}]"#.to_string(),
+                config_options_json: "[]".to_string(),
+                created_at: 20,
+                updated_at: 20,
+            })
+            .expect("upsert latest session config");
+        let store: Arc<dyn SessionStore> = sqlite;
+
+        let record =
+            resolve_runtime_agent_session_config_record(Agent::Claude, &[], &store).expect("load");
+
+        let record = record.expect("record");
+        assert_eq!(record.adapter_version, "0.54.1");
+        assert_eq!(
+            record.available_commands_json,
+            r#"[{"name":"deep-research"}]"#
+        );
+        let _ = std::fs::remove_dir_all(workspace);
     }
 }
 
@@ -8330,21 +8459,8 @@ fn get_runtime_agent_session_config(
     cache: State<'_, RuntimeAgentsCache>,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<Option<RuntimeAgentSessionConfigDto>, String> {
-    let detected_version = cache
-        .get()
-        .into_iter()
-        .find(|item| item.agent == agent)
-        .and_then(|item| item.detected_version);
-    let Some(adapter_version) = detected_version.as_deref().map(str::trim) else {
-        return Ok(None);
-    };
-    if adapter_version.is_empty() {
-        return Ok(None);
-    }
-    store
-        .get_runtime_agent_session_config(agent, adapter_version)
+    resolve_runtime_agent_session_config_record(agent, &cache.get(), store.inner())
         .map(|record| record.map(runtime_agent_session_config_to_dto))
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
