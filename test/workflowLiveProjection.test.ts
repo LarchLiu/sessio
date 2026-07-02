@@ -7,6 +7,7 @@ import {
   createWorkflowOverlayStore,
   createWorkflowOverlayCardContext,
   projectWorkflowLiveOverlays,
+  resolveWorkflowLiveSessionRoute,
   type WorkflowOverlay,
 } from "../src/lib/blocksuite/workflowLiveProjection";
 
@@ -293,6 +294,48 @@ describe("workflow live projection", () => {
     expect(overlays.has("build-card")).toBe(false);
   });
 
+  it("routes Astra delegated stage sessions from metadata before session refs refresh", () => {
+    const cards = [
+      card("thread-card", null),
+      card("build-card", "stage-build"),
+      card("review-card", "stage-review"),
+    ];
+    const liveState: LiveRuntimeState = {
+      sessions: {
+        "runtime-review": liveSession("runtime-review", "agent-review", 16, "Proofreading draft", {
+          astraRunId: "run-1",
+          astraTaskId: "task-review",
+          astraThreadStageId: "stage-review",
+        }),
+      },
+      lastSequence: 1,
+    };
+
+    const overlays = projectWorkflowLiveOverlays({
+      cards,
+      runtimeSessionAliases: {},
+      liveState,
+    });
+
+    expect(overlays.get("thread-card")?.stages["stage-review"]).toMatchObject({
+      active: true,
+      status: "in_progress",
+      currentAction: "Proofreading draft",
+    });
+    expect(overlays.get("review-card")?.stages["stage-review"]).toMatchObject({
+      active: true,
+      status: "in_progress",
+    });
+    expect(overlays.has("build-card")).toBe(false);
+
+    const sessionMap = buildSessionThreadStageMap(cards, {});
+    expect(resolveWorkflowLiveSessionRoute(liveState.sessions["runtime-review"], sessionMap)).toMatchObject({
+      childSessionId: "agent-review",
+      threadId: "thread-1",
+      stageId: "stage-review",
+    });
+  });
+
   it("builds reverse runtime and thread fan-out indexes", () => {
     const sessionMap = buildSessionThreadStageMap(
       [card("thread-card", null), card("build-card", "stage-build")],
@@ -308,5 +351,6 @@ describe("workflow live projection", () => {
       "thread-card",
       "build-card",
     ]);
+    expect([...sessionMap.threadIdsByStage.get("stage-build") ?? []]).toEqual(["thread-1"]);
   });
 });

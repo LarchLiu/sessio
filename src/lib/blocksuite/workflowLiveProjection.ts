@@ -41,6 +41,7 @@ export interface SessionThreadStageMap {
     assistantId: string | null;
   }>;
   blockIdsByThread: Map<string, Set<string>>;
+  threadIdsByStage: Map<string, Set<string>>;
   cardsByBlockId: Map<string, WorkflowOverlayCardContext>;
 }
 
@@ -125,6 +126,7 @@ export function buildSessionThreadStageMap(
 ): SessionThreadStageMap {
   const bySessioRuntimeId = new Map<string, WorkflowSessionRoute>();
   const blockIdsByThread = new Map<string, Set<string>>();
+  const threadIdsByStage = new Map<string, Set<string>>();
   const cardsByBlockId = new Map<string, WorkflowOverlayCardContext>();
 
   for (const card of cards) {
@@ -132,6 +134,11 @@ export function buildSessionThreadStageMap(
     const blockIds = blockIdsByThread.get(card.threadId) ?? new Set<string>();
     blockIds.add(card.blockId);
     blockIdsByThread.set(card.threadId, blockIds);
+    for (const stage of card.snapshot.stages ?? []) {
+      const threadIds = threadIdsByStage.get(stage.threadStageId) ?? new Set<string>();
+      threadIds.add(card.threadId);
+      threadIdsByStage.set(stage.threadStageId, threadIds);
+    }
 
     for (const route of snapshotSessionRoutes(card.snapshot)) {
       const identity = sessionIdentity(route.agent, route.childSessionId);
@@ -145,6 +152,7 @@ export function buildSessionThreadStageMap(
   return {
     bySessioRuntimeId,
     blockIdsByThread,
+    threadIdsByStage,
     cardsByBlockId,
   };
 }
@@ -161,7 +169,7 @@ export function projectWorkflowLiveOverlays({
   const sessionMap = buildSessionThreadStageMap(cards, runtimeSessionAliases);
   const overlays = new Map<string, WorkflowOverlay>();
   for (const liveSession of Object.values(liveState.sessions)) {
-    const route = liveSessionWorkflowRoute(liveSession, sessionMap);
+    const route = resolveWorkflowLiveSessionRoute(liveSession, sessionMap);
     if (!route?.threadId) continue;
     const activeTurns = liveSession.turns.filter(isActiveTurn);
     if (activeTurns.length === 0) continue;
@@ -221,7 +229,7 @@ export function applyWorkflowOverlayStoreProjection({
   }
 }
 
-function liveSessionWorkflowRoute(
+export function resolveWorkflowLiveSessionRoute(
   liveSession: LiveRuntimeSession,
   sessionMap: SessionThreadStageMap,
 ): WorkflowSessionRoute | null {
@@ -230,18 +238,65 @@ function liveSessionWorkflowRoute(
   if (explicitRoute) return explicitRoute;
 
   const metadata = liveSession.metadata ?? {};
-  const threadId = stringMeta(metadata, "astraThreadId") ?? stringMeta(metadata, "threadId");
+  const stageId = stringMeta(metadata, "astraThreadStageId")
+    ?? stringMeta(metadata, "threadStageId")
+    ?? stringMeta(metadata, "stageId");
+  const threadId = stringMeta(metadata, "astraThreadId")
+    ?? stringMeta(metadata, "threadId")
+    ?? threadIdForMetadataStage(sessionMap, stageId);
   if (!threadId || !sessionMap.blockIdsByThread.has(threadId)) return null;
-  if (stringMeta(metadata, "astraPurpose") !== "orchestration" && !(metadata.astraInternal && stringMeta(metadata, "astraRunId"))) {
+  if (!isAstraWorkflowSessionMetadata(metadata, stageId)) {
     return null;
   }
+  const resolvedStageId = stageBelongsToThread(sessionMap, threadId, stageId) ? stageId : null;
   return {
     agent: liveSession.agent,
     childSessionId: liveSession.agentRuntimeSessionId || liveSession.sessioRuntimeSessionId,
     threadId,
-    stageId: null,
-    assistantId: null,
+    stageId: resolvedStageId,
+    assistantId: resolvedStageId ? assistantIdForRoutedStage(sessionMap, threadId, resolvedStageId, liveSession.agent) : null,
   };
+}
+
+function isAstraWorkflowSessionMetadata(
+  metadata: Record<string, unknown>,
+  stageId: string | null,
+): boolean {
+  if (stringMeta(metadata, "astraPurpose") === "orchestration") return true;
+  if (metadata.astraInternal && stringMeta(metadata, "astraRunId")) return true;
+  return Boolean(stringMeta(metadata, "astraRunId") && (stringMeta(metadata, "astraTaskId") || stageId));
+}
+
+function threadIdForMetadataStage(
+  sessionMap: SessionThreadStageMap,
+  stageId: string | null,
+): string | null {
+  if (!stageId) return null;
+  const threadIds = [...sessionMap.threadIdsByStage.get(stageId) ?? []];
+  return threadIds.length === 1 ? threadIds[0] : null;
+}
+
+function stageBelongsToThread(
+  sessionMap: SessionThreadStageMap,
+  threadId: string,
+  stageId: string | null,
+): stageId is string {
+  if (!stageId) return false;
+  return Boolean(sessionMap.threadIdsByStage.get(stageId)?.has(threadId));
+}
+
+function assistantIdForRoutedStage(
+  sessionMap: SessionThreadStageMap,
+  threadId: string,
+  stageId: string,
+  agent: Agent,
+): string | null {
+  for (const card of sessionMap.cardsByBlockId.values()) {
+    if (card.threadId !== threadId) continue;
+    const assistantId = assistantIdForStageAgent(card.snapshot, stageId, agent);
+    if (assistantId) return assistantId;
+  }
+  return null;
 }
 
 function parseThreadWorkSnapshot(workflowSnapshotJson: string | null | undefined): ThreadWorkSnapshot | null {

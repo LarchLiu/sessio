@@ -298,7 +298,8 @@ export default function ThreadMultiSessionChatPage({
   }, [reloadAstraState]);
 
   useEffect(() => {
-    let unlisten: (() => void) | null = null;
+    let unlistenAstra: (() => void) | null = null;
+    let unlistenThreads: (() => void) | null = null;
     listen<AstraEvent>("astra-run-event", (event) => {
       if (event.payload.threadId !== threadId) return;
       void reloadAstraState();
@@ -306,10 +307,21 @@ export default function ThreadMultiSessionChatPage({
         void refresh();
       }
     }).then((fn) => {
-      unlisten = fn;
+      unlistenAstra = fn;
+    }).catch((err) => onError(String(err)));
+    listen<{
+      projectId?: string | null;
+      threadId?: string | null;
+    }>("threads_updated", (event) => {
+      if (event.payload?.threadId !== threadId) return;
+      void reloadAstraState();
+      void refresh();
+    }).then((fn) => {
+      unlistenThreads = fn;
     }).catch((err) => onError(String(err)));
     return () => {
-      unlisten?.();
+      unlistenAstra?.();
+      unlistenThreads?.();
     };
   }, [onError, refresh, reloadAstraState, threadId]);
 
@@ -926,7 +938,7 @@ function ThreadSessionLaneCard({
           {meta.title}
         </h2>
       </header>
-      {content ?? <ThreadSessionLatestMessage lane={lane} plannerRun={plannerRun} />}
+      {content ?? <ThreadSessionLatestMessage lane={lane} thread={thread} plannerRun={plannerRun} />}
     </section>
   );
 }
@@ -1576,9 +1588,11 @@ function ThreadPlannerSummaryMessage({
 
 function ThreadSessionLatestMessage({
   lane,
+  thread,
   plannerRun,
 }: {
   lane: ThreadSessionLane;
+  thread: ThreadWorkState;
   plannerRun?: AstraHandle | null;
 }) {
   const { t } = useI18n();
@@ -1663,8 +1677,8 @@ function ThreadSessionLatestMessage({
     [visibleItems],
   );
   const plannerSummary = useMemo(
-    () => isPlannerLane(lane) ? plannerSummaryFromTurns(viewModel.turns, plannerRun ?? null) : null,
-    [lane, plannerRun, viewModel.turns],
+    () => isPlannerLane(lane) ? plannerSummaryFromTurns(viewModel.turns, plannerRun ?? null, thread) : null,
+    [lane, plannerRun, thread, viewModel.turns],
   );
   const itemKeys = useMemo(() => renderItemKeys(visibleItems), [visibleItems]);
   const userPromptItemKeys = useMemo(
@@ -2135,6 +2149,7 @@ function isPlannerLane(lane: ThreadSessionLane): boolean {
 function plannerSummaryFromTurns(
   turns: LiveTurn[],
   run: AstraHandle | null,
+  thread: ThreadWorkState,
 ): { text: string; timestamp: number } | null {
   for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
     const turn = turns[turnIndex];
@@ -2154,6 +2169,13 @@ function plannerSummaryFromTurns(
           Date.now(),
       };
     }
+  }
+  const fallbackText = plannerFallbackSummaryText(run, thread);
+  if (fallbackText) {
+    return {
+      text: fallbackText,
+      timestamp: run?.updatedAt ?? run?.createdAt ?? Date.now(),
+    };
   }
   return null;
 }
@@ -2181,6 +2203,63 @@ function plannerOutputSummaryText(output: PlannerOutput, fallbackReason: string 
     }
   }
   return lines.join("\n").trim() || null;
+}
+
+function plannerFallbackSummaryText(run: AstraHandle | null, thread: ThreadWorkState): string | null {
+  const reason = astraRunReasonText(run);
+  if (!reason) return null;
+  const lines = [plannerReasonLabel(reason)];
+  const stageLines = thread.kind === "process" ? processStageSummaryLines(thread) : [];
+  if (stageLines.length > 0) {
+    lines.push("", stageLines.join("\n"));
+  }
+  return lines.join("\n").trim() || null;
+}
+
+function plannerReasonLabel(reason: string): string {
+  switch (reason) {
+    case "process_manual_checkpoint":
+      return "Process reached a manual checkpoint.";
+    case "process_completed":
+      return "Process completed.";
+    case "continue_with_process_tasks":
+      return "Process tasks were dispatched.";
+    case "teamwork_round_completed":
+      return "Teamwork round completed.";
+    default:
+      return readableTooltipText(reason) ?? reason;
+  }
+}
+
+function processStageSummaryLines(thread: ThreadWorkState): string[] {
+  return thread.stages
+    .slice()
+    .sort((a, b) => a.order - b.order)
+    .map((stage) => {
+      const label = stage.name?.trim() || stage.kind || stage.stageId;
+      const detail = readableTooltipText(stage.summary) ?? readableTooltipText(stage.outcome);
+      return detail
+        ? `- **${label}**: ${stageStatusLabel(stage.status)} - ${detail}`
+        : `- **${label}**: ${stageStatusLabel(stage.status)}`;
+    });
+}
+
+function stageStatusLabel(status: StageInfo["status"]): string {
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "needs_review":
+      return "needs review";
+    case "in_progress":
+      return "in progress";
+    case "blocked":
+      return "blocked";
+    case "skipped":
+      return "skipped";
+    case "not_started":
+    default:
+      return "not started";
+  }
 }
 
 function planTaskTitlePromptText(

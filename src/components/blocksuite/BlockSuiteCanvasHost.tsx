@@ -20,6 +20,7 @@ import type {
 import {
   captureWindowAreaPng,
   createAstraRun,
+  getThreadWorkState,
   getThreadWorkSnapshot,
   readLocalImageDataUrl,
   readWorkspaceTextFile,
@@ -70,9 +71,11 @@ import {
   createWorkflowOverlayCardContext,
   createWorkflowOverlayStore,
   projectWorkflowLiveOverlays,
+  resolveWorkflowLiveSessionRoute,
   type WorkflowOverlayCardContext,
   type WorkflowOverlayStore,
 } from "../../lib/blocksuite/workflowLiveProjection";
+import { buildThreadWorkSnapshot } from "../../threadSnapshot";
 
 const CANVAS_ADD_FILES_EVENT = "sessio:canvas-add-files";
 const CANVAS_GROUP_SELECTION_EVENT = "sessio:canvas-group-selection";
@@ -1448,13 +1451,31 @@ export default function BlockSuiteCanvasHost({
     }
     if (changed) {
       await syncCanvasBlocks(doc);
+      rebuildWorkflowOverlayCardContexts(doc);
       updateSelectionState();
     }
     for (const blockId of reconciledBlockIds) {
       workflowTerminalRetainOverlayBlockIdsRef.current.delete(blockId);
       workflowOverlayStoreRef.current?.delete(blockId);
     }
-  }, [getDoc, syncCanvasBlocks, updateSelectionState]);
+  }, [getDoc, rebuildWorkflowOverlayCardContexts, syncCanvasBlocks, updateSelectionState]);
+
+  const fetchTerminalWorkflowSnapshot = useCallback(async (route: {
+    agent: Agent;
+    childSessionId: string;
+    threadId: string | null;
+    stageId: string | null;
+  }): Promise<ThreadWorkSnapshot | null> => {
+    if (route.threadId) {
+      const thread = await getThreadWorkState(route.threadId);
+      const focusedStage = route.stageId
+        ? thread.stages.find((stage) => stage.id === route.stageId) ?? null
+        : null;
+      return buildThreadWorkSnapshot(thread, focusedStage, Date.now());
+    }
+    const snapshotResult = await getThreadWorkSnapshot(route.agent, route.childSessionId);
+    return snapshotResult?.snapshot ?? null;
+  }, []);
 
   const reconcileTerminalWorkflowTurn = useCallback((
     fetchKey: string,
@@ -1462,6 +1483,8 @@ export default function BlockSuiteCanvasHost({
     route: {
       agent: Agent;
       childSessionId: string;
+      threadId: string | null;
+      stageId: string | null;
     },
     terminalStatus: RuntimeTurnStatus,
   ) => {
@@ -1471,10 +1494,10 @@ export default function BlockSuiteCanvasHost({
       workflowTerminalRetainOverlayBlockIdsRef.current.add(blockId);
     }
     workflowTerminalInFlightKeysRef.current.add(fetchKey);
-    void getThreadWorkSnapshot(route.agent, route.childSessionId)
-      .then(async (snapshotResult) => {
-        if (!snapshotResult?.snapshot) return;
-        await writeTerminalWorkflowSnapshot(blockIds, snapshotResult.snapshot, terminalStatus);
+    void fetchTerminalWorkflowSnapshot(route)
+      .then(async (snapshot) => {
+        if (!snapshot) return;
+        await writeTerminalWorkflowSnapshot(blockIds, snapshot, terminalStatus);
         workflowTerminalFetchKeysRef.current.add(fetchKey);
       })
       .catch((error) => {
@@ -1483,15 +1506,14 @@ export default function BlockSuiteCanvasHost({
       .finally(() => {
         workflowTerminalInFlightKeysRef.current.delete(fetchKey);
       });
-  }, [writeTerminalWorkflowSnapshot]);
+  }, [fetchTerminalWorkflowSnapshot, writeTerminalWorkflowSnapshot]);
 
   const reconcileTerminalWorkflowTurns = useCallback(() => {
     const contexts = workflowOverlayCardContextsRef.current;
     if (contexts.length === 0) return;
     const sessionMap = buildSessionThreadStageMap(contexts, runtimeSessionAliasesRef.current);
     for (const liveSession of Object.values(liveStateRef.current.sessions)) {
-      const route = sessionMap.bySessioRuntimeId.get(liveSession.sessioRuntimeSessionId)
-        ?? sessionMap.bySessioRuntimeId.get(liveSession.agentRuntimeSessionId);
+      const route = resolveWorkflowLiveSessionRoute(liveSession, sessionMap);
       if (!route?.threadId) {
         for (const turn of liveSession.turns) {
           workflowTurnStatusRef.current.set(`${liveSession.sessioRuntimeSessionId}:${turn.turnId}`, turn.status);
