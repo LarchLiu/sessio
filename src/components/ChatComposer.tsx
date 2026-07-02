@@ -7,7 +7,11 @@ import {
 } from "react";
 import {
   ArrowUp,
+  BookOpen,
+  Check,
   ChevronDown,
+  FileText,
+  Image as ImageIcon,
   MonitorCog,
   LoaderCircle,
   Plus,
@@ -17,10 +21,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import {
-  attachmentMenuOptions,
-  ComposerAttachmentMenu,
-} from "./ComposerAttachments";
+import PopupMenu, { type PopupMenuOption } from "./PopupMenu";
 import { RuntimeMenuSelect } from "./RuntimeMenuSelect";
 import ScreenshotComposerButton from "./ScreenshotComposerButton";
 import Tooltip from "./Tooltip";
@@ -92,12 +93,68 @@ export default function ChatComposer({
           ? t("new_chat.sending")
           : t("new_chat.send")
     );
-  const attachmentOptions = attachmentMenuOptions({
-    supportsImageAttachments: composer.supportsImageAttachments,
-    supportsEmbeddedContext: composer.supportsEmbeddedContext,
-    imageLabel: t("new_chat.add_images"),
-    fileLabel: t("new_chat.add_files"),
-  });
+  const showContextMenuTrigger =
+    composer.supportsAttachments || composer.availableSkills.length > 0;
+  const systemSkills = composer.availableSkills.filter((skill) => skill.source === "builtin");
+  const personalSkills = composer.availableSkills.filter((skill) => skill.source === "user");
+  const skillSubmenuOptions: PopupMenuOption<string>[] = [
+    ...(composer.selectedSkillIds.length > 0
+      ? [{
+          key: "skills:clear",
+          label: t("new_chat.skills_clear"),
+          icon: <Trash2 className="h-4 w-4" />,
+        }]
+      : []),
+    ...(systemSkills.length > 0
+      ? [{ key: "skills:system-label", label: t("new_chat.skills_system"), kind: "label" as const }]
+      : []),
+    ...systemSkills.map((skill) => ({
+      key: `skill:${skill.id}`,
+      label: skill.name,
+      icon: composer.selectedSkillIds.includes(skill.id)
+        ? <Check className="h-4 w-4" />
+        : <BookOpen className="h-4 w-4" />,
+    })),
+    ...(personalSkills.length > 0
+      ? [{ key: "skills:personal-label", label: t("new_chat.skills_personal"), kind: "label" as const }]
+      : []),
+    ...personalSkills.map((skill) => ({
+      key: `skill:${skill.id}`,
+      label: skill.name,
+      icon: composer.selectedSkillIds.includes(skill.id)
+        ? <Check className="h-4 w-4" />
+        : <BookOpen className="h-4 w-4" />,
+    })),
+  ];
+  const attachmentOptions: PopupMenuOption<string>[] = [
+    ...(composer.supportsImageAttachments
+      ? [{
+          key: "images",
+          label: t("new_chat.add_images"),
+          icon: <ImageIcon className="h-4 w-4" />,
+        }]
+      : []),
+    ...(composer.supportsEmbeddedContext
+      ? [{
+          key: "files",
+          label: t("new_chat.add_files"),
+          icon: <FileText className="h-4 w-4" />,
+        }]
+      : []),
+    ...(composer.availableSkills.length > 0
+      ? [{
+          key: "skills",
+          label:
+            composer.selectedSkillIds.length > 0
+              ? t("new_chat.add_skills_selected", {
+                  count: composer.selectedSkillIds.length,
+                })
+              : t("new_chat.add_skills"),
+          icon: <BookOpen className="h-4 w-4" />,
+          children: skillSubmenuOptions,
+        }]
+      : []),
+  ];
   const outerClassName = variant === "chat" ? "w-full" : "w-full max-w-[730px]";
   const rootClassName = className ? `${outerClassName} ${className}` : outerClassName;
   const controlsClassName =
@@ -214,7 +271,7 @@ export default function ChatComposer({
         )}
         <div className={controlsClassName}>
           <div className={leadingControlsClassName}>
-            {composer.supportsAttachments && (
+            {showContextMenuTrigger && (
               <Tooltip content={t("new_chat.add_context")} placement="top">
                 <button
                   ref={composer.attachmentButtonRef}
@@ -316,13 +373,26 @@ export default function ChatComposer({
         </div>
         {bottomRow}
       </div>
-      {!runtimeControlsDisabled && composer.attachmentMenuOpen && composer.attachmentButtonRef.current && (
-        <ComposerAttachmentMenu
+      {!runtimeControlsDisabled &&
+        showContextMenuTrigger &&
+        composer.attachmentMenuOpen &&
+        composer.attachmentButtonRef.current && (
+        <PopupMenu
           anchor={composer.attachmentButtonRef.current}
           options={attachmentOptions}
           onClose={() => composer.setAttachmentMenuOpen(false)}
           onSelect={(key) => {
-            void composer.pickAttachments(key);
+            if (key === "skills:clear") {
+              composer.clearSelectedSkills();
+              return false;
+            }
+            if (key.startsWith("skill:")) {
+              composer.toggleSkillSelection(key.slice("skill:".length));
+              return false;
+            }
+            if (key === "images" || key === "files") {
+              void composer.pickAttachments(key);
+            }
           }}
         />
       )}

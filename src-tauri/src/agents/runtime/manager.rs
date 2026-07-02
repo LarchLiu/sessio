@@ -1975,6 +1975,12 @@ fn inherit_sticky_session_options(
         &["computerUse", "computer_use"],
         "computerUse",
     );
+    inherit_option_alias(
+        turn_options,
+        session_options,
+        &[crate::skills::SELECTED_SKILLS_OPTION, "selected_skills"],
+        crate::skills::SELECTED_SKILLS_OPTION,
+    );
 }
 
 fn inherit_option_alias(

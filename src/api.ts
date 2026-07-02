@@ -185,6 +185,27 @@ export interface McpServerConfig {
   env: McpKeyValue[];
 }
 
+export type SkillSource = "builtin" | "user";
+export type BuiltinSkillKind = "computerUse" | "workState";
+
+export interface SkillMetadata {
+  id: string;
+  name: string;
+  description: string;
+  source: SkillSource;
+  builtinKind: BuiltinSkillKind | null;
+  skillMdPath: string;
+  rootDir: string;
+  skillDirName: string;
+  frontmatter: Record<string, unknown>;
+}
+
+export interface InstallSkillRequest {
+  sourcePath: string;
+  directoryName?: string | null;
+  overwrite?: boolean;
+}
+
 export interface AppshotConfig {
   shortcut: string;
 }
@@ -2639,6 +2660,14 @@ export async function updateNetworkConfig(config: NetworkConfig): Promise<Networ
 
 export async function getMcpSettings(): Promise<McpSettings> {
   return invoke<McpSettings>("get_mcp_settings");
+}
+
+export async function listSkills(): Promise<SkillMetadata[]> {
+  return invoke<SkillMetadata[]>("list_skills");
+}
+
+export async function installSkill(req: InstallSkillRequest): Promise<SkillMetadata> {
+  return invoke<SkillMetadata>("install_skill", { req });
 }
 
 export async function updateMcpSettings(settings: McpSettings): Promise<McpSettings> {

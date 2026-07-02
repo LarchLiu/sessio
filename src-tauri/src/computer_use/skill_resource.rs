@@ -30,20 +30,16 @@ pub fn computer_use_skill_prompt_note() -> String {
 
 /// Short per-turn operating contract plus a pointer to the full bundled skill.
 pub fn computer_use_prompt_block() -> String {
-    let nonce = uuid::Uuid::new_v4().to_string();
-    let note = computer_use_skill_prompt_note();
-    format!(
-        r#"<!-- sessio-computer-use:start nonce="{nonce}" kind="computer_use" -->
-
-{note}
-When driving native macOS apps, prefer the injected `computer_*` tools over shell scripts.
+    crate::skills::inject_builtin_skill_prompt_block(
+        "",
+        crate::skills::BuiltinSkillKind::ComputerUse,
+        r#"When driving native macOS apps, prefer the injected `computer_*` tools over shell scripts.
 Start with `computer_get_app_state`; use AX refs (`ref`/`elementId`) before screenshot coordinates.
 For primary clicks, inspect the returned post-action screenshot first and use `lastClickResult` only as a hint: `semantic_success` / `observed_effect` are strong positives, `uncertain` means stop and inspect, and `no_effect` is the only immediate-retry signal. When `lastClickResult.nextDispatchRoute` is present after `no_effect`, retry with that explicit `dispatchRoute` instead of repeating `auto` blindly.
 When an app-state tool returns screenshots, treat the original screenshot dimensions as the source of truth for coordinates. If a second screenshot is included with a 50px grid/ruler overlay or click marker, it is the same pixel space as the original image and is only a positioning aid.
-Secondary click, double click, drag, and scroll also accept `dispatchRoute`; leave them on `auto` unless you intentionally want to force the next lower-level route after inspecting the updated screenshot. Those non-primary actions surface `lastActionResult {{ kind, route, outcome }}` in the returned AppState; use it as a hint, but still judge success from the updated screenshot first.
+Secondary click, double click, drag, and scroll also accept `dispatchRoute`; leave them on `auto` unless you intentionally want to force the next lower-level route after inspecting the updated screenshot. Those non-primary actions surface `lastActionResult { kind, route, outcome }` in the returned AppState; use it as a hint, but still judge success from the updated screenshot first.
 Never write or run raw Swift/CoreGraphics/CGEvent, cliclick, AppleScript mouse, or other direct input scripts. They bypass Sessio approvals, snapshot coordinate mapping, post-action screenshots, and the pointer overlay. If `computer_*` tools are unavailable, use `sessio cu` only.
-If the target has no visible window or is Dock-minimized, call `computer_raise_app` for that bundle, then retry `computer_get_app_state`. Do not use `open -a`, AppleScript `activate`/`frontmost`, or Window-menu clicks for this recovery path; those can report success without restoring the window.
-<!-- sessio-computer-use:end nonce="{nonce}" -->"#
+If the target has no visible window or is Dock-minimized, call `computer_raise_app` for that bundle, then retry `computer_get_app_state`. Do not use `open -a`, AppleScript `activate`/`frontmost`, or Window-menu clicks for this recovery path; those can report success without restoring the window."#,
     )
 }
 
@@ -131,10 +127,12 @@ mod tests {
     fn prompt_block_includes_skill_path_and_recovery_rules() {
         let block = computer_use_prompt_block();
 
-        assert!(block.contains("<!-- sessio-computer-use:start"));
-        assert!(block.contains("kind=\"computer_use\""));
-        assert!(block.contains("<!-- sessio-computer-use:end"));
-        assert!(block.contains("Full Sessio computer-use skill"));
+        assert!(block.contains("<!-- sessio-skills:start"));
+        assert!(block.contains("kind=\"builtin_skill\""));
+        assert!(block.contains("id: `builtin:computer-use`"));
+        assert!(block.contains("builtinKind: `computerUse`"));
+        assert!(block.contains("<!-- sessio-skills:end"));
+        assert!(block.contains("skillMdPath: `"));
         assert!(block.contains("computer_get_app_state"));
         assert!(block.contains("computer_raise_app"));
         assert!(block.contains("raw Swift/CoreGraphics/CGEvent"));

@@ -70,6 +70,10 @@ pub fn paste_cache_dir() -> Result<PathBuf> {
     Ok(app_home()?.join("paste-cache"))
 }
 
+pub fn skills_dir() -> Result<PathBuf> {
+    Ok(app_home()?.join("skils"))
+}
+
 pub fn memory_dir() -> Result<PathBuf> {
     Ok(app_home()?.join("memory"))
 }

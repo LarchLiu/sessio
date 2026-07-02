@@ -46,6 +46,7 @@ import {
   selectionPermissionMode,
 } from "../runtimeAgents";
 import { useComputerUseFeatureEnabled } from "./useComputerUseFeatureEnabled";
+import { useSelectableSkills } from "./useSelectableSkills";
 
 type PendingSessionExtras = Omit<
   Partial<PendingNewChatSession>,
@@ -102,6 +103,11 @@ export interface ChatComposerController {
   setComputerUseEnabled: Dispatch<SetStateAction<boolean>>;
   handleComputerUseToggle: () => void | Promise<void>;
   computerUseEligible: boolean;
+  availableSkills: import("../api").SkillMetadata[];
+  selectedSkillIds: string[];
+  selectedSkills: import("../api").SkillMetadata[];
+  toggleSkillSelection: (skillId: string) => void;
+  clearSelectedSkills: () => void;
   agentModelOptions: ReturnType<typeof agentModelSelectOptions>;
   permissionOptions: ReturnType<typeof runtimePermissionModeOptions>;
   handleAgentModelChange: (nextValue: string) => Promise<void>;
@@ -163,6 +169,13 @@ export function useChatComposer({
   const computerUseEligible = Boolean(
     selectedRuntimeAgent?.computerUseEligible && computerUseFeatureEnabled,
   );
+  const {
+    availableSkills,
+    selectedSkillIds,
+    selectedSkills,
+    toggleSkillSelection,
+    clearSelectedSkills,
+  } = useSelectableSkills();
 
   const handleEffortChange = useCallback(async (targetAgent: Agent, nextValue: string) => {
     if (targetAgent === agent) setEffort(nextValue);
@@ -264,10 +277,10 @@ export function useChatComposer({
   }, [computerUseEligible]);
 
   useEffect(() => {
-    if (!supportsAttachments) {
+    if (!supportsAttachments && availableSkills.length === 0) {
       setAttachmentMenuOpen(false);
     }
-  }, [supportsAttachments]);
+  }, [availableSkills.length, supportsAttachments]);
 
   useEffect(() => {
     window.requestAnimationFrame(() => textareaRef.current?.focus());
@@ -377,7 +390,13 @@ export function useChatComposer({
       const handle = await startAgentSession({
         agent,
         workspacePath: options.workspacePath,
-        options: runtimeSessionOptions(model, permissionMode, effort, computerUseEnabled),
+        options: runtimeSessionOptions(
+          model,
+          permissionMode,
+          effort,
+          computerUseEnabled,
+          selectedSkillIds,
+        ),
       });
       if (computerUseEnabled) {
         await setComputerUseSessionApproval(handle.sessioRuntimeSessionId, true);
@@ -479,6 +498,11 @@ export function useChatComposer({
     setComputerUseEnabled,
     handleComputerUseToggle: () => setComputerUseEnabled((enabled) => !enabled),
     computerUseEligible,
+    availableSkills,
+    selectedSkillIds,
+    selectedSkills,
+    toggleSkillSelection,
+    clearSelectedSkills,
     agentModelOptions,
     permissionOptions,
     handleAgentModelChange,
@@ -501,11 +525,13 @@ export function runtimeSessionOptions(
   permissionMode: string,
   effort = "",
   computerUse = false,
+  selectedSkillIds: string[] = [],
 ): Record<string, unknown> {
   return {
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
     ...(permissionMode ? { permissionMode } : {}),
     ...(computerUse ? { computerUse: true } : {}),
+    selectedSkillIds,
   };
 }

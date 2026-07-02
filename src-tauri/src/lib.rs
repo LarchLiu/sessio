@@ -17,6 +17,7 @@ pub mod polling;
 pub mod scheduled_tasks;
 mod screenshot;
 pub mod shell_env;
+pub mod skills;
 pub mod store;
 pub mod terminal;
 pub mod turns;
@@ -987,6 +988,14 @@ fn hydrate_ensure_request_from_db(
     hydrate_start_request_from_db(&mut start_req, store)?;
     req.options = start_req.options;
     Ok(())
+}
+
+fn hydrate_skill_options(
+    options: &mut agents::runtime::types::RuntimeMetadata,
+    cache: &skills::SkillsCache,
+) {
+    let available_skills = cache.get();
+    skills::hydrate_selected_skills_option(options, &available_skills);
 }
 
 #[tauri::command]
@@ -8376,6 +8385,26 @@ fn get_mcp_settings(cache: State<'_, mcp::McpSettingsCache>) -> Result<mcp::McpS
 }
 
 #[tauri::command]
+fn list_skills(
+    cache: State<'_, skills::SkillsCache>,
+) -> Result<Vec<skills::SkillMetadata>, String> {
+    Ok(cache.get())
+}
+
+#[tauri::command]
+fn install_skill(
+    req: skills::InstallSkillRequest,
+    app: AppHandle,
+    cache: State<'_, skills::SkillsCache>,
+) -> Result<skills::SkillMetadata, String> {
+    let installed = skills::install_skill(req).map_err(|e| e.to_string())?;
+    cache.refresh_from_disk().map_err(|e| e.to_string())?;
+    app.emit(skills::SKILLS_UPDATED_EVENT, ())
+        .map_err(|e| e.to_string())?;
+    Ok(installed)
+}
+
+#[tauri::command]
 fn update_mcp_settings(
     settings: mcp::McpSettings,
     cache: State<'_, mcp::McpSettingsCache>,
@@ -8705,9 +8734,11 @@ fn update_runtime_agent_preferences(
 fn start_agent_session(
     mut req: StartAgentSession,
     store: State<'_, Arc<dyn SessionStore>>,
+    skills_cache: State<'_, skills::SkillsCache>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
     hydrate_start_request_from_db(&mut req, store.inner()).map_err(|e| e.to_string())?;
+    hydrate_skill_options(&mut req.options, skills_cache.inner());
     runtime.start_session(req).map_err(|e| e.to_string())
 }
 
@@ -8771,9 +8802,11 @@ fn fork_agent_session(
 fn ensure_agent_runtime_session(
     mut req: EnsureAgentRuntimeSession,
     store: State<'_, Arc<dyn SessionStore>>,
+    skills_cache: State<'_, skills::SkillsCache>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
     hydrate_ensure_request_from_db(&mut req, store.inner()).map_err(|e| e.to_string())?;
+    hydrate_skill_options(&mut req.options, skills_cache.inner());
     runtime.ensure_session(req).map_err(|e| e.to_string())
 }
 
@@ -8795,6 +8828,7 @@ fn load_agent_session(
     agent_runtime_session_id: Option<String>,
     source_agent: Option<Agent>,
     store: State<'_, Arc<dyn SessionStore>>,
+    skills_cache: State<'_, skills::SkillsCache>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
     let mut req = EnsureAgentRuntimeSession {
@@ -8806,13 +8840,15 @@ fn load_agent_session(
         options: Default::default(),
     };
     hydrate_ensure_request_from_db(&mut req, store.inner()).map_err(|e| e.to_string())?;
+    hydrate_skill_options(&mut req.options, skills_cache.inner());
     runtime.ensure_session(req).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn send_agent_input(
     sessio_runtime_session_id: String,
-    input: AgentInput,
+    mut input: AgentInput,
+    skills_cache: State<'_, skills::SkillsCache>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentTurnHandle, String> {
     log::info!(
@@ -8820,6 +8856,7 @@ fn send_agent_input(
         sessio_runtime_session_id,
         input.text
     );
+    hydrate_skill_options(&mut input.options, skills_cache.inner());
     runtime
         .send_input(&sessio_runtime_session_id, input)
         .map_err(|e| e.to_string())
@@ -9205,9 +9242,12 @@ pub fn run() {
                 &app_config.mcp,
                 &app_config.computer_use,
             ));
+            let skills_cache = skills::SkillsCache::default();
+            skills_cache.refresh_from_disk()?;
             app.manage(AppshotShortcutState::default());
             app.manage(ScreenshotOverlayState::default());
             app.manage(mcp_settings_cache);
+            app.manage(skills_cache);
             if let Err(error) = update_appshot_shortcut_registration(
                 &app.handle().clone(),
                 &app_config.appshot.shortcut,
@@ -9222,6 +9262,8 @@ pub fn run() {
             app.manage(runtime.clone());
             let config_watcher = config_watch::ConfigWatcher::new(app.handle().clone())?;
             app.manage(config_watcher);
+            let skills_watcher = skills::SkillsWatcher::new(app.handle().clone())?;
+            app.manage(skills_watcher);
             app.manage(TerminalService::new(app.handle().clone()));
             let preview_file_watcher =
                 file_preview_watch::PreviewFileWatcher::new(app.handle().clone())?;
@@ -9468,6 +9510,8 @@ pub fn run() {
             get_network_config,
             update_network_config,
             get_mcp_settings,
+            list_skills,
+            install_skill,
             update_mcp_settings,
             get_appshot_config,
             take_config_recovery_notice,

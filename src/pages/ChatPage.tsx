@@ -90,6 +90,7 @@ import {
 } from "../hooks/useComposerInputHistory";
 import { useComputerUseFeatureEnabled } from "../hooks/useComputerUseFeatureEnabled";
 import type { ChatComposerController } from "../hooks/useChatComposer";
+import { useSelectableSkills } from "../hooks/useSelectableSkills";
 import { localeTag, useI18n } from "../i18n";
 import type { ChatView, ViewMode } from "../navigation";
 import {
@@ -723,6 +724,13 @@ export function AcpTranscriptPanel({
   const selectedComposerAgent =
     runtimeAgents.find((item) => item.agent === composerAgent) ?? null;
   const computerUseFeatureEnabled = useComputerUseFeatureEnabled();
+  const {
+    availableSkills,
+    selectedSkillIds,
+    selectedSkills,
+    toggleSkillSelection,
+    clearSelectedSkills,
+  } = useSelectableSkills();
   const composerComputerUseEligible = Boolean(
     selectedComposerAgent?.computerUseEligible && computerUseFeatureEnabled,
   );
@@ -1334,6 +1342,7 @@ export function AcpTranscriptPanel({
       composerPermissionMode,
       composerEffort,
       desiredComputerUseEnabled,
+      selectedSkillIds,
     );
     const existingRuntimeSession = sameAgent ? liveState.sessions[runtimeSessionId] : null;
     const existingComputerUseAttached = Boolean(
@@ -1476,10 +1485,14 @@ export function AcpTranscriptPanel({
               turns: parentSnapshotTurns,
             }),
           ];
+      const turnRuntimeOptions = {
+        selectedSkillIds,
+        ...(runtimeOptions ?? {}),
+      };
       const turn = await sendAgentInput(handle.sessioRuntimeSessionId, {
         text,
         attachments: inputAttachmentsWithContext,
-        options: runtimeOptions,
+        options: turnRuntimeOptions,
       });
       activeRuntimeTurnIdRef.current = turn.turnId;
       resetComposerInputHistory();
@@ -1497,7 +1510,7 @@ export function AcpTranscriptPanel({
     } finally {
       setSending(false);
     }
-  }, [agent, beginFollowingLiveStream, cachedAvailableCommands, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, resetComposerInputHistory, runtimeSessionId, scrollChatToBottom, selectedSlashCommand, sending, sessionId, workspacePath]);
+  }, [agent, beginFollowingLiveStream, cachedAvailableCommands, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, resetComposerInputHistory, runtimeSessionId, scrollChatToBottom, selectedSkillIds, selectedSlashCommand, sending, sessionId, workspacePath]);
 
   const runCommandText = useCallback(async (text: string) => {
     await handleSendText(text);
@@ -1689,6 +1702,11 @@ export function AcpTranscriptPanel({
     setComputerUseEnabled,
     handleComputerUseToggle,
     computerUseEligible: composerComputerUseEligible,
+    availableSkills,
+    selectedSkillIds,
+    selectedSkills,
+    toggleSkillSelection,
+    clearSelectedSkills,
     agentModelOptions,
     permissionOptions: composerPermissionOptions,
     handleAgentModelChange: handleComposerAgentModelChange,
@@ -1712,6 +1730,8 @@ export function AcpTranscriptPanel({
     sessionComputerUseActive,
     composerText,
     composerPermissionOptions,
+    availableSkills,
+    clearSelectedSkills,
     handleComposerAgentModelChange,
     handleComputerUseToggle,
     handleComposerPermissionChange,
@@ -1720,12 +1740,15 @@ export function AcpTranscriptPanel({
     removeAttachment,
     sendWithContext,
     setComposerAttachmentMenuOpen,
+    selectedSkillIds,
     selectedAgentModelValue,
     selectedComposerAgent,
+    selectedSkills,
     sending,
     supportsAttachments,
     supportsEmbeddedContext,
     supportsImageAttachments,
+    toggleSkillSelection,
   ]);
   useAppshotComposerRegistration(chatComposerController, true);
 

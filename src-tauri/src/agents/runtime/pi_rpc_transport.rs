@@ -1246,11 +1246,16 @@ fn prompt_params_from_input(input: AgentInput) -> Result<Value> {
 fn normalize_runtime_prompt_text(text: &str, options: &RuntimeMetadata) -> String {
     let text = normalize_canvas_prompt_text(text, options);
     let text = crate::work_state_skill_resource::inject_work_state_skill_prompt_block(&text);
+    let text = crate::skills::inject_selected_skills_prompt_block(&text, options);
     if !runtime_option_bool(options, "computerUse") && !runtime_option_bool(options, "computer_use")
     {
         return text;
     }
-    format!("{}\n\n\n\n{}", computer_use_prompt_block(), text)
+    let skill_block = computer_use_prompt_block();
+    if skill_block.trim().is_empty() {
+        return text;
+    }
+    format!("{skill_block}\n\n\n\n{text}")
 }
 
 fn runtime_option_bool(options: &RuntimeMetadata, key: &str) -> bool {
@@ -2062,8 +2067,9 @@ mod tests {
 
         let text = normalize_runtime_prompt_text("send the message", &options);
 
-        assert!(text.contains("<!-- sessio-computer-use:start"));
-        assert!(text.contains("<!-- sessio-computer-use:end"));
+        assert!(text.contains("<!-- sessio-skills:start"));
+        assert!(text.contains("kind=\"builtin_skill\""));
+        assert!(text.contains("id: `builtin:computer-use`"));
         assert!(text.contains("computer_get_app_state"));
         assert!(text.contains("computer_raise_app"));
         assert!(text.contains("open -a"));
@@ -2081,8 +2087,8 @@ mod tests {
 
         let text = normalize_runtime_prompt_text(prompt, &RuntimeMetadata::new());
 
-        assert!(text.contains("kind=\"work_state_skill\""));
-        assert!(text.contains("Full Sessio work-state skill"));
+        assert!(text.contains("kind=\"builtin_skill\""));
+        assert!(text.contains("id: `builtin:sessio-work-state`"));
         assert!(text.contains("~/.sessio/bin/sessio"));
         assert!(text.ends_with(prompt));
     }

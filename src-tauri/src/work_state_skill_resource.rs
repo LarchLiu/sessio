@@ -10,7 +10,7 @@ use std::path::PathBuf;
 const BUNDLED_SKILL_RELATIVE_PATH: &str = "sessio-work-state-skill/SKILL.md";
 const DEV_SKILL_RELATIVE_PATH: &str = "docs/sessio-work-state-skill.md";
 const WORK_CONTEXT_KIND: &str = "work_context";
-const WORK_STATE_SKILL_KIND: &str = "work_state_skill";
+const BUILTIN_WORK_STATE_SKILL_ID: &str = "builtin:sessio-work-state";
 
 /// Best-effort absolute path to the work-state skill the agent should read.
 pub fn work_state_skill_path() -> Option<PathBuf> {
@@ -32,30 +32,29 @@ pub fn work_state_skill_prompt_note() -> String {
 }
 
 /// Prepend the work-state skill pointer only for Sessio thread/stage work
-/// prompts. The block uses the existing `sessio-thread-prompt` wrapper so
-/// history/display stripping treats it like other injected thread context.
+/// prompts. Use the shared skills marker so history/display stripping can
+/// filter it the same way as other injected skill blocks.
 pub fn inject_work_state_skill_prompt_block(text: &str) -> String {
     let kinds = crate::models::sessio_thread_prompt_block_kinds(text);
     if !kinds.iter().any(|kind| kind == WORK_CONTEXT_KIND)
-        || kinds.iter().any(|kind| kind == WORK_STATE_SKILL_KIND)
+        || (text.contains("kind=\"builtin_skill\"")
+            && text.contains(&format!("id: `{BUILTIN_WORK_STATE_SKILL_ID}`")))
     {
         return text.to_string();
     }
 
     let block = work_state_skill_prompt_block();
+    if block.trim().is_empty() {
+        return text.to_string();
+    }
     format!("{block}\n\n{text}")
 }
 
 fn work_state_skill_prompt_block() -> String {
-    let nonce = uuid::Uuid::new_v4().to_string();
-    let note = work_state_skill_prompt_note();
-    format!(
-        r#"<!-- sessio-thread-prompt:start nonce="{nonce}" kind="{WORK_STATE_SKILL_KIND}" -->
-
-{note}
-Use `~/.sessio/bin/sessio` for reliable CLI access; `sessio` is acceptable only when it is known to be on PATH. Prefer `--json` for state reads and writes.
-
-<!-- sessio-thread-prompt:end nonce="{nonce}" -->"#
+    crate::skills::inject_builtin_skill_prompt_block(
+        "",
+        crate::skills::BuiltinSkillKind::WorkState,
+        "Use `~/.sessio/bin/sessio` for reliable CLI access; `sessio` is acceptable only when it is known to be on PATH. Prefer `--json` for state reads and writes.",
     )
 }
 
@@ -147,8 +146,11 @@ mod tests {
         );
         let output = inject_work_state_skill_prompt_block(prompt);
 
-        assert!(output.contains("kind=\"work_state_skill\""));
-        assert!(output.contains("Full Sessio work-state skill"));
+        assert!(output.contains("<!-- sessio-skills:start"));
+        assert!(output.contains("kind=\"builtin_skill\""));
+        assert!(output.contains("id: `builtin:sessio-work-state`"));
+        assert!(output.contains("builtinKind: `workState`"));
+        assert!(output.contains("skillMdPath: `"));
         assert!(output.contains("~/.sessio/bin/sessio"));
         assert!(output.ends_with(prompt));
     }
@@ -163,9 +165,9 @@ mod tests {
     #[test]
     fn does_not_inject_twice() {
         let prompt = concat!(
-            "<!-- sessio-thread-prompt:start nonce=\"skill\" kind=\"work_state_skill\" -->\n",
-            "skill path\n",
-            "<!-- sessio-thread-prompt:end nonce=\"skill\" -->\n\n",
+            "<!-- sessio-skills:start nonce=\"skill\" kind=\"builtin_skill\" -->\n",
+            "id: `builtin:sessio-work-state`\n",
+            "<!-- sessio-skills:end nonce=\"skill\" -->\n\n",
             "<!-- sessio-thread-prompt:start nonce=\"abc\" kind=\"work_context\" -->\n",
             "stage context\n",
             "<!-- sessio-thread-prompt:end nonce=\"abc\" -->"

@@ -11,6 +11,10 @@ const SESSIO_ASSISTANT_PROMPT_START = "<!-- sessio-assistant-prompt:start";
 const SESSIO_ASSISTANT_PROMPT_END = "<!-- sessio-assistant-prompt:end";
 const SESSIO_COMPUTER_USE_PROMPT_START = "<!-- sessio-computer-use:start";
 const SESSIO_COMPUTER_USE_PROMPT_END = "<!-- sessio-computer-use:end";
+const SESSIO_SKILLS_PROMPT_START = "<!-- sessio-skills:start";
+const SESSIO_SKILLS_PROMPT_END = "<!-- sessio-skills:end";
+const SESSIO_WORK_STATE_SKILL_PROMPT_START = "<!-- sessio-work-state-skill:start";
+const SESSIO_WORK_STATE_SKILL_PROMPT_END = "<!-- sessio-work-state-skill:end";
 
 export interface SessioThreadPromptBlockMeta {
   kind: string | null;
@@ -220,12 +224,16 @@ export function stripSessioAssistantPromptBlocks(input: string): string {
     .trim();
 }
 
-export function stripSessioComputerUsePromptBlocks(input: string): string {
+function stripSessioNonceDelimitedPromptBlocks(
+  input: string,
+  startMarker: string,
+  endMarkerPrefix: string,
+): string {
   let out = "";
   let cursor = 0;
   let changed = false;
   for (;;) {
-    const start = input.indexOf(SESSIO_COMPUTER_USE_PROMPT_START, cursor);
+    const start = input.indexOf(startMarker, cursor);
     if (start < 0) {
       out += input.slice(cursor);
       break;
@@ -242,7 +250,7 @@ export function stripSessioComputerUsePromptBlocks(input: string): string {
       cursor = startCommentEnd + "-->".length;
       continue;
     }
-    const endMarker = `${SESSIO_COMPUTER_USE_PROMPT_END} nonce="${nonce}" -->`;
+    const endMarker = `${endMarkerPrefix} nonce="${nonce}" -->`;
     const end = input.indexOf(endMarker, startCommentEnd + "-->".length);
     if (end < 0) {
       out += input.slice(cursor, startCommentEnd + "-->".length);
@@ -257,6 +265,30 @@ export function stripSessioComputerUsePromptBlocks(input: string): string {
   return out
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+export function stripSessioComputerUsePromptBlocks(input: string): string {
+  return stripSessioNonceDelimitedPromptBlocks(
+    input,
+    SESSIO_COMPUTER_USE_PROMPT_START,
+    SESSIO_COMPUTER_USE_PROMPT_END,
+  );
+}
+
+export function stripSessioSkillsPromptBlocks(input: string): string {
+  return stripSessioNonceDelimitedPromptBlocks(
+    input,
+    SESSIO_SKILLS_PROMPT_START,
+    SESSIO_SKILLS_PROMPT_END,
+  );
+}
+
+export function stripSessioWorkStateSkillPromptBlocks(input: string): string {
+  return stripSessioNonceDelimitedPromptBlocks(
+    input,
+    SESSIO_WORK_STATE_SKILL_PROMPT_START,
+    SESSIO_WORK_STATE_SKILL_PROMPT_END,
+  );
 }
 
 function commentAttr(comment: string, key: string): string | null {
@@ -309,8 +341,12 @@ export function stripInjectedContext(s: string): string {
   const idx = text.indexOf(MARKER);
   if (idx >= 0) text = text.slice(idx + MARKER.length);
   return stripSessioComputerUsePromptBlocks(
-    stripSessioAssistantPromptBlocks(
-      stripSessioThreadPromptBlocks(stripImagePlaceholders(text)),
+    stripSessioSkillsPromptBlocks(
+      stripSessioWorkStateSkillPromptBlocks(
+        stripSessioAssistantPromptBlocks(
+          stripSessioThreadPromptBlocks(stripImagePlaceholders(text)),
+        ),
+      ),
     ),
   ).trim();
 }
