@@ -367,6 +367,94 @@ fn parse_task_snapshot(value: Option<&str>, label: &str) -> anyhow::Result<Optio
         .transpose()
 }
 
+fn push_stage_work_snapshot_lines(
+    lines: &mut Vec<String>,
+    snapshot: &Value,
+    focused_stage_id: Option<&str>,
+    include_focused_stage_context: bool,
+) {
+    let focused_stage_id = focused_stage_id.unwrap_or_default();
+    if let Some(stages) = snapshot.get("stages").and_then(Value::as_array) {
+        for stage in stages {
+            let id = stage
+                .get("threadStageId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let name = stage.get("name").and_then(Value::as_str).unwrap_or(id);
+            let status = stage
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("not_started");
+            let focus = if !focused_stage_id.is_empty() && id == focused_stage_id {
+                " <- you are here"
+            } else {
+                ""
+            };
+            lines.push(format!("- [{}] {name}{focus}", status_label(status)));
+            if include_focused_stage_context || id != focused_stage_id {
+                if let Some(summary) = stage
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    lines.push(format!("    summary: {summary}"));
+                }
+                if let Some(outcome) = stage
+                    .get("outcome")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    lines.push(format!("    outcome: {outcome}"));
+                }
+            }
+            if let Some(issues) = stage.get("issues").and_then(Value::as_array) {
+                for issue in issues {
+                    if issue.get("status").and_then(Value::as_str) != Some("open") {
+                        continue;
+                    }
+                    let severity = issue
+                        .get("severity")
+                        .and_then(Value::as_str)
+                        .unwrap_or("medium");
+                    let title = issue
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("issue");
+                    lines.push(format!("    issue [{severity}] {title}"));
+                    if let Some(description) = issue
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        lines.push(format!("      {description}"));
+                    }
+                }
+            }
+            if let Some(session_refs) = stage.get("sessionRefs").and_then(Value::as_array) {
+                for reference in session_refs {
+                    let agent = reference
+                        .get("agent")
+                        .and_then(Value::as_str)
+                        .unwrap_or("agent");
+                    let session_id = reference
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("session");
+                    let title = reference.get("title").and_then(Value::as_str).unwrap_or("");
+                    lines.push(
+                        format!("    [{agent}:{session_id}] {title}")
+                            .trim_end()
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn build_process_thread_work_snapshot(
     thread: &ThreadInfo,
     focused_stage_id: Option<&str>,
@@ -558,6 +646,9 @@ fn render_plan_task_snapshot_prompt(
     snapshot: &Value,
     task: &AstraTaskProposal,
 ) -> String {
+    if thread.kind == ThreadKind::Process {
+        return render_process_plan_task_snapshot_prompt(thread, snapshot, task);
+    }
     let mut lines = Vec::new();
     lines.push("# Sessio plan task".to_string());
     lines.push(String::new());
@@ -625,6 +716,143 @@ fn render_plan_task_snapshot_prompt(
         attrs.push(("assistant_id", assistant_id.to_string()));
     }
     wrap_thread_prompt("astra_plan_task", thread, lines.join("\n"), &attrs)
+}
+
+fn render_process_plan_task_snapshot_prompt(
+    thread: &ThreadInfo,
+    snapshot: &Value,
+    task: &AstraTaskProposal,
+) -> String {
+    let mut lines = Vec::new();
+    let focused_stage = task.target_stage_id.as_deref().and_then(|stage_id| {
+        thread
+            .stages
+            .iter()
+            .find(|stage| stage.id == stage_id)
+    });
+    lines.push("# Sessio workflow task".to_string());
+    lines.push(String::new());
+    lines.push("You are executing a workflow stage task from an Astra sequential plan. Use the live workflow snapshot below as the primary execution context for this run. Persisted planning snapshots are included later only as reference.".to_string());
+    lines.push(format!("Thread goal: {}", thread.goal));
+    if let Some(description) = thread
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("Thread description: {description}"));
+    }
+    lines.push(format!("Task title: {}", task.title));
+    lines.push(format!("Runtime agent: {}", task.target_agent.as_str()));
+    if let Some(stage_id) = task.target_stage_id.as_deref() {
+        lines.push(format!("Thread stage id: {stage_id}"));
+    }
+    if let Some(assistant_id) = task.assistant_id.as_deref() {
+        lines.push(format!("Assistant id: {assistant_id}"));
+    }
+    if let Some(stage) = focused_stage {
+        lines.push(format!("Target stage: {}", stage_label(stage)));
+        if let Some(description) = stage
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(format!("Stage description: {description}"));
+        }
+        if let Some(summary) = stage
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(format!("Current stage summary: {summary}"));
+        }
+        if let Some(outcome) = stage
+            .outcome
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(format!("Current stage outcome: {outcome}"));
+        }
+    }
+    let completed = snapshot
+        .pointer("/rollup/completed")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let total = snapshot
+        .pointer("/rollup/total")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let blocked = snapshot
+        .pointer("/rollup/blocked")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let open_issues = snapshot
+        .pointer("/rollup/openIssues")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    lines.push(format!(
+        "Thread progress: {completed}/{total} stages complete, {blocked} blocked, {open_issues} open issues"
+    ));
+    lines.push(String::new());
+    lines.push("## Live workflow snapshot".to_string());
+    push_stage_work_snapshot_lines(
+        &mut lines,
+        snapshot,
+        task.target_stage_id.as_deref(),
+        false,
+    );
+    lines.push(String::new());
+    lines.push("## Planning snapshots (reference)".to_string());
+    if let Some(stage) = snapshot
+        .get("stageSnapshot")
+        .filter(|value| !value.is_null())
+    {
+        lines.push("### Stage snapshot".to_string());
+        lines.push(snapshot_text(stage));
+    }
+    if let Some(assistant) = snapshot
+        .get("assistantSnapshot")
+        .filter(|value| !value.is_null())
+    {
+        lines.push("### Assistant snapshot".to_string());
+        lines.push(snapshot_text(assistant));
+    }
+    if let Some(agent) = snapshot
+        .get("agentSnapshot")
+        .filter(|value| !value.is_null())
+    {
+        lines.push("### Agent snapshot".to_string());
+        lines.push(snapshot_text(agent));
+    }
+    lines.push(String::new());
+    lines.push("## Astra task".to_string());
+    lines.push(format!("Expected output: {}", task.expected_output));
+    lines.push(String::new());
+    lines.push(task.prompt.clone());
+    lines.push(String::new());
+    lines.push("## Reporting".to_string());
+    lines.push("Return a concise final result for Astra. Astra will decide status, summary, and outcome, then ask Sessio to update thread_stage_states.".to_string());
+    lines.push("Do not mark unrelated stages complete.".to_string());
+    let mut attrs = vec![
+        ("task_id", task.id.clone()),
+        ("task_title", task.title.clone()),
+        ("target_agent", task.target_agent.as_str().to_string()),
+    ];
+    if let Some(plan_task_id) = task.plan_task_id.as_deref() {
+        attrs.push(("plan_task_id", plan_task_id.to_string()));
+    }
+    if let Some(stage_id) = task.target_stage_id.as_deref() {
+        attrs.push(("thread_stage_id", stage_id.to_string()));
+    }
+    wrap_thread_prompt(
+        "astra_process_plan_task",
+        thread,
+        lines.join("\n"),
+        &attrs,
+    )
 }
 
 fn render_teamwork_task_prompt(
@@ -832,6 +1060,7 @@ fn build_stage_task_snapshot(
 ) -> Value {
     let mut stages = thread.stages.clone();
     stages.sort_by_key(|stage| stage.order);
+    let process_prior_context_enabled = thread.kind == ThreadKind::Process;
     let current_stage_label = stages
         .iter()
         .find(|stage| stage.id == focused_stage.id)
@@ -864,6 +1093,20 @@ fn build_stage_task_snapshot(
         .iter()
         .filter(|stage| {
             stage.id == focused_stage.id
+                || (process_prior_context_enabled
+                    && stage.order < focused_stage.order
+                    && stage.status == StageStatus::Completed
+                    && (!stage.sessions.is_empty()
+                        || stage
+                            .summary
+                            .as_deref()
+                            .map(str::trim)
+                            .is_some_and(|value| !value.is_empty())
+                        || stage
+                            .outcome
+                            .as_deref()
+                            .map(str::trim)
+                            .is_some_and(|value| !value.is_empty())))
                 || stage.status == StageStatus::Blocked
                 || stage.status == StageStatus::NeedsReview
                 || stage
@@ -872,6 +1115,8 @@ fn build_stage_task_snapshot(
                     .any(|issue| issue.status == IssueStatus::Open)
         })
         .map(|stage| {
+            let include_process_prior_context =
+                process_prior_context_enabled && stage.order < focused_stage.order;
             json!({
                 "threadStageId": stage.id,
                 "projectStageId": stage.stage_id,
@@ -879,11 +1124,11 @@ fn build_stage_task_snapshot(
                 "kind": stage.kind,
                 "icon": stage.icon,
                 "status": stage.status,
-                "summary": if stage.id == focused_stage.id { stage.summary.clone() } else { None },
-                "outcome": if stage.id == focused_stage.id { stage.outcome.clone() } else { None },
+                "summary": if stage.id == focused_stage.id || include_process_prior_context { stage.summary.clone() } else { None },
+                "outcome": if stage.id == focused_stage.id || include_process_prior_context { stage.outcome.clone() } else { None },
                 "assistants": stage.assistants,
                 "issues": stage.issues,
-                "sessionRefs": if stage.id == focused_stage.id {
+                "sessionRefs": if stage.id == focused_stage.id || include_process_prior_context {
                     stage
                         .sessions
                         .iter()
@@ -1020,67 +1265,12 @@ fn render_stage_task_prompt(
     ));
     lines.push(String::new());
     lines.push("## Stage work snapshot".to_string());
-    if let Some(stages) = snapshot.get("stages").and_then(Value::as_array) {
-        for stage in stages {
-            let id = stage
-                .get("threadStageId")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let name = stage.get("name").and_then(Value::as_str).unwrap_or(id);
-            let status = stage
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("not_started");
-            let focus = if id == focused_stage.id {
-                " <- you are here"
-            } else {
-                ""
-            };
-            lines.push(format!("- [{}] {name}{focus}", status_label(status)));
-            if let Some(issues) = stage.get("issues").and_then(Value::as_array) {
-                for issue in issues {
-                    if issue.get("status").and_then(Value::as_str) != Some("open") {
-                        continue;
-                    }
-                    let severity = issue
-                        .get("severity")
-                        .and_then(Value::as_str)
-                        .unwrap_or("medium");
-                    let title = issue
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .unwrap_or("issue");
-                    lines.push(format!("    issue [{severity}] {title}"));
-                    if let Some(description) = issue
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                    {
-                        lines.push(format!("      {description}"));
-                    }
-                }
-            }
-            if let Some(session_refs) = stage.get("sessionRefs").and_then(Value::as_array) {
-                for reference in session_refs {
-                    let agent = reference
-                        .get("agent")
-                        .and_then(Value::as_str)
-                        .unwrap_or("agent");
-                    let session_id = reference
-                        .get("sessionId")
-                        .and_then(Value::as_str)
-                        .unwrap_or("session");
-                    let title = reference.get("title").and_then(Value::as_str).unwrap_or("");
-                    lines.push(
-                        format!("    [{agent}:{session_id}] {title}")
-                            .trim_end()
-                            .to_string(),
-                    );
-                }
-            }
-        }
-    }
+    push_stage_work_snapshot_lines(
+        &mut lines,
+        snapshot,
+        Some(focused_stage.id.as_str()),
+        false,
+    );
     lines.push(String::new());
     lines.push("## Astra task".to_string());
     lines.push(format!("Task title: {}", task.title));
@@ -1143,8 +1333,8 @@ mod tests {
     use super::*;
     use crate::astra::{AstraRunStatus, AstraTaskResult, AstraTaskResultStatus, AstraTaskRisk};
     use crate::models::{
-        Agent, AssistantAgentInfo, ProjectStageType, StageAssistantInfo, StageInfo,
-        ThreadAssistantInfo, ThreadKind,
+        Agent, AssistantAgentInfo, ProjectStageType, SessionInfo, StageAssistantInfo,
+        StageInfo, ThreadAssistantInfo, ThreadKind,
     };
 
     fn run() -> AstraRun {
@@ -1655,5 +1845,145 @@ mod tests {
             context.snapshot["task"]["title"],
             Value::String("writing / Writer".to_string())
         );
+        assert!(context.prompt.contains("## Live workflow snapshot"));
+        assert!(context
+            .prompt
+            .contains("Use the live workflow snapshot below as the primary execution context"));
+    }
+
+    #[test]
+    fn process_plan_task_prompt_prefers_live_workflow_context() {
+        let assistant = StageAssistantInfo {
+            assistant_id: "assistant-1".to_string(),
+            name: "Proofreader".to_string(),
+            color: None,
+            agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: String::new(),
+                mode: String::new(),
+                effort: String::new(),
+            },
+            system_prompt: None,
+            order: 0,
+        };
+        let prior_session = SessionInfo {
+            id: "session-writing".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: None,
+            project_name: None,
+            started_at: Some(1),
+            updated_at: Some(1),
+            message_count: 1,
+            rename_title: Some("Draft session".to_string()),
+            title: None,
+            first_user_message: None,
+            file_path: String::new(),
+            file_size: 0,
+            partial: false,
+            available: true,
+            archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
+            subagents: Vec::new(),
+        };
+        let thread = ThreadInfo {
+            id: "thread-1".to_string(),
+            project_id: "project-1".to_string(),
+            goal: "Polish the draft".to_string(),
+            description: Some("Carry writing output into proofreading.".to_string()),
+            stage_id: Some("stage-proofread".to_string()),
+            kind: crate::models::ThreadKind::Process,
+            enabled: true,
+            origin: crate::models::ThreadOrigin::Manual,
+            scheduled_task_id: None,
+            created_at: 1,
+            updated_at: 1,
+            assistants: Vec::new(),
+            agent_participants: Vec::new(),
+            stages: vec![
+                StageInfo {
+                    id: "stage-writing".to_string(),
+                    thread_id: "thread-1".to_string(),
+                    stage_id: "project-stage-writing".to_string(),
+                    project_id: "project-1".to_string(),
+                    assistant_ids: Vec::new(),
+                    assistants: vec![assistant.clone()],
+                    stage_type: ProjectStageType::Custom,
+                    process_template_id: None,
+                    kind: None,
+                    name: Some("Writing".to_string()),
+                    description: None,
+                    icon: None,
+                    order: 0,
+                    status: StageStatus::Completed,
+                    summary: Some("Draft written.".to_string()),
+                    outcome: Some("joke-draft.md updated.".to_string()),
+                    enabled: true,
+                    allow_empty_assistants: false,
+                    created_at: 1,
+                    updated_at: 1,
+                    sessions: vec![prior_session],
+                    issues: Vec::new(),
+                },
+                StageInfo {
+                    id: "stage-proofread".to_string(),
+                    thread_id: "thread-1".to_string(),
+                    stage_id: "project-stage-proofread".to_string(),
+                    project_id: "project-1".to_string(),
+                    assistant_ids: Vec::new(),
+                    assistants: vec![assistant],
+                    stage_type: ProjectStageType::Custom,
+                    process_template_id: None,
+                    kind: None,
+                    name: Some("Proofreading".to_string()),
+                    description: Some("Review the draft.".to_string()),
+                    icon: None,
+                    order: 1,
+                    status: StageStatus::NotStarted,
+                    summary: None,
+                    outcome: None,
+                    enabled: true,
+                    allow_empty_assistants: false,
+                    created_at: 1,
+                    updated_at: 1,
+                    sessions: Vec::new(),
+                    issues: Vec::new(),
+                },
+            ],
+            sessions: Vec::new(),
+        };
+        let task = AstraTaskProposal {
+            id: "task-proofread".to_string(),
+            plan_task_id: Some("plan-task-1".to_string()),
+            assistant_id: Some("assistant-1".to_string()),
+            agent_participant_id: None,
+            title: "proofreading / Proofreader".to_string(),
+            target_stage_id: Some("stage-proofread".to_string()),
+            target_agent: Agent::Codex,
+            prompt: "Proofread the draft.".to_string(),
+            expected_output: "Proofreading notes.".to_string(),
+            risk: AstraTaskRisk::Low,
+            depends_on: Vec::new(),
+        };
+
+        let context = build_plan_task_snapshot_context(
+            &thread,
+            &task,
+            Some(r#"{"id":"project-stage-proofread","name":"Proofreading","summary":"stale planned snapshot"}"#),
+            Some(r#"{"assistantId":"assistant-1","name":"Proofreader"}"#),
+            Some(r#"{"agent":"codex","agentInfo":{"displayName":"Codex CLI"}}"#),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(context.prompt.contains("## Live workflow snapshot"));
+        assert!(context.prompt.contains("Draft written."));
+        assert!(context.prompt.contains("joke-draft.md updated."));
+        assert!(context.prompt.contains("[codex:session-writing] Draft session"));
+        assert!(context.prompt.contains("## Planning snapshots (reference)"));
     }
 }

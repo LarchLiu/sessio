@@ -4671,8 +4671,8 @@ mod tests {
         prior_stage.description = None;
         prior_stage.order = -1;
         prior_stage.status = StageStatus::Completed;
-        prior_stage.summary = Some("Previous stage result should not be included.".to_string());
-        prior_stage.outcome = Some("Previous stage outcome should not be included.".to_string());
+        prior_stage.summary = Some("Previous stage result should now be included.".to_string());
+        prior_stage.outcome = Some("Previous stage outcome should now be included.".to_string());
         prior_stage.assistants = Vec::new();
         prior_stage.issues = Vec::new();
 
@@ -4713,8 +4713,14 @@ mod tests {
             context.snapshot["focusedStageId"],
             Value::String("thread-stage-1".to_string())
         );
+        let focused_stage_snapshot = context.snapshot["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stage| stage["threadStageId"] == Value::String("thread-stage-1".to_string()))
+            .unwrap();
         assert_eq!(
-            context.snapshot["stages"][0]["status"],
+            focused_stage_snapshot["status"],
             Value::String("not_started".to_string())
         );
         assert_eq!(
@@ -4753,12 +4759,12 @@ mod tests {
         assert!(context
             .prompt
             .contains("Implement and verify the missing API."));
-        assert!(!context
+        assert!(context
             .prompt
-            .contains("Previous stage result should not be included."));
-        assert!(!context
+            .contains("Previous stage result should now be included."));
+        assert!(context
             .prompt
-            .contains("Previous stage outcome should not be included."));
+            .contains("Previous stage outcome should now be included."));
     }
 
     #[test]
