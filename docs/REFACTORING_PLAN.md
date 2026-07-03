@@ -696,6 +696,7 @@ src-tauri/src/
 | Stage persistence | ✅ | 已建立 `store/sqlite/stages.rs`，迁出 project/process-template stage CRUD、thread-stage/session/issue 持久化、stage row 读取与 assistant binding |
 | Config characterization tests | ✅ | 已有配置测试覆盖 unknown section ignore、legacy `astra` ignore、invalid recovery notice、computer_use + builtin MCP 联合解析、默认补全与 roundtrip 序列化 |
 | Config raw model split | ✅ | 已建立 `config/raw.rs`，先迁出 `RawConfig` 与各 section 的 raw DTO，保持解析、resolve、默认补全与序列化行为不变 |
+| Config parser split | ✅ | 已建立 `config/parser.rs`，迁出 `parse_raw_config()`、section/value parsing、宽松 bool、数组解析与 inline comment stripping |
 
 ### 6.2 当前焦点
 
