@@ -1,7 +1,8 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{Agent, SessionInfo, SessionOrigin};
+use crate::store::{file_mtime_for, is_real_session_file_path, now_ms};
 
 #[derive(Debug, Clone)]
 pub(super) struct ExistingSessionRow {
@@ -285,4 +286,378 @@ fn merge_session_lineage(
         (Some(agent), None) => (Some(agent), parsed_id),
         (None, None) => (parsed_agent, parsed_id),
     }
+}
+
+struct ExistingPlaceholder {
+    session_id: String,
+    scope: String,
+}
+
+pub(super) fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()> {
+    let identity_rows = load_identity_session_rows(conn, s.agent, &s.id)?;
+    let incoming_real = is_real_session_file_path(&s.file_path);
+    let existing_real = identity_rows
+        .iter()
+        .find(|row| is_real_session_file_path(&row.file_path))
+        .cloned();
+    let existing_same_scope = identity_rows.iter().find(|row| row.scope == scope).cloned();
+
+    if !incoming_real {
+        if let Some(existing) = existing_real.clone() {
+            let message_count = merged_message_count(&identity_rows, s);
+            let partial = existing.partial;
+            let available = (existing.available != 0 || s.available) as i64;
+            let archived = existing.archived;
+            let rename_title = choose_identity_rename_title(&identity_rows, s);
+            let title = choose_identity_title(&identity_rows, s, false);
+            let first_user_message = choose_identity_first_user(&identity_rows, s, false);
+            let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
+            let provenance = merge_session_provenance(&identity_rows, s);
+            conn.execute(
+                "UPDATE sessions
+                 SET project_path = COALESCE(project_path, ?),
+                     project_name = COALESCE(project_name, ?),
+                     started_at = COALESCE(started_at, ?),
+                     updated_at = COALESCE(updated_at, ?),
+                     rename_title = ?,
+                     title = ?,
+                     first_user_message = ?,
+                     message_count = ?,
+                     partial = ?,
+                     available = ?,
+                     archived = ?,
+                     forked_from_agent = ?,
+                     forked_from_id = ?,
+                     origin = ?,
+                     scheduled_task_id = ?,
+                     is_auxiliary = ?
+                 WHERE agent = ? AND session_id = ? AND scope = ?",
+                params![
+                    s.project_path,
+                    s.project_name,
+                    s.started_at,
+                    s.updated_at,
+                    rename_title,
+                    title,
+                    first_user_message,
+                    message_count,
+                    partial,
+                    available,
+                    archived,
+                    forked_from_agent.map(|agent| agent.as_str()),
+                    forked_from_id,
+                    provenance.origin.as_str(),
+                    provenance.scheduled_task_id,
+                    provenance.is_auxiliary,
+                    s.agent.as_str(),
+                    s.id,
+                    existing.scope,
+                ],
+            )?;
+            delete_duplicate_session_rows(conn, s.agent, &s.id, &existing.scope)?;
+            return Ok(());
+        }
+    }
+
+    if incoming_real {
+        if let Some(existing) = existing_same_scope.clone() {
+            let rename_title = choose_identity_rename_title(&identity_rows, s);
+            let title = choose_identity_title(&identity_rows, s, true);
+            let first_user_message = choose_identity_first_user(&identity_rows, s, true);
+            let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
+            let provenance = merge_session_provenance(&identity_rows, s);
+            conn.execute(
+                "UPDATE sessions
+                 SET file_path = ?, project_path = ?, project_name = ?,
+                     started_at = ?, updated_at = ?, rename_title = ?, title = ?, first_user_message = ?,
+                     message_count = ?, file_size = ?, file_mtime = ?, partial = ?, available = ?, archived = ?,
+                     last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?,
+                     origin = ?, scheduled_task_id = ?, is_auxiliary = ?
+                 WHERE agent = ? AND session_id = ? AND scope = ?",
+                params![
+                    s.file_path,
+                    s.project_path,
+                    s.project_name,
+                    s.started_at,
+                    s.updated_at,
+                    rename_title,
+                    title,
+                    first_user_message,
+                    merged_message_count(&identity_rows, s),
+                    s.file_size as i64,
+                    file_mtime_for(&s.file_path),
+                    0,
+                    s.available as i64,
+                    s.archived as i64,
+                    now_ms(),
+                    forked_from_agent.map(|agent| agent.as_str()),
+                    forked_from_id,
+                    provenance.origin.as_str(),
+                    provenance.scheduled_task_id,
+                    provenance.is_auxiliary,
+                    s.agent.as_str(),
+                    s.id,
+                    existing.scope,
+                ],
+            )?;
+            delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
+            return Ok(());
+        }
+        if let Some(existing) = existing_real.clone().filter(|row| row.scope != scope) {
+            let rename_title = choose_identity_rename_title(&identity_rows, s);
+            let title = choose_identity_title(&identity_rows, s, true);
+            let first_user_message = choose_identity_first_user(&identity_rows, s, true);
+            let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
+            let provenance = merge_session_provenance(&identity_rows, s);
+            conn.execute(
+                "UPDATE sessions
+                 SET scope = ?, file_path = ?, project_path = ?, project_name = ?,
+                     started_at = ?, updated_at = ?, rename_title = ?, title = ?, first_user_message = ?,
+                     message_count = ?, file_size = ?, file_mtime = ?, partial = ?, available = ?, archived = ?,
+                     last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?,
+                     origin = ?, scheduled_task_id = ?, is_auxiliary = ?
+                 WHERE agent = ? AND session_id = ? AND scope = ?",
+                params![
+                    scope,
+                    s.file_path,
+                    s.project_path,
+                    s.project_name,
+                    s.started_at,
+                    s.updated_at,
+                    rename_title,
+                    title,
+                    first_user_message,
+                    merged_message_count(&identity_rows, s),
+                    s.file_size as i64,
+                    file_mtime_for(&s.file_path),
+                    0,
+                    s.available as i64,
+                    s.archived as i64,
+                    now_ms(),
+                    forked_from_agent.map(|agent| agent.as_str()),
+                    forked_from_id,
+                    provenance.origin.as_str(),
+                    provenance.scheduled_task_id,
+                    provenance.is_auxiliary,
+                    s.agent.as_str(),
+                    s.id,
+                    existing.scope,
+                ],
+            )?;
+            delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
+            return Ok(());
+        }
+        if let Some(existing) = existing_placeholder(conn, s.agent, &s.id, scope, s)? {
+            let rename_title = choose_identity_rename_title(&identity_rows, s);
+            let title = choose_identity_title(&identity_rows, s, true);
+            let first_user_message = choose_identity_first_user(&identity_rows, s, true);
+            let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
+            let provenance = merge_session_provenance(&identity_rows, s);
+            if conn.query_row(
+                "SELECT 1 FROM sessions WHERE agent = ? AND session_id = ? AND scope = ? LIMIT 1",
+                params![s.agent.as_str(), s.id, scope],
+                |_| Ok(()),
+            ).optional()?.is_some() {
+                conn.execute(
+                    "UPDATE sessions
+                     SET origin = ?,
+                         scheduled_task_id = ?,
+                         is_auxiliary = ?
+                     WHERE agent = ? AND session_id = ? AND scope = ?",
+                    params![
+                        provenance.origin.as_str(),
+                        provenance.scheduled_task_id,
+                        provenance.is_auxiliary,
+                        s.agent.as_str(),
+                        s.id,
+                        scope,
+                    ],
+                )?;
+                conn.execute(
+                    "DELETE FROM sessions
+                     WHERE agent = ? AND session_id = ? AND scope = ?",
+                    params![s.agent.as_str(), s.id, existing.scope],
+                )?;
+            } else {
+                conn.execute(
+                    "UPDATE sessions
+                     SET session_id = ?, scope = ?, file_path = ?, project_path = ?, project_name = ?,
+                         started_at = ?, updated_at = ?, rename_title = ?, title = ?, first_user_message = ?,
+                         message_count = ?, file_size = ?, file_mtime = ?, partial = ?, available = ?, archived = ?,
+                         last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?,
+                         origin = ?, scheduled_task_id = ?, is_auxiliary = ?
+                     WHERE agent = ? AND session_id = ? AND scope = ?",
+                    params![
+                        s.id,
+                        scope,
+                        s.file_path,
+                        s.project_path,
+                        s.project_name,
+                        s.started_at,
+                        s.updated_at,
+                        rename_title,
+                        title,
+                        first_user_message,
+                        merged_message_count(&identity_rows, s),
+                        s.file_size as i64,
+                        file_mtime_for(&s.file_path),
+                        0,
+                        s.available as i64,
+                        s.archived as i64,
+                        now_ms(),
+                        forked_from_agent.map(|agent| agent.as_str()),
+                        forked_from_id,
+                        provenance.origin.as_str(),
+                        provenance.scheduled_task_id,
+                        provenance.is_auxiliary,
+                        s.agent.as_str(),
+                        existing.session_id,
+                        existing.scope,
+                    ],
+                )?;
+                delete_duplicate_session_rows(
+                    conn,
+                    s.agent,
+                    &s.id,
+                    scope,
+                )?;
+                return Ok(());
+            }
+        }
+    }
+
+    let identity_rows = load_identity_session_rows(conn, s.agent, &s.id)?;
+    let prefer_incoming_parsed = incoming_real;
+    let rename_title = choose_identity_rename_title(&identity_rows, s);
+    let title = choose_identity_title(&identity_rows, s, prefer_incoming_parsed);
+    let first_user_message = choose_identity_first_user(&identity_rows, s, prefer_incoming_parsed);
+    if let Some(existing_same_scope) = identity_rows.iter().find(|row| row.scope == scope) {
+        let message_count = merged_message_count(&identity_rows, s);
+        let partial = if s.partial {
+            existing_same_scope.partial
+        } else {
+            0
+        };
+        let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
+        let provenance = merge_session_provenance(&identity_rows, s);
+        conn.execute(
+            "UPDATE sessions
+             SET session_id = ?, scope = ?, file_path = ?, project_path = ?, project_name = ?,
+                 started_at = ?, updated_at = ?, rename_title = ?, title = ?, first_user_message = ?,
+                 message_count = ?, file_size = ?, file_mtime = ?, partial = ?, available = ?, archived = ?,
+                 last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?,
+                 origin = ?, scheduled_task_id = ?, is_auxiliary = ?
+             WHERE agent = ? AND session_id = ? AND scope = ?",
+            params![
+                s.id,
+                scope,
+                s.file_path,
+                s.project_path,
+                s.project_name,
+                s.started_at,
+                s.updated_at,
+                rename_title,
+                title,
+                first_user_message,
+                message_count,
+                s.file_size as i64,
+                file_mtime_for(&s.file_path),
+                partial,
+                s.available as i64,
+                s.archived as i64,
+                now_ms(),
+                forked_from_agent.map(|agent| agent.as_str()),
+                forked_from_id,
+                provenance.origin.as_str(),
+                provenance.scheduled_task_id,
+                provenance.is_auxiliary,
+                s.agent.as_str(),
+                s.id,
+                existing_same_scope.scope,
+            ],
+        )?;
+        delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
+        return Ok(());
+    }
+    let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
+    let provenance = merge_session_provenance(&identity_rows, s);
+    conn.execute(
+        "INSERT OR REPLACE INTO sessions (
+            agent, session_id, scope, file_path,
+            project_path, project_name,
+            started_at, updated_at,
+            message_count, rename_title, title, first_user_message,
+            file_size, file_mtime,
+            partial, available, archived,
+            last_indexed_at, forked_from_agent, forked_from_id,
+            origin, scheduled_task_id, is_auxiliary
+        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?,?, ?,?, ?,?,?, ?,?,?, ?,?,?)",
+        params![
+            s.agent.as_str(),
+            s.id,
+            scope,
+            s.file_path,
+            s.project_path,
+            s.project_name,
+            s.started_at,
+            s.updated_at,
+            merged_message_count(&identity_rows, s),
+            rename_title,
+            title,
+            first_user_message,
+            s.file_size as i64,
+            file_mtime_for(&s.file_path),
+            s.partial as i64,
+            s.available as i64,
+            s.archived as i64,
+            now_ms(),
+            forked_from_agent.map(|agent| agent.as_str()),
+            forked_from_id,
+            provenance.origin.as_str(),
+            provenance.scheduled_task_id,
+            provenance.is_auxiliary,
+        ],
+    )?;
+    delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
+    // Subagent rows are written through upsert_subagent so their lifecycle
+    // is independent from the parent session's reindex.
+    Ok(())
+}
+
+fn existing_placeholder(
+    conn: &Connection,
+    agent: Agent,
+    session_id: &str,
+    next_scope: &str,
+    _next: &SessionInfo,
+) -> Result<Option<ExistingPlaceholder>> {
+    if let Some(scope) = existing_placeholder_scope(conn, agent, session_id, next_scope)? {
+        return Ok(Some(ExistingPlaceholder {
+            session_id: session_id.to_string(),
+            scope,
+        }));
+    }
+    Ok(None)
+}
+
+fn existing_placeholder_scope(
+    conn: &Connection,
+    agent: Agent,
+    session_id: &str,
+    next_scope: &str,
+) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT scope FROM sessions
+         WHERE agent = ? AND session_id = ? AND scope != ?
+           AND file_size = 0 AND partial = 1
+           AND (file_path = '' OR file_path LIKE 'astra://%')
+         ORDER BY last_indexed_at DESC
+         LIMIT 1",
+    )?;
+    let scope = stmt
+        .query_row(params![agent.as_str(), session_id, next_scope], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(scope)
 }
