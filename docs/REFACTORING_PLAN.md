@@ -402,7 +402,7 @@ src-tauri/src/
   - [ ] `astra`
   - [ ] `runtime_agents`
   - [ ] `canvas`
-  - [ ] `snapshots`
+  - [x] `snapshots`
 
 **第 7 步: 最后再收窄 public trait**
 
@@ -683,6 +683,7 @@ src-tauri/src/
 | Workflow aggregation | ✅ | 已建立 `store/thread_replay.rs`、`store/sqlite/thread_index.rs`、`store/sqlite/plan_queries.rs` 与 `store/sqlite/thread_queries.rs`，迁出 thread replay 编排、thread index 聚合、plan round/task hydrate 查询、`load_thread_by_id()` 入口及 thread/stage/session hydrate |
 | Scheduled task persistence | ✅ | 已建立 `store/sqlite/scheduled_tasks.rs`，迁出 scheduled task/task run row 读取、列表查询、replace 写入、run 状态更新与 interrupted push cleanup |
 | Channel session persistence | ✅ | 已建立 `store/sqlite/channel_sessions.rs`，迁出 channel session row 读取、info 转换、active session 查询、upsert、activity 更新与结束标记 |
+| Snapshot persistence | ✅ | 已建立 `store/sqlite/snapshots.rs`，迁出 session history snapshot 读写和 thread work snapshot upsert/query |
 
 ### 6.2 当前焦点
 
