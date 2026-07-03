@@ -1,4 +1,5 @@
 pub mod cached;
+pub mod capabilities;
 mod session_rules;
 pub mod sqlite;
 mod thread_replay;
