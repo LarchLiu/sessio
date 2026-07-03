@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,7 @@ mod orchestrator;
 mod planner;
 mod prompt;
 mod runtime_agent_backend;
+mod runtime_limiter;
 mod structured_response;
 mod types;
 
@@ -47,6 +48,7 @@ use planner::next_dispatchable_tasks;
 use prompt::{
     build_plan_task_snapshot_context, build_stage_task_context, build_thread_assistant_task_context,
 };
+use runtime_limiter::RuntimeResourceLimiter;
 pub use types::{
     AstraHandle, AstraPlan, AstraRun, AstraRunStatus, AstraTaskProposal, AstraTaskResult,
     AstraTaskResultStatus, AstraTaskRisk,
@@ -184,88 +186,6 @@ struct OwnedAstraPlanTask {
 enum AstraWorkerState {
     Pending,
     Running,
-}
-
-struct RuntimeResourceLimiter {
-    active: Mutex<HashMap<Agent, usize>>,
-    waiters: Condvar,
-}
-
-impl RuntimeResourceLimiter {
-    fn new() -> Self {
-        Self {
-            active: Mutex::new(HashMap::new()),
-            waiters: Condvar::new(),
-        }
-    }
-
-    fn acquire(
-        &self,
-        agent: Agent,
-        queue_timeout: Duration,
-        mut is_still_active: impl FnMut() -> Result<bool>,
-    ) -> Result<Option<Agent>> {
-        let Some(limit) = delegated_runtime_limit(agent) else {
-            return Ok(None);
-        };
-        let queued_at = Instant::now();
-        let deadline = queued_at + queue_timeout;
-
-        loop {
-            if !is_still_active()? {
-                bail!(
-                    "Astra run is no longer active while waiting for {} runtime capacity",
-                    agent.as_str()
-                );
-            }
-
-            let mut active = self
-                .active
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Astra runtime limiter lock poisoned"))?;
-            let active_count = *active.get(&agent).unwrap_or(&0);
-            if active_count < limit {
-                active.insert(agent, active_count + 1);
-                return Ok(Some(agent));
-            }
-
-            let now = Instant::now();
-            if now >= deadline {
-                bail!(
-                    "Astra delegated runtime queue timed out after {}ms for {}",
-                    queue_timeout.as_millis(),
-                    agent.as_str()
-                );
-            }
-            let remaining = deadline.saturating_duration_since(now);
-            let (guard, _) = self
-                .waiters
-                .wait_timeout(active, remaining.min(Duration::from_millis(250)))
-                .map_err(|_| anyhow::anyhow!("Astra runtime limiter lock poisoned"))?;
-            drop(guard);
-        }
-    }
-
-    fn release(&self, agent: Agent) {
-        if delegated_runtime_limit(agent).is_none() {
-            return;
-        }
-        if let Ok(mut active) = self.active.lock() {
-            match active.get_mut(&agent) {
-                Some(count) if *count > 1 => *count -= 1,
-                Some(_) => {
-                    active.remove(&agent);
-                }
-                None => {}
-            }
-        }
-        self.waiters.notify_all();
-    }
-}
-
-fn delegated_runtime_limit(agent: Agent) -> Option<usize> {
-    let _ = agent;
-    None
 }
 
 fn delegated_attempt_id(plan_task_id: &str, attempt_count: u32) -> String {
