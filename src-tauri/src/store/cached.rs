@@ -11,7 +11,8 @@ use crate::models::{
     ThreadAgentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
 };
 use crate::store::{
-    is_real_session_file_path, AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord,
+    file_mtime_for, is_placeholder_indexed_session, is_real_session_file_path,
+    is_virtual_session_ref, now_ms, AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord,
     ChannelSessionRecord, IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound,
     NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord,
     RuntimeAgentSelection, RuntimeAgentSessionConfigRecord, ScheduledTaskRecord,
@@ -143,35 +144,6 @@ impl CachedStore {
         snap.by_pk.insert(key, rec);
         Ok(())
     }
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-fn file_mtime_for(file_path: &str) -> Option<i64> {
-    if file_path.is_empty() {
-        return None;
-    }
-    std::fs::metadata(file_path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_millis() as i64)
-        })
-}
-
-fn is_virtual_session_ref(value: &str) -> bool {
-    value.trim_start().starts_with("astra://")
-}
-
-fn is_placeholder_session(record: &IndexedSessionRecord) -> bool {
-    record.file_size == 0 && record.available
 }
 
 impl SessionStore for CachedStore {
@@ -1099,7 +1071,7 @@ impl SessionStore for CachedStore {
         for rec in snap.by_pk.values_mut() {
             if rec.agent == agent
                 && !present.contains(&rec.scope)
-                && !is_placeholder_session(rec)
+                && !is_placeholder_indexed_session(rec)
                 && !is_virtual_session_ref(&rec.scope)
                 && !is_virtual_session_ref(&rec.file_path)
             {

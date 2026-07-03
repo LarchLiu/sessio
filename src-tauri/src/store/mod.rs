@@ -1,5 +1,11 @@
 pub mod cached;
+mod session_rules;
 pub mod sqlite;
+
+pub(crate) use session_rules::{
+    file_mtime_for, is_placeholder_indexed_session, is_real_session_file_path,
+    is_virtual_session_ref, now_ms,
+};
 
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -1021,11 +1027,6 @@ pub(crate) fn insert_best_session(
     if replace {
         sessions.insert(key, session);
     }
-}
-
-pub(crate) fn is_real_session_file_path(file_path: &str) -> bool {
-    let trimmed = file_path.trim();
-    !trimmed.is_empty() && !trimmed.starts_with("astra://")
 }
 
 pub(crate) fn is_virtual_orchestrator_session_id(session_id: &str) -> bool {

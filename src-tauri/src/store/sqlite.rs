@@ -25,6 +25,7 @@ use crate::models::{
     ThreadAssistantInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
 };
 use crate::store::{
+    file_mtime_for, is_real_session_file_path, is_virtual_session_ref, now_ms,
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, AstraRunSessionRecord,
     ChannelSessionRecord, IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound,
     NewPlanTask, NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch,
@@ -899,13 +900,6 @@ const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, sta
 const ACTIVE_ASTRA_RUN_STATUS_SQL: &str =
     "'planning', 'thinking', 'awaiting_approval', 'dispatching', 'running'";
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 fn unique_nonce() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1711,10 +1705,6 @@ fn load_identity_session_rows(
     Ok(rows)
 }
 
-fn is_real_session_file_path(file_path: &str) -> bool {
-    !file_path.trim().is_empty() && !is_virtual_session_ref(file_path)
-}
-
 fn choose_identity_title(
     rows: &[ExistingSessionRow],
     incoming: &SessionInfo,
@@ -2314,20 +2304,6 @@ fn existing_placeholder_scope(
         })
         .optional()?;
     Ok(scope)
-}
-
-fn file_mtime_for(file_path: &str) -> Option<i64> {
-    if file_path.is_empty() {
-        return None;
-    }
-    std::fs::metadata(file_path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_millis() as i64)
-        })
 }
 
 fn opt_u64_to_i64(v: Option<u64>) -> Option<i64> {
@@ -9497,10 +9473,6 @@ impl SessionStore for SqliteStore {
         tx.commit()?;
         Ok(())
     }
-}
-
-fn is_virtual_session_ref(value: &str) -> bool {
-    value.trim_start().starts_with("astra://")
 }
 
 impl MemoryStore for SqliteStore {

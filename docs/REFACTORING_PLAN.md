@@ -350,11 +350,12 @@ src-tauri/src/
 **第 2 步: 抽公共规则，不改行为**
 
 - 从 `store/mod.rs`、`sqlite.rs`、`cached.rs` 抽出重复规则：
-  - `is_real_session_file_path`
-  - best-session 选择规则
-  - virtual session 判断
-  - `now_ms`
-  - `file_mtime_for`
+  - [x] `is_real_session_file_path`
+  - [ ] best-session 选择规则
+  - [x] virtual session 判断
+  - [x] placeholder indexed-session 判断
+  - [x] `now_ms`
+  - [x] `file_mtime_for`
 - 这一步的目标是消除重复实现，先统一行为，再拆模块。
 
 **第 3 步: 拆 schema / migration / seed**
@@ -676,12 +677,13 @@ src-tauri/src/
 | `state/` 拆分 | ⏳ | 已拆出 appshot shortcut 与 screenshot overlay 状态类型，后续可继续收窄状态操作方法 |
 | `window/` 拆分 | ⏳ | 已拆出 appearance 命令、系统主题 observer、主窗口 show/hide helper，窗口创建与 overlay 窗口流程仍在 `lib.rs` |
 | `CachedStore` 回归测试 | ✅ | 已覆盖 placeholder 替换、`replace_by_scope` subagent 保留、virtual session guard、astra cleanup snapshot refresh |
+| 公共 session 规则 | ⏳ | 已抽出 `session_rules.rs`，统一时间、文件 mtime、real/virtual session 与 placeholder indexed-session 判断；best-session 选择规则待收敛 |
 
 ### 6.2 当前焦点
 
 当前优先级按顺序是：
 
-1. 按阶段 2 第 2 步抽公共 session 规则，优先统一 `is_real_session_file_path`、virtual session 判断、`now_ms`、`file_mtime_for`。
+1. 继续阶段 2 第 2 步，收敛 best-session 选择规则，或进入 schema / migration / seed 拆分。
 2. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环。
 3. 后续再评估是否继续拆 screenshot overlay 窗口流程。
 
