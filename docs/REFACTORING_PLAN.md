@@ -710,12 +710,13 @@ src-tauri/src/
 | 阶段 4 首轮完成 | ✅ | 已完成 9 个高复用稳定 DTO 的生成与 `api.ts` 替换验证，满足阶段 4 先覆盖 5~10 个核心 DTO 的目标，暂不追求全量替换 |
 | Astra artifact/journal helper split | ✅ | 已建立 `astra/artifacts.rs`，迁出任务输出 artifact 路径/写入、planner completion JSON 与 teamwork round journal helper，`astra/mod.rs` 降至约 5k 行 |
 | Astra runtime limiter split | ✅ | 已建立 `astra/runtime_limiter.rs`，迁出 delegated runtime capacity acquire/release 与队列超时逻辑，保持 delegated dispatch 行为不变 |
+| Astra diagnostics split | ✅ | 已建立 `astra/diagnostics.rs`，迁出 run diagnostics cap、delegated lifecycle/dispatch diagnostics 与 session ref dedupe helper |
 
 ### 6.2 当前焦点
 
 当前优先级按顺序是：
 
-1. 继续阶段 5，优先拆分 `astra/mod.rs` 中可独立搬出的服务实现，下一步评估委派 session 记录/diagnostics 或 plan persistence helper 的边界。
+1. 继续阶段 5，优先拆分 `astra/mod.rs` 中可独立搬出的服务实现，下一步评估委派 session 记录或 plan persistence helper 的边界。
 2. 后续再评估 `claude/parser.rs` 与 `codex/parser.rs` 的共享解析逻辑抽取。
 3. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环；若后续涉及前端类型或 invoke 面，同步执行前端 check/build。
 

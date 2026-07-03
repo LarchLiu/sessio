@@ -13,7 +13,7 @@ use crate::agents::runtime::types::{
     AgentInput, AgentRuntimeEvent, AgentRuntimeEventPayload, AgentSessionHandle, RuntimeMetadata,
     StartAgentSession,
 };
-use crate::agents::runtime::{RuntimeCleanupReport, RuntimeManager};
+use crate::agents::runtime::RuntimeManager;
 use crate::mcp::SELECTED_MCP_IDS_OPTION;
 use crate::models::{
     Agent, AgentInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
@@ -32,6 +32,7 @@ mod brainstorm_facilitator;
 mod debate_backend;
 mod debate_judge;
 mod deterministic_backend;
+mod diagnostics;
 mod orchestration_response;
 mod orchestrator;
 mod planner;
@@ -41,6 +42,10 @@ mod runtime_limiter;
 mod structured_response;
 mod types;
 
+use diagnostics::{
+    delegated_dispatch_diagnostic, delegated_dispatch_error_code, delegated_lifecycle_diagnostic,
+    delegated_runtime_cleanup_diagnostics, trim_astra_run_diagnostics,
+};
 use orchestrator::{
     dedicated_backend_required_error, push_internal_planner_session_id, RustNativeWorkerOutcome,
 };
@@ -58,18 +63,11 @@ pub(crate) use types::{AstraOrchestration, AstraRunIntent, AstraTaskCompletion};
 pub const ASTRA_EVENT_NAME: &str = "astra-run-event";
 const RUST_NATIVE_ROUND_LIMIT: u32 = 12;
 const ASTRA_ORCHESTRATOR_TIMEOUT_MS: u64 = 300_000;
-const MAX_ASTRA_RUN_DIAGNOSTICS: usize = 100;
 const ASTRA_DELEGATED_QUEUE_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const ASTRA_RUNTIME_STARTUP_TIMEOUT_MS: u64 = 60_000;
 const ASTRA_DELEGATED_STARTUP_TIMEOUT_MS: u64 = ASTRA_RUNTIME_STARTUP_TIMEOUT_MS;
 const ASTRA_DELEGATED_EXECUTION_TIMEOUT_MS: u64 = 60 * 60 * 1_000;
 pub(crate) const ASTRA_RUNTIME_CLEANUP_TIMEOUT_MS: u64 = 5_000;
-
-fn trim_astra_run_diagnostics(values: &mut Vec<Value>) {
-    if values.len() > MAX_ASTRA_RUN_DIAGNOSTICS {
-        values.drain(0..values.len() - MAX_ASTRA_RUN_DIAGNOSTICS);
-    }
-}
 
 fn validate_astra_tasks_for_thread(thread: &ThreadInfo, tasks: &[AstraTaskProposal]) -> Result<()> {
     if thread.kind == ThreadKind::Process {
@@ -2086,125 +2084,6 @@ fn is_internal_planner_metadata(metadata: &RuntimeMetadata) -> bool {
         )
 }
 
-fn delegated_lifecycle_diagnostic(
-    code: &str,
-    task_id: &str,
-    live_runtime_session_id: &str,
-    session_id: Option<&str>,
-    attempt_count: u32,
-    message: &str,
-) -> Value {
-    json!({
-        "kind": "delegated_task_lifecycle",
-        "code": code,
-        "taskId": task_id,
-        "liveRuntimeSessionId": live_runtime_session_id,
-        "sessionId": session_id,
-        "attemptCount": attempt_count,
-        "message": message,
-        "timestamp": now_ms(),
-    })
-}
-
-fn delegated_dispatch_diagnostic(
-    code: &str,
-    task_id: &str,
-    attempt_count: u32,
-    message: &str,
-) -> Value {
-    json!({
-        "kind": "delegated_task_lifecycle",
-        "code": code,
-        "taskId": task_id,
-        "liveRuntimeSessionId": Value::Null,
-        "sessionId": Value::Null,
-        "attemptCount": attempt_count,
-        "message": message,
-        "timestamp": now_ms(),
-    })
-}
-
-fn delegated_dispatch_error_code(message: &str) -> &'static str {
-    if message.contains("runtime queue timed out") {
-        "queue_timeout"
-    } else if message.contains("no longer active") {
-        "dispatch_cancelled"
-    } else {
-        "dispatch_failed"
-    }
-}
-
-fn delegated_runtime_cleanup_diagnostics(
-    report: &RuntimeCleanupReport,
-    task_id: &str,
-    live_runtime_session_id: &str,
-    session_id: Option<&str>,
-    attempt_count: u32,
-) -> Vec<Value> {
-    let mut diagnostics = Vec::new();
-    if let Some(message) = report.cancel_error.as_deref() {
-        diagnostics.push(delegated_lifecycle_diagnostic(
-            "runtime_cancel_failed",
-            task_id,
-            live_runtime_session_id,
-            session_id,
-            attempt_count,
-            message,
-        ));
-    }
-    if let Some(message) = report.dispose_error.as_deref() {
-        diagnostics.push(delegated_lifecycle_diagnostic(
-            "runtime_dispose_failed",
-            task_id,
-            live_runtime_session_id,
-            session_id,
-            attempt_count,
-            message,
-        ));
-    }
-    if report.timed_out {
-        diagnostics.push(delegated_lifecycle_diagnostic(
-            "runtime_cleanup_timed_out",
-            task_id,
-            live_runtime_session_id,
-            session_id,
-            attempt_count,
-            &format!(
-                "runtime cleanup exceeded {}ms",
-                ASTRA_RUNTIME_CLEANUP_TIMEOUT_MS
-            ),
-        ));
-    }
-    if report.force_detached {
-        diagnostics.push(delegated_lifecycle_diagnostic(
-            "runtime_force_detached",
-            task_id,
-            live_runtime_session_id,
-            session_id,
-            attempt_count,
-            "runtime session was detached from Astra coordination after cancellation; ACP worker termination is best-effort",
-        ));
-    }
-    diagnostics
-}
-
-fn dedupe_session_ref_values(values: Vec<Value>) -> Vec<Value> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for value in values {
-        let Some(agent) = value.get("agent").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(session_id) = value.get("sessionId").and_then(Value::as_str) else {
-            continue;
-        };
-        if seen.insert(format!("{agent}:{session_id}")) {
-            out.push(value);
-        }
-    }
-    out
-}
-
 pub(crate) fn stage_label(stage: &crate::models::StageInfo) -> String {
     stage
         .name
@@ -3048,8 +2927,14 @@ mod tests {
         TEAMWORK_JOURNAL_TASK_EXCERPT_CHAR_LIMIT, TEAMWORK_PLANNER_OUTPUT_CHAR_LIMIT,
         TEAMWORK_ROUND_JOURNAL_KIND,
     };
+    use super::diagnostics::{
+        delegated_dispatch_diagnostic, delegated_lifecycle_diagnostic,
+        delegated_runtime_cleanup_diagnostics, trim_astra_run_diagnostics,
+        MAX_ASTRA_RUN_DIAGNOSTICS,
+    };
     use super::planner::deterministic_plan;
     use super::*;
+    use crate::agents::runtime::RuntimeCleanupReport;
     use crate::astra::orchestrator::mark_process_manual_checkpoint_in_store;
     use crate::models::{
         AssistantAgentInfo, AssistantType, IssueSeverity, IssueStatus, StageAssistantInfo,

@@ -1,9 +1,10 @@
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::diagnostics::dedupe_session_ref_values;
 use super::{
-    dedupe_session_ref_values, pick_stage_agent, short_hash, stage_label, status_label, AstraRun,
-    AstraTaskCompletion, AstraTaskProposal, StageTaskContext,
+    pick_stage_agent, short_hash, stage_label, status_label, AstraRun, AstraTaskCompletion,
+    AstraTaskProposal, StageTaskContext,
 };
 use crate::models::{IssueStatus, SessionInfo, StageStatus, ThreadInfo, ThreadKind};
 use crate::prompt_markers::sessio_prompt_markers;
