@@ -361,11 +361,11 @@ src-tauri/src/
 **第 3 步: 拆 schema / migration / seed**
 
 - 把以下内容从 `sqlite.rs` 中移出：
-  - `SCHEMA_SESSIONS`
-  - `SCHEMA_MEMORY`
-  - `SCHEMA_APP`
-  - `initialize_schema()`
-  - `ensure_column()`
+  - [ ] `SCHEMA_SESSIONS`
+  - [ ] `SCHEMA_MEMORY`
+  - [ ] `SCHEMA_APP`
+  - [ ] `initialize_schema()`
+  - [x] `ensure_column()`
   - builtin seeds 相关逻辑
 - 这是最适合先落刀的一层，因为对上层业务行为影响最小。
 
@@ -678,6 +678,7 @@ src-tauri/src/
 | `window/` 拆分 | ⏳ | 已拆出 appearance 命令、系统主题 observer、主窗口 show/hide helper，窗口创建与 overlay 窗口流程仍在 `lib.rs` |
 | `CachedStore` 回归测试 | ✅ | 已覆盖 placeholder 替换、`replace_by_scope` subagent 保留、virtual session guard、astra cleanup snapshot refresh |
 | 公共 session 规则 | ✅ | 已抽出 `session_rules.rs`，统一时间、文件 mtime、real/virtual session、placeholder indexed-session 与 best-session 选择规则 |
+| SQLite schema/bootstrap | ⏳ | 已建立 `store/sqlite/schema.rs` 并迁出 `ensure_column()`；schema SQL 与 seed 逻辑仍待拆分 |
 
 ### 6.2 当前焦点
 

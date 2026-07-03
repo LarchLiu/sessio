@@ -35,6 +35,8 @@ use crate::store::{
     SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK,
 };
 
+mod schema;
+
 pub struct SqliteStore {
     conn: Mutex<Connection>,
 }
@@ -922,31 +924,19 @@ fn unique_suffix() -> String {
     unique_nonce()
 }
 
-fn ensure_column(conn: &Connection, table: &str, column: &str, alter_sql: &str) -> Result<()> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for existing in columns {
-        if existing? == column {
-            return Ok(());
-        }
-    }
-    conn.execute(alter_sql, [])?;
-    Ok(())
-}
-
 fn initialize_schema(conn: &Connection) -> Result<()> {
     conn.execute("DROP TABLE IF EXISTS canvas_shape_refs", [])?;
     conn.execute("DROP TABLE IF EXISTS canvas_context_anchors", [])?;
     conn.execute_batch(SCHEMA_SESSIONS)?;
     conn.execute_batch(SCHEMA_MEMORY)?;
     conn.execute_batch(SCHEMA_APP)?;
-    ensure_column(
+    schema::ensure_column(
         conn,
         "assistants",
         "selected_skill_ids_json",
         "ALTER TABLE assistants ADD COLUMN selected_skill_ids_json TEXT NOT NULL DEFAULT '[]'",
     )?;
-    ensure_column(
+    schema::ensure_column(
         conn,
         "assistants",
         "selected_mcp_ids_json",
