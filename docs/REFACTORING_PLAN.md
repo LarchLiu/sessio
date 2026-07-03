@@ -396,7 +396,7 @@ src-tauri/src/
   - [x] `channel_sessions`
   - [x] `projects`
   - [x] `assistants`
-  - [ ] `threads`
+  - [x] `threads`
   - [ ] `stages`
   - [x] `plans`
   - [x] `astra`
@@ -690,6 +690,7 @@ src-tauri/src/
 | Astra persistence | ✅ | 已建立 `store/sqlite/astra.rs`，迁出 Astra config、run、run session、active-run recovery 与 partial session cleanup 持久化逻辑 |
 | Project persistence | ✅ | 已建立 `store/sqlite/projects.rs`，迁出 project row 读取、路径/名称规范化、list/add/create/update/archive 持久化入口 |
 | Assistant persistence | ✅ | 已建立 `store/sqlite/assistants.rs`，迁出 assistant row 读取、skill/MCP ID 规范化、list/create/update/delete 持久化入口 |
+| Thread persistence | ✅ | 已建立 `store/sqlite/threads.rs`，迁出 thread list/create/update/delete、assistant binding 与 agent participant 持久化逻辑 |
 
 ### 6.2 当前焦点
 
