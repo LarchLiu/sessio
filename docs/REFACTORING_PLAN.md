@@ -342,10 +342,10 @@ src-tauri/src/
 **第 1 步: 先补 cache 回归测试**
 
 - 为 `CachedStore` 增补以下场景测试：
-  - placeholder 被 real row 替换
-  - `replace_by_scope` 后 subagent 保留
-  - `mark_missing_scopes_unavailable` 不误伤 virtual session
-  - astra placeholder cleanup 后 snapshot 刷新
+  - [x] placeholder 被 real row 替换
+  - [x] `replace_by_scope` 后 subagent 保留
+  - [x] `mark_missing_scopes_unavailable` 不误伤 virtual session
+  - [x] astra placeholder cleanup 后 snapshot 刷新
 
 **第 2 步: 抽公共规则，不改行为**
 
@@ -675,14 +675,15 @@ src-tauri/src/
 | `generate_handler![]` 收敛 | ⏳ | 首批迁移命令已改用 `commands::*` 模块路径注册，整体注册仍集中在 `lib.rs` |
 | `state/` 拆分 | ⏳ | 已拆出 appshot shortcut 与 screenshot overlay 状态类型，后续可继续收窄状态操作方法 |
 | `window/` 拆分 | ⏳ | 已拆出 appearance 命令、系统主题 observer、主窗口 show/hide helper，窗口创建与 overlay 窗口流程仍在 `lib.rs` |
+| `CachedStore` 回归测试 | ✅ | 已覆盖 placeholder 替换、`replace_by_scope` subagent 保留、virtual session guard、astra cleanup snapshot refresh |
 
 ### 6.2 当前焦点
 
 当前优先级按顺序是：
 
-1. 评估是否继续拆 screenshot overlay 窗口流程，或先按阶段 2 计划补 `CachedStore` 回归测试。
+1. 按阶段 2 第 2 步抽公共 session 规则，优先统一 `is_real_session_file_path`、virtual session 判断、`now_ms`、`file_mtime_for`。
 2. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环。
-3. 在阶段 1 满足退出条件后，再并行推进 `store/sqlite.rs` 的边界重构。
+3. 后续再评估是否继续拆 screenshot overlay 窗口流程。
 
 ---
 

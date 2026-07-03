@@ -1202,6 +1202,156 @@ mod tests {
         std::env::temp_dir().join(format!("{prefix}-{}-{}.db", std::process::id(), now_ms()))
     }
 
+    fn test_session(id: &str, file_path: &str, file_size: u64) -> SessionInfo {
+        SessionInfo {
+            id: id.to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some("/tmp/project".to_string()),
+            project_name: Some("project".to_string()),
+            started_at: Some(10),
+            updated_at: Some(20),
+            message_count: 1,
+            rename_title: Some(format!("Session {id}")),
+            title: None,
+            first_user_message: Some("hello".to_string()),
+            file_path: file_path.to_string(),
+            file_size,
+            partial: file_size == 0,
+            available: true,
+            archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
+            subagents: Vec::new(),
+        }
+    }
+
+    fn test_subagent(id: &str, file_path: &str) -> SubagentInfo {
+        SubagentInfo {
+            id: id.to_string(),
+            agent_type: Some("research".to_string()),
+            description: Some("Research helper".to_string()),
+            started_at: Some(11),
+            updated_at: Some(21),
+            message_count: 2,
+            first_user_message: Some("subtask".to_string()),
+            file_path: file_path.to_string(),
+            file_size: 17,
+            partial: false,
+            available: true,
+        }
+    }
+
+    #[test]
+    fn cached_store_replaces_placeholder_with_real_row() {
+        let path = unique_db("sessio-cached-placeholder-real-row");
+        let sqlite = Arc::new(SqliteStore::open(&path).unwrap());
+        sqlite.init().unwrap();
+        let store = CachedStore::new(sqlite).unwrap();
+
+        let placeholder = test_session("session-1", "", 0);
+        let real_path = "/tmp/project/session-1.jsonl";
+        let mut real = test_session("session-1", real_path, 42);
+        real.partial = false;
+
+        store.upsert_session("", &placeholder).unwrap();
+        store.upsert_session(real_path, &real).unwrap();
+
+        let rows: Vec<_> = store
+            .list_indexed_sessions()
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.agent == Agent::Codex && row.session_id == "session-1")
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].scope, real_path);
+        assert_eq!(rows[0].file_path, real_path);
+        assert_eq!(rows[0].file_size, 42);
+        assert!(rows[0].available);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cached_store_replace_by_scope_preserves_subagents() {
+        let path = unique_db("sessio-cached-replace-subagents");
+        let sqlite = Arc::new(SqliteStore::open(&path).unwrap());
+        sqlite.init().unwrap();
+        let store = CachedStore::new(sqlite).unwrap();
+
+        let scope = "/tmp/project/session-parent.jsonl";
+        let session = test_session("parent", scope, 20);
+        let subagent = test_subagent("subagent-1", "/tmp/project/subagent-1.jsonl");
+
+        store.upsert_session(scope, &session).unwrap();
+        store
+            .upsert_subagent(Agent::Codex, scope, "parent", &subagent)
+            .unwrap();
+
+        let replacement = SessionInfo {
+            file_size: 99,
+            updated_at: Some(30),
+            ..session.clone()
+        };
+        store
+            .replace_by_scope(scope, Agent::Codex, &[replacement])
+            .unwrap();
+
+        let row = store
+            .list_indexed_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.agent == Agent::Codex && row.session_id == "parent")
+            .unwrap();
+        assert_eq!(row.file_size, 99);
+        assert_eq!(row.subagents.len(), 1);
+        assert_eq!(row.subagents[0].subagent_id, "subagent-1");
+        assert_eq!(row.subagents[0].file_path, "/tmp/project/subagent-1.jsonl");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cached_store_cleanup_partial_astra_sessions_refreshes_snapshot() {
+        let path = unique_db("sessio-cached-astra-cleanup-refresh");
+        let sqlite = Arc::new(SqliteStore::open(&path).unwrap());
+        sqlite.init().unwrap();
+        let store = CachedStore::new(sqlite).unwrap();
+
+        let placeholder = test_session("astra-placeholder", "", 0);
+        let real = test_session("astra-real", "/tmp/project/astra-real.jsonl", 42);
+        store.upsert_session("", &placeholder).unwrap();
+        store
+            .upsert_session("/tmp/project/astra-real.jsonl", &real)
+            .unwrap();
+
+        let changed = store
+            .cleanup_partial_astra_sessions(&[
+                "astra-placeholder".to_string(),
+                "astra-real".to_string(),
+            ])
+            .unwrap();
+        assert_eq!(changed, 1);
+
+        let rows = store.list_indexed_sessions().unwrap();
+        let placeholder = rows
+            .iter()
+            .find(|row| row.session_id == "astra-placeholder")
+            .unwrap();
+        let real = rows
+            .iter()
+            .find(|row| row.session_id == "astra-real")
+            .unwrap();
+        assert!(!placeholder.available);
+        assert!(placeholder.archived);
+        assert!(real.available);
+        assert!(!real.archived);
+
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn cached_store_preserves_virtual_sessions_when_scopes_disappear() {
         let path = unique_db("sessio-cached-astra-virtual-scope");
