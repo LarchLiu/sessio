@@ -1,7 +1,7 @@
 # Sessio 架构重构总方案
 
 **最后更新**: 2026-07-03  
-**当前状态**: 阶段 1 首批薄命令模块、初始 `state/` / `window/` 拆分已落地；阶段 2 正在拆分 SQLite schema/bootstrap
+**当前状态**: 阶段 1 首批薄命令模块、初始 `state/` / `window/` 拆分已落地；阶段 2 已拆出 SQLite schema 与 seed 初始模块
 **本文档角色**: 唯一的重构主文档，统一记录现状、方案、实施计划和进度
 
 ---
@@ -24,7 +24,7 @@
 | 文件 | 当前行数 | 说明 |
 |------|----------|------|
 | `src-tauri/src/lib.rs` | 9,076 | 仍然是主重构对象，首批薄命令、初始状态类型和初始窗口 helper 已迁出 |
-| `src-tauri/src/store/sqlite.rs` | 14,381 | 最大的单文件风险点，schema SQL 已迁出 |
+| `src-tauri/src/store/sqlite.rs` | 13,710 | 最大的单文件风险点，schema SQL 与 seed 逻辑已初步迁出 |
 | `src-tauri/src/store/mod.rs` | 1,104 | `SessionStore` 过大且混入默认业务逻辑 |
 | `src-tauri/src/config.rs` | 1,839 | 含配置恢复与兼容解析逻辑 |
 | `src/api.ts` | 2,970 | 前端手写类型很多 |
@@ -366,7 +366,7 @@ src-tauri/src/
   - [x] `SCHEMA_APP`
   - [ ] `initialize_schema()`
   - [x] `ensure_column()`
-  - builtin seeds 相关逻辑
+  - [x] builtin seeds 相关逻辑
 - 这是最适合先落刀的一层，因为对上层业务行为影响最小。
 
 **第 4 步: 拆 session identity 子系统**
@@ -678,7 +678,7 @@ src-tauri/src/
 | `window/` 拆分 | ⏳ | 已拆出 appearance 命令、系统主题 observer、主窗口 show/hide helper，窗口创建与 overlay 窗口流程仍在 `lib.rs` |
 | `CachedStore` 回归测试 | ✅ | 已覆盖 placeholder 替换、`replace_by_scope` subagent 保留、virtual session guard、astra cleanup snapshot refresh |
 | 公共 session 规则 | ✅ | 已抽出 `session_rules.rs`，统一时间、文件 mtime、real/virtual session、placeholder indexed-session 与 best-session 选择规则 |
-| SQLite schema/bootstrap | ⏳ | 已建立 `store/sqlite/schema.rs`，迁出 schema SQL、base schema 初始化与 `ensure_column()`；seed 逻辑仍待拆分 |
+| SQLite schema/bootstrap | ⏳ | 已建立 `store/sqlite/schema.rs` 与 `store/sqlite/seed.rs`，迁出 schema SQL、base schema 初始化、`ensure_column()` 与 builtin seed 逻辑 |
 
 ### 6.2 当前焦点
 
