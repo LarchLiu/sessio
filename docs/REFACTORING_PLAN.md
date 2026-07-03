@@ -707,14 +707,15 @@ src-tauri/src/
 | 阶段 3 完成标准 | ✅ | Config 已完成 parser/resolver/defaults/recovery/serializer 分层，主入口降至 1k 行以内，关键兼容测试覆盖已落地，首批 2 个简单 section 已接入 TOML/serde adapter |
 | 首批 ts-rs 类型同步 | ✅ | 已为 `Agent`、`ProcessTemplateType`、`ProcessTemplateInfo`、`ProjectInfo` 接入 `ts-rs`，生成 `src/bindings/*` 并替换 `api.ts` 对应手写类型 |
 | 第二批 ts-rs 类型同步 | ✅ | 已继续为 `AgentType`、`AstraConfig`、`AgentCommandsInfo`、`RuntimeAgentOptionMetadata`、`AgentAiProviderInfo` 接入生成类型，阶段 4 首批覆盖达到 9 个 DTO |
+| 阶段 4 首轮完成 | ✅ | 已完成 9 个高复用稳定 DTO 的生成与 `api.ts` 替换验证，满足阶段 4 先覆盖 5~10 个核心 DTO 的目标，暂不追求全量替换 |
 
 ### 6.2 当前焦点
 
 当前优先级按顺序是：
 
-1. 继续阶段 4，优先从 `models.rs` 中选择下一组高复用、低 churn 的共享 DTO 接入 `ts-rs`。
-2. 每批只替换 `api.ts` 中已由生成文件覆盖的手写类型，保持生成类型数量与前端替换范围同步增长。
-3. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环；若阶段 4 涉及前端类型或 invoke 面，同步执行前端 check/build。
+1. 进入阶段 5，优先评估并拆分 `astra/mod.rs` 中可独立搬出的服务实现。
+2. 后续再评估 `claude/parser.rs` 与 `codex/parser.rs` 的共享解析逻辑抽取。
+3. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环；若后续涉及前端类型或 invoke 面，同步执行前端 check/build。
 
 ---
 
