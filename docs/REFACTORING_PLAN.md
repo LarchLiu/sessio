@@ -702,6 +702,7 @@ src-tauri/src/
 | Config serializer split | ✅ | 已建立 `config/serializer.rs`，迁出 `serialize_app_config()`、各 section serializer 与 TOML string/array helper |
 | Config resolver split | ✅ | 已建立 `config/resolver.rs`，迁出 raw 到 runtime config 的 resolve 逻辑、MCP/computer_use 兼容归一化与 memory env override |
 | Config recovery split | ✅ | 已建立 `config/recovery.rs`，迁出 invalid config fallback、recovery notice 状态与错误行提取 helper |
+| Config typed raw defaults | ✅ | `raw_config_with_defaults()` 已改为直接构造 typed raw defaults，不再通过默认配置序列化后反解析来补全 |
 
 ### 6.2 当前焦点
 
