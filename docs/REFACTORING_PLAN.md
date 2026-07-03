@@ -401,7 +401,7 @@ src-tauri/src/
   - [ ] `plans`
   - [ ] `astra`
   - [x] `runtime_agents`
-  - [ ] `canvas`
+  - [x] `canvas`
   - [x] `snapshots`
 
 **第 7 步: 最后再收窄 public trait**
@@ -685,6 +685,7 @@ src-tauri/src/
 | Channel session persistence | ✅ | 已建立 `store/sqlite/channel_sessions.rs`，迁出 channel session row 读取、info 转换、active session 查询、upsert、activity 更新与结束标记 |
 | Snapshot persistence | ✅ | 已建立 `store/sqlite/snapshots.rs`，迁出 session history snapshot 读写和 thread work snapshot upsert/query |
 | Runtime agent persistence | ✅ | 已建立 `store/sqlite/runtime_agents.rs`，迁出 runtime agent selection、capability 与 session config 的读写逻辑 |
+| Canvas persistence | ✅ | 已建立 `store/sqlite/canvas.rs`，迁出 canvas document/revision/block/context anchor 的 ID、row mapper、读写与 pruning 逻辑 |
 
 ### 6.2 当前焦点
 
