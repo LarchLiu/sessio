@@ -177,12 +177,14 @@ pub(super) fn build_astra_orchestration_prompt(
     let completed_tasks = if thread.kind == ThreadKind::Teamwork {
         completions
             .iter()
-            .map(|completion| super::planner_task_completion_value(&run.run_id, completion))
+            .map(|completion| {
+                super::artifacts::planner_task_completion_value(&run.run_id, completion)
+            })
             .collect::<Vec<_>>()
     } else {
         completions
             .iter()
-            .map(super::filtered_task_completion_value)
+            .map(super::artifacts::filtered_task_completion_value)
             .collect::<Vec<_>>()
     };
 
@@ -207,7 +209,7 @@ pub(super) fn build_astra_orchestration_prompt(
         if let Some(record) = body.as_object_mut() {
             record.insert(
                 "previousRounds".to_string(),
-                Value::Array(super::previous_rounds_from_diagnostics(
+                Value::Array(super::artifacts::previous_rounds_from_diagnostics(
                     &run.run_diagnostics,
                     round_index,
                 )),
@@ -1631,14 +1633,14 @@ mod tests {
                 "code": "timeout",
             }),
             json!({
-                "kind": crate::astra::TEAMWORK_ROUND_JOURNAL_KIND,
+                "kind": super::super::artifacts::TEAMWORK_ROUND_JOURNAL_KIND,
                 "roundIndex": 0,
                 "plannerSummary": "第 1 轮：完成需求分析。",
                 "tasks": [{ "title": "需求分析", "status": "completed" }],
                 "recordedAt": 1,
             }),
             json!({
-                "kind": crate::astra::TEAMWORK_ROUND_JOURNAL_KIND,
+                "kind": super::super::artifacts::TEAMWORK_ROUND_JOURNAL_KIND,
                 "roundIndex": 1,
                 "plannerSummary": "第 2 轮：实现核心接口。",
                 "tasks": [],

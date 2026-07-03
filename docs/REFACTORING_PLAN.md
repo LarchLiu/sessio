@@ -1,7 +1,7 @@
 # Sessio 架构重构总方案
 
 **最后更新**: 2026-07-04
-**当前状态**: 阶段 1 首批薄命令模块、初始 `state/` / `window/` 拆分已落地；阶段 2 已完成 SQLite schema/bootstrap/seed、session identity、workflow aggregation、主要 domain persistence、`SessionStore` 默认编排收窄与首批命令层能力接口拆分；当前焦点进入阶段 3 配置管理收敛
+**当前状态**: 阶段 1 首批薄命令模块、初始 `state/` / `window/` 拆分已落地；阶段 2 已完成 SQLite schema/bootstrap/seed、session identity、workflow aggregation、主要 domain persistence、`SessionStore` 默认编排收窄与首批命令层能力接口拆分；阶段 3 配置管理收敛与阶段 4 首轮类型同步已完成；当前焦点进入阶段 5 后续优化
 **本文档角色**: 唯一的重构主文档，统一记录现状、方案、实施计划和进度
 
 ---
@@ -708,12 +708,13 @@ src-tauri/src/
 | 首批 ts-rs 类型同步 | ✅ | 已为 `Agent`、`ProcessTemplateType`、`ProcessTemplateInfo`、`ProjectInfo` 接入 `ts-rs`，生成 `src/bindings/*` 并替换 `api.ts` 对应手写类型 |
 | 第二批 ts-rs 类型同步 | ✅ | 已继续为 `AgentType`、`AstraConfig`、`AgentCommandsInfo`、`RuntimeAgentOptionMetadata`、`AgentAiProviderInfo` 接入生成类型，阶段 4 首批覆盖达到 9 个 DTO |
 | 阶段 4 首轮完成 | ✅ | 已完成 9 个高复用稳定 DTO 的生成与 `api.ts` 替换验证，满足阶段 4 先覆盖 5~10 个核心 DTO 的目标，暂不追求全量替换 |
+| Astra artifact/journal helper split | ✅ | 已建立 `astra/artifacts.rs`，迁出任务输出 artifact 路径/写入、planner completion JSON 与 teamwork round journal helper，`astra/mod.rs` 降至约 5k 行 |
 
 ### 6.2 当前焦点
 
 当前优先级按顺序是：
 
-1. 进入阶段 5，优先评估并拆分 `astra/mod.rs` 中可独立搬出的服务实现。
+1. 继续阶段 5，优先拆分 `astra/mod.rs` 中可独立搬出的服务实现，下一步评估运行状态/委派 session 或 diagnostics 相关 helper 的边界。
 2. 后续再评估 `claude/parser.rs` 与 `codex/parser.rs` 的共享解析逻辑抽取。
 3. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环；若后续涉及前端类型或 invoke 面，同步执行前端 check/build。
 

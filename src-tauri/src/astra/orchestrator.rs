@@ -98,7 +98,7 @@ impl AstraService {
                     .get_thread_work_state(&current_run.thread_id)?;
                 if latest_thread.kind == ThreadKind::Teamwork && !completions.is_empty() {
                     if let Some((journal_round_index, planner_summary)) = pending_journal.take() {
-                        let entry = super::teamwork_round_journal_entry(
+                        let entry = super::artifacts::teamwork_round_journal_entry(
                             &current_run.run_id,
                             journal_round_index,
                             &planner_summary,
@@ -182,7 +182,7 @@ impl AstraService {
             // Persist full outputs as workspace artifacts so later rounds can
             // read them on demand. Debate is skipped to preserve lane isolation.
             if matches!(thread.kind, ThreadKind::Teamwork | ThreadKind::Brainstorm) {
-                super::write_task_artifacts(
+                super::artifacts::write_task_artifacts(
                     &current_run.project_path,
                     &current_run.run_id,
                     &batch_completions,

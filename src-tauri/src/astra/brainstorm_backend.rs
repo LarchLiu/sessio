@@ -542,7 +542,7 @@ fn shared_board_value(
                 "title": completion.task.title,
                 "status": completion.result.status.as_str(),
                 "opinion": output,
-                "fullOutputPath": super::task_artifact_relative_path(&run.run_id, &completion.task.id),
+                "fullOutputPath": super::artifacts::task_artifact_relative_path(&run.run_id, &completion.task.id),
             })
         })
         .collect::<Vec<_>>();
