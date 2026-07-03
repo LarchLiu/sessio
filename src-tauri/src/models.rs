@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use ts_rs::TS;
 
 use crate::agents::runtime::types::{RuntimeCapabilitySet, RuntimeTransportKind};
 use crate::prompt_markers::sessio_prompt_markers;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub enum Agent {
     Pi,
     Codex,
@@ -166,8 +168,9 @@ pub struct SubagentInfo {
     pub available: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub enum ProcessTemplateType {
     Builtin,
     Custom,
@@ -190,26 +193,32 @@ impl ProcessTemplateType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub struct ProcessTemplateInfo {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
     #[serde(rename = "type")]
     pub process_template_type: ProcessTemplateType,
+    #[ts(type = "number")]
     pub created_at: i64,
+    #[ts(type = "number")]
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub struct ProjectInfo {
     pub id: String,
     pub path: String,
     pub name: String,
     pub process_template_id: String,
+    #[ts(type = "number")]
     pub created_at: i64,
+    #[ts(type = "number")]
     pub updated_at: i64,
     pub session_count: usize,
 }

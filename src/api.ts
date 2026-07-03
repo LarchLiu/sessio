@@ -11,8 +11,12 @@ import type {
   UpdateCanvasBlocksRequest,
   UpsertCanvasAnchorRequest,
 } from "./canvasTypes";
+import type { Agent as GeneratedAgent } from "./bindings/Agent";
+import type { ProcessTemplateInfo as GeneratedProcessTemplateInfo } from "./bindings/ProcessTemplateInfo";
+import type { ProcessTemplateType as GeneratedProcessTemplateType } from "./bindings/ProcessTemplateType";
+import type { ProjectInfo as GeneratedProjectInfo } from "./bindings/ProjectInfo";
 
-export type Agent = "pi" | "codex" | "claude" | "opencode";
+export type Agent = GeneratedAgent;
 
 /// Single source of truth for runtime agent ids. Keep in sync with the
 /// `Agent` enum on the Rust side. Adding a new agent here is the only TS
@@ -34,26 +38,11 @@ export function isAgent(value: unknown): value is Agent {
   return typeof value === "string" && (AGENTS as readonly string[]).includes(value);
 }
 
-export type ProcessTemplateType = "builtin" | "custom";
+export type ProcessTemplateType = GeneratedProcessTemplateType;
 
-export interface ProcessTemplateInfo {
-  id: string;
-  name: string;
-  description: string | null;
-  type: ProcessTemplateType;
-  createdAt: number;
-  updatedAt: number;
-}
+export type ProcessTemplateInfo = GeneratedProcessTemplateInfo;
 
-export interface ProjectInfo {
-  id: string;
-  path: string;
-  name: string;
-  processTemplateId: string;
-  createdAt: number;
-  updatedAt: number;
-  sessionCount: number;
-}
+export type ProjectInfo = GeneratedProjectInfo;
 
 export interface TerminalSessionInfo {
   id: string;
