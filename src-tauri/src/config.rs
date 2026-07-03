@@ -9,6 +9,7 @@ mod defaults;
 mod loader;
 mod parser;
 mod raw;
+mod recovery;
 mod resolver;
 mod serializer;
 
@@ -17,13 +18,12 @@ use defaults::{default_app_config, raw_config_with_defaults};
 #[cfg(test)]
 use loader::load_config_from_path;
 pub(crate) use loader::load_config_strict;
-pub use loader::{
-    load_config, load_memory_config, save_config, save_memory_config, take_config_recovery_notice,
-};
+pub use loader::{load_config, load_memory_config, save_config, save_memory_config};
 #[cfg(test)]
 use parser::parse_raw_config;
 #[cfg(test)]
 use raw::RawConfig;
+pub use recovery::take_config_recovery_notice;
 pub(in crate::config) use resolver::resolve_app_config;
 #[cfg(test)]
 use resolver::resolve_memory_config_inner;
