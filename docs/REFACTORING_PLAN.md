@@ -694,13 +694,14 @@ src-tauri/src/
 | Assistant persistence | ✅ | 已建立 `store/sqlite/assistants.rs`，迁出 assistant row 读取、skill/MCP ID 规范化、list/create/update/delete 持久化入口 |
 | Thread persistence | ✅ | 已建立 `store/sqlite/threads.rs`，迁出 thread list/create/update/delete、assistant binding 与 agent participant 持久化逻辑 |
 | Stage persistence | ✅ | 已建立 `store/sqlite/stages.rs`，迁出 project/process-template stage CRUD、thread-stage/session/issue 持久化、stage row 读取与 assistant binding |
+| Config characterization tests | ✅ | 已有配置测试覆盖 unknown section ignore、legacy `astra` ignore、invalid recovery notice、computer_use + builtin MCP 联合解析、默认补全与 roundtrip 序列化 |
 
 ### 6.2 当前焦点
 
 当前优先级按顺序是：
 
-1. 进入阶段 3 第 1 步，先补配置兼容行为 characterization tests。
-2. 配置测试钉稳后，再做 loader / parser / resolver / defaults / serializer 的纯搬运式模块拆分。
+1. 进入阶段 3 第 2 步，做 loader / parser / resolver / defaults / serializer 的纯搬运式模块拆分。
+2. 拆分过程中保持 `load_config()` / `load_config_strict()` / `save_config()` / `take_config_recovery_notice()` 外部 API 不变。
 3. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环。
 
 ---
