@@ -20,6 +20,7 @@ use crate::models::{
     PlanTaskSessionRole, ProcessTemplateInfo, ProcessTemplateType, ProjectInfo, ProjectStageInfo,
     RuntimeAgentOptionMetadata, SessionInfo, SessionOrigin, StageInfo, StageIssueInfo, StageStatus,
     SubagentInfo, ThreadAgentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
+    ThreadReplayInfo,
 };
 #[cfg(test)]
 use crate::models::{
@@ -1935,6 +1936,10 @@ impl SessionStore for SqliteStore {
     fn get_thread_work_state(&self, thread_id: &str) -> Result<ThreadInfo> {
         let conn = self.conn.lock().unwrap();
         load_thread_by_id(&conn, thread_id)
+    }
+
+    fn get_thread_replay(&self, thread_id: &str) -> Result<ThreadReplayInfo> {
+        super::thread_replay::get_thread_replay(self, thread_id)
     }
 
     fn create_thread(

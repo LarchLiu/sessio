@@ -8,7 +8,7 @@ use crate::models::{
     ChannelSessionInfo, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
     PlanTaskInfo, PlanTaskSessionInfo, PlanTaskSessionRole, ProcessTemplateInfo, ProjectInfo,
     ProjectStageInfo, SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo,
-    ThreadAgentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
+    ThreadAgentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin, ThreadReplayInfo,
 };
 use crate::store::{
     file_mtime_for, is_placeholder_indexed_session, is_real_session_file_path,
@@ -445,6 +445,10 @@ impl SessionStore for CachedStore {
 
     fn get_thread_work_state(&self, thread_id: &str) -> Result<ThreadInfo> {
         self.inner.get_thread_work_state(thread_id)
+    }
+
+    fn get_thread_replay(&self, thread_id: &str) -> Result<ThreadReplayInfo> {
+        self.inner.get_thread_replay(thread_id)
     }
 
     fn create_thread(

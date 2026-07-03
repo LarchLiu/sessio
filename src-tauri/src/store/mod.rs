@@ -464,9 +464,7 @@ pub trait SessionStore: Send + Sync {
     fn list_threads(&self, project_id: &str) -> Result<Vec<ThreadInfo>>;
     fn list_thread_index(&self, project_id: Option<&str>) -> Result<Vec<ThreadIndexItemInfo>>;
     fn get_thread_work_state(&self, thread_id: &str) -> Result<ThreadInfo>;
-    fn get_thread_replay(&self, thread_id: &str) -> Result<ThreadReplayInfo> {
-        thread_replay::get_thread_replay(self, thread_id)
-    }
+    fn get_thread_replay(&self, thread_id: &str) -> Result<ThreadReplayInfo>;
     fn create_thread(
         &self,
         project_id: &str,
@@ -481,18 +479,7 @@ pub trait SessionStore: Send + Sync {
         kind: ThreadKind,
         assistant_ids: &[String],
         agent_participants: &[crate::models::ThreadAgentInfo],
-    ) -> Result<ThreadInfo> {
-        self.create_thread_with_origin(
-            project_id,
-            goal,
-            description,
-            kind,
-            assistant_ids,
-            agent_participants,
-            ThreadOrigin::Manual,
-            None,
-        )
-    }
+    ) -> Result<ThreadInfo>;
     /// Full thread creation entry point — `create_thread_with_options` forwards
     /// here with `ThreadOrigin::Manual`. The scheduled-task path in
     /// `scheduled_tasks::start_thread_run` calls this directly with
@@ -507,16 +494,7 @@ pub trait SessionStore: Send + Sync {
         agent_participants: &[crate::models::ThreadAgentInfo],
         origin: ThreadOrigin,
         scheduled_task_id: Option<&str>,
-    ) -> Result<ThreadInfo> {
-        let _ = (
-            kind,
-            assistant_ids,
-            agent_participants,
-            origin,
-            scheduled_task_id,
-        );
-        self.create_thread(project_id, goal, description)
-    }
+    ) -> Result<ThreadInfo>;
     fn update_thread(
         &self,
         thread_id: &str,
@@ -534,10 +512,7 @@ pub trait SessionStore: Send + Sync {
         kind: Option<ThreadKind>,
         assistant_ids: Option<&[String]>,
         agent_participants: Option<&[crate::models::ThreadAgentInfo]>,
-    ) -> Result<ThreadInfo> {
-        let _ = (kind, assistant_ids, agent_participants);
-        self.update_thread(thread_id, goal, description, enabled)
-    }
+    ) -> Result<ThreadInfo>;
     fn delete_thread(&self, thread_id: &str) -> Result<()>;
     fn create_plan_round(&self, round: NewPlanRound<'_>) -> Result<PlanRoundInfo>;
     fn get_plan_round(&self, round_id: &str) -> Result<Option<PlanRoundInfo>>;
