@@ -1,0 +1,521 @@
+use anyhow::Result;
+use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
+
+use crate::models::{
+    AssistantAgentInfo, AssistantInfo, AssistantType, ProjectStageInfo, ProjectStageType,
+    StageAssistantInfo, StageType,
+};
+use crate::store::{now_ms, ProjectStagePatch};
+
+use super::assistants::load_assistant_by_id;
+use super::projects::load_project_by_id;
+use super::{ensure_process_template_exists, parse_string_array_json, usage_list};
+
+fn stable_project_stage_id(
+    process_template_id: Option<&str>,
+    project_id: Option<&str>,
+    stage_name: &str,
+    order: i64,
+    now: i64,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(process_template_id.unwrap_or("").as_bytes());
+    hasher.update(project_id.unwrap_or("").as_bytes());
+    hasher.update(stage_name.as_bytes());
+    hasher.update(order.to_string().as_bytes());
+    hasher.update(now.to_string().as_bytes());
+    format!("stage-{}", &hex::encode(hasher.finalize())[..16])
+}
+
+pub(super) fn project_stage_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ProjectStageInfo> {
+    let stage_type_raw: String = row.get(2)?;
+    let process_template_id_raw: Option<String> = row.get(3)?;
+    let stage_kind_raw: Option<String> = row.get(4)?;
+    Ok(ProjectStageInfo {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        stage_type: ProjectStageType::from_db_str(&stage_type_raw)
+            .unwrap_or(ProjectStageType::Custom),
+        process_template_id: process_template_id_raw,
+        kind: stage_kind_raw.and_then(|value| StageType::from_db_str(&value)),
+        name: row.get(5)?,
+        description: row.get(6)?,
+        icon: row.get(7)?,
+        order: row.get(8)?,
+        enabled: row.get::<_, i64>(9)? != 0,
+        allow_empty_assistants: row.get::<_, i64>(10)? != 0,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+        assistants: Vec::new(),
+    })
+}
+
+pub(super) fn load_project_stage_by_id(
+    conn: &Connection,
+    stage_id: &str,
+) -> Result<ProjectStageInfo> {
+    let mut stage = conn.query_row(
+        "SELECT id, project_id, type, process_template_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
+         FROM stages
+         WHERE id = ?",
+        params![stage_id],
+        project_stage_from_row,
+    )
+    .optional()?
+    .ok_or_else(|| anyhow::anyhow!("project stage not found: {stage_id}"))?;
+    stage.assistants = load_project_stage_assistants(conn, &stage.id)?;
+    Ok(stage)
+}
+
+fn validate_assistant_for_stage(
+    conn: &Connection,
+    stage: &ProjectStageInfo,
+    assistant_id: &str,
+) -> Result<AssistantInfo> {
+    let assistant = load_assistant_by_id(conn, assistant_id)?;
+    if !assistant.enabled {
+        anyhow::bail!("assistant is disabled");
+    }
+    if stage.project_id.is_some() && assistant.project_id == stage.project_id {
+        return Ok(assistant);
+    }
+    if stage.project_id.is_none()
+        && stage.process_template_id.is_some()
+        && assistant.project_id.is_none()
+        && assistant.process_template_id == stage.process_template_id
+    {
+        return Ok(assistant);
+    }
+    if stage.project_id.is_none()
+        && stage.process_template_id.is_some()
+        && assistant.project_id.is_none()
+        && assistant.process_template_id.is_none()
+        && assistant.assistant_type == AssistantType::Custom
+    {
+        return Ok(assistant);
+    }
+    anyhow::bail!("assistant is not available for this stage")
+}
+
+fn validate_assistants_for_stage(
+    conn: &Connection,
+    stage: &ProjectStageInfo,
+    assistant_ids: &[String],
+) -> Result<Vec<AssistantInfo>> {
+    let mut seen = HashSet::new();
+    let mut assistants = Vec::new();
+    for assistant_id in assistant_ids {
+        let assistant_id = assistant_id.trim();
+        if assistant_id.is_empty() || !seen.insert(assistant_id.to_string()) {
+            continue;
+        }
+        assistants.push(validate_assistant_for_stage(conn, stage, assistant_id)?);
+    }
+    Ok(assistants)
+}
+
+pub(super) fn ensure_project_stage_can_be_disabled(
+    conn: &Connection,
+    stage_id: &str,
+) -> Result<()> {
+    let stage = load_project_stage_by_id(conn, stage_id)?;
+    let project_id = stage.project_id.as_deref();
+    let thread_stage_usages = {
+        let mut stmt = conn.prepare(
+            "SELECT
+                COALESCE(p.name, 'Unknown'),
+                t.goal,
+                COALESCE(s.name, s.kind, s.id)
+             FROM thread_stages ts
+             INNER JOIN threads t ON t.id = ts.thread_id
+             INNER JOIN stages s ON s.id = ts.stage_id
+             LEFT JOIN projects p ON p.id = t.project_id
+             WHERE ts.stage_id = ?
+               AND ((? IS NULL AND t.project_id IS NULL) OR t.project_id = ?)
+             ORDER BY p.name COLLATE NOCASE ASC, t.updated_at DESC, ts.sort_order ASC",
+        )?;
+        let rows = stmt.query_map(params![stage_id, project_id, project_id], |row| {
+            let project_name: String = row.get(0)?;
+            let thread_goal: String = row.get(1)?;
+            let stage_name: String = row.get(2)?;
+            Ok(format!(
+                "project \"{project_name}\" thread \"{thread_goal}\" stage \"{stage_name}\""
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if !thread_stage_usages.is_empty() {
+        anyhow::bail!(
+            "stage is in use by {} thread stage(s); remove these stages from threads before disabling: {}",
+            thread_stage_usages.len(),
+            usage_list(&thread_stage_usages)
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn load_project_stage_assistants(
+    conn: &Connection,
+    stage_id: &str,
+) -> Result<Vec<StageAssistantInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT sa.assistant_id, a.name, a.color, a.agent_json, a.system_prompt, a.selected_skill_ids_json, a.selected_mcp_ids_json, sa.sort_order
+         FROM stage_assistants sa
+         INNER JOIN assistants a ON a.id = sa.assistant_id
+         WHERE sa.stage_id = ?
+         ORDER BY sa.sort_order ASC, sa.created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![stage_id], |row| {
+        let agent_json: String = row.get(3)?;
+        Ok(StageAssistantInfo {
+            assistant_id: row.get(0)?,
+            name: row.get(1)?,
+            color: row.get(2)?,
+            agent: serde_json::from_str::<AssistantAgentInfo>(&agent_json).unwrap_or_else(|_| {
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: String::new(),
+                    mode: String::new(),
+                    effort: String::new(),
+                }
+            }),
+            system_prompt: row.get(4)?,
+            selected_skill_ids: parse_string_array_json(&row.get::<_, String>(5)?),
+            selected_mcp_ids: parse_string_array_json(&row.get::<_, String>(6)?),
+            order: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn replace_project_stage_assistants(
+    conn: &Connection,
+    stage_id: &str,
+    assistants: &[AssistantInfo],
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM stage_assistants WHERE stage_id = ?",
+        params![stage_id],
+    )?;
+    for (index, assistant) in assistants.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO stage_assistants (stage_id, assistant_id, sort_order, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)",
+            params![stage_id, assistant.id, index as i64, now, now],
+        )?;
+    }
+    Ok(())
+}
+
+fn reorder_project_stage_scope(
+    conn: &Connection,
+    stage_id: &str,
+    process_template_id: &str,
+    project_id: Option<&str>,
+    target_order: i64,
+) -> Result<i64> {
+    let rows: Vec<(String, i64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, sort_order
+             FROM stages
+             WHERE process_template_id = ?
+               AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)
+             ORDER BY sort_order ASC, type ASC, project_id IS NOT NULL ASC, created_at ASC",
+        )?;
+        let rows = stmt.query_map(
+            params![process_template_id, project_id, project_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let Some(current_index) = rows.iter().position(|(id, _)| id == stage_id) else {
+        anyhow::bail!("project stage not found in reorder scope: {stage_id}");
+    };
+    let Some(target_index) = rows
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != current_index)
+        .find(|(_, (_, order))| *order == target_order)
+        .map(|(index, _)| index)
+    else {
+        return Ok(rows[current_index].1);
+    };
+    if current_index == target_index {
+        return Ok(rows[current_index].1);
+    }
+
+    let mut ids = rows.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    let id = ids.remove(current_index);
+    ids.insert(target_index, id);
+
+    for (index, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE stages SET sort_order = ? WHERE id = ?",
+            params![-((index as i64) + 1), id],
+        )?;
+    }
+    let mut next_order = 0;
+    for (index, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE stages SET sort_order = ? WHERE id = ?",
+            params![index as i64, id],
+        )?;
+        if id == stage_id {
+            next_order = index as i64;
+        }
+    }
+    Ok(next_order)
+}
+
+pub(super) fn list_project_stages(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<Vec<ProjectStageInfo>> {
+    load_project_by_id(conn, project_id)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, type, process_template_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
+         FROM stages
+         WHERE project_id = ?
+         ORDER BY sort_order ASC, type ASC, created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![project_id], project_stage_from_row)?;
+    let mut stages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    for stage in stages.iter_mut() {
+        stage.assistants = load_project_stage_assistants(conn, &stage.id)?;
+    }
+    Ok(stages)
+}
+
+pub(super) fn list_process_template_stages(
+    conn: &Connection,
+    process_template_id: &str,
+) -> Result<Vec<ProjectStageInfo>> {
+    ensure_process_template_exists(conn, process_template_id)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, type, process_template_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
+         FROM stages
+         WHERE project_id IS NULL AND process_template_id = ?
+         ORDER BY sort_order ASC, type ASC, created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![process_template_id], project_stage_from_row)?;
+    let mut stages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    for stage in stages.iter_mut() {
+        stage.assistants = load_project_stage_assistants(conn, &stage.id)?;
+    }
+    Ok(stages)
+}
+
+pub(super) fn create_project_stage(
+    conn: &Connection,
+    project_id: &str,
+    process_template_id: Option<String>,
+    name: &str,
+    description: Option<&str>,
+    icon: Option<&str>,
+) -> Result<ProjectStageInfo> {
+    let name = name.trim();
+    if name.is_empty() {
+        anyhow::bail!("project stage name cannot be empty");
+    }
+    let description = description.map(str::trim).filter(|value| !value.is_empty());
+    let icon = icon.map(str::trim).filter(|value| !value.is_empty());
+    let requested_process_template_id = process_template_id;
+    let project = if requested_process_template_id.is_none() {
+        Some(load_project_by_id(conn, project_id)?)
+    } else if project_id.trim().is_empty() {
+        None
+    } else {
+        Some(load_project_by_id(conn, project_id)?)
+    };
+    let resolved_process_template_id = requested_process_template_id
+        .as_deref()
+        .or_else(|| {
+            project
+                .as_ref()
+                .map(|project| project.process_template_id.as_str())
+        })
+        .ok_or_else(|| anyhow::anyhow!("project stage requires a project or process template"))?;
+    ensure_process_template_exists(conn, resolved_process_template_id)?;
+    let template_project_id = if requested_process_template_id.is_some() {
+        None
+    } else {
+        Some(project_id)
+    };
+    let next_order: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM stages
+             WHERE process_template_id = ?
+               AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)",
+            params![
+                resolved_process_template_id,
+                template_project_id,
+                template_project_id
+            ],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let now = now_ms();
+    let id = stable_project_stage_id(
+        Some(resolved_process_template_id),
+        template_project_id,
+        name,
+        next_order,
+        now,
+    );
+    conn.execute(
+        "INSERT INTO stages (id, project_id, type, process_template_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at)
+         VALUES (?, ?, 'custom', ?, NULL, ?, ?, ?, ?, 1, 0, ?, ?)",
+        params![
+            id,
+            template_project_id,
+            resolved_process_template_id,
+            name,
+            description,
+            icon,
+            next_order,
+            now,
+            now
+        ],
+    )?;
+    load_project_stage_by_id(conn, &id)
+}
+
+pub(super) fn update_project_stage(
+    conn: &mut Connection,
+    stage_id: &str,
+    patch: ProjectStagePatch<'_>,
+) -> Result<ProjectStageInfo> {
+    let ProjectStagePatch {
+        name,
+        description,
+        icon,
+        order,
+        enabled,
+        allow_empty_assistants,
+    } = patch;
+    let tx = conn.transaction()?;
+    let current = load_project_stage_by_id(&tx, stage_id)?;
+    if current.stage_type != ProjectStageType::Custom && (name.is_some() || description.is_some()) {
+        anyhow::bail!("builtin project stage details cannot be updated");
+    }
+    let Some(scope_process_template_id) = current.process_template_id else {
+        anyhow::bail!("project stage requires a process template");
+    };
+    let scope_project_id = current.project_id.as_deref();
+    let next_name = match name {
+        Some(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                anyhow::bail!("project stage name cannot be empty");
+            }
+            value.to_string()
+        }
+        None => current.name.unwrap_or_default(),
+    };
+    let next_description = match description {
+        Some(Some(value)) => {
+            if value.trim().is_empty() {
+                None
+            } else {
+                Some(value.trim().to_string())
+            }
+        }
+        Some(None) => None,
+        None => current.description,
+    };
+    let next_icon = match icon {
+        Some(Some(value)) => {
+            if value.trim().is_empty() {
+                None
+            } else {
+                Some(value.trim().to_string())
+            }
+        }
+        Some(None) => None,
+        None => current.icon,
+    };
+    let next_order = match order {
+        Some(target_order) if target_order != current.order => reorder_project_stage_scope(
+            &tx,
+            stage_id,
+            scope_process_template_id.as_str(),
+            scope_project_id,
+            target_order,
+        )?,
+        _ => current.order,
+    };
+    let next_enabled = enabled.unwrap_or(current.enabled);
+    if current.enabled && !next_enabled {
+        ensure_project_stage_can_be_disabled(&tx, stage_id)?;
+    }
+    let next_allow_empty_assistants =
+        allow_empty_assistants.unwrap_or(current.allow_empty_assistants);
+    let now = now_ms();
+    if current.stage_type == ProjectStageType::Custom {
+        tx.execute(
+            "UPDATE stages SET name = ?, description = ?, icon = ?, sort_order = ?, enabled = ?, allow_empty_assistants = ?, updated_at = ? WHERE id = ?",
+            params![
+                next_name,
+                next_description,
+                next_icon,
+                next_order,
+                next_enabled as i64,
+                next_allow_empty_assistants as i64,
+                now,
+                stage_id
+            ],
+        )?;
+    } else {
+        tx.execute(
+            "UPDATE stages SET icon = ?, sort_order = ?, enabled = ?, allow_empty_assistants = ?, updated_at = ? WHERE id = ?",
+            params![
+                next_icon,
+                next_order,
+                next_enabled as i64,
+                next_allow_empty_assistants as i64,
+                now,
+                stage_id
+            ],
+        )?;
+    }
+    let stage = load_project_stage_by_id(&tx, stage_id)?;
+    tx.commit()?;
+    Ok(stage)
+}
+
+pub(super) fn update_project_stage_assistants(
+    conn: &mut Connection,
+    stage_id: &str,
+    assistant_ids: &[String],
+) -> Result<ProjectStageInfo> {
+    let tx = conn.transaction()?;
+    let stage = load_project_stage_by_id(&tx, stage_id)?;
+    let assistants = validate_assistants_for_stage(&tx, &stage, assistant_ids)?;
+    let now = now_ms();
+    replace_project_stage_assistants(&tx, stage_id, &assistants, now)?;
+    tx.execute(
+        "UPDATE stages SET updated_at = ? WHERE id = ?",
+        params![now, stage_id],
+    )?;
+    let stage = load_project_stage_by_id(&tx, stage_id)?;
+    tx.commit()?;
+    Ok(stage)
+}
+
+pub(super) fn delete_project_stage(conn: &Connection, stage_id: &str) -> Result<()> {
+    let current = load_project_stage_by_id(conn, stage_id)?;
+    if current.stage_type != ProjectStageType::Custom {
+        anyhow::bail!("builtin project stage cannot be deleted");
+    }
+    let changed = conn.execute("DELETE FROM stages WHERE id = ?", params![stage_id])?;
+    if changed == 0 {
+        anyhow::bail!("project stage not found: {stage_id}");
+    }
+    Ok(())
+}
