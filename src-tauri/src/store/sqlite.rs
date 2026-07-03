@@ -51,7 +51,8 @@ use self::plan_queries::{
     plan_round_from_row, plan_task_session_from_row,
 };
 use self::thread_queries::{
-    load_thread_agents, load_thread_assistants, load_thread_by_id, thread_from_row,
+    load_stage_sessions, load_thread_agents, load_thread_assistants, load_thread_by_id,
+    load_thread_sessions, load_thread_stages, thread_from_row, thread_stage_from_row,
 };
 
 pub struct SqliteStore {
@@ -842,41 +843,6 @@ fn project_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectSt
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
         assistants: Vec::new(),
-    })
-}
-
-fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo> {
-    let stage_type_raw: String = row.get(4)?;
-    let process_template_id_raw: Option<String> = row.get(5)?;
-    let stage_kind_raw: Option<String> = row.get(6)?;
-    let status_raw: Option<String> = row.get(15)?;
-    Ok(StageInfo {
-        id: row.get(0)?,
-        thread_id: row.get(1)?,
-        stage_id: row.get(2)?,
-        project_id: row.get(3)?,
-        assistant_ids: Vec::new(),
-        assistants: Vec::new(),
-        stage_type: ProjectStageType::from_db_str(&stage_type_raw)
-            .unwrap_or(ProjectStageType::Custom),
-        process_template_id: process_template_id_raw,
-        kind: stage_kind_raw.and_then(|value| StageType::from_db_str(&value)),
-        name: row.get(7)?,
-        description: row.get(8)?,
-        icon: row.get(9)?,
-        order: row.get(10)?,
-        status: status_raw
-            .as_deref()
-            .and_then(StageStatus::from_db_str)
-            .unwrap_or(StageStatus::NotStarted),
-        summary: row.get(16)?,
-        outcome: row.get(17)?,
-        enabled: row.get::<_, i64>(11)? != 0,
-        allow_empty_assistants: row.get::<_, i64>(12)? != 0,
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
-        sessions: Vec::new(),
-        issues: Vec::new(),
     })
 }
 
@@ -2028,7 +1994,7 @@ fn ensure_project_stage_can_be_disabled(conn: &Connection, stage_id: &str) -> Re
     Ok(())
 }
 
-fn load_stage_assistants(
+pub(super) fn load_stage_assistants(
     conn: &Connection,
     thread_stage_id: &str,
 ) -> Result<Vec<StageAssistantInfo>> {
@@ -2386,7 +2352,10 @@ fn load_kanban_item_by_id(conn: &Connection, item_id: &str) -> Result<KanbanItem
     Ok(item)
 }
 
-fn load_stage_issues(conn: &Connection, thread_stage_id: &str) -> Result<Vec<StageIssueInfo>> {
+pub(super) fn load_stage_issues(
+    conn: &Connection,
+    thread_stage_id: &str,
+) -> Result<Vec<StageIssueInfo>> {
     let mut stmt = conn.prepare(
         "SELECT id, thread_stage_id, title, description, status, severity, created_at, updated_at
          FROM thread_stage_issues
@@ -2431,115 +2400,6 @@ fn load_kanban_item_sessions(conn: &Connection, item_id: &str) -> Result<Vec<Ses
     Ok(sessions)
 }
 
-pub(super) fn load_thread_sessions(conn: &Connection, thread_id: &str) -> Result<Vec<SessionInfo>> {
-    let mut subs_by_parent = load_all_subagents_grouped(conn)?;
-    let sql = format!(
-        "SELECT {SESSION_INFO_COLUMNS_S}
-         FROM thread_sessions ts
-         INNER JOIN sessions s ON s.agent = ts.agent AND s.session_id = ts.session_id
-         WHERE ts.thread_id = ? AND s.available = 1
-         ORDER BY ts.created_at ASC, s.updated_at DESC, s.started_at DESC",
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let mut sessions: Vec<SessionInfo> = stmt
-        .query_map(params![thread_id], session_info_from_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    dedupe_sessions(&mut sessions);
-    for session in sessions.iter_mut() {
-        session.subagents = subs_by_parent
-            .remove(&(session.agent, session.id.clone()))
-            .unwrap_or_default();
-    }
-    Ok(sessions)
-}
-
-fn load_stage_sessions(conn: &Connection, thread_stage_id: &str) -> Result<Vec<SessionInfo>> {
-    let mut subs_by_parent = load_all_subagents_grouped(conn)?;
-    let sql = format!(
-        "SELECT {SESSION_INFO_COLUMNS_S}
-         FROM stage_sessions ss
-         INNER JOIN sessions s ON s.agent = ss.agent AND s.session_id = ss.session_id
-         WHERE ss.thread_stage_id = ? AND s.available = 1
-         ORDER BY ss.created_at ASC, s.updated_at DESC, s.started_at DESC",
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let mut sessions: Vec<SessionInfo> = stmt
-        .query_map(params![thread_stage_id], session_info_from_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    dedupe_sessions(&mut sessions);
-    for session in sessions.iter_mut() {
-        session.subagents = subs_by_parent
-            .remove(&(session.agent, session.id.clone()))
-            .unwrap_or_default();
-    }
-    Ok(sessions)
-}
-
-pub(super) fn load_thread_stages(conn: &Connection, thread_id: &str) -> Result<Vec<StageInfo>> {
-    let mut stmt = conn.prepare(
-        "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.process_template_id, s.kind, s.name, s.description, s.icon,
-                ts.sort_order, s.enabled, s.allow_empty_assistants, ts.created_at, ts.updated_at,
-                tss.status, tss.summary, tss.outcome
-         FROM thread_stages ts
-         INNER JOIN threads t ON t.id = ts.thread_id
-         INNER JOIN stages s ON s.id = ts.stage_id
-         LEFT JOIN thread_stage_states tss ON tss.thread_stage_id = ts.id
-         WHERE ts.thread_id = ?
-         ORDER BY ts.sort_order ASC, ts.created_at ASC",
-    )?;
-    let mut stages = stmt
-        .query_map(params![thread_id], thread_stage_from_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    // Lazy default: thread stages without an explicit thread_stage_states row
-    // get a status derived from their order relative to the active stage
-    // (before -> completed, active -> in_progress, after -> not_started). This
-    // keeps pre-V6 threads coherent without materializing rows on read.
-    let stored: HashSet<String> = {
-        let mut stmt = conn.prepare(
-            "SELECT tss.thread_stage_id
-             FROM thread_stage_states tss
-             INNER JOIN thread_stages ts ON ts.id = tss.thread_stage_id
-             WHERE ts.thread_id = ?",
-        )?;
-        let ids = stmt
-            .query_map(params![thread_id], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<HashSet<String>>>()?;
-        ids
-    };
-    let active_stage_id: Option<String> = conn
-        .query_row(
-            "SELECT stage_id FROM threads WHERE id = ?",
-            params![thread_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .flatten();
-    let active_index = active_stage_id.as_deref().and_then(|active| {
-        stages
-            .iter()
-            .position(|stage| stage.id == active || stage.stage_id == active)
-    });
-    for (index, stage) in stages.iter_mut().enumerate() {
-        if !stored.contains(&stage.id) {
-            stage.status = match active_index {
-                Some(active) if index < active => StageStatus::Completed,
-                Some(active) if index == active => StageStatus::InProgress,
-                _ => StageStatus::NotStarted,
-            };
-        }
-        stage.assistants = load_stage_assistants(conn, &stage.id)?;
-        stage.assistant_ids = stage
-            .assistants
-            .iter()
-            .map(|assistant| assistant.assistant_id.clone())
-            .collect();
-        stage.sessions = load_stage_sessions(conn, &stage.id)?;
-        stage.issues = load_stage_issues(conn, &stage.id)?;
-    }
-    Ok(stages)
-}
-
 fn attach_kanban_item_sessions(conn: &Connection, items: &mut [KanbanItem]) -> Result<()> {
     for item in items {
         item.sessions = load_kanban_item_sessions(conn, &item.id)?;
@@ -2547,7 +2407,7 @@ fn attach_kanban_item_sessions(conn: &Connection, items: &mut [KanbanItem]) -> R
     Ok(())
 }
 
-fn dedupe_sessions(sessions: &mut Vec<SessionInfo>) {
+pub(super) fn dedupe_sessions(sessions: &mut Vec<SessionInfo>) {
     let mut selected: HashMap<(Agent, String), usize> = HashMap::new();
     let mut keep = vec![true; sessions.len()];
 
@@ -2771,7 +2631,7 @@ fn replace_session_history_snapshots_inner(
     Ok(())
 }
 
-fn load_all_subagents_grouped(
+pub(super) fn load_all_subagents_grouped(
     conn: &Connection,
 ) -> Result<HashMap<(Agent, String), Vec<SubagentInfo>>> {
     let mut stmt = conn.prepare(
@@ -2934,7 +2794,7 @@ fn load_all_indexed_subagents_grouped(
 /// [`session_info_from_row`]. Every reader must use the same list — the row
 /// mapper reads by positional index. The `s.` prefix lets this be reused as
 /// either an unaliased or aliased projection (callers concat their own FROM).
-const SESSION_INFO_COLUMNS_S: &str =
+pub(super) const SESSION_INFO_COLUMNS_S: &str =
     "s.agent, s.session_id, s.file_path, s.project_path, s.project_name,
         s.started_at, s.updated_at, s.message_count, s.rename_title, s.title, s.first_user_message,
         s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id,
@@ -2947,7 +2807,7 @@ const SESSION_INFO_COLUMNS: &str = "agent, session_id, file_path, project_path, 
         file_size, partial, available, archived, forked_from_agent, forked_from_id,
         origin, scheduled_task_id, is_auxiliary";
 
-fn session_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionInfo> {
+pub(super) fn session_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionInfo> {
     let agent_str: String = row.get(0)?;
     let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
     let origin_raw: String = row.get(17)?;
