@@ -9,6 +9,7 @@ use crate::agents::sources::shared::attachment_text::clean_history_user_preview_
 use crate::agents::sources::shared::cross_context::{
     cross_context_lineage_from_payload, cross_context_lineage_from_text,
 };
+use crate::agents::sources::shared::time::parse_iso;
 use crate::agents::sources::system_time_to_millis;
 use crate::agents::sources::types::{HistoryAcpMessage, SourceLocation};
 use crate::models::{normalize_preview, Agent, SessionInfo, SubagentInfo};
@@ -1478,12 +1479,6 @@ fn image_mime_type(uri: &str) -> Option<String> {
         return None;
     };
     Some(mime.to_string())
-}
-
-fn parse_iso(s: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|d| d.timestamp_millis())
 }
 
 #[cfg(test)]

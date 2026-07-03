@@ -8,6 +8,7 @@ use crate::agents::runtime::types::AcpProtocolMessage;
 use crate::agents::sources::pi::text_message_event;
 use crate::agents::sources::shared::attachment_text::clean_history_user_preview_text;
 use crate::agents::sources::shared::convert::project_key_for_path_or_name;
+use crate::agents::sources::shared::time::parse_iso;
 use crate::agents::sources::system_time_to_millis;
 use crate::agents::sources::types::{
     HistoryAcpMessage, MessageContent, MessageEvent, MessageRole, Metadata, SessionSource,
@@ -713,12 +714,6 @@ fn project_dir_name_from_path(path: &Path) -> Option<String> {
         project_path.as_deref(),
         project_name.as_deref(),
     ))
-}
-
-fn parse_iso(value: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|dt| dt.timestamp_millis())
 }
 
 #[cfg(test)]

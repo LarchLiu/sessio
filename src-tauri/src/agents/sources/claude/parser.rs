@@ -9,6 +9,7 @@ use crate::agents::sources::shared::attachment_text::{
     clean_history_preview_candidate_text, clean_history_user_preview_text,
 };
 use crate::agents::sources::shared::cross_context::cross_context_lineage_from_payload;
+use crate::agents::sources::shared::time::parse_iso;
 use crate::agents::sources::system_time_to_millis;
 use crate::agents::sources::types::{HistoryAcpMessage, SourceLocation};
 use crate::models::{normalize_preview, Agent, SessionInfo, SubagentInfo};
@@ -1212,12 +1213,6 @@ fn latest_reverse_metadata_from_file(path: &Path) -> Result<ReverseMetadata> {
         title: latest_ai_title.or(latest_last_prompt),
         updated_at,
     })
-}
-
-fn parse_iso(s: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|d| d.timestamp_millis())
 }
 
 #[derive(Debug, Default, serde::Deserialize)]

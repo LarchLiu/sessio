@@ -713,13 +713,14 @@ src-tauri/src/
 | Astra diagnostics split | ✅ | 已建立 `astra/diagnostics.rs`，迁出 run diagnostics cap、delegated lifecycle/dispatch diagnostics 与 session ref dedupe helper |
 | Astra plan persistence split | ✅ | 已建立 `astra/plan_persistence.rs`，迁出 run record 转换、Astra task/plan task 映射、plan round 写入、task session link/relink、result 写回与 process stage 状态更新 helper |
 | Astra runtime metadata split | ✅ | 已建立 `astra/runtime_metadata.rs`，迁出 delegated runtime start request 补全、assistant skill/MCP 资源注入与 runtime option 归一化 helper |
+| Parser shared timestamp helper | ✅ | 已建立 `agents/sources/shared/time.rs`，将 Claude/Codex/Pi parser 中重复的 RFC3339 `parse_iso()` 收敛为共享 helper |
 
 ### 6.2 当前焦点
 
 当前优先级按顺序是：
 
 1. 继续阶段 5，优先拆分 `astra/mod.rs` 中可独立搬出的服务实现，下一步评估委派 session 记录或 run state mutation 的边界。
-2. 后续再评估 `claude/parser.rs` 与 `codex/parser.rs` 的共享解析逻辑抽取。
+2. 继续评估 Claude/Codex parser 中除时间解析外的共享解析逻辑，优先选择无行为差异的小 helper。
 3. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环；若后续涉及前端类型或 invoke 面，同步执行前端 check/build。
 
 ---
