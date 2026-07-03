@@ -392,17 +392,17 @@ src-tauri/src/
 **第 6 步: 再按领域搬 persistence 实现**
 
 - 在规则层与聚合层稳定后，再拆 domain modules：
-  - `scheduled_tasks`
-  - `channel_sessions`
-  - `projects`
-  - `assistants`
-  - `threads`
-  - `stages`
-  - `plans`
-  - `astra`
-  - `runtime_agents`
-  - `canvas`
-  - `snapshots`
+  - [x] `scheduled_tasks`
+  - [ ] `channel_sessions`
+  - [ ] `projects`
+  - [ ] `assistants`
+  - [ ] `threads`
+  - [ ] `stages`
+  - [ ] `plans`
+  - [ ] `astra`
+  - [ ] `runtime_agents`
+  - [ ] `canvas`
+  - [ ] `snapshots`
 
 **第 7 步: 最后再收窄 public trait**
 
@@ -681,12 +681,13 @@ src-tauri/src/
 | SQLite schema/bootstrap | ✅ | 已建立 `store/sqlite/bootstrap.rs`、`schema.rs` 与 `seed.rs`，迁出 schema SQL、base schema 初始化、`initialize_schema()`、`ensure_column()` 与 builtin seed 逻辑 |
 | Session identity | ✅ | 已建立 `store/sqlite/identity.rs`，迁出 identity row 读取、title/message/provenance merge、origin upgrade/downgrade、scheduled-task/origin 标记、duplicate cleanup、`insert_session()` 与 `replace_by_scope()` 写入规则 |
 | Workflow aggregation | ✅ | 已建立 `store/thread_replay.rs`、`store/sqlite/thread_index.rs`、`store/sqlite/plan_queries.rs` 与 `store/sqlite/thread_queries.rs`，迁出 thread replay 编排、thread index 聚合、plan round/task hydrate 查询、`load_thread_by_id()` 入口及 thread/stage/session hydrate |
+| Scheduled task persistence | ✅ | 已建立 `store/sqlite/scheduled_tasks.rs`，迁出 scheduled task/task run row 读取、列表查询、replace 写入、run 状态更新与 interrupted push cleanup |
 
 ### 6.2 当前焦点
 
 当前优先级按顺序是：
 
-1. 进入阶段 2 第 6 步，按领域拆分 persistence 实现。
+1. 继续阶段 2 第 6 步，按领域拆分 persistence 实现。
 2. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环。
 3. 后续再评估是否继续拆 screenshot overlay 窗口流程。
 
