@@ -3,9 +3,11 @@ import type { McpServerConfig, SkillMetadata } from "../api";
 import { useI18n } from "../i18n";
 import { useSelectableMcpServers } from "../hooks/useSelectableMcpServers";
 import { useSelectableSkills } from "../hooks/useSelectableSkills";
+import { getSessioPromptMarkers } from "../promptMarkers";
 
 const sectionClassName = "rounded-lg border border-card-border/[0.12] bg-card-chip/[0.04] p-2.5";
 const optionClassName = "flex min-w-0 items-start gap-2 rounded-md px-2 py-1.5 text-left transition hover:bg-card-chip/[0.08]";
+const SESSIO_PROMPT_MARKERS = getSessioPromptMarkers();
 
 export default function AssistantResourceSelector({
   selectedSkillIds,
@@ -30,6 +32,14 @@ export default function AssistantResourceSelector({
   const personalSkills = useMemo(
     () => availableSkills.filter((skill) => skill.source !== "builtin"),
     [availableSkills],
+  );
+  const builtinMcpServers = useMemo(
+    () => availableMcpServers.filter((server) => server.source === SESSIO_PROMPT_MARKERS.mcpSourceBuiltin),
+    [availableMcpServers],
+  );
+  const customMcpServers = useMemo(
+    () => availableMcpServers.filter((server) => server.source === SESSIO_PROMPT_MARKERS.mcpSourceCustom),
+    [availableMcpServers],
   );
 
   return (
@@ -57,14 +67,18 @@ export default function AssistantResourceSelector({
         empty={t("assistant.no_mcps")}
         isEmpty={availableMcpServers.length === 0}
       >
-        {availableMcpServers.map((server) => (
-          <McpOption
-            key={server.id}
-            server={server}
-            checked={selectedMcpIds.includes(server.id)}
-            onToggle={() => onSelectedMcpIdsChange(toggleId(selectedMcpIds, server.id))}
-          />
-        ))}
+        <McpGroup
+          label={t("new_chat.mcps_builtin")}
+          servers={builtinMcpServers}
+          selectedIds={selectedMcpIds}
+          onChange={onSelectedMcpIdsChange}
+        />
+        <McpGroup
+          label={t("new_chat.mcps_custom")}
+          servers={customMcpServers}
+          selectedIds={selectedMcpIds}
+          onChange={onSelectedMcpIdsChange}
+        />
       </ResourceSection>
     </div>
   );
@@ -142,6 +156,33 @@ function SkillOption({
   );
 }
 
+function McpGroup({
+  label,
+  servers,
+  selectedIds,
+  onChange,
+}: {
+  label: string;
+  servers: McpServerConfig[];
+  selectedIds: string[];
+  onChange: (ids: string[]) => void;
+}) {
+  if (servers.length === 0) return null;
+  return (
+    <div className="grid gap-1">
+      <div className="px-2 pt-1 text-caption font-medium text-card-subtle/50">{label}</div>
+      {servers.map((server) => (
+        <McpOption
+          key={server.id}
+          server={server}
+          checked={selectedIds.includes(server.id)}
+          onToggle={() => onChange(toggleId(selectedIds, server.id))}
+        />
+      ))}
+    </div>
+  );
+}
+
 function McpOption({
   server,
   checked,
@@ -156,7 +197,12 @@ function McpOption({
       <input type="checkbox" checked={checked} onChange={onToggle} className="mt-0.5 h-3.5 w-3.5 accent-ink" />
       <span className="min-w-0">
         <span className="block truncate text-body-sm text-card-fg/75">{server.name}</span>
-        <span className="block text-caption text-card-muted/55">{server.transport}</span>
+        {server.description && (
+          <span className="block line-clamp-3 whitespace-pre-wrap text-caption text-card-muted/55">
+            {server.description}
+          </span>
+        )}
+        <span className="block text-caption text-card-muted/45">{server.transport}</span>
       </span>
     </label>
   );

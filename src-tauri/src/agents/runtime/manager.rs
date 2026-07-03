@@ -513,91 +513,49 @@ impl RuntimeManager {
         }
     }
 
-    /// Resolve an agent's probed runtime capabilities. Prefer the in-memory
-    /// metadata cache, but fall back to the DB record so early sessions don't
-    /// silently miss computer-use injection while startup probing is still
-    /// refreshing the cache.
-    fn probed_capabilities(&self, agent: Agent) -> Option<RuntimeCapabilitySet> {
-        if let Some(cache) = self
-            .inner
-            .app
-            .try_state::<super::metadata::RuntimeAgentsCache>()
-        {
-            if let Some(capabilities) = cache
-                .get()
-                .into_iter()
-                .find(|metadata| metadata.agent == agent)
-                .and_then(|metadata| metadata.capabilities)
-            {
-                return Some(capabilities);
-            }
-        }
-
-        let Some(store) = self.inner.app.try_state::<Arc<dyn SessionStore>>() else {
-            return None;
-        };
-        match super::metadata::runtime_agents_from_db(store.inner().clone(), &[]) {
-            Ok(agents) => agents
-                .into_iter()
-                .find(|metadata| metadata.agent == agent)
-                .and_then(|metadata| metadata.capabilities),
-            Err(error) => {
-                log::warn!(
-                    "[sessio-runtime:computer-use] failed to read DB capabilities for agent={}: {error}",
-                    agent.as_str()
-                );
-                None
-            }
-        }
-    }
-
     /// Attach any configured MCP servers to this session config. Custom MCPs
     /// are only injected when the user selected them for this conversation.
     /// Built-in MCPs can additionally inspect session options before opting in.
-    fn attach_mcp_injections(
+    pub(super) fn attach_mcp_injections_with_capabilities(
         &self,
         agent: Agent,
         sessio_runtime_session_id: &str,
         options: &super::types::RuntimeMetadata,
+        capabilities: &RuntimeCapabilitySet,
         config: &mut AgentRuntimeSessionConfig,
     ) {
-        let capabilities = self.probed_capabilities(agent);
         let settings = self
             .inner
             .app
             .try_state::<crate::mcp::McpSettingsCache>()
             .map(|cache| cache.get())
             .unwrap_or_else(|| crate::mcp::load_settings().unwrap_or_default());
-        match crate::mcp::selected_session_servers(&settings, capabilities.as_ref(), options) {
+        match crate::mcp::selected_session_servers(
+            &settings,
+            Some(capabilities),
+            options,
+            |server| match server.builtin_kind {
+                Some(crate::mcp::BuiltinMcpKind::ComputerUse) => {
+                    let runtime = self.computer_use();
+                    let injection = runtime
+                        .prepare_injection(sessio_runtime_session_id)
+                        .map_err(anyhow::Error::msg)?;
+                    log::info!(
+                        "[sessio-runtime:computer-use] injecting MCP server for session={} agent={:?}",
+                        sessio_runtime_session_id,
+                        agent
+                    );
+                    Ok(Some(crate::mcp::computer_use_runtime_server(&injection)))
+                }
+                None => Ok(None),
+            },
+        ) {
             Ok(mut servers) => {
                 config.mcp_servers.append(&mut servers);
             }
             Err(error) => {
                 log::warn!(
                     "[sessio-runtime:mcp] failed to load selected MCP servers for session={}: {}",
-                    sessio_runtime_session_id,
-                    error
-                );
-            }
-        }
-        if !super::computer_use_runtime::should_inject(options, capabilities.as_ref()) {
-            return;
-        }
-        let runtime = self.computer_use();
-        match runtime.prepare_injection(sessio_runtime_session_id) {
-            Ok(injection) => {
-                log::info!(
-                    "[sessio-runtime:computer-use] injecting MCP server for session={} agent={:?}",
-                    sessio_runtime_session_id,
-                    agent
-                );
-                config
-                    .mcp_servers
-                    .push(crate::mcp::computer_use_runtime_server(&injection));
-            }
-            Err(error) => {
-                log::warn!(
-                    "[sessio-runtime:computer-use] failed to prepare injection for session={}: {}",
                     sessio_runtime_session_id,
                     error
                 );
@@ -664,7 +622,7 @@ impl RuntimeManager {
         }
 
         let transport = self.requested_transport(req.agent, &req.options);
-        let mut runtime_config = session_config_from_options(req.agent, &req.options);
+        let runtime_config = session_config_from_options(req.agent, &req.options);
         let id = self.next_id("runtime");
         let agent_session_id = self.next_id("fake-agent-session");
         let capabilities = runtime_capabilities_for_transport(transport);
@@ -673,7 +631,6 @@ impl RuntimeManager {
         let mut pi_rpc_worker = None;
         match transport {
             RuntimeTransportKind::Acp => {
-                self.attach_mcp_injections(req.agent, &id, &req.options, &mut runtime_config);
                 let command = acp_transport::command_from_options(req.agent, &req.options);
                 let start = match (&req.source_session_id, req.source_agent) {
                     (Some(source_session_id), Some(source_agent)) if source_agent == req.agent => {
@@ -690,6 +647,7 @@ impl RuntimeManager {
                     req.workspace_path.clone(),
                     command,
                     Some(runtime_config),
+                    req.options.clone(),
                     start,
                 ));
             }
@@ -821,7 +779,7 @@ impl RuntimeManager {
         }
 
         let transport = self.requested_transport(req.agent, &req.options);
-        let mut runtime_config = session_config_from_options(req.agent, &req.options);
+        let runtime_config = session_config_from_options(req.agent, &req.options);
         let agent_session_id = req
             .agent_runtime_session_id
             .clone()
@@ -832,12 +790,6 @@ impl RuntimeManager {
         let mut pi_rpc_worker = None;
         match transport {
             RuntimeTransportKind::Acp => {
-                self.attach_mcp_injections(
-                    req.agent,
-                    &req.sessio_runtime_session_id,
-                    &req.options,
-                    &mut runtime_config,
-                );
                 let start = req
                     .agent_runtime_session_id
                     .as_ref()
@@ -861,6 +813,7 @@ impl RuntimeManager {
                     req.workspace_path.clone(),
                     acp_transport::command_from_options(req.agent, &req.options),
                     Some(runtime_config),
+                    req.options.clone(),
                     start,
                 ));
             }
@@ -1972,14 +1925,20 @@ fn inherit_sticky_session_options(
     inherit_option_alias(
         turn_options,
         session_options,
-        &["computerUse", "computer_use"],
-        "computerUse",
+        &[crate::skills::SELECTED_SKILLS_OPTION, "selected_skills"],
+        crate::skills::SELECTED_SKILLS_OPTION,
     );
     inherit_option_alias(
         turn_options,
         session_options,
-        &[crate::skills::SELECTED_SKILLS_OPTION, "selected_skills"],
-        crate::skills::SELECTED_SKILLS_OPTION,
+        &[crate::mcp::SELECTED_MCP_IDS_OPTION, "selected_mcp_ids"],
+        crate::mcp::SELECTED_MCP_IDS_OPTION,
+    );
+    inherit_option_alias(
+        turn_options,
+        session_options,
+        &[crate::mcp::SELECTED_MCPS_OPTION, "selected_mcps"],
+        crate::mcp::SELECTED_MCPS_OPTION,
     );
 }
 
@@ -2090,37 +2049,20 @@ mod tests {
     }
 
     #[test]
-    fn sticky_computer_use_option_is_inherited_by_turns() {
+    fn sticky_selected_mcp_ids_are_inherited_by_turns() {
         let mut turn = RuntimeMetadata::new();
         let mut session = RuntimeMetadata::new();
-        session.insert("computerUse".into(), json!(true));
+        session.insert(
+            crate::mcp::SELECTED_MCP_IDS_OPTION.into(),
+            json!([crate::mcp::BUILTIN_COMPUTER_USE_ID]),
+        );
 
         inherit_sticky_session_options(&mut turn, &session);
 
-        assert_eq!(turn.get("computerUse"), Some(&json!(true)));
-    }
-
-    #[test]
-    fn sticky_computer_use_option_accepts_snake_case_session_alias() {
-        let mut turn = RuntimeMetadata::new();
-        let mut session = RuntimeMetadata::new();
-        session.insert("computer_use".into(), json!(true));
-
-        inherit_sticky_session_options(&mut turn, &session);
-
-        assert_eq!(turn.get("computerUse"), Some(&json!(true)));
-    }
-
-    #[test]
-    fn explicit_turn_computer_use_option_wins_over_session() {
-        let mut turn = RuntimeMetadata::new();
-        turn.insert("computerUse".into(), json!(false));
-        let mut session = RuntimeMetadata::new();
-        session.insert("computerUse".into(), json!(true));
-
-        inherit_sticky_session_options(&mut turn, &session);
-
-        assert_eq!(turn.get("computerUse"), Some(&json!(false)));
+        assert_eq!(
+            turn.get(crate::mcp::SELECTED_MCP_IDS_OPTION),
+            Some(&json!([crate::mcp::BUILTIN_COMPUTER_USE_ID]))
+        );
     }
 
     #[test]

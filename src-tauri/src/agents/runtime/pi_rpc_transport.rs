@@ -1245,25 +1245,8 @@ fn prompt_params_from_input(input: AgentInput) -> Result<Value> {
 
 fn normalize_runtime_prompt_text(text: &str, options: &RuntimeMetadata) -> String {
     let text = normalize_canvas_prompt_text(text, options);
-    let text = crate::work_state_skill_resource::inject_work_state_skill_prompt_block(&text);
     let text = crate::skills::inject_selected_skills_prompt_block(&text, options);
-    if !runtime_option_bool(options, "computerUse") && !runtime_option_bool(options, "computer_use")
-    {
-        return text;
-    }
-    let skill_block = computer_use_prompt_block();
-    if skill_block.trim().is_empty() {
-        return text;
-    }
-    format!("{skill_block}\n\n\n\n{text}")
-}
-
-fn runtime_option_bool(options: &RuntimeMetadata, key: &str) -> bool {
-    options.get(key).and_then(Value::as_bool).unwrap_or(false)
-}
-
-fn computer_use_prompt_block() -> String {
-    crate::computer_use::skill_resource::computer_use_prompt_block()
+    crate::mcp::inject_selected_mcps_prompt_block(&text, options)
 }
 
 fn normalize_canvas_prompt_text(text: &str, options: &RuntimeMetadata) -> String {
@@ -2061,25 +2044,32 @@ mod tests {
     }
 
     #[test]
-    fn computer_use_prompt_layer_mentions_raise_recovery() {
+    fn selected_computer_use_mcp_injects_mcp_prompt_layer_without_skill_prompt() {
         let markers = crate::prompt_markers::sessio_prompt_markers();
+        let settings = crate::mcp::McpSettings {
+            servers: vec![crate::mcp::computer_use_server_entry(
+                &crate::computer_use::settings::ComputerUseSettings::enabled(),
+            )],
+        };
         let mut options = RuntimeMetadata::new();
-        options.insert("computerUse".into(), json!(true));
+        options.insert(
+            crate::mcp::SELECTED_MCP_IDS_OPTION.into(),
+            json!([crate::mcp::BUILTIN_COMPUTER_USE_ID]),
+        );
+        crate::mcp::hydrate_selected_mcps_option(&mut options, &settings);
 
         let text = normalize_runtime_prompt_text("send the message", &options);
 
-        assert!(text.contains(markers.skills_prompt_start));
-        assert!(text.contains(&format!("kind=\"{}\"", markers.builtin_skill_prompt_kind)));
+        assert!(text.contains(markers.mcps_prompt_start));
+        assert!(text.contains(&format!("kind=\"{}\"", markers.selected_mcps_prompt_kind)));
         assert!(text.contains("id: `builtin:computer-use`"));
         assert!(text.contains("computer_get_app_state"));
-        assert!(text.contains("computer_raise_app"));
-        assert!(text.contains("open -a"));
-        assert!(text.contains("AppleScript"));
+        assert!(!text.contains(markers.skills_prompt_start));
         assert!(text.ends_with("send the message"));
     }
 
     #[test]
-    fn work_state_skill_pointer_is_injected_for_work_context() {
+    fn work_state_skill_is_not_injected_without_selection() {
         let markers = crate::prompt_markers::sessio_prompt_markers();
         let prompt = format!(
             "{} nonce=\"abc\" kind=\"{}\" -->\nstage context\n{} nonce=\"abc\" -->",
@@ -2090,10 +2080,28 @@ mod tests {
 
         let text = normalize_runtime_prompt_text(&prompt, &RuntimeMetadata::new());
 
-        assert!(text.contains(&format!("kind=\"{}\"", markers.builtin_skill_prompt_kind)));
+        assert_eq!(text, prompt);
+    }
+
+    #[test]
+    fn selected_work_state_skill_is_injected_via_selected_skills_prompt() {
+        let markers = crate::prompt_markers::sessio_prompt_markers();
+        let skill =
+            crate::skills::builtin_skill_metadata(crate::skills::BuiltinSkillKind::WorkState)
+                .expect("work-state skill metadata");
+        let mut options = RuntimeMetadata::new();
+        options.insert(
+            crate::skills::SELECTED_SKILLS_OPTION.into(),
+            json!(vec![skill]),
+        );
+
+        let text = normalize_runtime_prompt_text("stage context", &options);
+
+        assert!(text.contains(markers.skills_prompt_start));
+        assert!(text.contains(&format!("kind=\"{}\"", markers.selected_skills_prompt_kind)));
         assert!(text.contains("id: `builtin:sessio-work-state`"));
-        assert!(text.contains("~/.sessio/bin/sessio"));
-        assert!(text.ends_with(&prompt));
+        assert!(text.contains("skillMdPath: `"));
+        assert!(text.ends_with("stage context"));
     }
 
     #[test]

@@ -1842,7 +1842,7 @@ pub fn strip_injected_context(s: &str) -> String {
         text = &text[i + codex_request_marker.len()..];
     }
 
-    strip_sessio_skills_prompt_blocks(&strip_sessio_computer_use_prompt_blocks(
+    strip_sessio_mcps_prompt_blocks(&strip_sessio_skills_prompt_blocks(
         &strip_sessio_thread_prompt_blocks(text),
     ))
     .trim()
@@ -1866,17 +1866,6 @@ pub fn strip_sessio_thread_prompt_blocks(input: &str) -> String {
     cleaned.trim().to_string()
 }
 
-pub fn strip_sessio_computer_use_prompt_blocks(input: &str) -> String {
-    let markers = sessio_prompt_markers();
-    strip_nonce_delimited_prompt_blocks(
-        input,
-        markers.computer_use_prompt_start,
-        markers.computer_use_prompt_end,
-    )
-    .map(|out| collapse_blank_lines(&out).trim().to_string())
-    .unwrap_or_else(|| input.to_string())
-}
-
 pub fn strip_sessio_skills_prompt_blocks(input: &str) -> String {
     let markers = sessio_prompt_markers();
     strip_nonce_delimited_prompt_blocks(
@@ -1886,6 +1875,13 @@ pub fn strip_sessio_skills_prompt_blocks(input: &str) -> String {
     )
     .map(|out| collapse_blank_lines(&out).trim().to_string())
     .unwrap_or_else(|| input.to_string())
+}
+
+pub fn strip_sessio_mcps_prompt_blocks(input: &str) -> String {
+    let markers = sessio_prompt_markers();
+    strip_nonce_delimited_prompt_blocks(input, markers.mcps_prompt_start, markers.mcps_prompt_end)
+        .map(|out| collapse_blank_lines(&out).trim().to_string())
+        .unwrap_or_else(|| input.to_string())
 }
 
 fn strip_nonce_delimited_prompt_blocks(
@@ -2048,8 +2044,7 @@ fn html_unattr(value: &str) -> String {
 mod tests {
     use super::{
         normalize_preview, sessio_attachment_marker_name, strip_injected_context,
-        strip_sessio_computer_use_prompt_blocks, strip_sessio_skills_prompt_blocks,
-        strip_sessio_thread_prompt_blocks, text_content_blocks,
+        strip_sessio_skills_prompt_blocks, strip_sessio_thread_prompt_blocks, text_content_blocks,
     };
     use crate::prompt_markers::sessio_prompt_markers;
 
@@ -2168,33 +2163,6 @@ mod tests {
         );
 
         assert_eq!(strip_sessio_thread_prompt_blocks(&input), input);
-    }
-
-    #[test]
-    fn strip_sessio_computer_use_prompt_blocks_removes_complete_block() {
-        let markers = sessio_prompt_markers();
-        let input = format!(
-            "{} nonce=\"abc\" kind=\"{}\" -->\nUse injected computer tools.\n{} nonce=\"abc\" -->\n\nclick the button",
-            markers.computer_use_prompt_start,
-            markers.computer_use_prompt_kind,
-            markers.computer_use_prompt_end
-        );
-
-        assert_eq!(
-            strip_sessio_computer_use_prompt_blocks(&input),
-            "click the button"
-        );
-        assert_eq!(strip_injected_context(&input), "click the button");
-    }
-
-    #[test]
-    fn strip_sessio_computer_use_prompt_blocks_keeps_unmatched_user_marker() {
-        let input = format!(
-            "show {} nonce=\"abc\" --> literally",
-            sessio_prompt_markers().computer_use_prompt_start
-        );
-
-        assert_eq!(strip_sessio_computer_use_prompt_blocks(&input), input);
     }
 
     #[test]

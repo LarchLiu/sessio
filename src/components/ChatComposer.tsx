@@ -106,6 +106,12 @@ export default function ChatComposer({
   const personalSkills = composer.availableSkills.filter(
     (skill) => skill.source === SESSIO_PROMPT_MARKERS.skillSourceUser,
   );
+  const builtinMcpServers = composer.availableMcpServers.filter(
+    (server) => server.source === SESSIO_PROMPT_MARKERS.mcpSourceBuiltin,
+  );
+  const customMcpServers = composer.availableMcpServers.filter(
+    (server) => server.source === SESSIO_PROMPT_MARKERS.mcpSourceCustom,
+  );
   const skillSubmenuOptions: PopupMenuOption<string>[] = [
     ...(composer.selectedSkillIds.length > 0
       ? [{
@@ -143,7 +149,20 @@ export default function ChatComposer({
           icon: <Trash2 className="h-4 w-4" />,
         }]
       : []),
-    ...composer.availableMcpServers.map((server) => ({
+    ...(builtinMcpServers.length > 0
+      ? [{ key: "mcps:builtin-label", label: t("new_chat.mcps_builtin"), kind: "label" as const }]
+      : []),
+    ...builtinMcpServers.map((server) => ({
+      key: `mcp:${server.id}`,
+      label: server.name,
+      icon: composer.selectedMcpIds.includes(server.id)
+        ? <Check className="h-4 w-4" />
+        : <Wrench className="h-4 w-4" />,
+    })),
+    ...(customMcpServers.length > 0
+      ? [{ key: "mcps:custom-label", label: t("new_chat.mcps_custom"), kind: "label" as const }]
+      : []),
+    ...customMcpServers.map((server) => ({
       key: `mcp:${server.id}`,
       label: server.name,
       icon: composer.selectedMcpIds.includes(server.id)

@@ -36,7 +36,11 @@ import {
   useComposerAttachments,
 } from "../components/ComposerAttachments";
 import { RuntimeEffortControl, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
-import { mergeRuntimeResourceOptions } from "../assistantResources";
+import {
+  builtinComputerUseMcpId,
+  mergeRuntimeResourceOptions,
+  runtimeOptionsSelectComputerUseMcp,
+} from "../assistantResources";
 import { buildSessioAssistantPromptBlock } from "../historyMerge";
 import type { PendingNewChatSession } from "../navigation";
 import { dispatchSessionStartedFallback, type LiveRuntimeAction, type LiveRuntimeState } from "../runtimeChat";
@@ -166,7 +170,6 @@ export function useChatComposer({
   const [permissionMode, setPermissionMode] = useState(() =>
     initialRuntimeAgent ? selectionPermissionMode(initialRuntimeAgent, lastRuntimeAgentSelection) : "",
   );
-  const [computerUseEnabled, setComputerUseEnabled] = useState(false);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
@@ -184,9 +187,22 @@ export function useChatComposer({
     availableMcpServers,
     selectedMcpIds,
     selectedMcpServers,
+    setSelectedMcpIds,
     toggleMcpSelection,
     clearSelectedMcps,
   } = useSelectableMcpServers(selectedRuntimeAgent?.capabilities ?? null);
+  const computerUseMcpId = builtinComputerUseMcpId();
+  const computerUseEnabled = selectedMcpIds.includes(computerUseMcpId);
+  const setComputerUseEnabled: Dispatch<SetStateAction<boolean>> = useCallback((value) => {
+    setSelectedMcpIds((current) => {
+      const enabled = typeof value === "function"
+        ? value(current.includes(computerUseMcpId))
+        : value;
+      return enabled
+        ? normalizeSelectedMcpIds([...current, computerUseMcpId])
+        : current.filter((id) => id !== computerUseMcpId);
+    });
+  }, [computerUseMcpId, setSelectedMcpIds]);
   const {
     availableSkills,
     selectedSkillIds,
@@ -410,7 +426,6 @@ export function useChatComposer({
           model,
           permissionMode,
           effort,
-          computerUseEnabled,
           selectedSkillIds,
           selectedMcpIds,
         ),
@@ -421,7 +436,7 @@ export function useChatComposer({
         workspacePath: options.workspacePath,
         options: sessionOptions,
       });
-      if (computerUseEnabled) {
+      if (runtimeOptionsSelectComputerUseMcp(sessionOptions)) {
         await setComputerUseSessionApproval(handle.sessioRuntimeSessionId, true);
       }
       await rememberRuntimeAgentSelection({
@@ -553,7 +568,6 @@ export function runtimeSessionOptions(
   model: string,
   permissionMode: string,
   effort = "",
-  computerUse = false,
   selectedSkillIds: string[] = [],
   selectedMcpIds: string[] = [],
 ): Record<string, unknown> {
@@ -561,7 +575,6 @@ export function runtimeSessionOptions(
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
     ...(permissionMode ? { permissionMode } : {}),
-    ...(computerUse ? { computerUse: true } : {}),
     selectedSkillIds,
     selectedMcpIds: normalizeSelectedMcpIds(selectedMcpIds),
   };

@@ -1669,46 +1669,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_session_ignores_truncated_hidden_last_prompt_preview() {
-        let dir = std::env::temp_dir().join(format!(
-            "sessio-claude-parser-hidden-title-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-
-        let path = dir.join("truncated-hidden-last-prompt-session.jsonl");
-        let markers = crate::prompt_markers::sessio_prompt_markers();
-        fs::write(
-            &path,
-            format!(
-                "{{\"type\":\"user\",\"timestamp\":\"2026-05-18T05:09:15.000Z\",\"cwd\":\"/tmp/project\",\"message\":{{\"role\":\"user\",\"content\":\"{} nonce=\\\"abc\\\" kind=\\\"{}\\\" -->\\nUse injected computer tools.\\n{} nonce=\\\"abc\\\" -->\\n\\n使用网易云音乐打开私人雷达然后播放\"}}}}\n{{\"type\":\"last-prompt\",\"lastPrompt\":\"{} nonce=\\\"abc...\",\"leafUuid\":\"leaf\",\"sessionId\":\"truncated-hidden-last-prompt-session\"}}\n",
-                markers.computer_use_prompt_start,
-                markers.computer_use_prompt_kind,
-                markers.computer_use_prompt_end,
-                markers.computer_use_prompt_start
-            ),
-        )
-        .unwrap();
-
-        let info = parse_session(&path).unwrap().unwrap();
-        assert_eq!(
-            info.first_user_message.as_deref(),
-            Some("使用网易云音乐打开私人雷达然后播放")
-        );
-        assert_eq!(
-            info.title.as_deref(),
-            Some("使用网易云音乐打开私人雷达然后播放")
-        );
-
-        fs::remove_file(path).ok();
-        fs::remove_dir(dir).ok();
-    }
-
-    #[test]
     fn expand_message_adds_file_edit_summary_after_successful_edit_result() {
         let msg = serde_json::json!({
             "role": "assistant",

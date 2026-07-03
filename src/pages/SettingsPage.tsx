@@ -886,6 +886,7 @@ function GeneralSettings({
   const { t } = useI18n();
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
   const [mcpSettings, setMcpSettings] = useState<McpSettings | null>(null);
+  const [runtimeAgents, setRuntimeAgents] = useState<RuntimeAgentMetadata[]>([]);
   const [savedCustomMcpServers, setSavedCustomMcpServers] = useState<McpServerConfig[]>([]);
   const [computerUseSettings, setComputerUseSettings] = useState<ComputerUseSettings | null>(null);
   const [desktopControlPermissionStatus, setDesktopControlPermissionStatus] = useState<import("../api").DesktopControlPermissionStatus | null>(null);
@@ -906,14 +907,16 @@ function GeneralSettings({
     Promise.all([
       getNetworkConfig(),
       getMcpSettings(),
+      listRuntimeAgents(),
       getAppshotConfig(),
       getComputerUseSettings(),
       getDesktopControlPermissionStatus(),
     ])
-      .then(([config, nextMcpSettings, nextAppshot, nextComputerUse, desktopStatus]) => {
+      .then(([config, nextMcpSettings, runtimeAgentRows, nextAppshot, nextComputerUse, desktopStatus]) => {
         if (cancelled) return;
         setNetworkConfig(config);
         setMcpSettings(nextMcpSettings);
+        setRuntimeAgents(runtimeAgentRows);
         setSavedCustomMcpServers(extractCustomMcpServers(nextMcpSettings));
         setProxyEnabled(config.proxy.enabled);
         setProxyUrl(config.proxy.url ?? "");
@@ -1101,6 +1104,10 @@ function GeneralSettings({
     () => stableMcpServerJson(customMcpServers) !== stableMcpServerJson(savedCustomMcpServers),
     [customMcpServers, savedCustomMcpServers],
   );
+  const supportedCustomMcpTransports = useMemo(
+    () => supportedCustomMcpTransportValues(runtimeAgents),
+    [runtimeAgents],
+  );
   useEffect(() => {
     if (stableMcpServerJson(customMcpServers) !== stableMcpServerJson(savedCustomMcpServers)) {
       setMcpSaveStatus("idle");
@@ -1115,13 +1122,15 @@ function GeneralSettings({
       void Promise.all([
         getNetworkConfig(),
         getMcpSettings(),
+        listRuntimeAgents(),
         getComputerUseSettings(),
         getDesktopControlPermissionStatus(),
       ])
-        .then(([config, nextMcpSettings, nextComputerUse, desktopStatus]) => {
+        .then(([config, nextMcpSettings, runtimeAgentRows, nextComputerUse, desktopStatus]) => {
           if (disposed) return;
           setNetworkConfig(config);
           setMcpSettings(nextMcpSettings);
+          setRuntimeAgents(runtimeAgentRows);
           setSavedCustomMcpServers(extractCustomMcpServers(nextMcpSettings));
           setProxyEnabled(config.proxy.enabled);
           setProxyUrl(config.proxy.url ?? "");
@@ -1154,7 +1163,10 @@ function GeneralSettings({
   };
 
   const addCustomMcpServer = () => {
-    updateCustomMcpServers((servers) => [...servers, createDefaultCustomMcpServer()]);
+    updateCustomMcpServers((servers) => [
+      ...servers,
+      createDefaultCustomMcpServer(supportedCustomMcpTransports[0] ?? "http"),
+    ]);
   };
 
   const updateCustomMcpServer = (
@@ -1386,6 +1398,7 @@ function GeneralSettings({
                 <McpCustomServerCard
                   key={server.id}
                   server={server}
+                  supportedTransports={supportedCustomMcpTransports}
                   onUpdate={(nextServer) => updateCustomMcpServer(server.id, () => nextServer)}
                   onRemove={() => removeCustomMcpServer(server.id)}
                 />
@@ -3478,6 +3491,7 @@ function AgentEditor({
           displayName: patch.displayName,
           enabled: patch.enabled,
           order: patch.order,
+          commands: patch.commands,
           model: patch.model,
           effort: patch.effort,
           permissionMode: patch.permissionMode,
@@ -5022,10 +5036,11 @@ function McpBuiltinCard({ server }: { server: McpServerConfig }) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-body-sm font-medium text-ink">{server.name}</div>
-          <div className="mt-1 text-caption leading-relaxed text-ink/50">
-            {server.builtinKind === SESSIO_PROMPT_MARKERS.builtinMcpKindComputerUse
-              ? t("settings.mcp_builtin_computer_use_note")
-              : t("settings.mcp_builtin_description")}
+          <div className="mt-1 whitespace-pre-wrap text-caption leading-relaxed text-ink/50">
+            {server.description
+              ?? (server.builtinKind === SESSIO_PROMPT_MARKERS.builtinMcpKindComputerUse
+                ? t("settings.mcp_builtin_computer_use_note")
+                : t("settings.mcp_builtin_description"))}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -5041,15 +5056,21 @@ function McpBuiltinCard({ server }: { server: McpServerConfig }) {
 
 function McpCustomServerCard({
   server,
+  supportedTransports,
   onUpdate,
   onRemove,
 }: {
   server: McpServerConfig;
+  supportedTransports: McpServerConfig["transport"][];
   onUpdate: (server: McpServerConfig) => void;
   onRemove: () => void;
 }) {
   const { t } = useI18n();
   const isStdio = server.transport === "stdio";
+  const transportOptions = supportedTransports.map((transport) => ({
+    value: transport,
+    label: mcpTransportLabel(t, transport),
+  }));
 
   return (
     <div className="rounded-lg border border-card-border/[0.12] bg-card-chip/[0.04] p-3">
@@ -5095,14 +5116,20 @@ function McpCustomServerCard({
           <span className="text-caption text-ink/45">{t("settings.mcp_transport")}</span>
           <SegmentedControl
             value={server.transport}
-            options={[
-              { value: "http", label: "HTTP" },
-              { value: "sse", label: "SSE" },
-              { value: "stdio", label: "stdio" },
-            ]}
+            options={transportOptions}
             onChange={(value) => onUpdate(applyCustomMcpTransport(server, value as McpServerConfig["transport"]))}
           />
         </div>
+        <label className="grid gap-1.5 md:col-span-2">
+          <span className="text-caption text-ink/45">{t("settings.mcp_description")}</span>
+          <textarea
+            value={server.description ?? ""}
+            onChange={(event) => onUpdate({ ...server, description: event.target.value })}
+            rows={3}
+            placeholder={t("settings.mcp_description_placeholder")}
+            className={textareaClassName}
+          />
+        </label>
         {isStdio ? (
           <label className="grid gap-1.5 md:col-span-2">
             <span className="text-caption text-ink/45">{t("settings.mcp_command")}</span>
@@ -5192,18 +5219,21 @@ function EmptyState({ label }: { label: string }) {
   return <div className="rounded-md border border-dashed border-ink/10 py-8 text-center text-body-sm text-ink/35">{label}</div>;
 }
 
-function createDefaultCustomMcpServer(): McpServerConfig {
+function createDefaultCustomMcpServer(
+  transport: McpServerConfig["transport"] = "http",
+): McpServerConfig {
   return {
     id: `custom-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`,
     name: "",
+    description: "",
     enabled: true,
     source: SESSIO_PROMPT_MARKERS.mcpSourceCustom,
-    transport: "http",
+    transport,
     injectionMode: "sessionOptIn",
     builtinKind: null,
-    url: "",
+    url: transport === "stdio" ? null : "",
     headers: [],
-    command: null,
+    command: transport === "stdio" ? "" : null,
     args: [],
     env: [],
   };
@@ -5304,6 +5334,26 @@ function mcpTransportLabel(
     : transport === "sse"
       ? t("settings.mcp_transport_sse")
       : t("settings.mcp_transport_stdio");
+}
+
+function supportedCustomMcpTransportValues(
+  runtimeAgents: RuntimeAgentMetadata[],
+): McpServerConfig["transport"][] {
+  const enabledAcpAgents = runtimeAgents.filter(
+    (agent) => agent.enabled && agent.transport === "acp",
+  );
+  if (enabledAcpAgents.length === 0) {
+    return ["http", "stdio"];
+  }
+  const supported = new Set<McpServerConfig["transport"]>(["stdio", "http"]);
+  for (const agent of enabledAcpAgents) {
+    if (agent.capabilities?.mcpInjection?.sse) {
+      supported.add("sse");
+    }
+  }
+  return ["http", "sse", "stdio"].filter((transport) =>
+    supported.has(transport as McpServerConfig["transport"]),
+  ) as McpServerConfig["transport"][];
 }
 
 const inputClassName = "h-9 min-w-0 rounded-md border border-input-border/[0.16] bg-input px-3 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30";

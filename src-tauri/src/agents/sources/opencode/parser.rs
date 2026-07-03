@@ -733,43 +733,6 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_session_first_user_message_strips_computer_use_prompt_block() {
-        let markers = crate::prompt_markers::sessio_prompt_markers();
-        let db = unique_db();
-        let conn = create_test_db(&db);
-        conn.execute(
-            "INSERT INTO session VALUES ('ses_1', 'Title 1', '/tmp/proj', 1000, 2000)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO message VALUES ('msg_1', 'ses_1', 1000, ?)",
-            [r#"{"role":"user"}"#],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO part VALUES ('part_1', 'ses_1', 'msg_1', 1000, ?)",
-            [format!(
-                r#"{{"type":"text","text":"{} nonce=\"abc\" kind=\"{}\" -->\nUse injected computer tools.\n{} nonce=\"abc\" -->\n\nopen settings"}}"#,
-                markers.computer_use_prompt_start,
-                markers.computer_use_prompt_kind,
-                markers.computer_use_prompt_end
-            )],
-        )
-        .unwrap();
-        drop(conn);
-
-        let session = parse_sqlite_session(&db, "ses_1")
-            .unwrap()
-            .expect("session");
-
-        assert_eq!(session.first_user_message.as_deref(), Some("open settings"));
-
-        let _ = fs::remove_file(&db);
-        let _ = fs::remove_dir_all(db.parent().unwrap());
-    }
-
-    #[test]
     fn raw_messages_emit_user_assistant_and_tool_history() {
         fn text_part(text: &str) -> OpencodePart {
             OpencodePart {

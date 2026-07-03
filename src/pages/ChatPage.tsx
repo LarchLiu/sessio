@@ -8,7 +8,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type Dispatch,
   type ReactNode,
+  type SetStateAction,
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { ArrowDownToLine, BookOpen, Bot, Brain, Check, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, Copy, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, MoveRight, Pen, Search, SearchCheck, Square, SquareTerminal, Trash2, UserKey, Wrench } from "lucide-react";
@@ -94,7 +96,9 @@ import { normalizeSelectedMcpIds, useSelectableMcpServers } from "../hooks/useSe
 import { useSelectableSkills } from "../hooks/useSelectableSkills";
 import {
   assistantResourceRuntimeOptions,
+  builtinComputerUseMcpId,
   mergeRuntimeResourceOptions,
+  runtimeOptionsSelectComputerUseMcp,
 } from "../assistantResources";
 import { localeTag, useI18n } from "../i18n";
 import type { ChatView, ViewMode } from "../navigation";
@@ -698,7 +702,6 @@ export function AcpTranscriptPanel({
   const [composerModel, setComposerModel] = useState("");
   const [composerEffort, setComposerEffort] = useState("");
   const [composerPermissionMode, setComposerPermissionMode] = useState("");
-  const [computerUseEnabled, setComputerUseEnabled] = useState(false);
   const [computerUseStatus, setComputerUseStatus] = useState<ComputerUseStatus | null>(null);
   const [cachedAvailableCommands, setCachedAvailableCommands] = useState<AcpAvailableCommand[]>([]);
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<AcpAvailableCommand | null>(null);
@@ -733,9 +736,22 @@ export function AcpTranscriptPanel({
     availableMcpServers,
     selectedMcpIds,
     selectedMcpServers,
+    setSelectedMcpIds,
     toggleMcpSelection,
     clearSelectedMcps,
   } = useSelectableMcpServers(selectedComposerAgent?.capabilities ?? null);
+  const computerUseMcpId = builtinComputerUseMcpId();
+  const computerUseEnabled = selectedMcpIds.includes(computerUseMcpId);
+  const setComputerUseEnabled: Dispatch<SetStateAction<boolean>> = useCallback((value) => {
+    setSelectedMcpIds((current) => {
+      const enabled = typeof value === "function"
+        ? value(current.includes(computerUseMcpId))
+        : value;
+      return enabled
+        ? normalizeSelectedMcpIds([...current, computerUseMcpId])
+        : current.filter((id) => id !== computerUseMcpId);
+    });
+  }, [computerUseMcpId, setSelectedMcpIds]);
   const {
     availableSkills,
     selectedSkillIds,
@@ -747,7 +763,9 @@ export function AcpTranscriptPanel({
     selectedComposerAgent?.computerUseEligible && computerUseFeatureEnabled,
   );
   const sessionComputerUseAttached = Boolean(
-    liveSession && !liveSession.ended && liveSession.metadata?.computerUse,
+    liveSession && !liveSession.ended && (
+      runtimeMetadataSelectedMcpIds(liveSession.metadata).includes(computerUseMcpId)
+    ),
   );
   const sessionComputerUseActive = sessionComputerUseAttached;
   const handleComposerEffortChange = useCallback(async (targetAgent: Agent, nextValue: string) => {
@@ -1348,14 +1366,12 @@ export function AcpTranscriptPanel({
     const timestamp = Date.now();
     const targetAgent = composerAgent;
     const sameAgent = targetAgent === agent;
-    const desiredComputerUseEnabled = Boolean(composerComputerUseEligible && computerUseEnabled);
     const normalizedSelectedMcpIds = normalizeSelectedMcpIds(selectedMcpIds);
     const sessionOptions = mergeRuntimeResourceOptions(
       buildRuntimeSessionOptions(
         composerModel,
         composerPermissionMode,
         composerEffort,
-        desiredComputerUseEnabled,
         selectedSkillIds,
         normalizedSelectedMcpIds,
       ),
@@ -1364,12 +1380,14 @@ export function AcpTranscriptPanel({
     const effectiveSelectedMcpIds = runtimeMetadataSelectedMcpIds(sessionOptions);
     const existingRuntimeSession = sameAgent ? liveState.sessions[runtimeSessionId] : null;
     const existingComputerUseAttached = Boolean(
-      existingRuntimeSession && !existingRuntimeSession.ended && existingRuntimeSession.metadata?.computerUse,
+      existingRuntimeSession
+        && !existingRuntimeSession.ended
+        && runtimeMetadataSelectedMcpIds(existingRuntimeSession.metadata).includes(computerUseMcpId),
     );
     const existingSelectedMcpIds = runtimeMetadataSelectedMcpIds(existingRuntimeSession?.metadata);
     const shouldRecreateForComputerUse =
       Boolean(existingRuntimeSession && !existingRuntimeSession.ended) &&
-      existingComputerUseAttached !== desiredComputerUseEnabled;
+      existingComputerUseAttached && !computerUseEnabled;
     const shouldRecreateForSelectedMcps =
       Boolean(existingRuntimeSession && !existingRuntimeSession.ended) &&
       !sameNormalizedStringList(existingSelectedMcpIds, effectiveSelectedMcpIds);
@@ -1418,7 +1436,7 @@ export function AcpTranscriptPanel({
             sourceSessionId: sessionId,
             options: sessionOptions,
           });
-      if (desiredComputerUseEnabled) {
+      if (runtimeOptionsSelectComputerUseMcp(sessionOptions)) {
         await setComputerUseSessionApproval(handle.sessioRuntimeSessionId, true);
       }
       if (sameAgent) {

@@ -1055,6 +1055,14 @@ fn hydrate_skill_options(
     skills::hydrate_selected_skills_option(options, &available_skills);
 }
 
+fn hydrate_mcp_options(
+    options: &mut agents::runtime::types::RuntimeMetadata,
+    cache: &mcp::McpSettingsCache,
+) {
+    let settings = cache.get();
+    mcp::hydrate_selected_mcps_option(options, &settings);
+}
+
 #[tauri::command]
 fn list_assistants(
     project_id: Option<String>,
@@ -8866,10 +8874,12 @@ fn start_agent_session(
     mut req: StartAgentSession,
     store: State<'_, Arc<dyn SessionStore>>,
     skills_cache: State<'_, skills::SkillsCache>,
+    mcp_cache: State<'_, mcp::McpSettingsCache>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
     hydrate_start_request_from_db(&mut req, store.inner()).map_err(|e| e.to_string())?;
     hydrate_skill_options(&mut req.options, skills_cache.inner());
+    hydrate_mcp_options(&mut req.options, mcp_cache.inner());
     runtime.start_session(req).map_err(|e| e.to_string())
 }
 
@@ -8914,6 +8924,8 @@ fn computer_use_abort(sessio_runtime_session_id: String, runtime: State<'_, Runt
 fn fork_agent_session(
     mut req: StartAgentSession,
     store: State<'_, Arc<dyn SessionStore>>,
+    skills_cache: State<'_, skills::SkillsCache>,
+    mcp_cache: State<'_, mcp::McpSettingsCache>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
     if req
@@ -8926,6 +8938,8 @@ fn fork_agent_session(
         return Err("source_session_id is required".to_string());
     }
     hydrate_start_request_from_db(&mut req, store.inner()).map_err(|e| e.to_string())?;
+    hydrate_skill_options(&mut req.options, skills_cache.inner());
+    hydrate_mcp_options(&mut req.options, mcp_cache.inner());
     runtime.start_session(req).map_err(|e| e.to_string())
 }
 
@@ -8934,10 +8948,12 @@ fn ensure_agent_runtime_session(
     mut req: EnsureAgentRuntimeSession,
     store: State<'_, Arc<dyn SessionStore>>,
     skills_cache: State<'_, skills::SkillsCache>,
+    mcp_cache: State<'_, mcp::McpSettingsCache>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
     hydrate_ensure_request_from_db(&mut req, store.inner()).map_err(|e| e.to_string())?;
     hydrate_skill_options(&mut req.options, skills_cache.inner());
+    hydrate_mcp_options(&mut req.options, mcp_cache.inner());
     runtime.ensure_session(req).map_err(|e| e.to_string())
 }
 
@@ -8960,6 +8976,7 @@ fn load_agent_session(
     source_agent: Option<Agent>,
     store: State<'_, Arc<dyn SessionStore>>,
     skills_cache: State<'_, skills::SkillsCache>,
+    mcp_cache: State<'_, mcp::McpSettingsCache>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
     let mut req = EnsureAgentRuntimeSession {
@@ -8972,6 +8989,7 @@ fn load_agent_session(
     };
     hydrate_ensure_request_from_db(&mut req, store.inner()).map_err(|e| e.to_string())?;
     hydrate_skill_options(&mut req.options, skills_cache.inner());
+    hydrate_mcp_options(&mut req.options, mcp_cache.inner());
     runtime.ensure_session(req).map_err(|e| e.to_string())
 }
 
@@ -8980,6 +8998,7 @@ fn send_agent_input(
     sessio_runtime_session_id: String,
     mut input: AgentInput,
     skills_cache: State<'_, skills::SkillsCache>,
+    mcp_cache: State<'_, mcp::McpSettingsCache>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentTurnHandle, String> {
     log::info!(
@@ -8988,6 +9007,7 @@ fn send_agent_input(
         input.text
     );
     hydrate_skill_options(&mut input.options, skills_cache.inner());
+    hydrate_mcp_options(&mut input.options, mcp_cache.inner());
     runtime
         .send_input(&sessio_runtime_session_id, input)
         .map_err(|e| e.to_string())

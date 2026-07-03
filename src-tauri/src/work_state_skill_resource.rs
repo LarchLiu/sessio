@@ -7,11 +7,8 @@
 
 use std::path::PathBuf;
 
-use crate::prompt_markers::sessio_prompt_markers;
-
 const BUNDLED_SKILL_RELATIVE_PATH: &str = "sessio-work-state-skill/SKILL.md";
 const DEV_SKILL_RELATIVE_PATH: &str = "docs/sessio-work-state-skill.md";
-const BUILTIN_WORK_STATE_SKILL_ID: &str = "builtin:sessio-work-state";
 
 /// Best-effort absolute path to the work-state skill the agent should read.
 pub fn work_state_skill_path() -> Option<PathBuf> {
@@ -20,8 +17,7 @@ pub fn work_state_skill_path() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// Markdown note injected into thread/stage turns so agents can load the full
-/// bundled work-state skill when they need the complete command contract.
+/// Human-readable pointer to the resolved work-state skill path.
 pub fn work_state_skill_prompt_note() -> String {
     match work_state_skill_path() {
         Some(path) => format!(
@@ -30,36 +26,6 @@ pub fn work_state_skill_prompt_note() -> String {
         ),
         None => "Full Sessio work-state skill path could not be resolved; use `~/.sessio/bin/sessio ... --json` and the injected thread/stage context below.".to_string(),
     }
-}
-
-/// Prepend the work-state skill pointer only for Sessio thread/stage work
-/// prompts. Use the shared skills marker so history/display stripping can
-/// filter it the same way as other injected skill blocks.
-pub fn inject_work_state_skill_prompt_block(text: &str) -> String {
-    let markers = sessio_prompt_markers();
-    let kinds = crate::models::sessio_thread_prompt_block_kinds(text);
-    if !kinds
-        .iter()
-        .any(|kind| kind == markers.thread_prompt_kind_work_context)
-        || (text.contains(&format!("kind=\"{}\"", markers.builtin_skill_prompt_kind))
-            && text.contains(&format!("id: `{BUILTIN_WORK_STATE_SKILL_ID}`")))
-    {
-        return text.to_string();
-    }
-
-    let block = work_state_skill_prompt_block();
-    if block.trim().is_empty() {
-        return text.to_string();
-    }
-    format!("{block}\n\n{text}")
-}
-
-fn work_state_skill_prompt_block() -> String {
-    crate::skills::inject_builtin_skill_prompt_block(
-        "",
-        crate::skills::BuiltinSkillKind::WorkState,
-        "Use `~/.sessio/bin/sessio` for reliable CLI access; `sessio` is acceptable only when it is known to be on PATH. Prefer `--json` for state reads and writes.",
-    )
 }
 
 fn candidate_skill_paths() -> Vec<PathBuf> {
@@ -141,60 +107,12 @@ mod tests {
         assert!(note.contains("SKILL.md") || note.contains("sessio-work-state-skill.md"));
     }
 
-    #[test]
-    fn injects_skill_pointer_for_work_context() {
-        let markers = sessio_prompt_markers();
-        let prompt = format!(
-            "{} nonce=\"abc\" kind=\"{}\" -->\nstage context\n{} nonce=\"abc\" -->",
-            markers.thread_prompt_start,
-            markers.thread_prompt_kind_work_context,
-            markers.thread_prompt_end
-        );
-        let output = inject_work_state_skill_prompt_block(&prompt);
-
-        assert!(output.contains(markers.skills_prompt_start));
-        assert!(output.contains(&format!("kind=\"{}\"", markers.builtin_skill_prompt_kind)));
-        assert!(output.contains("id: `builtin:sessio-work-state`"));
-        assert!(output.contains(&format!(
-            "builtinKind: `{}`",
-            markers.builtin_skill_kind_work_state
-        )));
-        assert!(output.contains("skillMdPath: `"));
-        assert!(output.contains("~/.sessio/bin/sessio"));
-        assert!(output.ends_with(&prompt));
-    }
-
-    #[test]
-    fn does_not_inject_without_work_context() {
-        let prompt = "plain user prompt";
-
-        assert_eq!(inject_work_state_skill_prompt_block(prompt), prompt);
-    }
-
-    #[test]
-    fn does_not_inject_twice() {
-        let markers = sessio_prompt_markers();
-        let prompt = format!(
-            "{} nonce=\"skill\" kind=\"{}\" -->\nid: `builtin:sessio-work-state`\n{} nonce=\"skill\" -->\n\n{} nonce=\"abc\" kind=\"{}\" -->\nstage context\n{} nonce=\"abc\" -->",
-            markers.skills_prompt_start,
-            markers.builtin_skill_prompt_kind,
-            markers.skills_prompt_end,
-            markers.thread_prompt_start,
-            markers.thread_prompt_kind_work_context,
-            markers.thread_prompt_end
-        );
-
-        assert_eq!(inject_work_state_skill_prompt_block(&prompt), prompt);
-    }
-
+    #[cfg(target_os = "macos")]
     #[test]
     fn macos_contents_dir_detects_bundle_layout() {
-        #[cfg(target_os = "macos")]
-        {
-            let exe = std::path::Path::new("/Applications/Sessio.app/Contents/MacOS/sessio")
-                .to_path_buf();
-            let contents = macos_bundle_contents_dir(&exe).expect("contents dir");
-            assert_eq!(contents, PathBuf::from("/Applications/Sessio.app/Contents"));
-        }
+        let exe =
+            std::path::Path::new("/Applications/Sessio.app/Contents/MacOS/sessio").to_path_buf();
+        let contents = macos_bundle_contents_dir(&exe).expect("contents dir");
+        assert_eq!(contents, PathBuf::from("/Applications/Sessio.app/Contents"));
     }
 }

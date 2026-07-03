@@ -1,10 +1,10 @@
 //! Runtime glue for `computer use`: decides eligibility, owns the shared
 //! desktop MCP server + host, and produces per-session injections.
 //!
-//! This is the shape-independent runtime layer between the chat option and the
+//! This is the shape-independent runtime layer between MCP selection and the
 //! ACP `session/new` injection. It:
 //!
-//! - parses the `computerUse` session option,
+//! - checks whether the built-in computer-use MCP is selected,
 //! - gates ACP injection on `mcp_injection.http` and Pi injection on
 //!   `mcp_injection.native_extension`,
 //! - owns one desktop-started HTTP MCP server / attach broker (loopback),
@@ -27,29 +27,8 @@ use tauri::AppHandle;
 
 use super::types::{ComputerUseInjection, RuntimeCapabilitySet, RuntimeMetadata};
 
-/// Parse the `computerUse` boolean session option (default false).
 pub fn computer_use_requested(options: &RuntimeMetadata) -> bool {
-    options
-        .get("computerUse")
-        .or_else(|| options.get("computer_use"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-
-/// Whether the session may inject computer use: requested AND the agent's
-/// capabilities advertise HTTP MCP injection.
-///
-/// Per plan v3, the MVP gates on `mcp_injection.http`; `acp` does not gate.
-pub fn should_inject(
-    options: &RuntimeMetadata,
-    capabilities: Option<&RuntimeCapabilitySet>,
-) -> bool {
-    if !computer_use_requested(options) {
-        return false;
-    }
-    capabilities
-        .map(|caps| caps.mcp_injection.http)
-        .unwrap_or(false)
+    crate::mcp::selected_computer_use_server(options)
 }
 
 /// Whether a native agent extension (currently Pi) should be activated for this
@@ -155,6 +134,9 @@ impl ComputerUseRuntime {
     /// issue a bearer token, and return the URL + token to attach to
     /// `session/new`.
     pub fn prepare_injection(&self, session_id: &str) -> Result<ComputerUseInjection, String> {
+        if !self.host.settings().enabled {
+            return Err("computer use is disabled".to_string());
+        }
         let server = self.server()?;
         let token = server.issue_token(session_id);
         Ok(ComputerUseInjection {
@@ -182,12 +164,13 @@ mod tests {
     use crate::desktop_control::{DesktopControlInputs, DesktopPlatform, PermissionTier};
     use serde_json::json;
 
-    fn options(value: serde_json::Value) -> RuntimeMetadata {
-        let mut m = RuntimeMetadata::new();
-        if let Some(b) = value.as_bool() {
-            m.insert("computerUse".into(), json!(b));
-        }
-        m
+    fn selected_computer_use_options() -> RuntimeMetadata {
+        let mut options = RuntimeMetadata::new();
+        options.insert(
+            crate::mcp::SELECTED_MCP_IDS_OPTION.into(),
+            json!([crate::mcp::BUILTIN_COMPUTER_USE_ID]),
+        );
+        options
     }
 
     fn caps(http: bool) -> RuntimeCapabilitySet {
@@ -212,24 +195,9 @@ mod tests {
     }
 
     #[test]
-    fn requested_parses_both_casings_and_defaults_false() {
+    fn requested_reads_selected_mcp_and_defaults_false() {
         assert!(!computer_use_requested(&RuntimeMetadata::new()));
-        assert!(computer_use_requested(&options(json!(true))));
-        let mut snake = RuntimeMetadata::new();
-        snake.insert("computer_use".into(), json!(true));
-        assert!(computer_use_requested(&snake));
-    }
-
-    #[test]
-    fn should_inject_requires_request_and_http_capability() {
-        // Requested but no http capability.
-        assert!(!should_inject(&options(json!(true)), Some(&caps(false))));
-        // http capable but not requested.
-        assert!(!should_inject(&RuntimeMetadata::new(), Some(&caps(true))));
-        // Both → inject.
-        assert!(should_inject(&options(json!(true)), Some(&caps(true))));
-        // No capabilities probed.
-        assert!(!should_inject(&options(json!(true)), None));
+        assert!(computer_use_requested(&selected_computer_use_options()));
     }
 
     #[test]
@@ -238,7 +206,7 @@ mod tests {
         native.mcp_injection.native_extension = true;
 
         assert!(should_inject_native_extension(
-            &options(json!(true)),
+            &selected_computer_use_options(),
             Some(&native)
         ));
         assert!(!should_inject_native_extension(
@@ -246,10 +214,13 @@ mod tests {
             Some(&native)
         ));
         assert!(!should_inject_native_extension(
-            &options(json!(true)),
+            &selected_computer_use_options(),
             Some(&caps(false))
         ));
-        assert!(!should_inject_native_extension(&options(json!(true)), None));
+        assert!(!should_inject_native_extension(
+            &selected_computer_use_options(),
+            None
+        ));
     }
 
     fn runtime() -> ComputerUseRuntime {
@@ -276,6 +247,15 @@ mod tests {
         assert!(!rt.host().approvals().session_approved("s1"));
         // Idempotent.
         rt.teardown_session("s1");
+    }
+
+    #[test]
+    fn prepare_injection_fails_when_disabled() {
+        let rt = ComputerUseRuntime::new_for_tests(ComputerUseSettings::default(), Arc::new(perm));
+
+        let error = rt.prepare_injection("s1").expect_err("disabled");
+
+        assert!(error.contains("disabled"));
     }
 
     #[test]

@@ -173,6 +173,7 @@ export interface McpKeyValue {
 export interface McpServerConfig {
   id: string;
   name: string;
+  description: string | null;
   enabled: boolean;
   source: McpServerSource;
   transport: McpServerTransport;

@@ -1,8 +1,10 @@
 import type { AssistantInfo, StageAssistantInfo, ThreadAssistantInfo } from "./api";
 import { normalizeSelectedMcpIds } from "./hooks/useSelectableMcpServers";
+import { getSessioPromptMarkers } from "./promptMarkers";
 
 export const SELECTED_SKILL_IDS_OPTION = "selectedSkillIds";
 export const SELECTED_MCP_IDS_OPTION = "selectedMcpIds";
+const SESSIO_PROMPT_MARKERS = getSessioPromptMarkers();
 
 export type AssistantResourceSelection =
   | Pick<AssistantInfo, "selectedSkillIds" | "selectedMcpIds">
@@ -49,6 +51,17 @@ export function mergeRuntimeResourceOptions(
     ...runtimeStringIds(extra, SELECTED_MCP_IDS_OPTION),
   ]);
   return merged;
+}
+
+export function runtimeOptionsSelectComputerUseMcp(
+  options: Record<string, unknown> | null | undefined,
+): boolean {
+  return runtimeStringIds(options, SELECTED_MCP_IDS_OPTION)
+    .includes(builtinComputerUseMcpId());
+}
+
+export function builtinComputerUseMcpId(): string {
+  return SESSIO_PROMPT_MARKERS.builtinMcpIdComputerUse;
 }
 
 function runtimeStringIds(

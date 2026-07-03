@@ -1346,6 +1346,7 @@ mod tests {
         let servers_json = serde_json::to_string(&vec![crate::mcp::McpServerConfig {
             id: "docs".to_string(),
             name: "Docs".to_string(),
+            description: Some("Project docs".to_string()),
             enabled: true,
             source: crate::mcp::McpServerSource::Custom,
             transport: crate::mcp::McpServerTransport::Stdio,

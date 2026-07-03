@@ -5,9 +5,6 @@ import {
   type McpServerConfig,
   type RuntimeCapabilitySet,
 } from "../api";
-import { getSessioPromptMarkers } from "../promptMarkers";
-
-const SESSIO_PROMPT_MARKERS = getSessioPromptMarkers();
 
 export function normalizeSelectedMcpIds(ids: readonly string[]): string[] {
   const seen = new Set<string>();
@@ -33,6 +30,7 @@ export function useSelectableMcpServers(
   options: { filterByCapabilities?: boolean } = {},
 ) {
   const [servers, setServers] = useState<McpServerConfig[]>([]);
+  const [serversLoaded, setServersLoaded] = useState(false);
   const [selectedMcpIds, setSelectedMcpIds] = useState<string[]>([]);
 
   useEffect(() => {
@@ -43,8 +41,12 @@ export function useSelectableMcpServers(
         const settings = await getMcpSettings();
         if (disposed) return;
         setServers(settings.servers);
+        setServersLoaded(true);
       } catch {
-        if (!disposed) setServers([]);
+        if (!disposed) {
+          setServers([]);
+          setServersLoaded(true);
+        }
       }
     };
 
@@ -63,8 +65,7 @@ export function useSelectableMcpServers(
     () =>
       servers
         .filter((server) =>
-          server.source === SESSIO_PROMPT_MARKERS.mcpSourceCustom
-          && server.enabled
+          server.enabled
           && (
             options.filterByCapabilities === false
             || supportsMcpTransport(server, capabilities)
@@ -77,9 +78,11 @@ export function useSelectableMcpServers(
   );
 
   useEffect(() => {
+    if (!serversLoaded) return;
+    if (options.filterByCapabilities !== false && capabilities == null) return;
     const availableIds = new Set(availableMcpServers.map((server) => server.id));
     setSelectedMcpIds((current) => current.filter((id) => availableIds.has(id)));
-  }, [availableMcpServers]);
+  }, [availableMcpServers, capabilities, options.filterByCapabilities, serversLoaded]);
 
   const selectedMcpServers = useMemo(
     () =>
@@ -107,6 +110,7 @@ export function useSelectableMcpServers(
     availableMcpServers,
     selectedMcpIds,
     selectedMcpServers,
+    setSelectedMcpIds,
     toggleMcpSelection,
     clearSelectedMcps,
   };

@@ -881,31 +881,6 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn pi_session_first_user_message_strips_computer_use_prompt_block() {
-        let markers = crate::prompt_markers::sessio_prompt_markers();
-        let path = unique_temp_jsonl_path("pi-computer-use-preview");
-        let content = format!(
-            "{{\"type\":\"session\",\"id\":\"session-1\",\"timestamp\":\"2026-06-25T18:48:15.425Z\",\"cwd\":\"/tmp/project\"}}\n{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"{} nonce=\\\"abc\\\" kind=\\\"{}\\\" -->\\nUse injected computer tools.\\n{} nonce=\\\"abc\\\" -->\\n\\nclick the button\"}}],\"timestamp\":1000}}}}\n",
-            markers.computer_use_prompt_start,
-            markers.computer_use_prompt_kind,
-            markers.computer_use_prompt_end
-        );
-        std::fs::write(&path, content).expect("write temp pi jsonl");
-
-        let session = parse_session_file(&path)
-            .expect("parse pi session")
-            .expect("session");
-
-        assert_eq!(
-            session.first_user_message.as_deref(),
-            Some("click the button")
-        );
-        assert_eq!(session.title.as_deref(), Some("click the button"));
-
-        let _ = std::fs::remove_file(path);
-    }
-
     fn unique_temp_jsonl_path(prefix: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

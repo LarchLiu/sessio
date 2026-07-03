@@ -12,15 +12,15 @@ export interface SessioPromptMarkers {
   threadPromptEnd: string;
   assistantPromptStart: string;
   assistantPromptEnd: string;
-  computerUsePromptStart: string;
-  computerUsePromptEnd: string;
   skillsPromptStart: string;
   skillsPromptEnd: string;
+  mcpsPromptStart: string;
+  mcpsPromptEnd: string;
   workStateSkillPromptStart: string;
   workStateSkillPromptEnd: string;
   threadPromptKindWorkContext: string;
-  computerUsePromptKind: string;
   selectedSkillsPromptKind: string;
+  selectedMcpsPromptKind: string;
   builtinSkillPromptKind: string;
   skillSourceBuiltin: SkillSource;
   skillSourceUser: SkillSource;
@@ -29,6 +29,7 @@ export interface SessioPromptMarkers {
   mcpSourceBuiltin: McpServerSource;
   mcpSourceCustom: McpServerSource;
   builtinMcpKindComputerUse: BuiltinMcpKind;
+  builtinMcpIdComputerUse: string;
 }
 
 const SESSIO_PROMPT_MARKERS: Readonly<SessioPromptMarkers> = Object.freeze({
@@ -38,15 +39,15 @@ const SESSIO_PROMPT_MARKERS: Readonly<SessioPromptMarkers> = Object.freeze({
   threadPromptEnd: "<!-- sessio-thread-prompt:end",
   assistantPromptStart: "<!-- sessio-assistant-prompt:start",
   assistantPromptEnd: "<!-- sessio-assistant-prompt:end",
-  computerUsePromptStart: "<!-- sessio-computer-use:start",
-  computerUsePromptEnd: "<!-- sessio-computer-use:end",
   skillsPromptStart: "<!-- sessio-skills:start",
   skillsPromptEnd: "<!-- sessio-skills:end",
+  mcpsPromptStart: "<!-- sessio-mcps:start",
+  mcpsPromptEnd: "<!-- sessio-mcps:end",
   workStateSkillPromptStart: "<!-- sessio-work-state-skill:start",
   workStateSkillPromptEnd: "<!-- sessio-work-state-skill:end",
   threadPromptKindWorkContext: "work_context",
-  computerUsePromptKind: "computer_use",
   selectedSkillsPromptKind: "selected_skills",
+  selectedMcpsPromptKind: "selected_mcps",
   builtinSkillPromptKind: "builtin_skill",
   skillSourceBuiltin: "builtin",
   skillSourceUser: "user",
@@ -55,6 +56,7 @@ const SESSIO_PROMPT_MARKERS: Readonly<SessioPromptMarkers> = Object.freeze({
   mcpSourceBuiltin: "builtin",
   mcpSourceCustom: "custom",
   builtinMcpKindComputerUse: "computerUse",
+  builtinMcpIdComputerUse: "builtin:computer-use",
 });
 
 export function getSessioPromptMarkers(): Readonly<SessioPromptMarkers> {

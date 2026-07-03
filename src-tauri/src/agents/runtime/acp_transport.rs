@@ -108,6 +108,7 @@ pub fn spawn_session(
     workspace_path: String,
     command: String,
     runtime_config: Option<AgentRuntimeSessionConfig>,
+    options: RuntimeMetadata,
     start: AcpSessionStart,
 ) -> AcpSessionController {
     let (command_tx, command_rx) = tauri::async_runtime::channel(32);
@@ -123,6 +124,7 @@ pub fn spawn_session(
                     workspace_path,
                     command,
                     runtime_config,
+                    options,
                     start,
                 },
                 command_rx,
@@ -241,6 +243,7 @@ pub struct AcpSessionSpec {
     pub workspace_path: String,
     pub command: String,
     pub runtime_config: Option<AgentRuntimeSessionConfig>,
+    pub options: RuntimeMetadata,
     pub start: AcpSessionStart,
 }
 
@@ -255,6 +258,7 @@ async fn run_session(
         workspace_path,
         command,
         runtime_config,
+        options,
         start,
     } = spec;
     let spawned_transport = spawn_acp_transport(&command, &workspace_path)
@@ -442,6 +446,7 @@ async fn run_session(
             let start = start.clone();
             let current_turn_id = current_turn_id.clone();
             let runtime_config = runtime_config.clone();
+            let options = options.clone();
             let turn_activity = turn_activity.clone();
             async move {
                 let init = connection
@@ -467,10 +472,27 @@ async fn run_session(
                     )
                     .map_err(acp_internal_error)?;
                 let capabilities = runtime_capabilities_from_acp(&init.agent_capabilities);
+                let mut runtime_config = runtime_config.unwrap_or_default();
+                manager.attach_mcp_injections_with_capabilities(
+                    agent,
+                    &sessio_runtime_session_id,
+                    &options,
+                    &capabilities,
+                    &mut runtime_config,
+                );
+                let runtime_config = Some(runtime_config);
                 let acp_session_id = match start {
                     AcpSessionStart::New => {
                         let request =
                             new_session_request(agent, workspace_path, runtime_config.as_ref());
+                        emit_acp_client_request(
+                            &manager,
+                            &sessio_runtime_session_id,
+                            "session/new",
+                            None,
+                            None,
+                            &request,
+                        )?;
                         let session = connection
                             .send_request(request)
                             .block_task()
@@ -507,6 +529,14 @@ async fn run_session(
                             workspace_path,
                             runtime_config.as_ref(),
                         );
+                        emit_acp_client_request(
+                            &manager,
+                            &sessio_runtime_session_id,
+                            "session/load",
+                            Some(acp_session_id.to_string()),
+                            None,
+                            &request,
+                        )?;
                         let session = connection
                             .send_request(request)
                             .block_task()
@@ -545,6 +575,14 @@ async fn run_session(
                                 workspace_path,
                                 runtime_config.as_ref(),
                             );
+                            emit_acp_client_request(
+                                &manager,
+                                &sessio_runtime_session_id,
+                                "session/load",
+                                Some(acp_session_id.to_string()),
+                                None,
+                                &request,
+                            )?;
                             let session = connection
                                 .send_request(request)
                                 .block_task()
@@ -579,6 +617,14 @@ async fn run_session(
                                 workspace_path,
                                 runtime_config.as_ref(),
                             );
+                            emit_acp_client_request(
+                                &manager,
+                                &sessio_runtime_session_id,
+                                "session/resume",
+                                Some(acp_session_id.to_string()),
+                                None,
+                                &request,
+                            )?;
                             let session = connection
                                 .send_request(request)
                                 .block_task()
@@ -616,6 +662,14 @@ async fn run_session(
                             workspace_path,
                             runtime_config.as_ref(),
                         );
+                        emit_acp_client_request(
+                            &manager,
+                            &sessio_runtime_session_id,
+                            "session/fork",
+                            None,
+                            None,
+                            &request,
+                        )?;
                         let session = connection
                             .send_request(request)
                             .block_task()
@@ -1331,30 +1385,111 @@ fn prompt_request_from_input(session_id: SessionId, input: AgentInput) -> Result
     Ok(PromptRequest::new(session_id, prompt))
 }
 
+fn emit_acp_client_request<T: serde::Serialize>(
+    manager: &RuntimeManager,
+    sessio_runtime_session_id: &str,
+    method: &'static str,
+    acp_session_id: Option<String>,
+    turn_id: Option<String>,
+    request: &T,
+) -> Result<(), agent_client_protocol::Error> {
+    let mut data = serde_json::to_value(request).map_err(acp_internal_error)?;
+    let mcp_server_count = mcp_server_count_from_protocol_value(&data);
+    redact_sensitive_protocol_fields(&mut data);
+    if mcp_server_count > 0 {
+        log::info!(
+            "[sessio-runtime:acp:mcp] session={} method={} mcp_servers={}",
+            sessio_runtime_session_id,
+            method,
+            mcp_server_count
+        );
+    }
+    manager
+        .emit(
+            acp_protocol_event(
+                sessio_runtime_session_id,
+                AcpProtocolEnvelope {
+                    direction: "client_to_agent",
+                    message_kind: "request",
+                    method,
+                    acp_session_id,
+                    turn_id,
+                    request_id: None,
+                    update_type: None,
+                },
+                &data,
+            )
+            .map_err(acp_internal_error)?,
+        )
+        .map_err(acp_internal_error)
+}
+
+fn mcp_server_count_from_protocol_value(value: &serde_json::Value) -> usize {
+    value
+        .get("mcpServers")
+        .or_else(|| value.get("mcp_servers"))
+        .and_then(|value| value.as_array())
+        .map(|servers| servers.len())
+        .unwrap_or(0)
+}
+
+fn redact_sensitive_protocol_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(headers) = map.get_mut("headers") {
+                redact_named_values(headers);
+            }
+            if let Some(env) = map.get_mut("env") {
+                redact_named_values(env);
+            }
+            for (key, child) in map.iter_mut() {
+                let lower = key.to_ascii_lowercase();
+                if child.is_string()
+                    && (lower.contains("token")
+                        || lower.contains("secret")
+                        || lower.contains("password")
+                        || lower.contains("authorization")
+                        || lower.contains("api_key")
+                        || lower.contains("apikey"))
+                {
+                    *child = serde_json::Value::String("[redacted]".to_string());
+                } else {
+                    redact_sensitive_protocol_fields(child);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                redact_sensitive_protocol_fields(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_named_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(entries) => {
+            for entry in entries {
+                redact_named_values(entry);
+            }
+        }
+        serde_json::Value::Object(entry) => {
+            if entry.get("value").is_some() {
+                entry.insert(
+                    "value".to_string(),
+                    serde_json::Value::String("[redacted]".to_string()),
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 fn normalize_runtime_prompt_text(text: &str, options: &RuntimeMetadata) -> String {
     let text = normalize_canvas_prompt_text(text, options);
-    let text = crate::work_state_skill_resource::inject_work_state_skill_prompt_block(&text);
     let text = crate::skills::inject_selected_skills_prompt_block(&text, options);
-    if !runtime_option_bool(options, "computerUse") && !runtime_option_bool(options, "computer_use")
-    {
-        return text;
-    }
-    let skill_block = computer_use_prompt_block();
-    if skill_block.trim().is_empty() {
-        return text;
-    }
-    format!("{skill_block}\n\n\n\n{text}")
-}
-
-fn runtime_option_bool(options: &RuntimeMetadata, key: &str) -> bool {
-    options
-        .get(key)
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-}
-
-fn computer_use_prompt_block() -> String {
-    crate::computer_use::skill_resource::computer_use_prompt_block()
+    crate::mcp::inject_selected_mcps_prompt_block(&text, options)
 }
 
 fn normalize_canvas_prompt_text(text: &str, options: &RuntimeMetadata) -> String {
@@ -2038,20 +2173,27 @@ mod tests {
     }
 
     #[test]
-    fn computer_use_prompt_layer_mentions_raise_recovery() {
+    fn selected_computer_use_mcp_injects_mcp_prompt_layer_without_skill_prompt() {
         let markers = crate::prompt_markers::sessio_prompt_markers();
+        let settings = crate::mcp::McpSettings {
+            servers: vec![crate::mcp::computer_use_server_entry(
+                &crate::computer_use::settings::ComputerUseSettings::enabled(),
+            )],
+        };
         let mut options = RuntimeMetadata::new();
-        options.insert("computerUse".into(), serde_json::json!(true));
+        options.insert(
+            crate::mcp::SELECTED_MCP_IDS_OPTION.into(),
+            serde_json::json!([crate::mcp::BUILTIN_COMPUTER_USE_ID]),
+        );
+        crate::mcp::hydrate_selected_mcps_option(&mut options, &settings);
 
         let text = normalize_runtime_prompt_text("send the message", &options);
 
-        assert!(text.contains(markers.skills_prompt_start));
-        assert!(text.contains(&format!("kind=\"{}\"", markers.builtin_skill_prompt_kind)));
+        assert!(text.contains(markers.mcps_prompt_start));
+        assert!(text.contains(&format!("kind=\"{}\"", markers.selected_mcps_prompt_kind)));
         assert!(text.contains("id: `builtin:computer-use`"));
         assert!(text.contains("computer_get_app_state"));
-        assert!(text.contains("computer_raise_app"));
-        assert!(text.contains("open -a"));
-        assert!(text.contains("AppleScript"));
+        assert!(!text.contains(markers.skills_prompt_start));
         assert!(text.ends_with("send the message"));
     }
 
@@ -2063,7 +2205,7 @@ mod tests {
     }
 
     #[test]
-    fn work_state_skill_pointer_is_injected_for_work_context() {
+    fn work_state_skill_is_not_injected_without_selection() {
         let markers = crate::prompt_markers::sessio_prompt_markers();
         let prompt = format!(
             "{} nonce=\"abc\" kind=\"{}\" -->\nstage context\n{} nonce=\"abc\" -->",
@@ -2074,10 +2216,28 @@ mod tests {
 
         let text = normalize_runtime_prompt_text(&prompt, &RuntimeMetadata::new());
 
-        assert!(text.contains(&format!("kind=\"{}\"", markers.builtin_skill_prompt_kind)));
+        assert_eq!(text, prompt);
+    }
+
+    #[test]
+    fn selected_work_state_skill_is_injected_via_selected_skills_prompt() {
+        let markers = crate::prompt_markers::sessio_prompt_markers();
+        let skill =
+            crate::skills::builtin_skill_metadata(crate::skills::BuiltinSkillKind::WorkState)
+                .expect("work-state skill metadata");
+        let mut options = RuntimeMetadata::new();
+        options.insert(
+            crate::skills::SELECTED_SKILLS_OPTION.into(),
+            serde_json::to_value(vec![skill]).expect("serialize skills"),
+        );
+
+        let text = normalize_runtime_prompt_text("stage context", &options);
+
+        assert!(text.contains(markers.skills_prompt_start));
+        assert!(text.contains(&format!("kind=\"{}\"", markers.selected_skills_prompt_kind)));
         assert!(text.contains("id: `builtin:sessio-work-state`"));
-        assert!(text.contains("~/.sessio/bin/sessio"));
-        assert!(text.ends_with(&prompt));
+        assert!(text.contains("skillMdPath: `"));
+        assert!(text.ends_with("stage context"));
     }
 
     #[test]
@@ -2106,6 +2266,29 @@ mod tests {
             }
             other => panic!("expected Http MCP server, got {other:?}"),
         }
+
+        let value = serde_json::to_value(&request).expect("serialize request");
+        let servers = value
+            .get("mcpServers")
+            .and_then(|value| value.as_array())
+            .expect("mcpServers array");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].get("type"), Some(&serde_json::json!("http")));
+        assert_eq!(
+            servers[0].get("name"),
+            Some(&serde_json::json!("sessio-computer-use"))
+        );
+        assert_eq!(
+            servers[0].get("url"),
+            Some(&serde_json::json!("http://127.0.0.1:54321/mcp"))
+        );
+        assert_eq!(
+            servers[0].get("headers"),
+            Some(&serde_json::json!([{
+                "name": "Authorization",
+                "value": "Bearer tok-abc"
+            }]))
+        );
     }
 
     #[test]

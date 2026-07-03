@@ -11,10 +11,15 @@ use crate::agents::runtime::types::{ComputerUseInjection, RuntimeCapabilitySet};
 use crate::computer_use::settings::ComputerUseSettings;
 use crate::config;
 
-const BUILTIN_COMPUTER_USE_ID: &str = "builtin:computer-use";
+pub const BUILTIN_COMPUTER_USE_ID: &str = "builtin:computer-use";
 const BUILTIN_COMPUTER_USE_NAME: &str = "Sessio Computer Use";
 const BUILTIN_COMPUTER_USE_SERVER_NAME: &str = "sessio-computer-use";
 pub const SELECTED_MCP_IDS_OPTION: &str = "selectedMcpIds";
+pub const SELECTED_MCPS_OPTION: &str = "selectedMcps";
+const BUILTIN_COMPUTER_USE_DESCRIPTION: &str = r#"Use for desktop observation and GUI control in native macOS apps. Prefer the exposed `computer_*` MCP tools over shell scripts.
+Start with `computer_get_app_state`; use AX refs (`ref` / `elementId`) before screenshot coordinates.
+If the target has no visible window or is Dock-minimized, call `computer_raise_app` for that bundle, then retry `computer_get_app_state`.
+Avoid raw Swift/CoreGraphics/CGEvent, cliclick, `open -a`, or AppleScript mouse / activate fallbacks because they bypass Sessio approvals, snapshot coordinate mapping, post-action screenshots, and the pointer overlay."#;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +67,8 @@ pub struct McpKeyValue {
 pub struct McpServerConfig {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub enabled: bool,
     pub source: McpServerSource,
     pub transport: McpServerTransport,
@@ -86,6 +93,19 @@ pub struct McpServerConfig {
 pub struct McpSettings {
     #[serde(default)]
     pub servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedMcpServerMetadata {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub source: McpServerSource,
+    pub transport: McpServerTransport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_kind: Option<BuiltinMcpKind>,
 }
 
 #[derive(Default)]
@@ -149,26 +169,90 @@ pub fn selected_session_servers(
     settings: &McpSettings,
     capabilities: Option<&RuntimeCapabilitySet>,
     options: &crate::agents::runtime::types::RuntimeMetadata,
+    mut builtin_runtime_server: impl FnMut(&McpServerConfig) -> Result<Option<McpServer>>,
 ) -> Result<Vec<McpServer>> {
     let selected_ids = selected_mcp_ids_from_options(options);
     if selected_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let selectable_servers = selectable_custom_servers(settings, capabilities);
+    let selectable_servers = selectable_session_servers(settings, capabilities);
     let mut out = Vec::new();
     for id in selected_ids {
-        let Some(server) = selectable_servers.iter().find(|server| server.id == id) else {
+        let server = selectable_servers
+            .iter()
+            .find(|server| server.id == id)
+            .map(|server| (*server).clone());
+        let Some(server) = server else {
             continue;
         };
-        out.push(configured_server_to_mcp_server(server)?);
+        match server.source {
+            McpServerSource::Builtin => {
+                if let Some(server) = builtin_runtime_server(&server)? {
+                    out.push(server);
+                }
+            }
+            McpServerSource::Custom => {
+                out.push(configured_server_to_mcp_server(&server)?);
+            }
+        }
     }
     Ok(out)
+}
+
+pub fn hydrate_selected_mcps_option(
+    options: &mut crate::agents::runtime::types::RuntimeMetadata,
+    settings: &McpSettings,
+) {
+    let selected_ids = selected_mcp_ids_from_options(options);
+    if selected_ids.is_empty() {
+        return;
+    }
+    let selected_mcps = selected_ids
+        .iter()
+        .filter_map(|id| {
+            settings
+                .servers
+                .iter()
+                .find(|server| server.id == *id && server.enabled)
+                .map(selected_mcp_metadata)
+        })
+        .collect::<Vec<_>>();
+    options.insert(
+        SELECTED_MCP_IDS_OPTION.to_string(),
+        serde_json::json!(selected_ids),
+    );
+    options.insert(
+        SELECTED_MCPS_OPTION.to_string(),
+        serde_json::to_value(selected_mcps).unwrap_or_else(|_| serde_json::json!([])),
+    );
+}
+
+pub fn inject_selected_mcps_prompt_block(
+    text: &str,
+    options: &crate::agents::runtime::types::RuntimeMetadata,
+) -> String {
+    let Some(mcps) = selected_mcps_from_options(options) else {
+        return text.to_string();
+    };
+    if mcps.is_empty() {
+        return text.to_string();
+    }
+    prepend_mcps_prompt_block(text, &mcps)
+}
+
+pub fn selected_computer_use_server(
+    options: &crate::agents::runtime::types::RuntimeMetadata,
+) -> bool {
+    selected_mcp_ids_from_options(options)
+        .iter()
+        .any(|id| id == BUILTIN_COMPUTER_USE_ID)
 }
 
 pub fn computer_use_server_entry(computer_use: &ComputerUseSettings) -> McpServerConfig {
     McpServerConfig {
         id: BUILTIN_COMPUTER_USE_ID.to_string(),
         name: BUILTIN_COMPUTER_USE_NAME.to_string(),
+        description: Some(BUILTIN_COMPUTER_USE_DESCRIPTION.to_string()),
         enabled: computer_use.enabled,
         source: McpServerSource::Builtin,
         transport: McpServerTransport::Http,
@@ -208,6 +292,7 @@ fn normalize_custom_server(server: McpServerConfig) -> Result<McpServerConfig> {
     if name.is_empty() {
         bail!("MCP server name is required");
     }
+    let description = trimmed_option(server.description.as_deref());
 
     let headers = normalize_entries(server.headers);
     let env = normalize_entries(server.env);
@@ -226,6 +311,7 @@ fn normalize_custom_server(server: McpServerConfig) -> Result<McpServerConfig> {
             McpServerConfig {
                 id,
                 name,
+                description,
                 enabled: server.enabled,
                 source: McpServerSource::Custom,
                 transport: server.transport,
@@ -245,6 +331,7 @@ fn normalize_custom_server(server: McpServerConfig) -> Result<McpServerConfig> {
             McpServerConfig {
                 id,
                 name,
+                description,
                 enabled: server.enabled,
                 source: McpServerSource::Custom,
                 transport: McpServerTransport::Stdio,
@@ -294,18 +381,116 @@ fn selected_mcp_ids_from_options(
         .collect()
 }
 
-fn selectable_custom_servers<'a>(
+fn selected_mcps_from_options(
+    options: &crate::agents::runtime::types::RuntimeMetadata,
+) -> Option<Vec<SelectedMcpServerMetadata>> {
+    let value = options
+        .get(SELECTED_MCPS_OPTION)
+        .or_else(|| options.get("selected_mcps"))?;
+    serde_json::from_value::<Vec<SelectedMcpServerMetadata>>(value.clone()).ok()
+}
+
+fn selected_mcp_metadata(server: &McpServerConfig) -> SelectedMcpServerMetadata {
+    SelectedMcpServerMetadata {
+        id: server.id.clone(),
+        name: server.name.clone(),
+        description: server.description.clone(),
+        source: server.source,
+        transport: server.transport,
+        builtin_kind: server.builtin_kind,
+    }
+}
+
+fn prepend_mcps_prompt_block(text: &str, mcps: &[SelectedMcpServerMetadata]) -> String {
+    if mcps.is_empty() {
+        return text.to_string();
+    }
+
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let markers = crate::prompt_markers::sessio_prompt_markers();
+    let mut block = String::new();
+    block.push_str(&format!(
+        "{} nonce=\"{nonce}\" kind=\"{}\" -->\n\n",
+        markers.mcps_prompt_start, markers.selected_mcps_prompt_kind
+    ));
+    block.push_str(
+        "Selected Sessio MCP servers are attached to this conversation.\nUse the metadata below to understand what each MCP is for before calling its tools. If an expected MCP tool is not visible in your available tools, say that the MCP is unavailable instead of assuming it exists.",
+    );
+    block.push_str("\n\n");
+    for mcp in mcps {
+        block.push_str(&render_mcp_metadata(mcp));
+    }
+    block.push_str(&format!(
+        "\n{} nonce=\"{nonce}\" -->",
+        markers.mcps_prompt_end
+    ));
+    if text.trim().is_empty() {
+        block
+    } else {
+        format!("{block}\n\n{text}")
+    }
+}
+
+fn render_mcp_metadata(mcp: &SelectedMcpServerMetadata) -> String {
+    let mut lines = vec![format!("- `{}`", mcp.name)];
+    lines.push(format!("  id: `{}`", mcp.id));
+    lines.push(format!("  source: `{}`", mcp_source_label(mcp.source)));
+    lines.push(format!(
+        "  transport: `{}`",
+        mcp_transport_label(mcp.transport)
+    ));
+    if let Some(kind) = mcp.builtin_kind {
+        lines.push(format!("  builtinKind: `{}`", builtin_mcp_kind_label(kind)));
+    }
+    if let Some(description) = mcp
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push("  description:".to_string());
+        lines.extend(
+            description
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(|line| format!("    {line}")),
+        );
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+fn mcp_source_label(source: McpServerSource) -> &'static str {
+    let markers = crate::prompt_markers::sessio_prompt_markers();
+    match source {
+        McpServerSource::Builtin => markers.mcp_source_builtin,
+        McpServerSource::Custom => markers.mcp_source_custom,
+    }
+}
+
+fn mcp_transport_label(transport: McpServerTransport) -> &'static str {
+    match transport {
+        McpServerTransport::Http => "http",
+        McpServerTransport::Sse => "sse",
+        McpServerTransport::Stdio => "stdio",
+    }
+}
+
+fn builtin_mcp_kind_label(kind: BuiltinMcpKind) -> &'static str {
+    let markers = crate::prompt_markers::sessio_prompt_markers();
+    match kind {
+        BuiltinMcpKind::ComputerUse => markers.builtin_mcp_kind_computer_use,
+    }
+}
+
+fn selectable_session_servers<'a>(
     settings: &'a McpSettings,
     capabilities: Option<&RuntimeCapabilitySet>,
 ) -> Vec<&'a McpServerConfig> {
     settings
         .servers
         .iter()
-        .filter(|server| {
-            server.source == McpServerSource::Custom
-                && server.enabled
-                && transport_supported(server.transport, capabilities)
-        })
+        .filter(|server| server.enabled && transport_supported(server.transport, capabilities))
         .collect()
 }
 
@@ -399,6 +584,7 @@ mod tests {
                 McpServerConfig {
                     id: "custom-1".into(),
                     name: "Docs".into(),
+                    description: Some("Project docs".into()),
                     enabled: true,
                     source: McpServerSource::Custom,
                     transport: McpServerTransport::Http,
@@ -424,11 +610,81 @@ mod tests {
         let server = &settings.servers[0];
         assert_eq!(server.id, "custom-1");
         assert_eq!(server.injection_mode, McpServerInjectionMode::SessionOptIn);
+        assert_eq!(server.description.as_deref(), Some("Project docs"));
         assert_eq!(server.url.as_deref(), Some("http://127.0.0.1:8123/mcp"));
         assert!(server.command.is_none());
         assert!(server.args.is_empty());
         assert!(server.env.is_empty());
         assert!(server.builtin_kind.is_none());
+    }
+
+    #[test]
+    fn hydrates_selected_mcps_from_ids_without_sensitive_config() {
+        let settings = McpSettings {
+            servers: vec![McpServerConfig {
+                id: "docs".into(),
+                name: "Docs".into(),
+                description: Some("Look up project documentation.".into()),
+                enabled: true,
+                source: McpServerSource::Custom,
+                transport: McpServerTransport::Http,
+                injection_mode: McpServerInjectionMode::SessionOptIn,
+                builtin_kind: None,
+                url: Some("http://127.0.0.1:8123/mcp".into()),
+                headers: vec![McpKeyValue {
+                    name: "Authorization".into(),
+                    value: "Bearer secret".into(),
+                }],
+                command: None,
+                args: Vec::new(),
+                env: Vec::new(),
+            }],
+        };
+        let mut options = crate::agents::runtime::types::RuntimeMetadata::new();
+        options.insert(SELECTED_MCP_IDS_OPTION.to_string(), json!(["docs"]));
+
+        hydrate_selected_mcps_option(&mut options, &settings);
+
+        assert_eq!(
+            options.get(SELECTED_MCPS_OPTION),
+            Some(&json!([{
+                "id": "docs",
+                "name": "Docs",
+                "description": "Look up project documentation.",
+                "source": "custom",
+                "transport": "http"
+            }]))
+        );
+        let options_json = serde_json::to_string(&options).expect("options json");
+        assert!(!options_json.contains("secret"));
+        assert!(!options_json.contains("127.0.0.1"));
+    }
+
+    #[test]
+    fn injects_selected_mcps_prompt_block() {
+        let markers = crate::prompt_markers::sessio_prompt_markers();
+        let mut options = crate::agents::runtime::types::RuntimeMetadata::new();
+        options.insert(
+            SELECTED_MCPS_OPTION.to_string(),
+            json!([{
+                "id": BUILTIN_COMPUTER_USE_ID,
+                "name": "Sessio Computer Use",
+                "description": "Use for desktop observation and GUI control in native macOS apps.\nStart with `computer_get_app_state`.",
+                "source": "builtin",
+                "transport": "http",
+                "builtinKind": "computerUse"
+            }]),
+        );
+
+        let output = inject_selected_mcps_prompt_block("use the app", &options);
+
+        assert!(output.contains(markers.mcps_prompt_start));
+        assert!(output.contains(&format!("kind=\"{}\"", markers.selected_mcps_prompt_kind)));
+        assert!(output.contains("Selected Sessio MCP servers are attached"));
+        assert!(output.contains("id: `builtin:computer-use`"));
+        assert!(output.contains("builtinKind: `computerUse`"));
+        assert!(output.contains("computer_get_app_state"));
+        assert!(output.ends_with("use the app"));
     }
 
     #[test]
@@ -438,6 +694,7 @@ mod tests {
                 McpServerConfig {
                     id: "http".into(),
                     name: "HTTP".into(),
+                    description: None,
                     enabled: true,
                     source: McpServerSource::Custom,
                     transport: McpServerTransport::Http,
@@ -452,6 +709,7 @@ mod tests {
                 McpServerConfig {
                     id: "sse".into(),
                     name: "SSE".into(),
+                    description: None,
                     enabled: true,
                     source: McpServerSource::Custom,
                     transport: McpServerTransport::Sse,
@@ -466,6 +724,7 @@ mod tests {
                 McpServerConfig {
                     id: "stdio".into(),
                     name: "Stdio".into(),
+                    description: None,
                     enabled: true,
                     source: McpServerSource::Custom,
                     transport: McpServerTransport::Stdio,
@@ -487,7 +746,8 @@ mod tests {
         );
 
         let selected =
-            selected_session_servers(&settings, Some(&caps(true, false)), &options).unwrap();
+            selected_session_servers(&settings, Some(&caps(true, false)), &options, |_| Ok(None))
+                .unwrap();
         assert_eq!(selected.len(), 2);
         assert!(matches!(selected[0], McpServer::Stdio(_)));
         assert!(matches!(selected[1], McpServer::Http(_)));
@@ -500,6 +760,7 @@ mod tests {
                 McpServerConfig {
                     id: "http".into(),
                     name: "HTTP".into(),
+                    description: None,
                     enabled: true,
                     source: McpServerSource::Custom,
                     transport: McpServerTransport::Http,
@@ -514,6 +775,7 @@ mod tests {
                 McpServerConfig {
                     id: "stdio".into(),
                     name: "Stdio".into(),
+                    description: None,
                     enabled: true,
                     source: McpServerSource::Custom,
                     transport: McpServerTransport::Stdio,
@@ -534,8 +796,116 @@ mod tests {
         );
 
         let selected =
-            selected_session_servers(&settings, Some(&caps(false, false)), &options).unwrap();
+            selected_session_servers(&settings, Some(&caps(false, false)), &options, |_| Ok(None))
+                .unwrap();
         assert_eq!(selected.len(), 1);
         assert!(matches!(selected[0], McpServer::Stdio(_)));
+    }
+
+    #[test]
+    fn selected_session_servers_resolves_builtin_servers() {
+        let settings = McpSettings {
+            servers: vec![computer_use_server_entry(&ComputerUseSettings {
+                enabled: true,
+                ..Default::default()
+            })],
+        };
+        let mut options = crate::agents::runtime::types::RuntimeMetadata::new();
+        options.insert(
+            SELECTED_MCP_IDS_OPTION.to_string(),
+            json!([BUILTIN_COMPUTER_USE_ID]),
+        );
+
+        let selected =
+            selected_session_servers(&settings, Some(&caps(true, false)), &options, |server| {
+                assert_eq!(server.builtin_kind, Some(BuiltinMcpKind::ComputerUse));
+                Ok(Some(computer_use_runtime_server(&ComputerUseInjection {
+                    url: "http://127.0.0.1:1234/mcp".into(),
+                    bearer_token: "token".into(),
+                })))
+            })
+            .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert!(matches!(selected[0], McpServer::Http(_)));
+    }
+
+    #[test]
+    fn selected_session_servers_skips_builtin_when_settings_are_missing() {
+        let settings = McpSettings {
+            servers: Vec::new(),
+        };
+        let mut options = crate::agents::runtime::types::RuntimeMetadata::new();
+        options.insert(
+            SELECTED_MCP_IDS_OPTION.to_string(),
+            json!([BUILTIN_COMPUTER_USE_ID]),
+        );
+
+        let selected =
+            selected_session_servers(&settings, Some(&caps(true, false)), &options, |_| {
+                panic!("unexpected builtin resolver call")
+            })
+            .unwrap();
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn selected_session_servers_skips_disabled_builtin() {
+        let settings = McpSettings {
+            servers: vec![computer_use_server_entry(&ComputerUseSettings::default())],
+        };
+        let mut options = crate::agents::runtime::types::RuntimeMetadata::new();
+        options.insert(
+            SELECTED_MCP_IDS_OPTION.to_string(),
+            json!([BUILTIN_COMPUTER_USE_ID]),
+        );
+
+        let selected =
+            selected_session_servers(&settings, Some(&caps(true, false)), &options, |_| {
+                panic!("unexpected builtin resolver call")
+            })
+            .unwrap();
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn selected_session_servers_skips_builtin_without_http_capability() {
+        let settings = McpSettings {
+            servers: vec![computer_use_server_entry(&ComputerUseSettings {
+                enabled: true,
+                ..Default::default()
+            })],
+        };
+        let mut options = crate::agents::runtime::types::RuntimeMetadata::new();
+        options.insert(
+            SELECTED_MCP_IDS_OPTION.to_string(),
+            json!([BUILTIN_COMPUTER_USE_ID]),
+        );
+
+        let selected =
+            selected_session_servers(&settings, Some(&caps(false, false)), &options, |_| {
+                panic!("unexpected builtin resolver call")
+            })
+            .unwrap();
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn selected_session_servers_without_selection_does_not_inject_builtin() {
+        let settings = McpSettings {
+            servers: vec![computer_use_server_entry(&ComputerUseSettings {
+                enabled: true,
+                ..Default::default()
+            })],
+        };
+        let selected = selected_session_servers(
+            &settings,
+            Some(&caps(true, false)),
+            &crate::agents::runtime::types::RuntimeMetadata::new(),
+            |_| panic!("unexpected builtin resolver call"),
+        )
+        .unwrap();
+        assert!(selected.is_empty());
     }
 }

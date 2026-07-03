@@ -109,16 +109,4 @@ describe("threadPromptDisplayContentBlocks", () => {
     expect(blocks).toEqual([]);
   });
 
-  it("keeps computer use prompt blocks hidden while showing the real user text", () => {
-    const prompt = [
-      '<!-- sessio-computer-use:start nonce="abc" kind="computer_use" -->',
-      "Use injected computer tools.",
-      '<!-- sessio-computer-use:end nonce="abc" -->',
-      "",
-      "click the button",
-    ].join("\n");
-    const blocks = threadPromptDisplayContentBlocks([{ type: "text", text: prompt }], {}, false);
-
-    expect(blocks).toEqual([{ type: "text", text: "click the button" }]);
-  });
 });

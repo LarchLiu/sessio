@@ -258,19 +258,19 @@ function stripSessioNonceDelimitedPromptBlocks(
     .trim();
 }
 
-export function stripSessioComputerUsePromptBlocks(input: string): string {
-  return stripSessioNonceDelimitedPromptBlocks(
-    input,
-    PROMPT_MARKERS.computerUsePromptStart,
-    PROMPT_MARKERS.computerUsePromptEnd,
-  );
-}
-
 export function stripSessioSkillsPromptBlocks(input: string): string {
   return stripSessioNonceDelimitedPromptBlocks(
     input,
     PROMPT_MARKERS.skillsPromptStart,
     PROMPT_MARKERS.skillsPromptEnd,
+  );
+}
+
+export function stripSessioMcpsPromptBlocks(input: string): string {
+  return stripSessioNonceDelimitedPromptBlocks(
+    input,
+    PROMPT_MARKERS.mcpsPromptStart,
+    PROMPT_MARKERS.mcpsPromptEnd,
   );
 }
 
@@ -332,7 +332,7 @@ export function stripInjectedContext(s: string): string {
   if (idx >= 0) {
     text = text.slice(idx + PROMPT_MARKERS.codexRequestMarker.length);
   }
-  return stripSessioComputerUsePromptBlocks(
+  return stripSessioMcpsPromptBlocks(
     stripSessioSkillsPromptBlocks(
       stripSessioWorkStateSkillPromptBlocks(
         stripSessioAssistantPromptBlocks(

@@ -263,15 +263,9 @@ fn collapse_blank_lines(text: &str) -> String {
 fn starts_with_truncated_hidden_prompt_block(text: &str) -> bool {
     let trimmed = text.trim_start();
     let markers = sessio_prompt_markers();
-    [
-        (
-            markers.computer_use_prompt_start,
-            markers.computer_use_prompt_end,
-        ),
-        (markers.thread_prompt_start, markers.thread_prompt_end),
-    ]
-    .into_iter()
-    .any(|(start, end)| trimmed.starts_with(start) && !trimmed.contains(end))
+    [(markers.thread_prompt_start, markers.thread_prompt_end)]
+        .into_iter()
+        .any(|(start, end)| trimmed.starts_with(start) && !trimmed.contains(end))
 }
 
 #[cfg(test)]
@@ -316,29 +310,5 @@ mod tests {
         assert!(cleaned.contains("sessio-cross-context"), "{cleaned}");
         assert!(cleaned.contains("carry"));
         assert!(cleaned.contains("over"));
-    }
-
-    #[test]
-    fn preview_candidate_drops_truncated_hidden_prompt_block() {
-        let input = format!(
-            "{} nonce=\"abc...",
-            crate::prompt_markers::sessio_prompt_markers().computer_use_prompt_start
-        );
-        assert_eq!(clean_history_preview_candidate_text(&input), None);
-    }
-
-    #[test]
-    fn preview_candidate_keeps_cleaned_user_text_after_hidden_prompt_block() {
-        let markers = crate::prompt_markers::sessio_prompt_markers();
-        let input = format!(
-            "{} nonce=\"abc\" kind=\"{}\" -->\nUse injected computer tools.\n{} nonce=\"abc\" -->\n\n使用网易云音乐打开私人雷达然后播放",
-            markers.computer_use_prompt_start,
-            markers.computer_use_prompt_kind,
-            markers.computer_use_prompt_end
-        );
-        assert_eq!(
-            clean_history_preview_candidate_text(&input).as_deref(),
-            Some("使用网易云音乐打开私人雷达然后播放")
-        );
     }
 }
