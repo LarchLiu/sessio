@@ -394,7 +394,7 @@ src-tauri/src/
 - 在规则层与聚合层稳定后，再拆 domain modules：
   - [x] `scheduled_tasks`
   - [x] `channel_sessions`
-  - [ ] `projects`
+  - [x] `projects`
   - [ ] `assistants`
   - [ ] `threads`
   - [ ] `stages`
@@ -688,6 +688,7 @@ src-tauri/src/
 | Canvas persistence | ✅ | 已建立 `store/sqlite/canvas.rs`，迁出 canvas document/revision/block/context anchor 的 ID、row mapper、读写与 pruning 逻辑 |
 | Plan persistence | ✅ | 已建立 `store/sqlite/plans.rs`，迁出 plan round/task 写入、状态机、task session link/relink 与 plan persistence 查询入口 |
 | Astra persistence | ✅ | 已建立 `store/sqlite/astra.rs`，迁出 Astra config、run、run session、active-run recovery 与 partial session cleanup 持久化逻辑 |
+| Project persistence | ✅ | 已建立 `store/sqlite/projects.rs`，迁出 project row 读取、路径/名称规范化、list/add/create/update/archive 持久化入口 |
 
 ### 6.2 当前焦点
 
