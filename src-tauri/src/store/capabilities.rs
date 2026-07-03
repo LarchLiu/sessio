@@ -1,7 +1,8 @@
 use anyhow::Result;
 
 use crate::models::{
-    Agent, ChannelSessionInfo, KanbanItem, KanbanStatus, ProjectInfo, SessionInfo,
+    Agent, ChannelSessionInfo, KanbanItem, KanbanStatus, ProcessTemplateInfo, ProjectInfo,
+    SessionInfo,
 };
 
 use super::SessionStore;
@@ -127,5 +128,48 @@ impl<T: SessionStore + ?Sized> SessionCommandStore for T {
         rename_title: Option<&str>,
     ) -> Result<()> {
         SessionStore::update_session_rename_title(self, agent, session_id, rename_title)
+    }
+}
+
+pub trait ProcessTemplateStore {
+    fn list_process_templates(&self) -> Result<Vec<ProcessTemplateInfo>>;
+    fn create_process_template(
+        &self,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<ProcessTemplateInfo>;
+    fn update_process_template(
+        &self,
+        process_template_id: &str,
+        name: Option<&str>,
+        description: Option<Option<&str>>,
+    ) -> Result<ProcessTemplateInfo>;
+    fn delete_process_template(&self, process_template_id: &str) -> Result<()>;
+}
+
+impl<T: SessionStore + ?Sized> ProcessTemplateStore for T {
+    fn list_process_templates(&self) -> Result<Vec<ProcessTemplateInfo>> {
+        SessionStore::list_process_templates(self)
+    }
+
+    fn create_process_template(
+        &self,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<ProcessTemplateInfo> {
+        SessionStore::create_process_template(self, name, description)
+    }
+
+    fn update_process_template(
+        &self,
+        process_template_id: &str,
+        name: Option<&str>,
+        description: Option<Option<&str>>,
+    ) -> Result<ProcessTemplateInfo> {
+        SessionStore::update_process_template(self, process_template_id, name, description)
+    }
+
+    fn delete_process_template(&self, process_template_id: &str) -> Result<()> {
+        SessionStore::delete_process_template(self, process_template_id)
     }
 }
