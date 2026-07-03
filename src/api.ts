@@ -15,6 +15,11 @@ import type { Agent as GeneratedAgent } from "./bindings/Agent";
 import type { ProcessTemplateInfo as GeneratedProcessTemplateInfo } from "./bindings/ProcessTemplateInfo";
 import type { ProcessTemplateType as GeneratedProcessTemplateType } from "./bindings/ProcessTemplateType";
 import type { ProjectInfo as GeneratedProjectInfo } from "./bindings/ProjectInfo";
+import type { AgentAiProviderInfo as GeneratedAgentAiProviderInfo } from "./bindings/AgentAiProviderInfo";
+import type { AgentCommandsInfo as GeneratedAgentCommandsInfo } from "./bindings/AgentCommandsInfo";
+import type { AgentType as GeneratedAgentType } from "./bindings/AgentType";
+import type { AstraConfig as GeneratedAstraConfig } from "./bindings/AstraConfig";
+import type { RuntimeAgentOptionMetadata as GeneratedRuntimeAgentOptionMetadata } from "./bindings/RuntimeAgentOptionMetadata";
 
 export type Agent = GeneratedAgent;
 
@@ -84,7 +89,7 @@ export interface TerminalEventEnvelope {
   event: TerminalEvent;
 }
 
-export type AgentType = "builtin" | "custom";
+export type AgentType = GeneratedAgentType;
 
 export interface AgentInfo {
   id: string;
@@ -108,32 +113,11 @@ export interface AgentInfo {
   updatedAt: number;
 }
 
-export interface AstraConfig {
-  agent: string | null;
-  model: string | null;
-  effort: string | null;
-  permissionMode: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
+export type AstraConfig = GeneratedAstraConfig;
 
-export interface AgentAiProviderInfo {
-  id: string;
-  displayName: string;
-  provider: string;
-  api: string | null;
-  baseUrl: string | null;
-  apiKey: string | null;
-  model: string | null;
-  models: RuntimeAgentOptionMetadata[];
-  enabled: boolean;
-  order: number;
-}
+export type AgentAiProviderInfo = GeneratedAgentAiProviderInfo;
 
-export interface AgentCommandsInfo {
-  session: string[];
-  version: string[];
-}
+export type AgentCommandsInfo = GeneratedAgentCommandsInfo;
 
 export interface NetworkConfig {
   proxy: NetworkProxyConfig;
@@ -1166,13 +1150,7 @@ export interface DebugConfig {
   updatePreview: boolean;
 }
 
-export interface RuntimeAgentOptionMetadata {
-  value: string;
-  label: string;
-  displayName: string;
-  enabled: boolean;
-  order: number;
-}
+export type RuntimeAgentOptionMetadata = GeneratedRuntimeAgentOptionMetadata;
 
 export interface UpdateRuntimeAgentPreferencesRequest {
   agent: Agent;

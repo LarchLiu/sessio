@@ -223,8 +223,9 @@ pub struct ProjectInfo {
     pub session_count: usize,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub enum AgentType {
     Builtin,
     Custom,
@@ -272,19 +273,23 @@ pub struct AgentInfo {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub struct AstraConfig {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
+    #[ts(type = "number")]
     pub created_at: i64,
+    #[ts(type = "number")]
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub struct AgentAiProviderInfo {
     pub id: String,
     pub display_name: String,
@@ -296,11 +301,13 @@ pub struct AgentAiProviderInfo {
     pub model: Option<String>,
     pub models: Vec<RuntimeAgentOptionMetadata>,
     pub enabled: bool,
+    #[ts(type = "number")]
     pub order: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub struct AgentCommandsInfo {
     pub session: Vec<String>,
     pub version: Vec<String>,
@@ -1626,13 +1633,15 @@ pub struct RuntimeAgentMetadata {
     pub updated_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub struct RuntimeAgentOptionMetadata {
     pub value: String,
     pub label: String,
     pub display_name: String,
     pub enabled: bool,
+    #[ts(type = "number")]
     pub order: i64,
 }
 

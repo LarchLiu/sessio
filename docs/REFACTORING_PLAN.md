@@ -706,6 +706,7 @@ src-tauri/src/
 | Config simple section TOML adapter | ✅ | `[index]` 与 `[debug]` 标准值已先走 `toml` + serde adapter，保留 loose bool/null 等旧兼容解析兜底 |
 | 阶段 3 完成标准 | ✅ | Config 已完成 parser/resolver/defaults/recovery/serializer 分层，主入口降至 1k 行以内，关键兼容测试覆盖已落地，首批 2 个简单 section 已接入 TOML/serde adapter |
 | 首批 ts-rs 类型同步 | ✅ | 已为 `Agent`、`ProcessTemplateType`、`ProcessTemplateInfo`、`ProjectInfo` 接入 `ts-rs`，生成 `src/bindings/*` 并替换 `api.ts` 对应手写类型 |
+| 第二批 ts-rs 类型同步 | ✅ | 已继续为 `AgentType`、`AstraConfig`、`AgentCommandsInfo`、`RuntimeAgentOptionMetadata`、`AgentAiProviderInfo` 接入生成类型，阶段 4 首批覆盖达到 9 个 DTO |
 
 ### 6.2 当前焦点
 
