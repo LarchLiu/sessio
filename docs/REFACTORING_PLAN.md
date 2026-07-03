@@ -704,14 +704,15 @@ src-tauri/src/
 | Config recovery split | ✅ | 已建立 `config/recovery.rs`，迁出 invalid config fallback、recovery notice 状态与错误行提取 helper |
 | Config typed raw defaults | ✅ | `raw_config_with_defaults()` 已改为直接构造 typed raw defaults，不再通过默认配置序列化后反解析来补全 |
 | Config simple section TOML adapter | ✅ | `[index]` 与 `[debug]` 标准值已先走 `toml` + serde adapter，保留 loose bool/null 等旧兼容解析兜底 |
+| 阶段 3 完成标准 | ✅ | Config 已完成 parser/resolver/defaults/recovery/serializer 分层，主入口降至 1k 行以内，关键兼容测试覆盖已落地，首批 2 个简单 section 已接入 TOML/serde adapter |
 
 ### 6.2 当前焦点
 
 当前优先级按顺序是：
 
-1. 继续阶段 3 第 2 步，做 loader / parser / resolver / defaults / serializer 的纯搬运式模块拆分。
-2. 拆分过程中保持 `load_config()` / `load_config_strict()` / `save_config()` / `take_config_recovery_notice()` 外部 API 不变。
-3. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环。
+1. 进入阶段 4，先盘点 `models.rs`、`lib.rs`、`commands/*` 中适合导出的稳定 DTO。
+2. 优先选择高复用、低 churn 的 5~10 个共享模型接入 `ts-rs`，再替换 `api.ts` 中对应手写类型。
+3. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环；若阶段 4 涉及前端类型或 invoke 面，同步执行前端 check/build。
 
 ---
 
