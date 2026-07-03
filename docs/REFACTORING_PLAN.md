@@ -1,7 +1,7 @@
 # Sessio 架构重构总方案
 
 **最后更新**: 2026-07-03  
-**当前状态**: 阶段 1 首批薄命令模块、初始 `state/` / `window/` 拆分已落地；阶段 2 已完成 SQLite schema/bootstrap/seed 初始拆分，并开始 session identity helper 拆分
+**当前状态**: 阶段 1 首批薄命令模块、初始 `state/` / `window/` 拆分已落地；阶段 2 已完成 SQLite schema/bootstrap/seed 初始拆分与 session identity 子系统首轮拆分
 **本文档角色**: 唯一的重构主文档，统一记录现状、方案、实施计划和进度
 
 ---
@@ -24,7 +24,7 @@
 | 文件 | 当前行数 | 说明 |
 |------|----------|------|
 | `src-tauri/src/lib.rs` | 9,076 | 仍然是主重构对象，首批薄命令、初始状态类型和初始窗口 helper 已迁出 |
-| `src-tauri/src/store/sqlite.rs` | 13,033 | 最大的单文件风险点，schema SQL、bootstrap、seed 与部分 identity 写入逻辑已迁出 |
+| `src-tauri/src/store/sqlite.rs` | 13,007 | 最大的单文件风险点，schema SQL、bootstrap、seed 与 identity 写入逻辑已初步迁出 |
 | `src-tauri/src/store/mod.rs` | 1,104 | `SessionStore` 过大且混入默认业务逻辑 |
 | `src-tauri/src/config.rs` | 1,839 | 含配置恢复与兼容解析逻辑 |
 | `src/api.ts` | 2,970 | 前端手写类型很多 |
@@ -377,7 +377,7 @@ src-tauri/src/
   - [x] `insert_session()`
   - [x] `mark_session_scheduled_task()`
   - [x] `mark_session_origin()`
-  - [ ] `replace_by_scope()`
+  - [x] `replace_by_scope()`
 - 这一层要被视为“规则子系统”，而不是普通 CRUD。
 
 **第 5 步: 抽 workflow 聚合查询**
@@ -679,13 +679,13 @@ src-tauri/src/
 | `CachedStore` 回归测试 | ✅ | 已覆盖 placeholder 替换、`replace_by_scope` subagent 保留、virtual session guard、astra cleanup snapshot refresh |
 | 公共 session 规则 | ✅ | 已抽出 `session_rules.rs`，统一时间、文件 mtime、real/virtual session、placeholder indexed-session 与 best-session 选择规则 |
 | SQLite schema/bootstrap | ✅ | 已建立 `store/sqlite/bootstrap.rs`、`schema.rs` 与 `seed.rs`，迁出 schema SQL、base schema 初始化、`initialize_schema()`、`ensure_column()` 与 builtin seed 逻辑 |
-| Session identity | ⏳ | 已建立 `store/sqlite/identity.rs`，迁出 identity row 读取、title/message/provenance merge、origin upgrade/downgrade、scheduled-task/origin 标记、duplicate cleanup 与 `insert_session()` 写入规则 |
+| Session identity | ✅ | 已建立 `store/sqlite/identity.rs`，迁出 identity row 读取、title/message/provenance merge、origin upgrade/downgrade、scheduled-task/origin 标记、duplicate cleanup、`insert_session()` 与 `replace_by_scope()` 写入规则 |
 
 ### 6.2 当前焦点
 
 当前优先级按顺序是：
 
-1. 进入阶段 2 第 4 步，拆分 session identity 子系统。
+1. 进入阶段 2 第 5 步，抽 workflow 聚合查询。
 2. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环。
 3. 后续再评估是否继续拆 screenshot overlay 窗口流程。
 

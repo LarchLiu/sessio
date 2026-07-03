@@ -6847,33 +6847,7 @@ impl SessionStore for SqliteStore {
 
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-        let new_ids: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
-        let stale_ids: Vec<String> = {
-            let mut stmt =
-                tx.prepare("SELECT session_id FROM sessions WHERE scope = ? AND agent = ?")?;
-            let rows = stmt.query_map(params![scope, agent.as_str()], |r| r.get::<_, String>(0))?;
-            let mut v = Vec::new();
-            for r in rows {
-                v.push(r?);
-            }
-            v
-        };
-        for sid in &stale_ids {
-            if !new_ids.contains(sid.as_str()) {
-                tx.execute(
-                    "UPDATE sessions SET available = 0
-                     WHERE scope = ? AND agent = ? AND session_id = ?
-                       AND NOT (scope LIKE 'astra://%' OR file_path LIKE 'astra://%')",
-                    params![scope, agent.as_str(), sid],
-                )?;
-            }
-        }
-        for s in sessions {
-            insert_session(&tx, scope, s)?;
-        }
-        tx.commit()?;
-        Ok(())
+        identity::replace_by_scope(&mut conn, scope, agent, sessions)
     }
 
     fn mark_file_path_unavailable(&self, file_path: &str) -> Result<()> {

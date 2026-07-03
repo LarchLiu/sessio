@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
 
 use crate::models::{Agent, SessionInfo, SessionOrigin};
 use crate::store::{file_mtime_for, is_real_session_file_path, now_ms};
@@ -664,6 +665,41 @@ pub(super) fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) ->
     delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
     // Subagent rows are written through upsert_subagent so their lifecycle
     // is independent from the parent session's reindex.
+    Ok(())
+}
+
+pub(super) fn replace_by_scope(
+    conn: &mut Connection,
+    scope: &str,
+    agent: Agent,
+    sessions: &[SessionInfo],
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    let new_ids: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+    let stale_ids: Vec<String> = {
+        let mut stmt =
+            tx.prepare("SELECT session_id FROM sessions WHERE scope = ? AND agent = ?")?;
+        let rows = stmt.query_map(params![scope, agent.as_str()], |r| r.get::<_, String>(0))?;
+        let mut v = Vec::new();
+        for r in rows {
+            v.push(r?);
+        }
+        v
+    };
+    for sid in &stale_ids {
+        if !new_ids.contains(sid.as_str()) {
+            tx.execute(
+                "UPDATE sessions SET available = 0
+                 WHERE scope = ? AND agent = ? AND session_id = ?
+                   AND NOT (scope LIKE 'astra://%' OR file_path LIKE 'astra://%')",
+                params![scope, agent.as_str(), sid],
+            )?;
+        }
+    }
+    for s in sessions {
+        insert_session(&tx, scope, s)?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
