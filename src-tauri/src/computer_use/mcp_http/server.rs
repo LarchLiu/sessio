@@ -49,6 +49,8 @@ use super::auth::{SessionToken, TokenRegistry};
 use super::dispatch::dispatch;
 use super::protocol::{McpRequest, McpResponse};
 
+type HostForSession = Arc<dyn Fn(&str) -> Option<ComputerUseHost> + Send + Sync>;
+
 /// Callback that returns the current desktop-control permission status. Injected
 /// so the server reflects live OS permission state on every request without the
 /// HTTP layer depending on the platform FFI directly.
@@ -111,7 +113,7 @@ impl McpHttpServer {
     /// `host` resolves a session id to its [`ComputerUseHost`] (one host may be
     /// shared by all sessions, or per-session — the closure decides).
     pub fn start(
-        host_for_session: Arc<dyn Fn(&str) -> Option<ComputerUseHost> + Send + Sync>,
+        host_for_session: HostForSession,
         permission_provider: PermissionProvider,
     ) -> std::io::Result<McpServerHandle> {
         let bind = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
@@ -160,7 +162,7 @@ fn serve_loop(
     tokens: Arc<TokenRegistry>,
     external_session_counter: Arc<AtomicU64>,
     mcp_url: String,
-    host_for_session: Arc<dyn Fn(&str) -> Option<ComputerUseHost> + Send + Sync>,
+    host_for_session: HostForSession,
     permission_provider: PermissionProvider,
     shutdown_rx: mpsc::Receiver<()>,
 ) -> std::io::Result<()> {
@@ -216,13 +218,13 @@ struct BrokerState {
     tokens: Arc<TokenRegistry>,
     external_session_counter: Arc<AtomicU64>,
     mcp_url: String,
-    host_for_session: Arc<dyn Fn(&str) -> Option<ComputerUseHost> + Send + Sync>,
+    host_for_session: HostForSession,
 }
 
 #[derive(Clone)]
 struct SessioComputerUseService {
     tokens: Arc<TokenRegistry>,
-    host_for_session: Arc<dyn Fn(&str) -> Option<ComputerUseHost> + Send + Sync>,
+    host_for_session: HostForSession,
     permission_provider: PermissionProvider,
 }
 
@@ -259,18 +261,19 @@ impl ServerHandler for SessioComputerUseService {
     ) -> impl Future<Output = Result<ListToolsResult, ErrorData>> + Send + '_ {
         let authorized = self.resolve_session(&context).map(|_| ());
         std::future::ready(authorized.map(|_| {
-            let mut result = ListToolsResult::default();
-            result.tools = super::protocol::tool_definitions()
-                .into_iter()
-                .map(|definition| {
-                    let mut tool = Tool::default();
-                    tool.name = Cow::Borrowed(definition.name);
-                    tool.description = Some(Cow::Borrowed(definition.description));
-                    tool.input_schema = Arc::new(json_schema_object(definition.input_schema));
-                    tool
-                })
-                .collect();
-            result
+            ListToolsResult {
+                tools: super::protocol::tool_definitions()
+                    .into_iter()
+                    .map(|definition| {
+                        let mut tool = Tool::default();
+                        tool.name = Cow::Borrowed(definition.name);
+                        tool.description = Some(Cow::Borrowed(definition.description));
+                        tool.input_schema = Arc::new(json_schema_object(definition.input_schema));
+                        tool
+                    })
+                    .collect(),
+                ..Default::default()
+            }
         }))
     }
 

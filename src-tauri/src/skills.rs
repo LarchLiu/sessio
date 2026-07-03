@@ -545,7 +545,7 @@ fn prepend_skills_prompt_block(
         block.push_str(&render_skill_metadata(skill));
     }
     if let Some(guidance) = guidance.map(str::trim).filter(|value| !value.is_empty()) {
-        block.push_str("\n");
+        block.push('\n');
         block.push_str(guidance);
         block.push('\n');
     }

@@ -262,14 +262,12 @@ pub fn startup_probe_runtime_agents(
 }
 
 fn startup_probe_command(runtime_agent: Agent, agent: &AgentInfo) -> String {
-    match runtime_agent {
-        _ => agent
-            .commands
-            .session
-            .first()
-            .cloned()
-            .unwrap_or_else(|| acp_transport::default_acp_command(runtime_agent)),
-    }
+    agent
+        .commands
+        .session
+        .first()
+        .cloned()
+        .unwrap_or_else(|| acp_transport::default_acp_command(runtime_agent))
 }
 
 fn detect_capabilities_with_initialize_only(

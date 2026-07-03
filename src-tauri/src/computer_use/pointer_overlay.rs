@@ -121,14 +121,14 @@ pub fn tauri_pointer_event_sink(app: AppHandle) -> PointerEventSink {
     #[cfg(target_os = "macos")]
     {
         native_macos::register_app_handle(app.clone());
-        return Arc::new(move |event| {
+        Arc::new(move |event| {
             if let Err(error) = native_macos::show_pointer_event(&app, event) {
                 super::diagnostics::write(
                     "pointer_overlay_emit_failed",
                     serde_json::json!({ "error": error }),
                 );
             }
-        });
+        })
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -355,9 +355,7 @@ mod native_macos {
             }
             visible
         };
-        if should_destroy {
-            invalidate_pending_overlay_hides();
-        } else if should_hide {
+        if should_destroy || should_hide {
             invalidate_pending_overlay_hides();
         }
         if !should_destroy {
@@ -820,6 +818,7 @@ mod native_macos {
         panel.orderOut(None);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_pointer_frame_on_main(
         overlays: &[NativeOverlayWindow],
         screen_point: ScreenPoint,

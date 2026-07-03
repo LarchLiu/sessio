@@ -33,16 +33,10 @@ pub struct InstalledApp {
 }
 
 /// Options for app discovery.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AppListOptions {
     /// Recent-use window in days. `None` means the provider default.
     pub days: Option<u32>,
-}
-
-impl Default for AppListOptions {
-    fn default() -> Self {
-        Self { days: None }
-    }
 }
 
 /// Result of an app launch request.

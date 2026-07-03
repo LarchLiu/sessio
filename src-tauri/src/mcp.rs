@@ -37,17 +37,12 @@ pub enum McpServerTransport {
     Stdio,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum McpServerInjectionMode {
     Always,
+    #[default]
     SessionOptIn,
-}
-
-impl Default for McpServerInjectionMode {
-    fn default() -> Self {
-        Self::SessionOptIn
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,8 +142,7 @@ pub fn save_settings(settings: McpSettings) -> Result<McpSettings> {
             && server.builtin_kind == Some(BuiltinMcpKind::ComputerUse)
     }) {
         app_config.computer_use.enabled = server.enabled;
-        app_config.computer_use.mcp_description =
-            trimmed_option(server.description.as_deref());
+        app_config.computer_use.mcp_description = trimmed_option(server.description.as_deref());
     }
     app_config.mcp = normalize_custom_settings(settings)?;
     config::save_config(&app_config)?;

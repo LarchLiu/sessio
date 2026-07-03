@@ -450,6 +450,7 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<RuntimeAgentSelection>;
     fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>>;
     fn create_assistant(&self, assistant: NewAssistant<'_>) -> Result<AssistantInfo>;
+    #[allow(clippy::too_many_arguments)]
     fn update_assistant(
         &self,
         assistant_id: &str,
@@ -485,6 +486,7 @@ pub trait SessionStore: Send + Sync {
     /// here with `ThreadOrigin::Manual`. The scheduled-task path in
     /// `scheduled_tasks::start_thread_run` calls this directly with
     /// `ThreadOrigin::ScheduledTask` and the originating task id.
+    #[allow(clippy::too_many_arguments)]
     fn create_thread_with_origin(
         &self,
         project_id: &str,

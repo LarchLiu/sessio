@@ -56,7 +56,7 @@ pub struct AppRoutePreferences {
 }
 
 /// Tunable host policy for computer use.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputerUseSettings {
     /// Master switch. When false, the host refuses all leases regardless of
@@ -74,17 +74,6 @@ pub struct ComputerUseSettings {
     /// actions, so future auto actions can start with the known-good path.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub app_route_preferences: BTreeMap<String, AppRoutePreferences>,
-}
-
-impl Default for ComputerUseSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            mcp_description: None,
-            approved_apps: Vec::new(),
-            app_route_preferences: BTreeMap::new(),
-        }
-    }
 }
 
 impl ComputerUseSettings {

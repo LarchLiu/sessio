@@ -34,7 +34,9 @@ use super::provider::{
     ClickExecutionRoute, ComputerUseProvider, CoordinateSpace, InstalledApp, Point,
     ProviderCapabilities, ProviderError, RawAppState, ScreenshotRef, ScrollDirection, UiElement,
 };
-use super::settings::{AppRoutePreferences, ComputerUseSettings, OperationRoutePreference};
+#[cfg(test)]
+use super::settings::AppRoutePreferences;
+use super::settings::{ComputerUseSettings, OperationRoutePreference};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RoutePreferenceKey {
@@ -257,7 +259,7 @@ impl ComputerUseHost {
         let entry = settings
             .app_route_preferences
             .entry(app_id.to_string())
-            .or_insert_with(AppRoutePreferences::default);
+            .or_default();
         let slot = match key {
             RoutePreferenceKey::ClickElement => &mut entry.click_element,
             RoutePreferenceKey::ClickAt => &mut entry.click_at,
@@ -773,6 +775,7 @@ impl ComputerUseHost {
         })?)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn capture_post_action_state_with_timing(
         &self,
         session_id: &str,
@@ -1027,6 +1030,7 @@ impl ComputerUseHost {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_point_action_record(
         event: &str,
         session_id: &str,
@@ -1206,6 +1210,7 @@ impl ComputerUseHost {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_drag_action_record(
         session_id: &str,
         snapshot: &SnapshotId,
@@ -1801,6 +1806,7 @@ impl ComputerUseHost {
 
     /// `computer_drag` — drag between two points in the latest snapshot's
     /// screenshot coordinate space by default.
+    #[allow(clippy::too_many_arguments)]
     pub fn drag(
         &self,
         session_id: &str,
@@ -2086,6 +2092,7 @@ impl ComputerUseHost {
 
     /// Ref-targeted scroll — uses AX scroll actions when available, with the
     /// existing wheel path left as the coordinate-less fallback.
+    #[allow(clippy::too_many_arguments)]
     pub fn scroll_element(
         &self,
         session_id: &str,
@@ -3013,10 +3020,8 @@ mod tests {
                     dispatch_label = record["elementLabel"].as_str().map(ToString::to_string);
                     assert_eq!(record["elementId"].as_str(), Some("el-1"));
                 }
-                Some("primary_click_result") => {
-                    if record["clickId"].as_str().is_some() {
-                        result_id = record["clickId"].as_str().map(ToString::to_string);
-                    }
+                Some("primary_click_result") if record["clickId"].as_str().is_some() => {
+                    result_id = record["clickId"].as_str().map(ToString::to_string);
                 }
                 Some("post_action_capture_complete") => {
                     capture_id = record["clickId"].as_str().map(ToString::to_string);

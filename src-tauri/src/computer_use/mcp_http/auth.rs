@@ -84,6 +84,11 @@ impl TokenRegistry {
     pub fn len(&self) -> usize {
         self.tokens.lock().unwrap().len()
     }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.tokens.lock().unwrap().is_empty()
+    }
 }
 
 /// Extract the token from a `Bearer <token>` Authorization header value.

@@ -101,6 +101,7 @@ pub fn command_from_options(agent: Agent, options: &RuntimeMetadata) -> String {
         .unwrap_or_else(|| default_acp_command(agent))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_session(
     manager: RuntimeManager,
     sessio_runtime_session_id: String,
@@ -1474,13 +1475,11 @@ fn redact_named_values(value: &mut serde_json::Value) {
                 redact_named_values(entry);
             }
         }
-        serde_json::Value::Object(entry) => {
-            if entry.get("value").is_some() {
-                entry.insert(
-                    "value".to_string(),
-                    serde_json::Value::String("[redacted]".to_string()),
-                );
-            }
+        serde_json::Value::Object(entry) if entry.get("value").is_some() => {
+            entry.insert(
+                "value".to_string(),
+                serde_json::Value::String("[redacted]".to_string()),
+            );
         }
         _ => {}
     }

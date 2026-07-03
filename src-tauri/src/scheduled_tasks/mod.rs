@@ -83,6 +83,7 @@ fn is_runtime_startup_timeout(error: &anyhow::Error) -> bool {
         .any(|cause| cause.to_string().contains("startup timed out"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stamp_started_chat_session(
     runtime: &RuntimeManager,
     store: &dyn SessionStore,
@@ -393,7 +394,7 @@ impl SchedulerState {
     fn execute(&self, task: &ScheduledTask) -> Result<TaskRunOutcome> {
         Ok(match &task.target {
             TaskTarget::Chat { .. } => TaskRunOutcome::Chat(self.start_chat_session(task)?),
-            _ => TaskRunOutcome::Thread(self.start_thread_run(task)?),
+            _ => TaskRunOutcome::Thread(Box::new(self.start_thread_run(task)?)),
         })
     }
 
@@ -714,7 +715,7 @@ impl SchedulerState {
         let previous = self
             .snapshot()
             .into_iter()
-            .filter(|task| task_has_running_run(task))
+            .filter(task_has_running_run)
             .map(|task| (task.id.clone(), task))
             .collect::<HashMap<_, _>>();
         if previous.is_empty() {
@@ -1349,7 +1350,7 @@ impl SchedulerState {
     /// True once a concurrent action (force-unlock) moved this run's push out of
     /// the `summarizing` state set at the start of `push_run_summary`.
     fn push_superseded(&self, run_id: &str) -> bool {
-        self.tasks.lock().ok().map_or(false, |guard| {
+        self.tasks.lock().ok().is_some_and(|guard| {
             guard.iter().any(|task| {
                 task.runs.iter().any(|run| {
                     run.id == run_id
@@ -1676,7 +1677,7 @@ fn spawn_completion_watcher(state: Arc<SchedulerState>) -> Result<()> {
 
 enum TaskRunOutcome {
     Chat(AgentSessionHandle),
-    Thread(ThreadRunOutcome),
+    Thread(Box<ThreadRunOutcome>),
 }
 
 struct ThreadRunOutcome {

@@ -948,10 +948,13 @@ enum PiRpcIncoming {
     Event(Value),
 }
 
+type PiRpcResponseSender = oneshot::Sender<Result<Value, String>>;
+type PiRpcPending = Arc<AsyncMutex<HashMap<String, PiRpcResponseSender>>>;
+
 #[derive(Clone)]
 struct PiRpcClient {
     stdin: Arc<AsyncMutex<tokio::process::ChildStdin>>,
-    pending: Arc<AsyncMutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>,
+    pending: PiRpcPending,
     request_id: Arc<AtomicU64>,
 }
 
@@ -1023,7 +1026,7 @@ impl PiRpcClient {
 
 fn spawn_stdout_reader(
     stdout: tokio::process::ChildStdout,
-    pending: Arc<AsyncMutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>,
+    pending: PiRpcPending,
     event_tx: tauri::async_runtime::Sender<PiRpcIncoming>,
 ) {
     tauri::async_runtime::spawn(async move {

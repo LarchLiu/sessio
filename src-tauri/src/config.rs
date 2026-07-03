@@ -448,7 +448,7 @@ mod tests {
             env = ["DOCS_ROOT=/tmp/docs"]
             enabled = true
             description = "Project docs"
-            "#
+            "#,
         )
         .unwrap();
         let config = super::resolve_app_config(raw, false).unwrap();

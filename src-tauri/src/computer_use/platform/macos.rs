@@ -1440,6 +1440,7 @@ fn cg_window_image(
     })
 }
 
+#[allow(clippy::arc_with_non_send_sync)]
 fn sck_capture_window_image(
     window_id: u32,
     screen_bounds: Rect,
@@ -1493,6 +1494,7 @@ fn sck_capture_window_image(
     }
 }
 
+#[allow(clippy::arc_with_non_send_sync)]
 fn sck_window_for_window_id(window_id: u32) -> ProviderResult<Retained<AnyObject>> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Retained<AnyObject>, String>>(1);
     let tx = Arc::new(Mutex::new(Some(tx)));

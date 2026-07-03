@@ -5030,8 +5030,7 @@ mod appshot_permission_panel {
         let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(
             &NSString::from_str(SYSTEM_SETTINGS_BUNDLE_ID),
         );
-        apps.iter()
-            .find_map(|app| i32::try_from(app.processIdentifier()).ok())
+        apps.iter().next().map(|app| app.processIdentifier())
     }
 
     fn rect_contains_point(rect: CGRect, point: CGPoint) -> bool {
@@ -5440,6 +5439,7 @@ mod appshot_permission_panel {
         button
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_permission_card(
         mtm: MainThreadMarker,
         content: &NSView,
@@ -6045,9 +6045,6 @@ mod appshot_permission_panel {
                     close_drag_guide_panel();
                 }
                 update_panel_state();
-                if screenshots_granted && accessibility_granted {
-                    return;
-                }
             });
 
             thread::sleep(Duration::from_secs(1));
@@ -7436,7 +7433,7 @@ fn write_workspace_text_file(
     let path_buf = workspace_text_file_path(&workspace_path, &path)?;
     let _mime =
         text_file_mime(&path_buf).ok_or_else(|| "Unsupported text file type".to_string())?;
-    if content.as_bytes().len() as u64 > MAX_EDITOR_TEXT_BYTES {
+    if content.len() as u64 > MAX_EDITOR_TEXT_BYTES {
         return Err("File is too large to edit".to_string());
     }
     let meta = std::fs::metadata(&path_buf).map_err(|e| e.to_string())?;
@@ -7595,7 +7592,7 @@ fn unwatch_preview_file(
 fn safe_pasted_attachment_file_name(file_name: Option<&str>, mime_type: Option<&str>) -> String {
     let raw_name = file_name
         .unwrap_or("")
-        .rsplit(|ch| ch == '/' || ch == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or("")
         .trim();
@@ -7615,7 +7612,7 @@ fn safe_pasted_attachment_file_name(file_name: Option<&str>, mime_type: Option<&
         .to_string();
     if name.is_empty() || name == "." || name == ".." {
         name = match mime_type.and_then(extension_for_pasted_mime) {
-            Some(ext) if ext == "png" => "pasted-image.png".to_string(),
+            Some("png") => "pasted-image.png".to_string(),
             Some(ext) => format!("pasted-file.{ext}"),
             None => "pasted-file".to_string(),
         };
@@ -8538,6 +8535,7 @@ fn dispose_agent_runtime_session(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn load_agent_session(
     agent: Agent,
     runtime_session_id: String,

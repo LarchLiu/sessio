@@ -5,6 +5,8 @@
 //! `tools/call`. Parsing/serialization is pure so it is unit-testable without a
 //! socket; dispatch of `tools/call` into the host lives in [`super::dispatch`].
 
+use std::fmt;
+
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -37,6 +39,7 @@ pub enum McpResponse {
 impl McpRequest {
     /// Parse a JSON-RPC request body. Returns `Err` with a JSON-RPC parse-error
     /// response when the body is not a valid request.
+    #[allow(clippy::result_large_err)]
     pub fn parse(body: &str) -> Result<Self, McpResponse> {
         let value: Value = serde_json::from_str(body).map_err(|_| McpResponse::Error {
             id: Value::Null,
@@ -74,10 +77,6 @@ impl McpResponse {
         }
     }
 
-    pub fn to_string(&self) -> String {
-        self.to_json().to_string()
-    }
-
     pub fn result(id: Value, result: Value) -> Self {
         McpResponse::Result { id, result }
     }
@@ -88,6 +87,12 @@ impl McpResponse {
             code,
             message: message.into(),
         }
+    }
+}
+
+impl fmt::Display for McpResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_json())
     }
 }
 

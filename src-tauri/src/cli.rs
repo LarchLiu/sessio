@@ -550,6 +550,10 @@ fn tool_text(result: &Value) -> Option<String> {
         .map(|text| text.to_string())
 }
 
+fn serialize_app_config(config: &config::AppConfig) -> String {
+    config::serialize_app_config(config)
+}
+
 fn run_config(cmd: ConfigCommand) -> Result<()> {
     match cmd {
         ConfigCommand::Show { json } => {
@@ -3814,8 +3818,4 @@ mod tests {
             "http://127.0.0.1:1234/mcp"
         );
     }
-}
-
-fn serialize_app_config(config: &config::AppConfig) -> String {
-    config::serialize_app_config(config)
 }

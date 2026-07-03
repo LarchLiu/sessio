@@ -97,18 +97,13 @@ pub struct SessionInfo {
 /// `Thread` sessions are represented by their parent thread item. Auxiliary
 /// (system-internal) sessions are filtered out via `is_auxiliary`, not via
 /// origin — auxiliary sessions can still legitimately have any origin.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionOrigin {
+    #[default]
     Chat,
     Thread,
     Channel,
-}
-
-impl Default for SessionOrigin {
-    fn default() -> Self {
-        SessionOrigin::Chat
-    }
 }
 
 impl SessionOrigin {
@@ -721,17 +716,12 @@ pub struct ThreadInfo {
 
 /// Whether a thread was created manually by the user or spawned by an auto
 /// task. Sidebar adds a `CalendarClock` badge on `ScheduledTask` threads.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadOrigin {
+    #[default]
     Manual,
     ScheduledTask,
-}
-
-impl Default for ThreadOrigin {
-    fn default() -> Self {
-        ThreadOrigin::Manual
-    }
 }
 
 impl ThreadOrigin {

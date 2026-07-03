@@ -213,6 +213,7 @@ pub(super) fn create_assistant(
     load_assistant_by_id(conn, &id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn update_assistant(
     conn: &Connection,
     assistant_id: &str,

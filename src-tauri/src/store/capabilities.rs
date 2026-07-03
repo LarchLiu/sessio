@@ -177,6 +177,7 @@ impl<T: SessionStore + ?Sized> ProcessTemplateStore for T {
 pub trait AssistantStore {
     fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>>;
     fn create_assistant(&self, assistant: NewAssistant<'_>) -> Result<AssistantInfo>;
+    #[allow(clippy::too_many_arguments)]
     fn update_assistant(
         &self,
         assistant_id: &str,
