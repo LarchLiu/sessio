@@ -1,11 +1,11 @@
 use anyhow::Result;
 
 use crate::models::{
-    Agent, ChannelSessionInfo, KanbanItem, KanbanStatus, ProcessTemplateInfo, ProjectInfo,
-    SessionInfo,
+    Agent, AssistantAgentInfo, AssistantInfo, ChannelSessionInfo, KanbanItem, KanbanStatus,
+    ProcessTemplateInfo, ProjectInfo, SessionInfo,
 };
 
-use super::SessionStore;
+use super::{NewAssistant, SessionStore};
 
 pub trait ProjectStore {
     fn list_projects(&self) -> Result<Vec<ProjectInfo>>;
@@ -171,5 +171,60 @@ impl<T: SessionStore + ?Sized> ProcessTemplateStore for T {
 
     fn delete_process_template(&self, process_template_id: &str) -> Result<()> {
         SessionStore::delete_process_template(self, process_template_id)
+    }
+}
+
+pub trait AssistantStore {
+    fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>>;
+    fn create_assistant(&self, assistant: NewAssistant<'_>) -> Result<AssistantInfo>;
+    fn update_assistant(
+        &self,
+        assistant_id: &str,
+        name: Option<&str>,
+        agent: Option<AssistantAgentInfo>,
+        system_prompt: Option<Option<&str>>,
+        color: Option<Option<&str>>,
+        selected_skill_ids: Option<Vec<String>>,
+        selected_mcp_ids: Option<Vec<String>>,
+        enabled: Option<bool>,
+    ) -> Result<AssistantInfo>;
+    fn delete_assistant(&self, assistant_id: &str) -> Result<()>;
+}
+
+impl<T: SessionStore + ?Sized> AssistantStore for T {
+    fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>> {
+        SessionStore::list_assistants(self, project_id)
+    }
+
+    fn create_assistant(&self, assistant: NewAssistant<'_>) -> Result<AssistantInfo> {
+        SessionStore::create_assistant(self, assistant)
+    }
+
+    fn update_assistant(
+        &self,
+        assistant_id: &str,
+        name: Option<&str>,
+        agent: Option<AssistantAgentInfo>,
+        system_prompt: Option<Option<&str>>,
+        color: Option<Option<&str>>,
+        selected_skill_ids: Option<Vec<String>>,
+        selected_mcp_ids: Option<Vec<String>>,
+        enabled: Option<bool>,
+    ) -> Result<AssistantInfo> {
+        SessionStore::update_assistant(
+            self,
+            assistant_id,
+            name,
+            agent,
+            system_prompt,
+            color,
+            selected_skill_ids,
+            selected_mcp_ids,
+            enabled,
+        )
+    }
+
+    fn delete_assistant(&self, assistant_id: &str) -> Result<()> {
+        SessionStore::delete_assistant(self, assistant_id)
     }
 }

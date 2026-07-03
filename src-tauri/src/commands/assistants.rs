@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::models::{AssistantAgentInfo, AssistantInfo, AssistantType};
-use crate::store::{NewAssistant, SessionStore};
+use crate::store::{capabilities::AssistantStore, NewAssistant, SessionStore};
 use tauri::{AppHandle, Emitter, State};
 
 #[derive(serde::Deserialize)]
@@ -38,9 +38,7 @@ pub(crate) fn list_assistants(
     project_id: Option<String>,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<Vec<AssistantInfo>, String> {
-    store
-        .list_assistants(project_id.as_deref())
-        .map_err(|e| e.to_string())
+    list_assistants_with_store(store.inner().as_ref(), project_id.as_deref())
 }
 
 #[tauri::command]
@@ -60,8 +58,9 @@ pub(crate) fn create_assistant(
         process_template_id,
         project_id,
     } = req;
-    let assistant = store
-        .create_assistant(NewAssistant {
+    let assistant = create_assistant_with_store(
+        store.inner().as_ref(),
+        NewAssistant {
             name: &name,
             agent,
             system_prompt: system_prompt.as_deref(),
@@ -71,8 +70,8 @@ pub(crate) fn create_assistant(
             assistant_type,
             process_template_id,
             project_id: project_id.as_deref(),
-        })
-        .map_err(|e| e.to_string())?;
+        },
+    )?;
     app.emit("assistants_updated", ())
         .map_err(|e| e.to_string())?;
     Ok(assistant)
@@ -96,18 +95,17 @@ pub(crate) fn update_assistant(
     } = req;
     let system_prompt_ref = system_prompt.as_ref().map(|value| value.as_deref());
     let color_ref = color.as_ref().map(|value| value.as_deref());
-    let assistant = store
-        .update_assistant(
-            &assistant_id,
-            name.as_deref(),
-            agent,
-            system_prompt_ref,
-            color_ref,
-            selected_skill_ids,
-            selected_mcp_ids,
-            enabled,
-        )
-        .map_err(|e| e.to_string())?;
+    let assistant = update_assistant_with_store(
+        store.inner().as_ref(),
+        &assistant_id,
+        name.as_deref(),
+        agent,
+        system_prompt_ref,
+        color_ref,
+        selected_skill_ids,
+        selected_mcp_ids,
+        enabled,
+    )?;
     app.emit("assistants_updated", ())
         .map_err(|e| e.to_string())?;
     Ok(assistant)
@@ -119,10 +117,57 @@ pub(crate) fn delete_assistant(
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<(), String> {
-    store
-        .delete_assistant(&assistant_id)
-        .map_err(|e| e.to_string())?;
+    delete_assistant_with_store(store.inner().as_ref(), &assistant_id)?;
     app.emit("assistants_updated", ())
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn list_assistants_with_store<S: AssistantStore + ?Sized>(
+    store: &S,
+    project_id: Option<&str>,
+) -> Result<Vec<AssistantInfo>, String> {
+    store.list_assistants(project_id).map_err(|e| e.to_string())
+}
+
+fn create_assistant_with_store<S: AssistantStore + ?Sized>(
+    store: &S,
+    assistant: NewAssistant<'_>,
+) -> Result<AssistantInfo, String> {
+    store.create_assistant(assistant).map_err(|e| e.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_assistant_with_store<S: AssistantStore + ?Sized>(
+    store: &S,
+    assistant_id: &str,
+    name: Option<&str>,
+    agent: Option<AssistantAgentInfo>,
+    system_prompt: Option<Option<&str>>,
+    color: Option<Option<&str>>,
+    selected_skill_ids: Option<Vec<String>>,
+    selected_mcp_ids: Option<Vec<String>>,
+    enabled: Option<bool>,
+) -> Result<AssistantInfo, String> {
+    store
+        .update_assistant(
+            assistant_id,
+            name,
+            agent,
+            system_prompt,
+            color,
+            selected_skill_ids,
+            selected_mcp_ids,
+            enabled,
+        )
+        .map_err(|e| e.to_string())
+}
+
+fn delete_assistant_with_store<S: AssistantStore + ?Sized>(
+    store: &S,
+    assistant_id: &str,
+) -> Result<(), String> {
+    store
+        .delete_assistant(assistant_id)
+        .map_err(|e| e.to_string())
 }
