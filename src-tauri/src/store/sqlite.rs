@@ -39,6 +39,7 @@ mod bootstrap;
 mod channel_sessions;
 mod identity;
 mod plan_queries;
+mod runtime_agents;
 mod scheduled_tasks;
 mod schema;
 mod seed;
@@ -749,20 +750,6 @@ fn agent_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentInfo> {
     })
 }
 
-fn runtime_agent_session_config_from_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<RuntimeAgentSessionConfigRecord> {
-    let agent_raw: String = row.get(0)?;
-    Ok(RuntimeAgentSessionConfigRecord {
-        agent: Agent::from_db_str(&agent_raw).unwrap_or(Agent::Codex),
-        adapter_version: row.get(1)?,
-        available_commands_json: row.get(2)?,
-        config_options_json: row.get(3)?,
-        created_at: row.get(4)?,
-        updated_at: row.get(5)?,
-    })
-}
-
 fn assistant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantInfo> {
     let agent_json: String = row.get(2)?;
     let selected_skill_ids_json: String = row.get(5)?;
@@ -1043,20 +1030,6 @@ fn load_agents(conn: &Connection) -> Result<Vec<AgentInfo>> {
     )?;
     let rows = stmt.query_map([], agent_info_from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-fn runtime_agent_selection_from_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<RuntimeAgentSelection> {
-    let agent_str: String = row.get(0)?;
-    let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
-    Ok(RuntimeAgentSelection {
-        agent,
-        model: row.get(1)?,
-        effort: row.get(2)?,
-        permission_mode: row.get(3)?,
-        updated_at: row.get(4)?,
-    })
 }
 
 fn astra_run_from_row_without_sessions(
@@ -3464,15 +3437,7 @@ impl SessionStore for SqliteStore {
 
     fn get_last_runtime_agent_selection(&self) -> Result<Option<RuntimeAgentSelection>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT agent, model, effort, permission_mode, updated_at
-             FROM runtime_agent_selections
-             WHERE key = ?",
-            params![RUNTIME_SELECTION_KEY],
-            runtime_agent_selection_from_row,
-        )
-        .optional()
-        .map_err(Into::into)
+        runtime_agents::get_last_runtime_agent_selection(&conn)
     }
 
     fn set_last_runtime_agent_selection(
@@ -3483,38 +3448,13 @@ impl SessionStore for SqliteStore {
         permission_mode: Option<&str>,
     ) -> Result<RuntimeAgentSelection> {
         let conn = self.conn.lock().unwrap();
-        let now = now_ms();
-        let model = model.map(str::trim).filter(|value| !value.is_empty());
-        let effort = effort.map(str::trim).filter(|value| !value.is_empty());
-        let permission_mode = permission_mode
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        conn.execute(
-            "INSERT INTO runtime_agent_selections (
-                key, agent, model, effort, permission_mode, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT(key) DO UPDATE SET
-                agent = excluded.agent,
-                model = excluded.model,
-                effort = excluded.effort,
-                permission_mode = excluded.permission_mode,
-                updated_at = excluded.updated_at",
-            params![
-                RUNTIME_SELECTION_KEY,
-                agent.as_str(),
-                model,
-                effort,
-                permission_mode,
-                now,
-            ],
-        )?;
-        Ok(RuntimeAgentSelection {
+        runtime_agents::set_last_runtime_agent_selection(
+            &conn,
             agent,
-            model: model.map(str::to_string),
-            effort: effort.map(str::to_string),
-            permission_mode: permission_mode.map(str::to_string),
-            updated_at: now,
-        })
+            model,
+            effort,
+            permission_mode,
+        )
     }
 
     fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>> {
@@ -5390,53 +5330,12 @@ impl SessionStore for SqliteStore {
         agent: Agent,
     ) -> Result<Option<RuntimeAgentCapabilityRecord>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT transport_kind, detected_version, protocol_version,
-                    raw_initialize_response_json, raw_capabilities_json, updated_at
-             FROM runtime_agent_capabilities
-             WHERE agent = ?",
-        )?;
-        stmt.query_row(params![agent.as_str()], |row| {
-            let transport_kind: String = row.get(0)?;
-            Ok(RuntimeAgentCapabilityRecord {
-                agent,
-                transport: transport_kind_from_db(&transport_kind),
-                version: row.get(1)?,
-                protocol_version: row.get(2)?,
-                raw_initialize_response_json: row.get(3)?,
-                raw_capabilities_json: row.get(4)?,
-                updated_at: row.get(5)?,
-            })
-        })
-        .optional()
-        .map_err(Into::into)
+        runtime_agents::get_runtime_agent_capability(&conn, agent)
     }
 
     fn upsert_runtime_agent_capability(&self, record: &RuntimeAgentCapabilityRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO runtime_agent_capabilities (
-                agent, transport_kind, detected_version, protocol_version,
-                raw_initialize_response_json, raw_capabilities_json, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(agent) DO UPDATE SET
-                transport_kind = excluded.transport_kind,
-                detected_version = excluded.detected_version,
-                protocol_version = excluded.protocol_version,
-                raw_initialize_response_json = excluded.raw_initialize_response_json,
-                raw_capabilities_json = excluded.raw_capabilities_json,
-                updated_at = excluded.updated_at",
-            params![
-                record.agent.as_str(),
-                transport_kind_to_db(record.transport),
-                record.version,
-                record.protocol_version,
-                record.raw_initialize_response_json,
-                record.raw_capabilities_json,
-                record.updated_at,
-            ],
-        )?;
-        Ok(())
+        runtime_agents::upsert_runtime_agent_capability(&conn, record)
     }
 
     fn get_runtime_agent_session_config(
@@ -5444,20 +5343,8 @@ impl SessionStore for SqliteStore {
         agent: Agent,
         adapter_version: &str,
     ) -> Result<Option<RuntimeAgentSessionConfigRecord>> {
-        let Some(adapter_version) = normalize_adapter_version_key(adapter_version) else {
-            return Ok(None);
-        };
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT agent, adapter_version, available_commands_json,
-                    config_options_json, created_at, updated_at
-             FROM runtime_agent_session_configs
-             WHERE agent = ? AND adapter_version = ?",
-            params![agent.as_str(), adapter_version],
-            runtime_agent_session_config_from_row,
-        )
-        .optional()
-        .map_err(Into::into)
+        runtime_agents::get_runtime_agent_session_config(&conn, agent, adapter_version)
     }
 
     fn list_runtime_agent_session_configs(
@@ -5465,22 +5352,7 @@ impl SessionStore for SqliteStore {
         agent: Agent,
     ) -> Result<Vec<RuntimeAgentSessionConfigRecord>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT agent, adapter_version, available_commands_json,
-                    config_options_json, created_at, updated_at
-             FROM runtime_agent_session_configs
-             WHERE agent = ?
-             ORDER BY updated_at DESC, adapter_version ASC",
-        )?;
-        let rows = stmt.query_map(
-            params![agent.as_str()],
-            runtime_agent_session_config_from_row,
-        )?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
+        runtime_agents::list_runtime_agent_session_configs(&conn, agent)
     }
 
     fn mark_runtime_agent_session_config_needs_refresh(
@@ -5488,45 +5360,20 @@ impl SessionStore for SqliteStore {
         agent: Agent,
         adapter_version: &str,
     ) -> Result<()> {
-        let Some(adapter_version) = normalize_adapter_version_key(adapter_version) else {
-            return Ok(());
-        };
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM runtime_agent_session_configs
-             WHERE agent = ? AND adapter_version = ?",
-            params![agent.as_str(), adapter_version],
-        )?;
-        Ok(())
+        runtime_agents::mark_runtime_agent_session_config_needs_refresh(
+            &conn,
+            agent,
+            adapter_version,
+        )
     }
 
     fn upsert_runtime_agent_session_config(
         &self,
         record: &RuntimeAgentSessionConfigRecord,
     ) -> Result<()> {
-        let Some(adapter_version) = normalize_adapter_version_key(&record.adapter_version) else {
-            return Ok(());
-        };
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO runtime_agent_session_configs (
-                agent, adapter_version, available_commands_json,
-                config_options_json, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT(agent, adapter_version) DO UPDATE SET
-                available_commands_json = excluded.available_commands_json,
-                config_options_json = excluded.config_options_json,
-                updated_at = excluded.updated_at",
-            params![
-                record.agent.as_str(),
-                adapter_version,
-                record.available_commands_json,
-                record.config_options_json,
-                record.created_at,
-                record.updated_at,
-            ],
-        )?;
-        Ok(())
+        runtime_agents::upsert_runtime_agent_session_config(&conn, record)
     }
 
     fn get_session_history_snapshots(
