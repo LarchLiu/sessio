@@ -1,7 +1,7 @@
 # Sessio 架构重构总方案
 
-**最后更新**: 2026-07-03  
-**当前状态**: 阶段 1 首批薄命令模块、初始 `state/` / `window/` 拆分已落地；阶段 2 已完成 SQLite schema/bootstrap/seed、session identity、workflow aggregation、主要 domain persistence 拆分，并开始收窄 `SessionStore` 默认编排与命令层能力接口
+**最后更新**: 2026-07-04
+**当前状态**: 阶段 1 首批薄命令模块、初始 `state/` / `window/` 拆分已落地；阶段 2 已完成 SQLite schema/bootstrap/seed、session identity、workflow aggregation、主要 domain persistence、`SessionStore` 默认编排收窄与首批命令层能力接口拆分；当前焦点进入阶段 3 配置管理收敛
 **本文档角色**: 唯一的重构主文档，统一记录现状、方案、实施计划和进度
 
 ---
@@ -453,7 +453,7 @@ src-tauri/src/
 
 辅助量化指标可作为阶段 2 是否真正收敛的观察值：
 
-- `src-tauri/src/store/sqlite.rs` 不再继续维持当前约 15k 行的单文件形态；建议先把“主文件降到 `< 8,000` 且拆出至少 4 个稳定子模块”作为第一观察点。
+- `src-tauri/src/store/sqlite.rs` 已从约 15k 行降到约 8.7k 行，并拆出多个稳定子模块；后续继续观察是否能进一步降到 `< 8,000`。
 - schema / seed / migration、session identity、workflow aggregation 三类内容至少已分别落到独立文件，而不是仍混在同一实现单元。
 - `SessionStore` 或其中间态聚合接口的方法数量相对当前基线出现下降趋势；建议先把“核心聚合接口 `< 90` 个方法”作为观察值，而不是硬门槛。
 
@@ -674,7 +674,7 @@ src-tauri/src/
 | `commands/` 目录 | ✅ | 已创建模块入口和首批薄命令模块 |
 | `lib.rs` 命令迁移 | ⏳ | 已迁出 sessions / projects / process_templates / assistants / kanban / settings 的首批薄命令 |
 | `generate_handler![]` 收敛 | ⏳ | 首批迁移命令已改用 `commands::*` 模块路径注册，整体注册仍集中在 `lib.rs` |
-| 命令层能力接口 | ⏳ | 已建立 `store/capabilities.rs`，sessions / projects / process_templates / assistants / kanban 薄命令已通过小接口 helper 访问 store |
+| 命令层能力接口 | ✅ | 已建立 `store/capabilities.rs`，首批 store-backed 薄命令中的 sessions / projects / process_templates / assistants / kanban 已通过小接口 helper 访问 store |
 | `state/` 拆分 | ⏳ | 已拆出 appshot shortcut 与 screenshot overlay 状态类型，后续可继续收窄状态操作方法 |
 | `window/` 拆分 | ⏳ | 已拆出 appearance 命令、系统主题 observer、主窗口 show/hide helper，窗口创建与 overlay 窗口流程仍在 `lib.rs` |
 | `CachedStore` 回归测试 | ✅ | 已覆盖 placeholder 替换、`replace_by_scope` subagent 保留、virtual session guard、astra cleanup snapshot refresh |
@@ -699,9 +699,9 @@ src-tauri/src/
 
 当前优先级按顺序是：
 
-1. 继续阶段 2 第 7 步，逐步收窄 `SessionStore` 调用面并让命令层使用更小的能力接口。
-2. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环。
-3. 后续进入阶段 3 前，先补配置兼容行为 characterization tests。
+1. 进入阶段 3 第 1 步，先补配置兼容行为 characterization tests。
+2. 配置测试钉稳后，再做 loader / parser / resolver / defaults / serializer 的纯搬运式模块拆分。
+3. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环。
 
 ---
 
