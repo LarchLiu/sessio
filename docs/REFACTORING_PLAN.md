@@ -351,7 +351,7 @@ src-tauri/src/
 
 - 从 `store/mod.rs`、`sqlite.rs`、`cached.rs` 抽出重复规则：
   - [x] `is_real_session_file_path`
-  - [ ] best-session 选择规则
+  - [x] best-session 选择规则
   - [x] virtual session 判断
   - [x] placeholder indexed-session 判断
   - [x] `now_ms`
@@ -677,13 +677,13 @@ src-tauri/src/
 | `state/` 拆分 | ⏳ | 已拆出 appshot shortcut 与 screenshot overlay 状态类型，后续可继续收窄状态操作方法 |
 | `window/` 拆分 | ⏳ | 已拆出 appearance 命令、系统主题 observer、主窗口 show/hide helper，窗口创建与 overlay 窗口流程仍在 `lib.rs` |
 | `CachedStore` 回归测试 | ✅ | 已覆盖 placeholder 替换、`replace_by_scope` subagent 保留、virtual session guard、astra cleanup snapshot refresh |
-| 公共 session 规则 | ⏳ | 已抽出 `session_rules.rs`，统一时间、文件 mtime、real/virtual session 与 placeholder indexed-session 判断；best-session 选择规则待收敛 |
+| 公共 session 规则 | ✅ | 已抽出 `session_rules.rs`，统一时间、文件 mtime、real/virtual session、placeholder indexed-session 与 best-session 选择规则 |
 
 ### 6.2 当前焦点
 
 当前优先级按顺序是：
 
-1. 继续阶段 2 第 2 步，收敛 best-session 选择规则，或进入 schema / migration / seed 拆分。
+1. 进入阶段 2 第 3 步，拆分 schema / migration / seed 初始化逻辑。
 2. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环。
 3. 后续再评估是否继续拆 screenshot overlay 窗口流程。
 

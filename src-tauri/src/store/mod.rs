@@ -3,8 +3,8 @@ mod session_rules;
 pub mod sqlite;
 
 pub(crate) use session_rules::{
-    file_mtime_for, is_placeholder_indexed_session, is_real_session_file_path,
-    is_virtual_session_ref, now_ms,
+    better_session_candidate, file_mtime_for, insert_best_session, is_placeholder_indexed_session,
+    is_real_session_file_path, is_virtual_session_ref, now_ms,
 };
 
 use anyhow::Result;
@@ -1015,44 +1015,8 @@ pub(crate) fn collect_referenced_session_keys(
     refs.into_iter().collect()
 }
 
-pub(crate) fn insert_best_session(
-    sessions: &mut HashMap<(Agent, String), SessionInfo>,
-    session: SessionInfo,
-) {
-    let key = (session.agent, session.id.clone());
-    let replace = sessions
-        .get(&key)
-        .map(|current| better_session_candidate(&session, current))
-        .unwrap_or(true);
-    if replace {
-        sessions.insert(key, session);
-    }
-}
-
 pub(crate) fn is_virtual_orchestrator_session_id(session_id: &str) -> bool {
     session_id.trim().starts_with("deterministic-orchestrator-")
-}
-
-pub(crate) fn better_session_candidate(candidate: &SessionInfo, current: &SessionInfo) -> bool {
-    if candidate.available != current.available {
-        return candidate.available;
-    }
-    if candidate.partial != current.partial {
-        return !candidate.partial;
-    }
-    let candidate_real_path = is_real_session_file_path(&candidate.file_path);
-    let current_real_path = is_real_session_file_path(&current.file_path);
-    if candidate_real_path != current_real_path {
-        return candidate_real_path;
-    }
-    if candidate.file_path.is_empty() != current.file_path.is_empty() {
-        return !candidate.file_path.is_empty();
-    }
-    session_time(candidate) > session_time(current)
-}
-
-pub(crate) fn session_time(session: &SessionInfo) -> i64 {
-    session.updated_at.or(session.started_at).unwrap_or(0)
 }
 
 fn add_replay_session_source(

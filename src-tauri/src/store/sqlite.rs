@@ -25,8 +25,8 @@ use crate::models::{
     ThreadAssistantInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
 };
 use crate::store::{
-    file_mtime_for, is_real_session_file_path, is_virtual_session_ref, now_ms,
-    AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, AstraRunSessionRecord,
+    better_session_candidate, file_mtime_for, is_real_session_file_path, is_virtual_session_ref,
+    now_ms, AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, AstraRunSessionRecord,
     ChannelSessionRecord, IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound,
     NewPlanTask, NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch,
     RuntimeAgentCapabilityRecord, RuntimeAgentSelection, RuntimeAgentSessionConfigRecord,
@@ -5037,29 +5037,6 @@ fn dedupe_sessions(sessions: &mut Vec<SessionInfo>) {
         index += 1;
         retain
     });
-}
-
-fn better_session_candidate(candidate: &SessionInfo, current: &SessionInfo) -> bool {
-    if candidate.available != current.available {
-        return candidate.available;
-    }
-    if candidate.partial != current.partial {
-        return !candidate.partial;
-    }
-    let candidate_real_path = is_real_session_file_path(&candidate.file_path);
-    let current_real_path = is_real_session_file_path(&current.file_path);
-    if candidate_real_path != current_real_path {
-        return candidate_real_path;
-    }
-    if candidate.file_path.is_empty() != current.file_path.is_empty() {
-        return !candidate.file_path.is_empty();
-    }
-    candidate
-        .updated_at
-        .unwrap_or(candidate.started_at.unwrap_or_default())
-        > current
-            .updated_at
-            .unwrap_or(current.started_at.unwrap_or_default())
 }
 
 fn session_project_path(
