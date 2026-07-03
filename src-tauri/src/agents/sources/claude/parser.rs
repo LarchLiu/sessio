@@ -9,6 +9,7 @@ use crate::agents::sources::shared::attachment_text::{
     clean_history_preview_candidate_text, clean_history_user_preview_text,
 };
 use crate::agents::sources::shared::cross_context::cross_context_lineage_from_payload;
+use crate::agents::sources::shared::file_edit::file_edit_message;
 use crate::agents::sources::shared::time::parse_iso;
 use crate::agents::sources::system_time_to_millis;
 use crate::agents::sources::types::{HistoryAcpMessage, SourceLocation};
@@ -936,32 +937,6 @@ fn claude_multi_edit_edits(input: &serde_json::Value) -> Vec<serde_json::Value> 
         "deletions": deletions,
         "detail": detail,
     })]
-}
-
-fn file_edit_message(
-    source: &str,
-    edits: Vec<serde_json::Value>,
-    ts: Option<i64>,
-) -> Option<AcpProtocolMessage> {
-    if edits.is_empty() {
-        return None;
-    }
-    let additions: i64 = edits
-        .iter()
-        .filter_map(|e| e.get("additions").and_then(|x| x.as_i64()))
-        .sum();
-    let deletions: i64 = edits
-        .iter()
-        .filter_map(|e| e.get("deletions").and_then(|x| x.as_i64()))
-        .sum();
-    let data = serde_json::json!({
-        "source": source,
-        "files": edits.len(),
-        "additions": additions,
-        "deletions": deletions,
-        "edits": edits,
-    });
-    Some(history_session_update_message("file_edit", data, ts))
 }
 
 fn line_count(s: &str) -> usize {

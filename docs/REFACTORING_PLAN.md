@@ -714,6 +714,7 @@ src-tauri/src/
 | Astra plan persistence split | ✅ | 已建立 `astra/plan_persistence.rs`，迁出 run record 转换、Astra task/plan task 映射、plan round 写入、task session link/relink、result 写回与 process stage 状态更新 helper |
 | Astra runtime metadata split | ✅ | 已建立 `astra/runtime_metadata.rs`，迁出 delegated runtime start request 补全、assistant skill/MCP 资源注入与 runtime option 归一化 helper |
 | Parser shared timestamp helper | ✅ | 已建立 `agents/sources/shared/time.rs`，将 Claude/Codex/Pi parser 中重复的 RFC3339 `parse_iso()` 收敛为共享 helper |
+| Parser shared file-edit helper | ✅ | 已建立 `agents/sources/shared/file_edit.rs`，将 Claude/Codex parser 中重复的 file_edit session update builder 收敛为共享 helper |
 
 ### 6.2 当前焦点
 
