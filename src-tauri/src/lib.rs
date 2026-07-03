@@ -2,6 +2,7 @@ pub mod agents;
 pub mod app_paths;
 pub mod astra;
 pub mod cli;
+pub mod commands;
 pub mod computer_use;
 pub mod config;
 pub mod config_watch;
@@ -54,21 +55,20 @@ use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
-    Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AssistantAgentInfo, AssistantInfo,
-    AssistantType, AstraConfig, CanvasBlockKind, CanvasBlockRecord, CanvasBlockSourceType,
-    CanvasContextAnchor, CanvasDocumentState, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus,
-    PlanRoundInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
-    PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
-    ProjectStageInfo, RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
-    StageIssueInfo, StageStatus, ThreadAgentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind,
-    ThreadReplayInfo,
+    Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AssistantAgentInfo, AstraConfig,
+    CanvasBlockKind, CanvasBlockRecord, CanvasBlockSourceType, CanvasContextAnchor,
+    CanvasDocumentState, IssueSeverity, IssueStatus, KanbanItem, PlanRoundInfo, PlanRoundMode,
+    PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk, PlanTaskSessionInfo,
+    PlanTaskSessionRole, PlanTaskStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata,
+    SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo, StageStatus, ThreadAgentInfo,
+    ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadReplayInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
 use store::{
-    AgentPreferencesPatch, AstraConfigPatch, NewAssistant, NewPlanRound, NewPlanTask,
-    NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, SessionHistorySnapshotRecord,
-    SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
+    AgentPreferencesPatch, AstraConfigPatch, NewPlanRound, NewPlanTask, NewPlanTaskSession,
+    PlanTaskStatusPatch, ProjectStagePatch, SessionHistorySnapshotRecord, SessionStore,
+    ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
 };
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
@@ -267,7 +267,7 @@ fn thread_project_id(store: &dyn SessionStore, thread_id: &str) -> Option<String
         .ok()
 }
 
-fn default_process_template_id() -> String {
+pub(crate) fn default_process_template_id() -> String {
     "code".to_string()
 }
 
@@ -454,22 +454,6 @@ struct UpdateAgentPreferencesRequest {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateAssistantRequest {
-    name: String,
-    agent: AssistantAgentInfo,
-    system_prompt: Option<String>,
-    color: Option<String>,
-    #[serde(default)]
-    selected_skill_ids: Vec<String>,
-    #[serde(default)]
-    selected_mcp_ids: Vec<String>,
-    assistant_type: AssistantType,
-    process_template_id: Option<String>,
-    project_id: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct UpdateProjectStageRequest {
     stage_id: String,
     name: Option<String>,
@@ -478,19 +462,6 @@ struct UpdateProjectStageRequest {
     order: Option<i64>,
     enabled: Option<bool>,
     allow_empty_assistants: Option<bool>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateAssistantRequest {
-    assistant_id: String,
-    name: Option<String>,
-    agent: Option<AssistantAgentInfo>,
-    system_prompt: Option<Option<String>>,
-    color: Option<Option<String>>,
-    selected_skill_ids: Option<Vec<String>>,
-    selected_mcp_ids: Option<Vec<String>>,
-    enabled: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -641,101 +612,6 @@ fn close_terminal(
 }
 
 #[tauri::command]
-fn list_sessions(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<SessionInfo>, String> {
-    store.list_sessions().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn list_channel_sessions(
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<Vec<models::ChannelSessionInfo>, String> {
-    store.list_channel_sessions().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn list_process_templates(
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<Vec<ProcessTemplateInfo>, String> {
-    store.list_process_templates().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn create_process_template(
-    name: String,
-    description: Option<String>,
-    app: AppHandle,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<ProcessTemplateInfo, String> {
-    let process_template = store
-        .create_process_template(&name, description.as_deref())
-        .map_err(|e| e.to_string())?;
-    app.emit("process_templates_updated", ())
-        .map_err(|e| e.to_string())?;
-    Ok(process_template)
-}
-
-#[tauri::command]
-fn update_process_template(
-    process_template_id: String,
-    name: Option<String>,
-    description: Option<Option<String>>,
-    app: AppHandle,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<ProcessTemplateInfo, String> {
-    let process_template = store
-        .update_process_template(
-            &process_template_id,
-            name.as_deref(),
-            description.as_ref().map(|value| value.as_deref()),
-        )
-        .map_err(|e| e.to_string())?;
-    app.emit("process_templates_updated", ())
-        .map_err(|e| e.to_string())?;
-    Ok(process_template)
-}
-
-#[tauri::command]
-fn delete_process_template(
-    process_template_id: String,
-    app: AppHandle,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<(), String> {
-    store
-        .delete_process_template(&process_template_id)
-        .map_err(|e| e.to_string())?;
-    app.emit("process_templates_updated", ())
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-fn list_projects(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<ProjectInfo>, String> {
-    store.list_projects().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn add_existing_project(
-    path: String,
-    name: Option<String>,
-    process_template_id: Option<String>,
-    enabled_stage_ids: Option<Vec<String>>,
-    app: AppHandle,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<ProjectInfo, String> {
-    let project = store
-        .add_project(
-            &path,
-            name.as_deref(),
-            process_template_id.unwrap_or_else(default_process_template_id),
-            enabled_stage_ids.as_deref(),
-        )
-        .map_err(|e| e.to_string())?;
-    app.emit("projects_updated", ())
-        .map_err(|e| e.to_string())?;
-    Ok(project)
-}
-
-#[tauri::command]
 fn create_project(
     parent_path: String,
     name: String,
@@ -778,38 +654,6 @@ fn create_default_project(
     app.emit("projects_updated", ())
         .map_err(|e| e.to_string())?;
     Ok(project)
-}
-
-#[tauri::command]
-fn update_project(
-    project_id: String,
-    name: Option<String>,
-    process_template_id: Option<String>,
-    app: AppHandle,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<ProjectInfo, String> {
-    let project = store
-        .update_project(&project_id, name.as_deref(), process_template_id)
-        .map_err(|e| e.to_string())?;
-    app.emit("projects_updated", ())
-        .map_err(|e| e.to_string())?;
-    Ok(project)
-}
-
-#[tauri::command]
-fn archive_project(
-    project_id: String,
-    app: AppHandle,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<(), String> {
-    store
-        .archive_project(&project_id)
-        .map_err(|e| e.to_string())?;
-    app.emit("projects_updated", ())
-        .map_err(|e| e.to_string())?;
-    app.emit("sessions_index_updated", ())
-        .map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 #[tauri::command]
@@ -1061,100 +905,6 @@ fn hydrate_mcp_options(
 ) {
     let settings = cache.get();
     mcp::hydrate_selected_mcps_option(options, &settings);
-}
-
-#[tauri::command]
-fn list_assistants(
-    project_id: Option<String>,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<Vec<AssistantInfo>, String> {
-    store
-        .list_assistants(project_id.as_deref())
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn create_assistant(
-    req: CreateAssistantRequest,
-    app: AppHandle,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<AssistantInfo, String> {
-    let CreateAssistantRequest {
-        name,
-        agent,
-        system_prompt,
-        color,
-        selected_skill_ids,
-        selected_mcp_ids,
-        assistant_type,
-        process_template_id,
-        project_id,
-    } = req;
-    let assistant = store
-        .create_assistant(NewAssistant {
-            name: &name,
-            agent,
-            system_prompt: system_prompt.as_deref(),
-            color: color.as_deref(),
-            selected_skill_ids,
-            selected_mcp_ids,
-            assistant_type,
-            process_template_id,
-            project_id: project_id.as_deref(),
-        })
-        .map_err(|e| e.to_string())?;
-    app.emit("assistants_updated", ())
-        .map_err(|e| e.to_string())?;
-    Ok(assistant)
-}
-
-#[tauri::command]
-fn update_assistant(
-    req: UpdateAssistantRequest,
-    app: AppHandle,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<AssistantInfo, String> {
-    let UpdateAssistantRequest {
-        assistant_id,
-        name,
-        agent,
-        system_prompt,
-        color,
-        selected_skill_ids,
-        selected_mcp_ids,
-        enabled,
-    } = req;
-    let system_prompt_ref = system_prompt.as_ref().map(|value| value.as_deref());
-    let color_ref = color.as_ref().map(|value| value.as_deref());
-    let assistant = store
-        .update_assistant(
-            &assistant_id,
-            name.as_deref(),
-            agent,
-            system_prompt_ref,
-            color_ref,
-            selected_skill_ids,
-            selected_mcp_ids,
-            enabled,
-        )
-        .map_err(|e| e.to_string())?;
-    app.emit("assistants_updated", ())
-        .map_err(|e| e.to_string())?;
-    Ok(assistant)
-}
-
-#[tauri::command]
-fn delete_assistant(
-    assistant_id: String,
-    app: AppHandle,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<(), String> {
-    store
-        .delete_assistant(&assistant_id)
-        .map_err(|e| e.to_string())?;
-    app.emit("assistants_updated", ())
-        .map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 #[tauri::command]
@@ -1796,63 +1546,6 @@ fn unlink_stage_session(
         Some(stage.thread_id.clone()),
     )?;
     Ok(stage)
-}
-
-#[tauri::command]
-fn list_kanban_items(
-    project_id: String,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<Vec<KanbanItem>, String> {
-    store
-        .list_kanban_items(&project_id)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn create_kanban_item(
-    project_id: String,
-    title: String,
-    description: Option<String>,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<KanbanItem, String> {
-    store
-        .create_kanban_item(&project_id, &title, description.as_deref())
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn update_kanban_item(
-    item_id: String,
-    title: Option<String>,
-    description: Option<Option<String>>,
-    status: Option<KanbanStatus>,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<KanbanItem, String> {
-    let description_ref = description.as_ref().map(|value| value.as_deref());
-    store
-        .update_kanban_item(&item_id, title.as_deref(), description_ref, status)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn update_kanban_item_status(
-    item_id: String,
-    status: KanbanStatus,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<KanbanItem, String> {
-    store
-        .update_kanban_item(&item_id, None, None, Some(status))
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn delete_kanban_item(
-    item_id: String,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<(), String> {
-    store
-        .delete_kanban_item(&item_id)
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3220,22 +2913,6 @@ fn create_pending_session(
     let scope = session.file_path.clone();
     store
         .upsert_session(&scope, &session)
-        .map_err(|e| e.to_string())?;
-    app.emit("sessions_index_updated", ())
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-fn update_session_rename_title(
-    agent: Agent,
-    session_id: String,
-    rename_title: Option<String>,
-    app: AppHandle,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<(), String> {
-    store
-        .update_session_rename_title(agent, &session_id, rename_title.as_deref())
         .map_err(|e| e.to_string())?;
     app.emit("sessions_index_updated", ())
         .map_err(|e| e.to_string())?;
@@ -8502,28 +8179,6 @@ fn set_last_runtime_agent_selection(
 }
 
 #[tauri::command]
-fn get_debug_config() -> Result<config::DebugConfig, String> {
-    config::load_config()
-        .map(|config| config.debug)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn get_network_config() -> Result<config::NetworkConfig, String> {
-    network::load_network_config().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn update_network_config(config: config::NetworkConfig) -> Result<config::NetworkConfig, String> {
-    network::save_network_config(config).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn get_mcp_settings(cache: State<'_, mcp::McpSettingsCache>) -> Result<mcp::McpSettings, String> {
-    Ok(cache.get())
-}
-
-#[tauri::command]
 fn list_skills(
     cache: State<'_, skills::SkillsCache>,
 ) -> Result<Vec<skills::SkillMetadata>, String> {
@@ -8551,18 +8206,6 @@ fn update_mcp_settings(
     let settings = mcp::save_settings(settings).map_err(|e| e.to_string())?;
     cache.set(settings.clone());
     Ok(settings)
-}
-
-#[tauri::command]
-fn get_appshot_config() -> Result<config::AppshotConfig, String> {
-    config::load_config()
-        .map(|config| config.appshot)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn take_config_recovery_notice() -> Option<config::ConfigRecoveryNotice> {
-    config::take_config_recovery_notice()
 }
 
 #[tauri::command]
@@ -9544,26 +9187,26 @@ pub fn run() {
             write_terminal_input,
             resize_terminal,
             close_terminal,
-            list_sessions,
-            list_channel_sessions,
-            list_process_templates,
-            create_process_template,
-            update_process_template,
-            delete_process_template,
-            list_projects,
-            add_existing_project,
+            commands::sessions::list_sessions,
+            commands::sessions::list_channel_sessions,
+            commands::process_templates::list_process_templates,
+            commands::process_templates::create_process_template,
+            commands::process_templates::update_process_template,
+            commands::process_templates::delete_process_template,
+            commands::projects::list_projects,
+            commands::projects::add_existing_project,
             create_project,
             create_default_project,
-            update_project,
-            archive_project,
+            commands::projects::update_project,
+            commands::projects::archive_project,
             list_agents,
             get_astra_config,
             update_astra_config,
             update_agent_preferences,
-            list_assistants,
-            create_assistant,
-            update_assistant,
-            delete_assistant,
+            commands::assistants::list_assistants,
+            commands::assistants::create_assistant,
+            commands::assistants::update_assistant,
+            commands::assistants::delete_assistant,
             list_threads,
             get_thread_work_state,
             get_thread_replay,
@@ -9598,11 +9241,11 @@ pub fn run() {
             unlink_thread_session,
             link_stage_session,
             unlink_stage_session,
-            list_kanban_items,
-            create_kanban_item,
-            update_kanban_item,
-            update_kanban_item_status,
-            delete_kanban_item,
+            commands::kanban::list_kanban_items,
+            commands::kanban::create_kanban_item,
+            commands::kanban::update_kanban_item,
+            commands::kanban::update_kanban_item_status,
+            commands::kanban::delete_kanban_item,
             link_kanban_item_session,
             unlink_kanban_item_session,
             get_session_ancestors,
@@ -9614,7 +9257,7 @@ pub fn run() {
             get_session_history,
             update_session_history_count,
             create_pending_session,
-            update_session_rename_title,
+            commands::sessions::update_session_rename_title,
             read_local_image_data_url,
             save_pasted_attachment,
             capture_window_area_png,
@@ -9657,15 +9300,15 @@ pub fn run() {
             get_runtime_agent_session_config,
             get_last_runtime_agent_selection,
             set_last_runtime_agent_selection,
-            get_debug_config,
-            get_network_config,
-            update_network_config,
-            get_mcp_settings,
+            commands::settings::get_debug_config,
+            commands::settings::get_network_config,
+            commands::settings::update_network_config,
+            commands::settings::get_mcp_settings,
             list_skills,
             install_skill,
             update_mcp_settings,
-            get_appshot_config,
-            take_config_recovery_notice,
+            commands::settings::get_appshot_config,
+            commands::settings::take_config_recovery_notice,
             get_computer_use_settings,
             get_appshot_permission_status,
             get_desktop_control_permission_status,
