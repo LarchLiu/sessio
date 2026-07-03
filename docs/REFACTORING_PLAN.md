@@ -698,6 +698,7 @@ src-tauri/src/
 | Config raw model split | ✅ | 已建立 `config/raw.rs`，先迁出 `RawConfig` 与各 section 的 raw DTO，保持解析、resolve、默认补全与序列化行为不变 |
 | Config parser split | ✅ | 已建立 `config/parser.rs`，迁出 `parse_raw_config()`、section/value parsing、宽松 bool、数组解析与 inline comment stripping |
 | Config defaults split | ✅ | 已建立 `config/defaults.rs`，迁出默认配置构造与 raw config 默认补全/merge helper |
+| Config loader split | ✅ | 已建立 `config/loader.rs`，迁出 load/save 入口、strict/tolerant 读取、默认文件写入与 recovery notice 管理 |
 
 ### 6.2 当前焦点
 
