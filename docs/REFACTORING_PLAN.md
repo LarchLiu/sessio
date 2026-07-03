@@ -25,7 +25,7 @@
 |------|----------|------|
 | `src-tauri/src/lib.rs` | 9,076 | 仍然是主重构对象，首批薄命令、初始状态类型和初始窗口 helper 已迁出 |
 | `src-tauri/src/store/sqlite.rs` | 12,900 | 最大的单文件风险点，schema SQL、bootstrap、seed、identity 与 thread index 聚合已初步迁出 |
-| `src-tauri/src/store/mod.rs` | 1,104 | `SessionStore` 过大且混入默认业务逻辑 |
+| `src-tauri/src/store/mod.rs` | 834 | `SessionStore` 仍偏大，`get_thread_replay()` 默认编排已迁出 |
 | `src-tauri/src/config.rs` | 1,839 | 含配置恢复与兼容解析逻辑 |
 | `src/api.ts` | 2,970 | 前端手写类型很多 |
 | `src-tauri/src/commands/` | 7 个模块 | 已包含首批薄命令模块与模块入口 |
@@ -383,7 +383,7 @@ src-tauri/src/
 **第 5 步: 抽 workflow 聚合查询**
 
 - 优先抽出：
-  - [ ] `thread_replay`
+  - [x] `thread_replay`
   - [x] `thread_index`
   - [ ] `load_thread_by_id()` 相关 hydrate helpers
   - [ ] `load_plan_round_by_id()` / `load_plan_tasks()` 等组合查询
@@ -680,7 +680,7 @@ src-tauri/src/
 | 公共 session 规则 | ✅ | 已抽出 `session_rules.rs`，统一时间、文件 mtime、real/virtual session、placeholder indexed-session 与 best-session 选择规则 |
 | SQLite schema/bootstrap | ✅ | 已建立 `store/sqlite/bootstrap.rs`、`schema.rs` 与 `seed.rs`，迁出 schema SQL、base schema 初始化、`initialize_schema()`、`ensure_column()` 与 builtin seed 逻辑 |
 | Session identity | ✅ | 已建立 `store/sqlite/identity.rs`，迁出 identity row 读取、title/message/provenance merge、origin upgrade/downgrade、scheduled-task/origin 标记、duplicate cleanup、`insert_session()` 与 `replace_by_scope()` 写入规则 |
-| Workflow aggregation | ⏳ | 已建立 `store/sqlite/thread_index.rs`，迁出 thread index 聚合查询与 session key 汇总 |
+| Workflow aggregation | ⏳ | 已建立 `store/thread_replay.rs` 与 `store/sqlite/thread_index.rs`，迁出 thread replay 编排、thread index 聚合查询与 session key 汇总 |
 
 ### 6.2 当前焦点
 
