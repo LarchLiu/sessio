@@ -1,7 +1,7 @@
 # Sessio 架构重构总方案
 
 **最后更新**: 2026-07-03  
-**当前状态**: 阶段 1 首批薄命令模块、初始 `state/` / `window/` 拆分已落地；阶段 2 已完成 SQLite schema/bootstrap/seed、session identity 与 workflow aggregation 首轮拆分
+**当前状态**: 阶段 1 首批薄命令模块、初始 `state/` / `window/` 拆分已落地；阶段 2 已完成 SQLite schema/bootstrap/seed、session identity、workflow aggregation 与主要 domain persistence 拆分
 **本文档角色**: 唯一的重构主文档，统一记录现状、方案、实施计划和进度
 
 ---
@@ -24,7 +24,7 @@
 | 文件 | 当前行数 | 说明 |
 |------|----------|------|
 | `src-tauri/src/lib.rs` | 9,076 | 仍然是主重构对象，首批薄命令、初始状态类型和初始窗口 helper 已迁出 |
-| `src-tauri/src/store/sqlite.rs` | 12,545 | 最大的单文件风险点，schema SQL、bootstrap、seed、identity、thread/plan query 聚合已初步迁出 |
+| `src-tauri/src/store/sqlite.rs` | 8,694 | 最大的单文件风险点，schema SQL、bootstrap、seed、identity、workflow 聚合查询与主要 domain persistence 已初步迁出 |
 | `src-tauri/src/store/mod.rs` | 834 | `SessionStore` 仍偏大，`get_thread_replay()` 默认编排已迁出 |
 | `src-tauri/src/config.rs` | 1,839 | 含配置恢复与兼容解析逻辑 |
 | `src/api.ts` | 2,970 | 前端手写类型很多 |
@@ -240,7 +240,7 @@ src-tauri/src/
 
 ##### 5.8.1 当前代码事实
 
-- `src-tauri/src/store/sqlite.rs` 约 15k 行，是当前最大的单文件风险点。
+- `src-tauri/src/store/sqlite.rs` 约 8.7k 行，仍是当前最大的单文件风险点。
 - `src-tauri/src/store/mod.rs` 中的 `SessionStore` 约 120+ 个方法，范围已经覆盖：
   - sessions / indexed sessions / subagents
   - channel sessions
@@ -397,7 +397,7 @@ src-tauri/src/
   - [x] `projects`
   - [x] `assistants`
   - [x] `threads`
-  - [ ] `stages`
+  - [x] `stages`
   - [x] `plans`
   - [x] `astra`
   - [x] `runtime_agents`
@@ -691,7 +691,7 @@ src-tauri/src/
 | Project persistence | ✅ | 已建立 `store/sqlite/projects.rs`，迁出 project row 读取、路径/名称规范化、list/add/create/update/archive 持久化入口 |
 | Assistant persistence | ✅ | 已建立 `store/sqlite/assistants.rs`，迁出 assistant row 读取、skill/MCP ID 规范化、list/create/update/delete 持久化入口 |
 | Thread persistence | ✅ | 已建立 `store/sqlite/threads.rs`，迁出 thread list/create/update/delete、assistant binding 与 agent participant 持久化逻辑 |
-| Project stage persistence | ⏳ | 已建立 `store/sqlite/stages.rs`，先迁出 project/process-template stage CRUD、stage row 读取与 project-stage assistant binding |
+| Stage persistence | ✅ | 已建立 `store/sqlite/stages.rs`，迁出 project/process-template stage CRUD、thread-stage/session/issue 持久化、stage row 读取与 assistant binding |
 
 ### 6.2 当前焦点
 

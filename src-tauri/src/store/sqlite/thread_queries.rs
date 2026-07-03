@@ -7,9 +7,10 @@ use crate::models::{
     ThreadAgentInfo, ThreadAssistantInfo, ThreadInfo, ThreadKind, ThreadOrigin,
 };
 
+use super::stages::{load_stage_assistants, load_stage_issues};
 use super::{
-    dedupe_sessions, load_all_subagents_grouped, load_stage_assistants, load_stage_issues,
-    parse_string_array_json, session_info_from_row, SESSION_INFO_COLUMNS_S,
+    dedupe_sessions, load_all_subagents_grouped, parse_string_array_json, session_info_from_row,
+    SESSION_INFO_COLUMNS_S,
 };
 
 pub(super) fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
