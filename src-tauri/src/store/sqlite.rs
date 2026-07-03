@@ -6826,19 +6826,13 @@ impl SessionStore for SqliteStore {
         is_auxiliary: bool,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        // OR-ing into is_auxiliary keeps the sticky semantics: marking a
-        // session auxiliary later in its lifetime is allowed, but a chat-mode
-        // task session that was created with is_auxiliary=false must not flip
-        // to auxiliary just because a later mark call lands.
-        let aux_value = if is_auxiliary { 1 } else { 0 };
-        conn.execute(
-            "UPDATE sessions
-                SET scheduled_task_id = ?,
-                    is_auxiliary = MAX(is_auxiliary, ?)
-              WHERE agent = ? AND session_id = ?",
-            params![scheduled_task_id, aux_value, agent.as_str(), session_id,],
-        )?;
-        Ok(())
+        identity::mark_session_scheduled_task(
+            &conn,
+            agent,
+            session_id,
+            scheduled_task_id,
+            is_auxiliary,
+        )
     }
 
     fn mark_session_origin(
@@ -6847,20 +6841,8 @@ impl SessionStore for SqliteStore {
         session_id: &str,
         origin: SessionOrigin,
     ) -> Result<()> {
-        // Sticky origin: only upgrade rows whose stored origin is still the
-        // default `chat`. A `thread` or `channel` row stays put. Marking with
-        // `Chat` is a no-op.
-        if origin == SessionOrigin::Chat {
-            return Ok(());
-        }
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE sessions
-                SET origin = ?
-              WHERE agent = ? AND session_id = ? AND origin = 'chat'",
-            params![origin.as_str(), agent.as_str(), session_id],
-        )?;
-        Ok(())
+        identity::mark_session_origin(&conn, agent, session_id, origin)
     }
 
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()> {
