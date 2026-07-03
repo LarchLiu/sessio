@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::models::ProjectInfo;
+use crate::models::{KanbanItem, KanbanStatus, ProjectInfo};
 
 use super::SessionStore;
 
@@ -48,5 +48,52 @@ impl<T: SessionStore + ?Sized> ProjectStore for T {
 
     fn archive_project(&self, project_id: &str) -> Result<()> {
         SessionStore::archive_project(self, project_id)
+    }
+}
+
+pub trait KanbanStore {
+    fn list_kanban_items(&self, project_id: &str) -> Result<Vec<KanbanItem>>;
+    fn create_kanban_item(
+        &self,
+        project_id: &str,
+        title: &str,
+        description: Option<&str>,
+    ) -> Result<KanbanItem>;
+    fn update_kanban_item(
+        &self,
+        item_id: &str,
+        title: Option<&str>,
+        description: Option<Option<&str>>,
+        status: Option<KanbanStatus>,
+    ) -> Result<KanbanItem>;
+    fn delete_kanban_item(&self, item_id: &str) -> Result<()>;
+}
+
+impl<T: SessionStore + ?Sized> KanbanStore for T {
+    fn list_kanban_items(&self, project_id: &str) -> Result<Vec<KanbanItem>> {
+        SessionStore::list_kanban_items(self, project_id)
+    }
+
+    fn create_kanban_item(
+        &self,
+        project_id: &str,
+        title: &str,
+        description: Option<&str>,
+    ) -> Result<KanbanItem> {
+        SessionStore::create_kanban_item(self, project_id, title, description)
+    }
+
+    fn update_kanban_item(
+        &self,
+        item_id: &str,
+        title: Option<&str>,
+        description: Option<Option<&str>>,
+        status: Option<KanbanStatus>,
+    ) -> Result<KanbanItem> {
+        SessionStore::update_kanban_item(self, item_id, title, description, status)
+    }
+
+    fn delete_kanban_item(&self, item_id: &str) -> Result<()> {
+        SessionStore::delete_kanban_item(self, item_id)
     }
 }
