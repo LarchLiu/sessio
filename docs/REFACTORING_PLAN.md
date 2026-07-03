@@ -393,7 +393,7 @@ src-tauri/src/
 
 - 在规则层与聚合层稳定后，再拆 domain modules：
   - [x] `scheduled_tasks`
-  - [ ] `channel_sessions`
+  - [x] `channel_sessions`
   - [ ] `projects`
   - [ ] `assistants`
   - [ ] `threads`
@@ -682,6 +682,7 @@ src-tauri/src/
 | Session identity | ✅ | 已建立 `store/sqlite/identity.rs`，迁出 identity row 读取、title/message/provenance merge、origin upgrade/downgrade、scheduled-task/origin 标记、duplicate cleanup、`insert_session()` 与 `replace_by_scope()` 写入规则 |
 | Workflow aggregation | ✅ | 已建立 `store/thread_replay.rs`、`store/sqlite/thread_index.rs`、`store/sqlite/plan_queries.rs` 与 `store/sqlite/thread_queries.rs`，迁出 thread replay 编排、thread index 聚合、plan round/task hydrate 查询、`load_thread_by_id()` 入口及 thread/stage/session hydrate |
 | Scheduled task persistence | ✅ | 已建立 `store/sqlite/scheduled_tasks.rs`，迁出 scheduled task/task run row 读取、列表查询、replace 写入、run 状态更新与 interrupted push cleanup |
+| Channel session persistence | ✅ | 已建立 `store/sqlite/channel_sessions.rs`，迁出 channel session row 读取、info 转换、active session 查询、upsert、activity 更新与结束标记 |
 
 ### 6.2 当前焦点
 
