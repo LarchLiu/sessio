@@ -1,7 +1,7 @@
 # Sessio 架构重构总方案
 
 **最后更新**: 2026-07-04
-**当前状态**: 阶段 1 首批薄命令模块、初始 `state/` / `window/` 拆分已落地；阶段 2 已完成 SQLite schema/bootstrap/seed、session identity、workflow aggregation、主要 domain persistence、`SessionStore` 默认编排收窄与首批命令层能力接口拆分；阶段 3 配置管理收敛与阶段 4 首轮类型同步已完成；当前焦点进入阶段 5 后续优化
+**当前状态**: 阶段 1 首批薄命令模块、初始 `state/` / `window/` 拆分已落地；阶段 2 已完成 SQLite schema/bootstrap/seed、session identity、workflow aggregation、主要 domain persistence、`SessionStore` 默认编排收窄与首批命令层能力接口拆分；阶段 3 配置管理收敛、阶段 4 首轮类型同步与阶段 5 首轮后续优化已完成
 **本文档角色**: 唯一的重构主文档，统一记录现状、方案、实施计划和进度
 
 ---
@@ -715,13 +715,14 @@ src-tauri/src/
 | Astra runtime metadata split | ✅ | 已建立 `astra/runtime_metadata.rs`，迁出 delegated runtime start request 补全、assistant skill/MCP 资源注入与 runtime option 归一化 helper |
 | Parser shared timestamp helper | ✅ | 已建立 `agents/sources/shared/time.rs`，将 Claude/Codex/Pi parser 中重复的 RFC3339 `parse_iso()` 收敛为共享 helper |
 | Parser shared file-edit helper | ✅ | 已建立 `agents/sources/shared/file_edit.rs`，将 Claude/Codex parser 中重复的 file_edit session update builder 收敛为共享 helper |
+| 阶段 5 首轮完成 | ✅ | 已完成 `astra/mod.rs` 首批可独立 helper/service 边界拆分与 Claude/Codex parser 共享逻辑首批收敛；后续优化可在新计划中继续细化 |
 
 ### 6.2 当前焦点
 
-当前优先级按顺序是：
+当前阶段性重构已完成；后续可选优化方向：
 
-1. 继续阶段 5，优先拆分 `astra/mod.rs` 中可独立搬出的服务实现，下一步评估委派 session 记录或 run state mutation 的边界。
-2. 继续评估 Claude/Codex parser 中除时间解析外的共享解析逻辑，优先选择无行为差异的小 helper。
+1. 继续评估 `astra/mod.rs` 中委派 session 记录或 run state mutation 的边界。
+2. 继续评估 Claude/Codex parser 中除时间解析和 file_edit builder 外的共享解析逻辑，优先选择无行为差异的小 helper。
 3. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环；若后续涉及前端类型或 invoke 面，同步执行前端 check/build。
 
 ---
