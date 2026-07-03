@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 
 use super::raw::*;
+use super::simple_sections::{parse_standard_debug_key, parse_standard_index_key};
 
 pub(super) fn parse_raw_config(contents: &str) -> Result<RawConfig> {
     let mut raw = RawConfig::default();
@@ -23,8 +24,8 @@ pub(super) fn parse_raw_config(contents: &str) -> Result<RawConfig> {
             bail!("line {line_number}: invalid config line: {line}");
         };
         let key = key.trim();
-        let value =
-            parse_value(value.trim()).with_context(|| line_context(line_number, raw_line))?;
+        let raw_value = value.trim();
+        let value = parse_value(raw_value).with_context(|| line_context(line_number, raw_line))?;
         match &section {
             Section::Memory => match key {
                 "backend" => {
@@ -77,10 +78,15 @@ pub(super) fn parse_raw_config(contents: &str) -> Result<RawConfig> {
             },
             Section::Index => match key {
                 "poll_interval_seconds" => {
-                    raw.index.poll_interval_seconds = value
-                        .map(parse_u64)
-                        .transpose()
-                        .with_context(|| line_context(line_number, raw_line))?
+                    raw.index.poll_interval_seconds =
+                        if let Some(value) = parse_standard_index_key(key, raw_value) {
+                            value
+                        } else {
+                            value
+                                .map(parse_u64)
+                                .transpose()
+                                .with_context(|| line_context(line_number, raw_line))?
+                        }
                 }
                 other => bail!("line {line_number}: unknown key in [index]: {other}"),
             },
@@ -195,16 +201,26 @@ pub(super) fn parse_raw_config(contents: &str) -> Result<RawConfig> {
             },
             Section::Debug => match key {
                 "acp_config" => {
-                    raw.debug.acp_config = value
-                        .map(parse_bool)
-                        .transpose()
-                        .with_context(|| line_context(line_number, raw_line))?
+                    raw.debug.acp_config =
+                        if let Some(value) = parse_standard_debug_key(key, raw_value) {
+                            value
+                        } else {
+                            value
+                                .map(parse_bool)
+                                .transpose()
+                                .with_context(|| line_context(line_number, raw_line))?
+                        }
                 }
                 "update_preview" => {
-                    raw.debug.update_preview = value
-                        .map(parse_bool)
-                        .transpose()
-                        .with_context(|| line_context(line_number, raw_line))?
+                    raw.debug.update_preview =
+                        if let Some(value) = parse_standard_debug_key(key, raw_value) {
+                            value
+                        } else {
+                            value
+                                .map(parse_bool)
+                                .transpose()
+                                .with_context(|| line_context(line_number, raw_line))?
+                        }
                 }
                 other => bail!("line {line_number}: unknown key in [debug]: {other}"),
             },
@@ -384,5 +400,44 @@ fn line_context(line_number: usize, raw_line: &str) -> String {
         format!("line {line_number}")
     } else {
         format!("line {line_number}: {trimmed}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_raw_config;
+
+    #[test]
+    fn parses_simple_sections_with_standard_toml_adapter() {
+        let raw = parse_raw_config(
+            r#"
+            [index]
+            poll_interval_seconds = 120
+
+            [debug]
+            acp_config = true
+            update_preview = false
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(raw.index.poll_interval_seconds, Some(120));
+        assert_eq!(raw.debug.acp_config, Some(true));
+        assert_eq!(raw.debug.update_preview, Some(false));
+    }
+
+    #[test]
+    fn simple_section_parser_keeps_legacy_bool_aliases() {
+        let raw = parse_raw_config(
+            r#"
+            [debug]
+            acp_config = on
+            update_preview = 0
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(raw.debug.acp_config, Some(true));
+        assert_eq!(raw.debug.update_preview, Some(false));
     }
 }

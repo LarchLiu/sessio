@@ -12,6 +12,7 @@ mod raw;
 mod recovery;
 mod resolver;
 mod serializer;
+mod simple_sections;
 
 #[cfg(test)]
 use defaults::{default_app_config, raw_config_with_defaults};
