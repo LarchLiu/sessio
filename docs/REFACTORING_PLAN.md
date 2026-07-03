@@ -398,7 +398,7 @@ src-tauri/src/
   - [ ] `assistants`
   - [ ] `threads`
   - [ ] `stages`
-  - [ ] `plans`
+  - [x] `plans`
   - [ ] `astra`
   - [x] `runtime_agents`
   - [x] `canvas`
@@ -686,6 +686,7 @@ src-tauri/src/
 | Snapshot persistence | ✅ | 已建立 `store/sqlite/snapshots.rs`，迁出 session history snapshot 读写和 thread work snapshot upsert/query |
 | Runtime agent persistence | ✅ | 已建立 `store/sqlite/runtime_agents.rs`，迁出 runtime agent selection、capability 与 session config 的读写逻辑 |
 | Canvas persistence | ✅ | 已建立 `store/sqlite/canvas.rs`，迁出 canvas document/revision/block/context anchor 的 ID、row mapper、读写与 pruning 逻辑 |
+| Plan persistence | ✅ | 已建立 `store/sqlite/plans.rs`，迁出 plan round/task 写入、状态机、task session link/relink 与 plan persistence 查询入口 |
 
 ### 6.2 当前焦点
 
