@@ -12,6 +12,7 @@ use crate::computer_use::settings::ComputerUseSettings;
 use crate::config;
 
 pub const BUILTIN_COMPUTER_USE_ID: &str = "builtin:computer-use";
+pub const BUILTIN_COMPUTER_USE_CONFIG_KEY: &str = "computer_use";
 const BUILTIN_COMPUTER_USE_NAME: &str = "Sessio Computer Use";
 const BUILTIN_COMPUTER_USE_SERVER_NAME: &str = "sessio-computer-use";
 pub const SELECTED_MCP_IDS_OPTION: &str = "selectedMcpIds";
@@ -141,6 +142,14 @@ pub fn load_settings() -> Result<McpSettings> {
 
 pub fn save_settings(settings: McpSettings) -> Result<McpSettings> {
     let mut app_config = config::load_config()?;
+    if let Some(server) = settings.servers.iter().find(|server| {
+        server.source == McpServerSource::Builtin
+            && server.builtin_kind == Some(BuiltinMcpKind::ComputerUse)
+    }) {
+        app_config.computer_use.enabled = server.enabled;
+        app_config.computer_use.mcp_description =
+            trimmed_option(server.description.as_deref());
+    }
     app_config.mcp = normalize_custom_settings(settings)?;
     config::save_config(&app_config)?;
     Ok(merged_settings(&app_config.mcp, &app_config.computer_use))
@@ -252,7 +261,7 @@ pub fn computer_use_server_entry(computer_use: &ComputerUseSettings) -> McpServe
     McpServerConfig {
         id: BUILTIN_COMPUTER_USE_ID.to_string(),
         name: BUILTIN_COMPUTER_USE_NAME.to_string(),
-        description: Some(BUILTIN_COMPUTER_USE_DESCRIPTION.to_string()),
+        description: Some(computer_use_description(computer_use).to_string()),
         enabled: computer_use.enabled,
         source: McpServerSource::Builtin,
         transport: McpServerTransport::Http,
@@ -264,6 +273,14 @@ pub fn computer_use_server_entry(computer_use: &ComputerUseSettings) -> McpServe
         args: Vec::new(),
         env: Vec::new(),
     }
+}
+
+pub fn computer_use_description(computer_use: &ComputerUseSettings) -> &str {
+    computer_use
+        .mcp_description
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(BUILTIN_COMPUTER_USE_DESCRIPTION)
 }
 
 pub fn computer_use_runtime_server(injection: &ComputerUseInjection) -> McpServer {
@@ -287,6 +304,15 @@ fn normalize_custom_server(server: McpServerConfig) -> Result<McpServerConfig> {
     let id = server.id.trim().to_string();
     if id.is_empty() {
         bail!("MCP server id is required");
+    }
+    if id == BUILTIN_COMPUTER_USE_CONFIG_KEY {
+        bail!("`{BUILTIN_COMPUTER_USE_CONFIG_KEY}` is reserved for the built-in computer_use MCP server");
+    }
+    if !id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        bail!("MCP server id must use only ASCII letters, numbers, '-' or '_': {id}");
     }
     let name = server.name.trim().to_string();
     if name.is_empty() {

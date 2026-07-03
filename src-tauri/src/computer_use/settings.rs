@@ -62,6 +62,10 @@ pub struct ComputerUseSettings {
     /// Master switch. When false, the host refuses all leases regardless of
     /// per-session approval (a global kill-switch).
     pub enabled: bool,
+    /// Optional prompt-oriented description shown in MCP selectors and injected
+    /// MCP guidance for the built-in computer-use server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_description: Option<String>,
     /// Global allowlist of app bundle identifiers approved for computer-use
     /// control. Session approval is still required separately.
     #[serde(default)]
@@ -76,6 +80,7 @@ impl Default for ComputerUseSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            mcp_description: None,
             approved_apps: Vec::new(),
             app_route_preferences: BTreeMap::new(),
         }
@@ -88,6 +93,7 @@ impl ComputerUseSettings {
     pub fn enabled() -> Self {
         Self {
             enabled: true,
+            mcp_description: None,
             approved_apps: Vec::new(),
             app_route_preferences: BTreeMap::new(),
         }
@@ -125,6 +131,7 @@ mod tests {
     fn settings_round_trip_json() {
         let s = ComputerUseSettings {
             enabled: true,
+            mcp_description: Some("Use for desktop control".into()),
             approved_apps: vec!["com.example.app".into()],
             app_route_preferences: BTreeMap::from([(
                 "com.example.app".into(),

@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -117,7 +118,22 @@ struct RawNetworkProxyConfig {
 
 #[derive(Debug, Clone, Default)]
 struct RawMcpConfig {
-    custom_servers: Option<Vec<crate::mcp::McpServerConfig>>,
+    legacy_custom_servers: Option<Vec<crate::mcp::McpServerConfig>>,
+    servers: BTreeMap<String, RawMcpServerConfig>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RawMcpServerConfig {
+    name: Option<String>,
+    builtin: Option<String>,
+    transport: Option<String>,
+    enabled: Option<bool>,
+    description: Option<String>,
+    url: Option<String>,
+    headers: Option<Vec<String>>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    env: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -128,9 +144,10 @@ struct RawAppshotConfig {
 #[derive(Debug, Clone, Default)]
 struct RawComputerUseConfig {
     enabled: Option<bool>,
+    mcp_description: Option<String>,
     approved_apps: Option<Vec<String>>,
     app_route_preferences: Option<
-        std::collections::BTreeMap<String, crate::computer_use::settings::AppRoutePreferences>,
+        BTreeMap<String, crate::computer_use::settings::AppRoutePreferences>,
     >,
     allow_input_injection: Option<bool>,
     allow_foreground_takeover: Option<bool>,
@@ -351,7 +368,7 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
         let key = key.trim();
         let value =
             parse_value(value.trim()).with_context(|| line_context(line_number, raw_line))?;
-        match section {
+        match &section {
             Section::Memory => match key {
                 "backend" => {
                     raw.memory
@@ -423,7 +440,7 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
             },
             Section::Mcp => match key {
                 "custom_servers" => {
-                    raw.mcp.custom_servers = value
+                    raw.mcp.legacy_custom_servers = value
                         .map(|value| {
                             serde_json::from_str::<Vec<crate::mcp::McpServerConfig>>(&value)
                                 .map_err(anyhow::Error::from)
@@ -433,6 +450,44 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 }
                 other => bail!("line {line_number}: unknown key in [mcp]: {other}"),
             },
+            Section::McpServer(server_id) => {
+                let server = raw.mcp.servers.entry(server_id.clone()).or_default();
+                match key {
+                    "name" => server.name = value,
+                    "builtin" => server.builtin = value,
+                    "transport" => server.transport = value,
+                    "enabled" => {
+                        server.enabled = value
+                            .map(parse_bool)
+                            .transpose()
+                            .with_context(|| line_context(line_number, raw_line))?
+                    }
+                    "description" => server.description = value,
+                    "url" => server.url = value,
+                    "headers" => {
+                        server.headers = value
+                            .map(|value| parse_string_array(&value))
+                            .transpose()
+                            .with_context(|| line_context(line_number, raw_line))?
+                    }
+                    "command" => server.command = value,
+                    "args" => {
+                        server.args = value
+                            .map(|value| parse_string_array(&value))
+                            .transpose()
+                            .with_context(|| line_context(line_number, raw_line))?
+                    }
+                    "env" => {
+                        server.env = value
+                            .map(|value| parse_string_array(&value))
+                            .transpose()
+                            .with_context(|| line_context(line_number, raw_line))?
+                    }
+                    other => {
+                        bail!("line {line_number}: unknown key in [mcp_servers.{server_id}]: {other}")
+                    }
+                }
+            }
             Section::Appshot => match key {
                 "shortcut" => raw.appshot.shortcut = value,
                 other => bail!("line {line_number}: unknown key in [appshot]: {other}"),
@@ -454,7 +509,7 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                     raw.computer_use.app_route_preferences = value
                         .map(|value| {
                             serde_json::from_str::<
-                                std::collections::BTreeMap<
+                                BTreeMap<
                                     String,
                                     crate::computer_use::settings::AppRoutePreferences,
                                 >,
@@ -509,6 +564,7 @@ enum Section {
     Index,
     NetworkProxy,
     Mcp,
+    McpServer(String),
     Appshot,
     ComputerUse,
     Debug,
@@ -534,6 +590,7 @@ fn parse_section(line: &str) -> Result<Option<Section>> {
         [a] if a == "index" => Section::Index,
         [a, b] if a == "network" && b == "proxy" => Section::NetworkProxy,
         [a] if a == "mcp" => Section::Mcp,
+        [a, b] if a == "mcp_servers" => Section::McpServer(b.clone()),
         [a] if a == "appshot" => Section::Appshot,
         [a] if a == "computer_use" => Section::ComputerUse,
         [a, ..] if a == "astra" => Section::Ignored,
@@ -668,13 +725,15 @@ fn resolve_app_config(raw: RawConfig, apply_env: bool) -> Result<AppConfig> {
         .clone()
         .map(|memory| resolve_memory_config_inner(memory, apply_env))
         .transpose()?;
+    let mcp = resolve_mcp_config(raw.clone())?;
+    let computer_use = resolve_computer_use_config(raw.clone())?;
     Ok(AppConfig {
         memory,
         index: resolve_index_config(raw.clone()),
         network: resolve_network_config(raw.clone()),
-        mcp: resolve_mcp_config(raw.clone())?,
+        mcp,
         appshot: resolve_appshot_config(raw.clone()),
-        computer_use: resolve_computer_use_config(raw.clone()),
+        computer_use,
         debug: resolve_debug_config(raw),
     })
 }
@@ -697,9 +756,17 @@ fn resolve_network_config(raw: RawConfig) -> NetworkConfig {
 }
 
 fn resolve_mcp_config(raw: RawConfig) -> Result<McpSettings> {
-    crate::mcp::normalize_custom_settings(McpSettings {
-        servers: raw.mcp.custom_servers.unwrap_or_default(),
-    })
+    let mut servers = raw.mcp.legacy_custom_servers.unwrap_or_default();
+    for (server_id, raw_server) in raw.mcp.servers {
+        if let Some(builtin) = raw_server.builtin.as_deref() {
+            if builtin != "computer_use" {
+                bail!("unknown builtin MCP server in [mcp_servers.{server_id}]: {builtin}");
+            }
+            continue;
+        }
+        servers.push(resolve_custom_mcp_server(server_id, raw_server)?);
+    }
+    crate::mcp::normalize_custom_settings(McpSettings { servers })
 }
 
 fn resolve_appshot_config(raw: RawConfig) -> AppshotConfig {
@@ -709,17 +776,167 @@ fn resolve_appshot_config(raw: RawConfig) -> AppshotConfig {
     }
 }
 
-fn resolve_computer_use_config(raw: RawConfig) -> ComputerUseSettings {
+fn resolve_computer_use_config(raw: RawConfig) -> Result<ComputerUseSettings> {
     let defaults = ComputerUseSettings::recommended();
     let _legacy_control_settings = (
         raw.computer_use.allow_input_injection,
         raw.computer_use.allow_foreground_takeover,
     );
-    ComputerUseSettings {
-        enabled: raw.computer_use.enabled.unwrap_or(defaults.enabled),
+    let builtin = resolve_builtin_computer_use_mcp_server(&raw.mcp)?;
+    Ok(ComputerUseSettings {
+        enabled: builtin
+            .as_ref()
+            .and_then(|server| server.enabled)
+            .or(raw.computer_use.enabled)
+            .unwrap_or(defaults.enabled),
+        mcp_description: builtin
+            .and_then(|server| server.description)
+            .or(raw.computer_use.mcp_description)
+            .or(defaults.mcp_description),
         approved_apps: normalized_string_list(raw.computer_use.approved_apps.unwrap_or_default()),
         app_route_preferences: raw.computer_use.app_route_preferences.unwrap_or_default(),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct BuiltinComputerUseMcpServer {
+    enabled: Option<bool>,
+    description: Option<String>,
+}
+
+fn resolve_builtin_computer_use_mcp_server(
+    raw: &RawMcpConfig,
+) -> Result<Option<BuiltinComputerUseMcpServer>> {
+    let mut builtin = None;
+    for (server_id, server) in &raw.servers {
+        let Some(kind) = server.builtin.as_deref() else {
+            continue;
+        };
+        if kind != "computer_use" {
+            bail!("unknown builtin MCP server in [mcp_servers.{server_id}]: {kind}");
+        }
+        if builtin.is_some() {
+            bail!("duplicate builtin MCP server configuration for computer_use");
+        }
+        if let Some(transport) = server.transport.as_deref() {
+            let transport = parse_mcp_transport(transport)?;
+            if transport != crate::mcp::McpServerTransport::Http {
+                bail!("builtin computer_use MCP server must use http transport");
+            }
+        }
+        if server.url.is_some()
+            || server.command.is_some()
+            || server.args.as_ref().is_some_and(|args| !args.is_empty())
+            || server.headers.as_ref().is_some_and(|headers| !headers.is_empty())
+            || server.env.as_ref().is_some_and(|env| !env.is_empty())
+        {
+            bail!("builtin computer_use MCP server does not accept transport-specific connection fields");
+        }
+        builtin = Some(BuiltinComputerUseMcpServer {
+            enabled: server.enabled,
+            description: trimmed_string(server.description.as_deref()),
+        });
     }
+    Ok(builtin)
+}
+
+fn resolve_custom_mcp_server(
+    server_id: String,
+    raw: RawMcpServerConfig,
+) -> Result<crate::mcp::McpServerConfig> {
+    let transport = parse_mcp_transport(
+        raw.transport
+            .as_deref()
+            .context(format!("missing MCP transport for [mcp_servers.{server_id}]"))?,
+    )?;
+    let name = trimmed_string(raw.name.as_deref()).unwrap_or_else(|| server_id.clone());
+    let description = trimmed_string(raw.description.as_deref());
+    let args = normalize_ordered_strings(raw.args.unwrap_or_default());
+    let headers = parse_key_value_entries(raw.headers.unwrap_or_default(), "headers")?;
+    let env = parse_key_value_entries(raw.env.unwrap_or_default(), "env")?;
+
+    Ok(match transport {
+        crate::mcp::McpServerTransport::Http | crate::mcp::McpServerTransport::Sse => {
+            let url = trimmed_string(raw.url.as_deref())
+                .context(format!("missing MCP url for [mcp_servers.{server_id}]"))?;
+            crate::mcp::McpServerConfig {
+                id: server_id,
+                name,
+                description,
+                enabled: raw.enabled.unwrap_or(true),
+                source: crate::mcp::McpServerSource::Custom,
+                transport,
+                injection_mode: crate::mcp::McpServerInjectionMode::SessionOptIn,
+                builtin_kind: None,
+                url: Some(url),
+                headers,
+                command: None,
+                args: Vec::new(),
+                env: Vec::new(),
+            }
+        }
+        crate::mcp::McpServerTransport::Stdio => {
+            let command = trimmed_string(raw.command.as_deref())
+                .context(format!("missing MCP command for [mcp_servers.{server_id}]"))?;
+            crate::mcp::McpServerConfig {
+                id: server_id,
+                name,
+                description,
+                enabled: raw.enabled.unwrap_or(true),
+                source: crate::mcp::McpServerSource::Custom,
+                transport,
+                injection_mode: crate::mcp::McpServerInjectionMode::SessionOptIn,
+                builtin_kind: None,
+                url: None,
+                headers: Vec::new(),
+                command: Some(command),
+                args,
+                env,
+            }
+        }
+    })
+}
+
+fn parse_mcp_transport(value: &str) -> Result<crate::mcp::McpServerTransport> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "http" => Ok(crate::mcp::McpServerTransport::Http),
+        "sse" => Ok(crate::mcp::McpServerTransport::Sse),
+        "stdio" => Ok(crate::mcp::McpServerTransport::Stdio),
+        other => bail!("invalid MCP transport: {other}"),
+    }
+}
+
+fn parse_key_value_entries(
+    values: Vec<String>,
+    field_name: &str,
+) -> Result<Vec<crate::mcp::McpKeyValue>> {
+    let mut out = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((name, entry_value)) = trimmed.split_once('=') else {
+            bail!("{field_name} entries must use NAME=VALUE syntax: {trimmed}");
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("{field_name} entries must include a key name");
+        }
+        out.push(crate::mcp::McpKeyValue {
+            name: name.to_string(),
+            value: entry_value.trim().to_string(),
+        });
+    }
+    Ok(out)
+}
+
+fn normalize_ordered_strings(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
 }
 
 fn normalized_string_list(values: Vec<String>) -> Vec<String> {
@@ -815,9 +1032,10 @@ fn raw_config_with_defaults(mut raw: RawConfig) -> Result<(RawConfig, bool)> {
         defaults.appshot.shortcut,
         &mut changed,
     );
-    merge_option(
-        &mut raw.computer_use.enabled,
-        defaults.computer_use.enabled,
+    merge_mcp_server_defaults(
+        &mut raw.mcp.servers,
+        &defaults.mcp.servers,
+        crate::mcp::BUILTIN_COMPUTER_USE_CONFIG_KEY,
         &mut changed,
     );
     merge_option(
@@ -833,6 +1051,39 @@ fn merge_option<T>(target: &mut Option<T>, default: Option<T>, changed: &mut boo
     if target.is_none() && default.is_some() {
         *target = default;
         *changed = true;
+    }
+}
+
+fn merge_mcp_server_defaults(
+    target: &mut BTreeMap<String, RawMcpServerConfig>,
+    defaults: &BTreeMap<String, RawMcpServerConfig>,
+    server_id: &str,
+    changed: &mut bool,
+) {
+    let Some(default_server) = defaults.get(server_id) else {
+        return;
+    };
+    match target.get_mut(server_id) {
+        Some(server) => {
+            merge_option(&mut server.name, default_server.name.clone(), changed);
+            merge_option(&mut server.builtin, default_server.builtin.clone(), changed);
+            merge_option(&mut server.transport, default_server.transport.clone(), changed);
+            merge_option(&mut server.enabled, default_server.enabled, changed);
+            merge_option(
+                &mut server.description,
+                default_server.description.clone(),
+                changed,
+            );
+            merge_option(&mut server.url, default_server.url.clone(), changed);
+            merge_option(&mut server.headers, default_server.headers.clone(), changed);
+            merge_option(&mut server.command, default_server.command.clone(), changed);
+            merge_option(&mut server.args, default_server.args.clone(), changed);
+            merge_option(&mut server.env, default_server.env.clone(), changed);
+        }
+        None => {
+            target.insert(server_id.to_string(), default_server.clone());
+            *changed = true;
+        }
     }
 }
 
@@ -911,14 +1162,17 @@ pub fn serialize_app_config(config: &AppConfig) -> String {
     out.push('\n');
     out.push_str(&serialize_network_config(&config.network));
     out.push('\n');
-    out.push_str(&serialize_mcp_config(&config.mcp));
-    if !config.mcp.servers.is_empty() {
+    out.push_str(&serialize_mcp_config(&config.mcp, &config.computer_use));
+    if !out.ends_with("\n\n") {
         out.push('\n');
     }
     out.push_str(&serialize_appshot_config(&config.appshot));
     out.push('\n');
-    out.push_str(&serialize_computer_use_config(&config.computer_use));
-    out.push('\n');
+    let computer_use = serialize_computer_use_config(&config.computer_use);
+    if !computer_use.is_empty() {
+        out.push_str(&computer_use);
+        out.push('\n');
+    }
     out.push_str(&serialize_debug_config(&config.debug));
     out
 }
@@ -955,17 +1209,104 @@ fn serialize_network_config(config: &NetworkConfig) -> String {
     out
 }
 
-fn serialize_mcp_config(config: &McpSettings) -> String {
-    if config.servers.is_empty() {
-        return String::new();
-    }
+fn serialize_mcp_config(config: &McpSettings, computer_use: &ComputerUseSettings) -> String {
     let mut out = String::new();
-    out.push_str("[mcp]\n");
-    out.push_str("custom_servers = ");
+    let builtin = crate::mcp::computer_use_server_entry(computer_use);
+    out.push_str("[mcp_servers.");
+    out.push_str(crate::mcp::BUILTIN_COMPUTER_USE_CONFIG_KEY);
+    out.push_str("]\n");
+    out.push_str("builtin = ");
+    out.push_str(&toml_string("computer_use"));
+    out.push('\n');
+    out.push_str("transport = ");
+    out.push_str(&toml_string("http"));
+    out.push('\n');
+    out.push_str("enabled = ");
+    out.push_str(if builtin.enabled { "true" } else { "false" });
+    out.push('\n');
+    out.push_str("description = ");
     out.push_str(&toml_string(
-        &serde_json::to_string(&config.servers).expect("serialize MCP custom servers"),
+        builtin
+            .description
+            .as_deref()
+            .unwrap_or("Use for desktop observation and GUI control."),
     ));
     out.push('\n');
+    let mut custom_servers = config
+        .servers
+        .iter()
+        .filter(|server| server.source == crate::mcp::McpServerSource::Custom)
+        .collect::<Vec<_>>();
+    custom_servers.sort_by(|left, right| left.id.cmp(&right.id));
+    for server in custom_servers {
+        out.push('\n');
+        out.push_str("[mcp_servers.");
+        out.push_str(&server.id);
+        out.push_str("]\n");
+        if !server.name.trim().is_empty() && server.name != server.id {
+            out.push_str("name = ");
+            out.push_str(&toml_string(&server.name));
+            out.push('\n');
+        }
+        out.push_str("transport = ");
+        out.push_str(&toml_string(match server.transport {
+            crate::mcp::McpServerTransport::Http => "http",
+            crate::mcp::McpServerTransport::Sse => "sse",
+            crate::mcp::McpServerTransport::Stdio => "stdio",
+        }));
+        out.push('\n');
+        out.push_str("enabled = ");
+        out.push_str(if server.enabled { "true" } else { "false" });
+        out.push('\n');
+        if let Some(description) = &server.description {
+            out.push_str("description = ");
+            out.push_str(&toml_string(description));
+            out.push('\n');
+        }
+        match server.transport {
+            crate::mcp::McpServerTransport::Http | crate::mcp::McpServerTransport::Sse => {
+                if let Some(url) = &server.url {
+                    out.push_str("url = ");
+                    out.push_str(&toml_string(url));
+                    out.push('\n');
+                }
+                if !server.headers.is_empty() {
+                    out.push_str("headers = ");
+                    out.push_str(&toml_string_array(
+                        &server
+                            .headers
+                            .iter()
+                            .map(|entry| format!("{}={}", entry.name, entry.value))
+                            .collect::<Vec<_>>(),
+                    ));
+                    out.push('\n');
+                }
+            }
+            crate::mcp::McpServerTransport::Stdio => {
+                if let Some(command) = &server.command {
+                    out.push_str("command = ");
+                    out.push_str(&toml_string(command));
+                    out.push('\n');
+                }
+                if !server.args.is_empty() {
+                    out.push_str("args = ");
+                    out.push_str(&toml_string_array_ordered(&server.args));
+                    out.push('\n');
+                }
+                if !server.env.is_empty() {
+                    out.push_str("env = ");
+                    out.push_str(&toml_string_array(
+                        &server
+                            .env
+                            .iter()
+                            .map(|entry| format!("{}={}", entry.name, entry.value))
+                            .collect::<Vec<_>>(),
+                    ));
+                    out.push('\n');
+                }
+            }
+        }
+    }
     out
 }
 
@@ -979,11 +1320,11 @@ fn serialize_appshot_config(config: &AppshotConfig) -> String {
 }
 
 fn serialize_computer_use_config(config: &ComputerUseSettings) -> String {
+    if config.approved_apps.is_empty() && config.app_route_preferences.is_empty() {
+        return String::new();
+    }
     let mut out = String::new();
     out.push_str("[computer_use]\n");
-    out.push_str("enabled = ");
-    out.push_str(if config.enabled { "true" } else { "false" });
-    out.push('\n');
     if !config.approved_apps.is_empty() {
         out.push_str("approved_apps = ");
         out.push_str(&toml_string_array(&config.approved_apps));
@@ -1010,6 +1351,17 @@ fn toml_string_array(values: &[String]) -> String {
     values.dedup();
     let items = values
         .into_iter()
+        .map(toml_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{items}]")
+}
+
+fn toml_string_array_ordered(values: &[String]) -> String {
+    let items = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
         .map(toml_string)
         .collect::<Vec<_>>()
         .join(", ");
@@ -1277,6 +1629,8 @@ mod tests {
         assert!(serialized.contains("[debug]"));
         assert!(serialized.contains("[network.proxy]"));
         assert!(serialized.contains("enabled = false"));
+        assert!(serialized.contains("[mcp_servers.computer_use]"));
+        assert!(serialized.contains(r#"builtin = "computer_use""#));
         assert!(!serialized.contains("[agents.runtime"));
         assert!(config.memory.is_none());
         assert_eq!(config.index.poll_interval_seconds, 60);
@@ -1309,8 +1663,13 @@ mod tests {
         .unwrap();
         let raw = parse_raw_config(&format!(
             r#"
-            [computer_use]
+            [mcp_servers.computer_use]
+            builtin = "computer_use"
+            transport = "http"
             enabled = false
+            description = "Use for desktop observation and GUI control."
+
+            [computer_use]
             approved_apps = ["com.example.two", "com.example.one", "com.example.two", ""]
             app_route_preferences = {prefs_json:?}
             allow_input_injection = true
@@ -1321,6 +1680,10 @@ mod tests {
         let config = super::resolve_app_config(raw, false).unwrap();
 
         assert!(!config.computer_use.enabled);
+        assert_eq!(
+            config.computer_use.mcp_description.as_deref(),
+            Some("Use for desktop observation and GUI control.")
+        );
         assert_eq!(
             config.computer_use.approved_apps,
             vec!["com.example.one".to_string(), "com.example.two".to_string()]
@@ -1335,31 +1698,73 @@ mod tests {
             Some(crate::computer_use::provider::ClickDispatchRoute::Hid)
         );
         let serialized = serialize_app_config(&config);
+        assert!(serialized.contains("[mcp_servers.computer_use]"));
+        assert!(serialized.contains("enabled = false"));
         assert!(serialized.contains(r#"approved_apps = ["com.example.one", "com.example.two"]"#));
         assert!(serialized.contains("app_route_preferences = "));
+        assert!(!serialized.contains("[computer_use]\nenabled ="));
         assert!(!serialized.contains("allow_input_injection"));
         assert!(!serialized.contains("allow_foreground_takeover"));
     }
 
     #[test]
     fn parses_custom_mcp_config() {
+        let raw = parse_raw_config(
+            r#"
+            [mcp_servers.docs]
+            name = "Docs"
+            transport = "stdio"
+            command = "~/bin/docs-mcp"
+            args = ["serve"]
+            env = ["DOCS_ROOT=/tmp/docs"]
+            enabled = true
+            description = "Project docs"
+            "#
+        )
+        .unwrap();
+        let config = super::resolve_app_config(raw, false).unwrap();
+
+        assert_eq!(config.mcp.servers.len(), 1);
+        assert_eq!(config.mcp.servers[0].id, "docs");
+        assert_eq!(config.mcp.servers[0].name, "Docs");
+        assert_eq!(
+            config.mcp.servers[0].command.as_deref(),
+            Some("~/bin/docs-mcp")
+        );
+        assert_eq!(config.mcp.servers[0].args, vec!["serve".to_string()]);
+        assert_eq!(
+            config.mcp.servers[0].env,
+            vec![crate::mcp::McpKeyValue {
+                name: "DOCS_ROOT".into(),
+                value: "/tmp/docs".into(),
+            }]
+        );
+
+        let serialized = serialize_app_config(&config);
+        assert!(serialized.contains("[mcp_servers.docs]"));
+        assert!(serialized.contains(r#"transport = "stdio""#));
+        assert!(serialized.contains(r#"env = ["DOCS_ROOT=/tmp/docs"]"#));
+    }
+
+    #[test]
+    fn parses_legacy_custom_mcp_config() {
         let servers_json = serde_json::to_string(&vec![crate::mcp::McpServerConfig {
             id: "docs".to_string(),
             name: "Docs".to_string(),
             description: Some("Project docs".to_string()),
             enabled: true,
             source: crate::mcp::McpServerSource::Custom,
-            transport: crate::mcp::McpServerTransport::Stdio,
-            injection_mode: crate::mcp::McpServerInjectionMode::Always,
+            transport: crate::mcp::McpServerTransport::Http,
+            injection_mode: crate::mcp::McpServerInjectionMode::SessionOptIn,
             builtin_kind: None,
-            url: None,
-            headers: Vec::new(),
-            command: Some("~/bin/docs-mcp".to_string()),
-            args: vec!["serve".to_string()],
-            env: vec![crate::mcp::McpKeyValue {
-                name: "DOCS_ROOT".to_string(),
-                value: "/tmp/docs".to_string(),
+            url: Some("http://127.0.0.1:3001/mcp".to_string()),
+            headers: vec![crate::mcp::McpKeyValue {
+                name: "Authorization".to_string(),
+                value: "Bearer token".to_string(),
             }],
+            command: None,
+            args: Vec::new(),
+            env: Vec::new(),
         }])
         .unwrap();
         let raw = parse_raw_config(&format!(
@@ -1374,14 +1779,12 @@ mod tests {
         assert_eq!(config.mcp.servers.len(), 1);
         assert_eq!(config.mcp.servers[0].id, "docs");
         assert_eq!(
-            config.mcp.servers[0].command.as_deref(),
-            Some("~/bin/docs-mcp")
+            config.mcp.servers[0].headers,
+            vec![crate::mcp::McpKeyValue {
+                name: "Authorization".into(),
+                value: "Bearer token".into(),
+            }]
         );
-        assert_eq!(config.mcp.servers[0].args, vec!["serve".to_string()]);
-
-        let serialized = serialize_app_config(&config);
-        assert!(serialized.contains("[mcp]"));
-        assert!(serialized.contains("custom_servers = "));
     }
 
     #[test]

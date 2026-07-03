@@ -222,6 +222,7 @@ export interface ConfigRecoveryNotice {
 
 export interface ComputerUseSettings {
   enabled: boolean;
+  mcpDescription?: string | null;
   approvedApps: string[];
 }
 

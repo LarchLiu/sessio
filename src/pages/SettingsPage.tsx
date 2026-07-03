@@ -1036,6 +1036,7 @@ function GeneralSettings({
     try {
       const next = await updateComputerUseSettings({
         enabled: nextEnabled,
+        mcpDescription: computerUseSettings?.mcpDescription ?? null,
         approvedApps: computerUseSettings?.approvedApps ?? [],
       });
       setComputerUseSettings(next);
