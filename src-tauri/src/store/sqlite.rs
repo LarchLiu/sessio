@@ -18,11 +18,11 @@ use crate::models::{
     CanvasBlockSourceType, CanvasContextAnchor, CanvasDocumentInfo, CanvasDocumentState,
     CanvasRevisionInfo, ChannelSessionInfo, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus,
     PlanRoundInfo, PlanRoundMode, PlanRoundStatus, PlanTaskInfo, PlanTaskSessionInfo,
-    PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo,
-    ProcessTemplateType, ProjectInfo, ProjectStageInfo, ProjectStageType,
-    RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, SessionOrigin, StageAssistantInfo,
-    StageInfo, StageIssueInfo, StageStatus, StageType, SubagentInfo, ThreadAgentInfo,
-    ThreadAssistantInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
+    PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProcessTemplateType, ProjectInfo,
+    ProjectStageInfo, ProjectStageType, RuntimeAgentOptionMetadata, SessionHistoryTurn,
+    SessionInfo, SessionOrigin, StageAssistantInfo, StageInfo, StageIssueInfo, StageStatus,
+    StageType, SubagentInfo, ThreadAgentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind,
+    ThreadOrigin,
 };
 use crate::store::{
     better_session_candidate, file_mtime_for, is_virtual_session_ref, now_ms,
@@ -41,6 +41,7 @@ mod plan_queries;
 mod schema;
 mod seed;
 mod thread_index;
+mod thread_queries;
 
 use self::identity::{
     downgrade_session_origin_when_unlinked, insert_session, upgrade_session_origin_to_thread,
@@ -48,6 +49,9 @@ use self::identity::{
 use self::plan_queries::{
     load_plan_round_by_id, load_plan_task_by_id, load_plan_task_sessions, load_plan_tasks,
     plan_round_from_row, plan_task_session_from_row,
+};
+use self::thread_queries::{
+    load_thread_agents, load_thread_assistants, load_thread_by_id, thread_from_row,
 };
 
 pub struct SqliteStore {
@@ -787,7 +791,7 @@ fn assistant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantInfo
     })
 }
 
-fn parse_string_array_json(value: &str) -> Vec<String> {
+pub(super) fn parse_string_array_json(value: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(value)
         .unwrap_or_default()
         .into_iter()
@@ -873,28 +877,6 @@ fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo>
         updated_at: row.get(14)?,
         sessions: Vec::new(),
         issues: Vec::new(),
-    })
-}
-
-fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
-    let kind_raw: String = row.get(5)?;
-    let origin_raw: String = row.get(9)?;
-    Ok(ThreadInfo {
-        id: row.get(0)?,
-        project_id: row.get(1)?,
-        goal: row.get(2)?,
-        description: row.get(3)?,
-        stage_id: row.get(4)?,
-        kind: ThreadKind::from_db_str(&kind_raw).unwrap_or_default(),
-        enabled: row.get::<_, i64>(6)? != 0,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
-        origin: ThreadOrigin::from_db_str(&origin_raw).unwrap_or_default(),
-        scheduled_task_id: row.get(10)?,
-        assistants: Vec::new(),
-        agent_participants: Vec::new(),
-        stages: Vec::new(),
-        sessions: Vec::new(),
     })
 }
 
@@ -1260,25 +1242,6 @@ fn load_assistant_by_id(conn: &Connection, assistant_id: &str) -> Result<Assista
     )
     .optional()?
     .ok_or_else(|| anyhow::anyhow!("assistant not found: {assistant_id}"))
-}
-
-fn load_thread_by_id(conn: &Connection, thread_id: &str) -> Result<ThreadInfo> {
-    let mut thread = conn
-        .query_row(
-            "SELECT id, project_id, goal, description, stage_id, kind, enabled, created_at, updated_at,
-                    origin, scheduled_task_id
-             FROM threads
-             WHERE id = ?",
-            params![thread_id],
-            thread_from_row,
-        )
-        .optional()?
-        .ok_or_else(|| anyhow::anyhow!("thread not found: {thread_id}"))?;
-    thread.assistants = load_thread_assistants(conn, &thread.id)?;
-    thread.agent_participants = load_thread_agents(conn, &thread.id)?;
-    thread.stages = load_thread_stages(conn, &thread.id)?;
-    thread.sessions = load_thread_sessions(conn, &thread.id)?;
-    Ok(thread)
 }
 
 fn clean_required(value: &str, field: &str) -> Result<String> {
@@ -2135,61 +2098,6 @@ fn load_project_stage_assistants(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn load_thread_assistants(conn: &Connection, thread_id: &str) -> Result<Vec<ThreadAssistantInfo>> {
-    let mut stmt = conn.prepare(
-        "SELECT ta.assistant_id, a.name, a.color, a.agent_json, a.system_prompt, a.selected_skill_ids_json, a.selected_mcp_ids_json, ta.sort_order
-         FROM thread_assistants ta
-         INNER JOIN assistants a ON a.id = ta.assistant_id
-         WHERE ta.thread_id = ?
-         ORDER BY ta.sort_order ASC, ta.created_at ASC",
-    )?;
-    let rows = stmt.query_map(params![thread_id], |row| {
-        let agent_json: String = row.get(3)?;
-        Ok(ThreadAssistantInfo {
-            assistant_id: row.get(0)?,
-            name: row.get(1)?,
-            color: row.get(2)?,
-            agent: serde_json::from_str::<AssistantAgentInfo>(&agent_json).unwrap_or_else(|_| {
-                AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: String::new(),
-                    mode: String::new(),
-                    effort: String::new(),
-                }
-            }),
-            system_prompt: row.get(4)?,
-            selected_skill_ids: parse_string_array_json(&row.get::<_, String>(5)?),
-            selected_mcp_ids: parse_string_array_json(&row.get::<_, String>(6)?),
-            order: row.get(7)?,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-fn load_thread_agents(conn: &Connection, thread_id: &str) -> Result<Vec<ThreadAgentInfo>> {
-    let mut stmt = conn.prepare(
-        "SELECT participant_id, agent, model, effort, permission_mode, sort_order, created_at, updated_at
-         FROM thread_agents
-         WHERE thread_id = ?
-         ORDER BY sort_order ASC, created_at ASC",
-    )?;
-    let rows = stmt.query_map(params![thread_id], |row| {
-        let agent_raw: String = row.get(1)?;
-        Ok(ThreadAgentInfo {
-            participant_id: row.get(0)?,
-            agent: Agent::from_db_str(&agent_raw).unwrap_or(Agent::Codex),
-            model: row.get(2)?,
-            effort: row.get(3)?,
-            permission_mode: row.get(4)?,
-            order: row.get(5)?,
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
 fn stage_assistant_from_assistant(assistant: AssistantInfo, order: i64) -> StageAssistantInfo {
     StageAssistantInfo {
         assistant_id: assistant.id,
@@ -2523,7 +2431,7 @@ fn load_kanban_item_sessions(conn: &Connection, item_id: &str) -> Result<Vec<Ses
     Ok(sessions)
 }
 
-fn load_thread_sessions(conn: &Connection, thread_id: &str) -> Result<Vec<SessionInfo>> {
+pub(super) fn load_thread_sessions(conn: &Connection, thread_id: &str) -> Result<Vec<SessionInfo>> {
     let mut subs_by_parent = load_all_subagents_grouped(conn)?;
     let sql = format!(
         "SELECT {SESSION_INFO_COLUMNS_S}
@@ -2567,7 +2475,7 @@ fn load_stage_sessions(conn: &Connection, thread_stage_id: &str) -> Result<Vec<S
     Ok(sessions)
 }
 
-fn load_thread_stages(conn: &Connection, thread_id: &str) -> Result<Vec<StageInfo>> {
+pub(super) fn load_thread_stages(conn: &Connection, thread_id: &str) -> Result<Vec<StageInfo>> {
     let mut stmt = conn.prepare(
         "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.process_template_id, s.kind, s.name, s.description, s.icon,
                 ts.sort_order, s.enabled, s.allow_empty_assistants, ts.created_at, ts.updated_at,
