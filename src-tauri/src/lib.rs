@@ -20,6 +20,7 @@ pub mod scheduled_tasks;
 mod screenshot;
 pub mod shell_env;
 pub mod skills;
+pub mod state;
 pub mod store;
 pub mod terminal;
 pub mod turns;
@@ -63,6 +64,13 @@ use models::{
     SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo, StageStatus, ThreadAgentInfo,
     ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadReplayInfo,
 };
+use state::{
+    AppshotShortcutState, ComputerUsePointerOverlayReadyPayload, ScreenshotOverlayCancelledPayload,
+    ScreenshotOverlayCompleteRequest, ScreenshotOverlaySourceDto, ScreenshotOverlayState,
+    ScreenshotOverlayWindowCandidateDto, ScreenshotOverlayWindowDto,
+};
+#[cfg(any(windows, target_os = "linux"))]
+use state::{ScreenshotOverlayCompletion, ScreenshotOverlayResultSender};
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
 use store::{
@@ -126,84 +134,10 @@ struct AppshotPermissionRequiredPayload {
     status: AppshotPermissionStatusDto,
 }
 
-#[derive(Default)]
-struct AppshotShortcutState {
-    registered_shortcut: Mutex<Option<String>>,
-    suspended_shortcut: Mutex<Option<String>>,
-}
-
 /// How long a command-driven screenshot overlay waits for the user to
 /// finish a selection before it gives up.
 #[cfg(any(windows, target_os = "linux"))]
 const SCREENSHOT_OVERLAY_CAPTURE_TIMEOUT: Duration = Duration::from_secs(300);
-
-#[derive(Default)]
-struct ScreenshotOverlayState {
-    sources: Mutex<HashMap<String, ScreenshotOverlaySourceDto>>,
-    reveal_main_on_finish: Mutex<HashMap<String, bool>>,
-    #[cfg(any(windows, target_os = "linux"))]
-    pending_results: Mutex<HashMap<String, ScreenshotOverlayResultSender>>,
-    #[cfg(any(windows, target_os = "linux"))]
-    completed_results: Mutex<HashMap<String, ScreenshotOverlayCompletion>>,
-}
-
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ScreenshotOverlayWindowDto {
-    label: String,
-}
-
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ScreenshotOverlayCancelledPayload {
-    request_id: String,
-}
-
-#[derive(Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ComputerUsePointerOverlayReadyPayload {
-    label: String,
-}
-
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ScreenshotOverlaySourceDto {
-    request_id: String,
-    source_path: String,
-    file_name: String,
-    mode: String,
-    windows: Vec<ScreenshotOverlayWindowCandidateDto>,
-    initial_selection: Option<ScreenshotOverlayInitialSelectionDto>,
-}
-
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ScreenshotOverlayWindowCandidateDto {
-    id: String,
-    app_name: String,
-    title: Option<String>,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-}
-
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ScreenshotOverlayInitialSelectionDto {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-}
-
-#[derive(Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ScreenshotOverlayCompleteRequest {
-    request_id: String,
-    path: Option<String>,
-    cancelled: Option<bool>,
-}
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -309,7 +243,7 @@ struct SavePastedAttachmentRequest {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SavedPastedAttachment {
+pub(crate) struct SavedPastedAttachment {
     path: String,
 }
 
@@ -3933,17 +3867,6 @@ fn capture_frontmost_window_png(
     file_name: Option<String>,
 ) -> Result<SavedPastedAttachment, String> {
     screenshot::linux::capture_frontmost_window_png(file_name)
-}
-
-#[cfg(any(windows, target_os = "linux"))]
-type ScreenshotOverlayResultSender =
-    Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<SavedPastedAttachment, String>>>>>;
-
-#[cfg(any(windows, target_os = "linux"))]
-#[derive(Clone)]
-enum ScreenshotOverlayCompletion {
-    Saved(String),
-    Cancelled,
 }
 
 #[cfg(any(windows, target_os = "linux"))]

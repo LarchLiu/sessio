@@ -1,7 +1,7 @@
 # Sessio 架构重构总方案
 
 **最后更新**: 2026-07-03  
-**当前状态**: 阶段 1 首批薄命令模块已落地，准备继续拆分 `state/` / `window/`  
+**当前状态**: 阶段 1 首批薄命令模块与初始 `state/` 拆分已落地，准备继续拆分 `window/`
 **本文档角色**: 唯一的重构主文档，统一记录现状、方案、实施计划和进度
 
 ---
@@ -23,7 +23,7 @@
 
 | 文件 | 当前行数 | 说明 |
 |------|----------|------|
-| `src-tauri/src/lib.rs` | 9,363 | 仍然是主重构对象，首批薄命令已迁出 |
+| `src-tauri/src/lib.rs` | 9,286 | 仍然是主重构对象，首批薄命令和初始状态类型已迁出 |
 | `src-tauri/src/store/sqlite.rs` | 15,292 | 最大的单文件风险点 |
 | `src-tauri/src/store/mod.rs` | 1,104 | `SessionStore` 过大且混入默认业务逻辑 |
 | `src-tauri/src/config.rs` | 1,839 | 含配置恢复与兼容解析逻辑 |
@@ -37,7 +37,8 @@
 - `lib.rs` 当前通过 `generate_handler![]` 注册 169 个唯一 Tauri command 名称。
 - `#[tauri::command]` 在 `lib.rs` 中共出现 186 次，其中包含平台 `#[cfg]` 下的同名实现，因此不能把“186 vs 169”的差值直接理解为未注册死代码。
 - `lib.rs` 中仍保留多数命令实现与大量入口层辅助逻辑，但首批薄命令实现已迁出。
-- `state/` 和 `window/` 还没有从 `lib.rs` 中拆出。
+- `state/` 已初步拆出 appshot shortcut 与 screenshot overlay 状态类型。
+- `window/` 还没有从 `lib.rs` 中拆出。
 - 已新增 `scripts/check-tauri-commands.mjs`，用于校验当前目标平台有效 `#[tauri::command]`、`generate_handler![]` 和前端 literal `invoke()` 名称集合。
 
 ### 2.3 当前目录形态
@@ -46,6 +47,7 @@
 src-tauri/src/
 ├── lib.rs
 ├── commands/              # 首批薄命令模块已落地
+├── state/                 # appshot / screenshot overlay 状态类型已初步拆出
 ├── agents/
 ├── astra/
 ├── store/
@@ -131,7 +133,7 @@ src-tauri/src/
 - [x] 创建 `commands/` 模块结构
 - [x] 首批薄命令迁移已重新开始
 - [x] 首批迁移命令已通过模块路径注册到 `generate_handler![]`
-- [ ] `state/` 尚未拆分
+- [x] `state/` 初始拆分已落地
 - [ ] `window/` 尚未拆分
 
 当前这一阶段不应该被理解为“继续完成上次已开始的命令迁移”，而应该被理解为“在新的基线下重新定义拆分顺序并重新启动”。
@@ -670,14 +672,14 @@ src-tauri/src/
 | `commands/` 目录 | ✅ | 已创建模块入口和首批薄命令模块 |
 | `lib.rs` 命令迁移 | ⏳ | 已迁出 sessions / projects / process_templates / assistants / kanban / settings 的首批薄命令 |
 | `generate_handler![]` 收敛 | ⏳ | 首批迁移命令已改用 `commands::*` 模块路径注册，整体注册仍集中在 `lib.rs` |
-| `state/` 拆分 | ⏳ | 未开始 |
+| `state/` 拆分 | ⏳ | 已拆出 appshot shortcut 与 screenshot overlay 状态类型，后续可继续收窄状态操作方法 |
 | `window/` 拆分 | ⏳ | 未开始 |
 
 ### 6.2 当前焦点
 
 当前优先级按顺序是：
 
-1. 继续处理 `state/` 与 `window/` 的拆分。
+1. 继续处理 `window/` 拆分，并评估是否把状态操作方法继续收窄到 `state/`。
 2. 维持 `scripts/check-tauri-commands.mjs` 作为命令迁移的固定验证闭环。
 3. 在阶段 1 满足退出条件后，再并行推进 `store/sqlite.rs` 的边界重构。
 
