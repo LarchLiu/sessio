@@ -1,6 +1,8 @@
 use anyhow::Result;
 
-use crate::models::{KanbanItem, KanbanStatus, ProjectInfo};
+use crate::models::{
+    Agent, ChannelSessionInfo, KanbanItem, KanbanStatus, ProjectInfo, SessionInfo,
+};
 
 use super::SessionStore;
 
@@ -95,5 +97,35 @@ impl<T: SessionStore + ?Sized> KanbanStore for T {
 
     fn delete_kanban_item(&self, item_id: &str) -> Result<()> {
         SessionStore::delete_kanban_item(self, item_id)
+    }
+}
+
+pub trait SessionCommandStore {
+    fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
+    fn list_channel_sessions(&self) -> Result<Vec<ChannelSessionInfo>>;
+    fn update_session_rename_title(
+        &self,
+        agent: Agent,
+        session_id: &str,
+        rename_title: Option<&str>,
+    ) -> Result<()>;
+}
+
+impl<T: SessionStore + ?Sized> SessionCommandStore for T {
+    fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
+        SessionStore::list_sessions(self)
+    }
+
+    fn list_channel_sessions(&self) -> Result<Vec<ChannelSessionInfo>> {
+        SessionStore::list_channel_sessions(self)
+    }
+
+    fn update_session_rename_title(
+        &self,
+        agent: Agent,
+        session_id: &str,
+        rename_title: Option<&str>,
+    ) -> Result<()> {
+        SessionStore::update_session_rename_title(self, agent, session_id, rename_title)
     }
 }

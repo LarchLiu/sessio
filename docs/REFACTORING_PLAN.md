@@ -674,7 +674,7 @@ src-tauri/src/
 | `commands/` 目录 | ✅ | 已创建模块入口和首批薄命令模块 |
 | `lib.rs` 命令迁移 | ⏳ | 已迁出 sessions / projects / process_templates / assistants / kanban / settings 的首批薄命令 |
 | `generate_handler![]` 收敛 | ⏳ | 首批迁移命令已改用 `commands::*` 模块路径注册，整体注册仍集中在 `lib.rs` |
-| 命令层能力接口 | ⏳ | 已建立 `store/capabilities.rs`，projects / kanban 薄命令已通过小接口 helper 访问 store |
+| 命令层能力接口 | ⏳ | 已建立 `store/capabilities.rs`，sessions / projects / kanban 薄命令已通过小接口 helper 访问 store |
 | `state/` 拆分 | ⏳ | 已拆出 appshot shortcut 与 screenshot overlay 状态类型，后续可继续收窄状态操作方法 |
 | `window/` 拆分 | ⏳ | 已拆出 appearance 命令、系统主题 observer、主窗口 show/hide helper，窗口创建与 overlay 窗口流程仍在 `lib.rs` |
 | `CachedStore` 回归测试 | ✅ | 已覆盖 placeholder 替换、`replace_by_scope` subagent 保留、virtual session guard、astra cleanup snapshot refresh |
