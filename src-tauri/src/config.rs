@@ -9,6 +9,10 @@ use crate::app_paths;
 use crate::computer_use::settings::ComputerUseSettings;
 use crate::mcp::McpSettings;
 
+mod raw;
+
+use raw::*;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AppConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,97 +90,6 @@ pub struct QmdBackendConfig {
     pub artifacts_root: PathBuf,
     pub auto_embed: bool,
     pub install_command: String,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawConfig {
-    memory: Option<RawMemoryConfig>,
-    index: RawIndexConfig,
-    network: RawNetworkConfig,
-    mcp: RawMcpConfig,
-    appshot: RawAppshotConfig,
-    computer_use: RawComputerUseConfig,
-    debug: RawDebugConfig,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawIndexConfig {
-    poll_interval_seconds: Option<u64>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawNetworkConfig {
-    proxy: RawNetworkProxyConfig,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawNetworkProxyConfig {
-    enabled: Option<bool>,
-    url: Option<String>,
-    no_proxy: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawMcpConfig {
-    legacy_custom_servers: Option<Vec<crate::mcp::McpServerConfig>>,
-    servers: BTreeMap<String, RawMcpServerConfig>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawMcpServerConfig {
-    name: Option<String>,
-    builtin: Option<String>,
-    transport: Option<String>,
-    enabled: Option<bool>,
-    description: Option<String>,
-    url: Option<String>,
-    headers: Option<Vec<String>>,
-    command: Option<String>,
-    args: Option<Vec<String>>,
-    env: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawAppshotConfig {
-    shortcut: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawComputerUseConfig {
-    enabled: Option<bool>,
-    mcp_description: Option<String>,
-    approved_apps: Option<Vec<String>>,
-    app_route_preferences: Option<
-        BTreeMap<String, crate::computer_use::settings::AppRoutePreferences>,
-    >,
-    allow_input_injection: Option<bool>,
-    allow_foreground_takeover: Option<bool>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawDebugConfig {
-    acp_config: Option<bool>,
-    update_preview: Option<bool>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawMemoryConfig {
-    backend: Option<String>,
-    backends: RawMemoryBackends,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawMemoryBackends {
-    qmd: RawQmdBackendConfig,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawQmdBackendConfig {
-    binary: Option<String>,
-    index: Option<String>,
-    artifacts_root: Option<String>,
-    auto_embed: Option<bool>,
-    install_command: Option<String>,
 }
 
 static CONFIG_RECOVERY_NOTICE: OnceLock<Mutex<Option<ConfigRecoveryNotice>>> = OnceLock::new();
