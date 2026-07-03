@@ -35,6 +35,7 @@ use crate::store::{
     SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK,
 };
 
+mod bootstrap;
 mod schema;
 mod seed;
 
@@ -89,13 +90,6 @@ fn normalize_adapter_version_key(value: &str) -> Option<String> {
 #[cfg(test)]
 fn unique_suffix() -> String {
     unique_nonce()
-}
-
-fn initialize_schema(conn: &Connection) -> Result<()> {
-    schema::initialize_base_schema(conn)?;
-    seed::seed_builtins(conn)?;
-    seed::seed_opencode_builtin_agent(conn, now_ms())?;
-    Ok(())
 }
 
 fn runtime_option(value: &str, label: &str) -> RuntimeAgentOptionMetadata {
@@ -4108,7 +4102,7 @@ fn load_sessions(conn: &Connection, user_projects_only: bool) -> Result<Vec<Sess
 impl SessionStore for SqliteStore {
     fn init(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        initialize_schema(&conn)
+        bootstrap::initialize_schema(&conn)
     }
 
     fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
