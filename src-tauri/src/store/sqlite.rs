@@ -36,6 +36,7 @@ use crate::store::{
     ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
 };
 
+mod assistants;
 mod astra;
 mod bootstrap;
 mod canvas;
@@ -52,6 +53,7 @@ mod snapshots;
 mod thread_index;
 mod thread_queries;
 
+use self::assistants::{assistant_from_row, load_assistant_by_id};
 use self::identity::{
     downgrade_session_origin_when_unlinked, insert_session, upgrade_session_origin_to_thread,
 };
@@ -360,25 +362,6 @@ fn stable_process_template_id(name: &str, now: i64) -> String {
     format!("process-template-{}", &hex::encode(hasher.finalize())[..16])
 }
 
-fn stable_assistant_id(
-    assistant_type: AssistantType,
-    process_template_id: Option<&str>,
-    project_id: Option<&str>,
-    name: &str,
-    model: &str,
-    now: i64,
-) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(assistant_type.as_str().as_bytes());
-    hasher.update(process_template_id.unwrap_or("").as_bytes());
-    hasher.update(project_id.unwrap_or("").as_bytes());
-    hasher.update(name.as_bytes());
-    hasher.update(model.as_bytes());
-    hasher.update(now.to_string().as_bytes());
-    format!("assistant-{}", &hex::encode(hasher.finalize())[..16])
-}
-
 fn stable_project_builtin_assistant_id(project_id: &str, template_assistant_id: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -554,38 +537,6 @@ fn agent_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentInfo> {
     })
 }
 
-fn assistant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantInfo> {
-    let agent_json: String = row.get(2)?;
-    let selected_skill_ids_json: String = row.get(5)?;
-    let selected_mcp_ids_json: String = row.get(6)?;
-    let assistant_type_raw: String = row.get(7)?;
-    let process_template_id_raw: Option<String> = row.get(8)?;
-    Ok(AssistantInfo {
-        id: row.get(0)?,
-        name: row.get(1)?,
-        agent: serde_json::from_str::<AssistantAgentInfo>(&agent_json).unwrap_or_else(|_| {
-            AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: String::new(),
-                mode: String::new(),
-                effort: String::new(),
-            }
-        }),
-        system_prompt: row.get(3)?,
-        color: row.get(4)?,
-        selected_skill_ids: parse_string_array_json(&selected_skill_ids_json),
-        selected_mcp_ids: parse_string_array_json(&selected_mcp_ids_json),
-        assistant_type: AssistantType::from_db_str(&assistant_type_raw)
-            .unwrap_or(AssistantType::Custom),
-        process_template_id: process_template_id_raw,
-        project_id: row.get(9)?,
-        enabled: row.get::<_, i64>(10)? != 0,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
-    })
-}
-
 pub(super) fn parse_string_array_json(value: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(value)
         .unwrap_or_default()
@@ -598,23 +549,6 @@ pub(super) fn parse_string_array_json(value: &str) -> Vec<String> {
             }
             out
         })
-}
-
-fn normalize_string_ids(values: Vec<String>) -> Vec<String> {
-    values
-        .into_iter()
-        .map(|item| item.trim().to_string())
-        .filter(|item| !item.is_empty())
-        .fold(Vec::<String>::new(), |mut out, item| {
-            if !out.contains(&item) {
-                out.push(item);
-            }
-            out
-        })
-}
-
-fn string_ids_json(values: Vec<String>) -> Result<String> {
-    Ok(serde_json::to_string(&normalize_string_ids(values))?)
 }
 
 fn project_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectStageInfo> {
@@ -672,7 +606,7 @@ fn load_process_template_by_id(
     .ok_or_else(|| anyhow::anyhow!("process template not found: {process_template_id}"))
 }
 
-fn load_agent_by_id(conn: &Connection, agent_id: &str) -> Result<AgentInfo> {
+pub(super) fn load_agent_by_id(conn: &Connection, agent_id: &str) -> Result<AgentInfo> {
     conn.query_row(
         "SELECT id, name, display_name, icon, ai_provider, ai_providers_json,
                 model, models_json, effort, efforts_json,
@@ -698,18 +632,6 @@ fn load_agents(conn: &Connection) -> Result<Vec<AgentInfo>> {
     )?;
     let rows = stmt.query_map([], agent_info_from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-fn load_assistant_by_id(conn: &Connection, assistant_id: &str) -> Result<AssistantInfo> {
-    conn.query_row(
-        "SELECT id, name, agent_json, system_prompt, color, selected_skill_ids_json, selected_mcp_ids_json, type, process_template_id, project_id, enabled, created_at, updated_at
-         FROM assistants
-         WHERE id = ?",
-        params![assistant_id],
-        assistant_from_row,
-    )
-    .optional()?
-    .ok_or_else(|| anyhow::anyhow!("assistant not found: {assistant_id}"))
 }
 
 fn load_project_stage_by_id(conn: &Connection, stage_id: &str) -> Result<ProjectStageInfo> {
@@ -1037,7 +959,10 @@ fn usage_list(items: &[String]) -> String {
     visible.join("; ")
 }
 
-fn ensure_assistant_can_be_disabled(conn: &Connection, assistant_id: &str) -> Result<()> {
+pub(super) fn ensure_assistant_can_be_disabled(
+    conn: &Connection,
+    assistant_id: &str,
+) -> Result<()> {
     let assistant = load_assistant_by_id(conn, assistant_id)?;
     let project_id = assistant.project_id.as_deref();
     let project_stage_usages = {
@@ -2566,121 +2491,12 @@ impl SessionStore for SqliteStore {
 
     fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>> {
         let conn = self.conn.lock().unwrap();
-        let assistants = if let Some(project_id) = project_id {
-            load_project_by_id(&conn, project_id)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, name, agent_json, system_prompt, color, selected_skill_ids_json, selected_mcp_ids_json, type, process_template_id, project_id, enabled, created_at, updated_at
-                 FROM assistants
-                 WHERE project_id = ?
-                 ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
-            )?;
-            let rows = stmt.query_map(params![project_id], assistant_from_row)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        } else {
-            let mut stmt = conn.prepare(
-                "SELECT id, name, agent_json, system_prompt, color, selected_skill_ids_json, selected_mcp_ids_json, type, process_template_id, project_id, enabled, created_at, updated_at
-                 FROM assistants
-                 ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
-            )?;
-            let rows = stmt.query_map([], assistant_from_row)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        Ok(assistants)
+        assistants::list_assistants(&conn, project_id)
     }
 
     fn create_assistant(&self, assistant: NewAssistant<'_>) -> Result<AssistantInfo> {
-        let NewAssistant {
-            name,
-            agent,
-            system_prompt,
-            color,
-            selected_skill_ids,
-            selected_mcp_ids,
-            assistant_type,
-            process_template_id,
-            project_id,
-        } = assistant;
-        let name = name.trim();
-        if name.is_empty() {
-            anyhow::bail!("assistant name cannot be empty");
-        }
-        let mut agent = agent;
-        agent.id = agent.id.trim().to_string();
-        agent.name = agent.name.trim().to_string();
-        agent.model = agent.model.trim().to_string();
-        agent.mode = agent.mode.trim().to_string();
-        agent.effort = agent.effort.trim().to_string();
-        if agent.id.is_empty() {
-            anyhow::bail!("assistant agent id cannot be empty");
-        }
-        if agent.name.is_empty() {
-            anyhow::bail!("assistant agent name cannot be empty");
-        }
-        if agent.model.is_empty() {
-            anyhow::bail!("assistant model cannot be empty");
-        }
-        if agent.mode.is_empty() {
-            anyhow::bail!("assistant permission mode cannot be empty");
-        }
-        if agent.effort.is_empty() {
-            anyhow::bail!("assistant effort cannot be empty");
-        }
-        let system_prompt = system_prompt.map(str::trim).filter(|s| !s.is_empty());
-        let color = color.map(str::trim).filter(|s| !s.is_empty());
         let conn = self.conn.lock().unwrap();
-        let db_agent = load_agent_by_id(&conn, &agent.id)?;
-        agent.name = db_agent.name;
-        let project = project_id
-            .map(|project_id| load_project_by_id(&conn, project_id))
-            .transpose()?;
-        let resolved_process_template_id = process_template_id.or_else(|| {
-            project
-                .as_ref()
-                .map(|project| project.process_template_id.clone())
-        });
-        match assistant_type {
-            AssistantType::Builtin => {
-                if project_id.is_some() {
-                    anyhow::bail!("builtin assistant cannot be linked to a project");
-                }
-            }
-            AssistantType::Custom => {}
-        }
-        if let Some(process_template_id) = resolved_process_template_id.as_deref() {
-            ensure_process_template_exists(&conn, process_template_id)?;
-        }
-        let now = now_ms();
-        let id = stable_assistant_id(
-            assistant_type,
-            resolved_process_template_id.as_deref(),
-            project_id,
-            name,
-            &agent.model,
-            now,
-        );
-        let agent_json = serde_json::to_string(&agent)?;
-        let selected_skill_ids_json = string_ids_json(selected_skill_ids)?;
-        let selected_mcp_ids_json = string_ids_json(selected_mcp_ids)?;
-        conn.execute(
-            "INSERT INTO assistants (
-                id, name, agent_json, system_prompt, color, selected_skill_ids_json, selected_mcp_ids_json, type, process_template_id, project_id, enabled, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
-            params![
-                id,
-                name,
-                agent_json,
-                system_prompt,
-                color,
-                selected_skill_ids_json,
-                selected_mcp_ids_json,
-                assistant_type.as_str(),
-                resolved_process_template_id.as_deref(),
-                project_id,
-                now,
-                now,
-            ],
-        )?;
-        load_assistant_by_id(&conn, &id)
+        assistants::create_assistant(&conn, assistant)
     }
 
     fn update_assistant(
@@ -2695,108 +2511,22 @@ impl SessionStore for SqliteStore {
         enabled: Option<bool>,
     ) -> Result<AssistantInfo> {
         let conn = self.conn.lock().unwrap();
-        let current = load_assistant_by_id(&conn, assistant_id)?;
-        let next_agent = match agent {
-            Some(mut value) => {
-                value.id = value.id.trim().to_string();
-                value.name = value.name.trim().to_string();
-                value.model = value.model.trim().to_string();
-                value.mode = value.mode.trim().to_string();
-                value.effort = value.effort.trim().to_string();
-                if value.id.is_empty() {
-                    anyhow::bail!("assistant agent id cannot be empty");
-                }
-                if value.model.is_empty() {
-                    anyhow::bail!("assistant model cannot be empty");
-                }
-                if value.mode.is_empty() {
-                    anyhow::bail!("assistant permission mode cannot be empty");
-                }
-                if value.effort.is_empty() {
-                    anyhow::bail!("assistant effort cannot be empty");
-                }
-                let db_agent = load_agent_by_id(&conn, &value.id)?;
-                value.name = db_agent.name;
-                value
-            }
-            None => current.agent,
-        };
-        let next_name = match name {
-            Some(value) => {
-                let value = value.trim();
-                if value.is_empty() {
-                    anyhow::bail!("assistant name cannot be empty");
-                }
-                value.to_string()
-            }
-            None => current.name,
-        };
-        let next_system_prompt = match system_prompt {
-            Some(Some(value)) => {
-                if value.trim().is_empty() {
-                    None
-                } else {
-                    Some(value.trim().to_string())
-                }
-            }
-            Some(None) => None,
-            None => current.system_prompt,
-        };
-        let next_color = match color {
-            Some(Some(value)) => {
-                if value.trim().is_empty() {
-                    None
-                } else {
-                    Some(value.trim().to_string())
-                }
-            }
-            Some(None) => None,
-            None => current.color,
-        };
-        let next_enabled = enabled.unwrap_or(current.enabled);
-        let next_selected_skill_ids = selected_skill_ids.unwrap_or(current.selected_skill_ids);
-        let next_selected_mcp_ids = selected_mcp_ids.unwrap_or(current.selected_mcp_ids);
-        if current.enabled && !next_enabled {
-            ensure_assistant_can_be_disabled(&conn, assistant_id)?;
-        }
-        let next_agent_json = serde_json::to_string(&next_agent)?;
-        let next_selected_skill_ids_json = string_ids_json(next_selected_skill_ids)?;
-        let next_selected_mcp_ids_json = string_ids_json(next_selected_mcp_ids)?;
-        conn.execute(
-            "UPDATE assistants
-             SET name = ?, agent_json = ?, system_prompt = ?, color = ?, selected_skill_ids_json = ?, selected_mcp_ids_json = ?, enabled = ?, updated_at = ?
-             WHERE id = ?",
-            params![
-                next_name,
-                next_agent_json,
-                next_system_prompt,
-                next_color,
-                next_selected_skill_ids_json,
-                next_selected_mcp_ids_json,
-                next_enabled as i64,
-                now_ms(),
-                assistant_id,
-            ],
-        )?;
-        load_assistant_by_id(&conn, assistant_id)
+        assistants::update_assistant(
+            &conn,
+            assistant_id,
+            name,
+            agent,
+            system_prompt,
+            color,
+            selected_skill_ids,
+            selected_mcp_ids,
+            enabled,
+        )
     }
 
     fn delete_assistant(&self, assistant_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        load_assistant_by_id(&conn, assistant_id)?;
-        let stage_count: i64 = conn.query_row(
-            "SELECT
-                (SELECT count(*) FROM thread_stage_assistants WHERE assistant_id = ?) +
-                (SELECT count(*) FROM stage_assistants WHERE assistant_id = ?) +
-                (SELECT count(*) FROM thread_assistants WHERE assistant_id = ?)",
-            params![assistant_id, assistant_id, assistant_id],
-            |row| row.get(0),
-        )?;
-        if stage_count > 0 {
-            anyhow::bail!("assistant is used by stages or threads");
-        }
-        conn.execute("DELETE FROM assistants WHERE id = ?", params![assistant_id])?;
-        Ok(())
+        assistants::delete_assistant(&conn, assistant_id)
     }
 
     fn list_threads(&self, project_id: &str) -> Result<Vec<ThreadInfo>> {
