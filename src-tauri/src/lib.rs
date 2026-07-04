@@ -8126,9 +8126,12 @@ fn install_skill(
 fn update_mcp_settings(
     settings: mcp::McpSettings,
     cache: State<'_, mcp::McpSettingsCache>,
+    runtime: State<'_, RuntimeManager>,
 ) -> Result<mcp::McpSettings, String> {
     let settings = mcp::save_settings(settings).map_err(|e| e.to_string())?;
     cache.set(settings.clone());
+    let config = config::load_config().map_err(|e| e.to_string())?;
+    runtime.update_computer_use_settings(config.computer_use);
     Ok(settings)
 }
 
