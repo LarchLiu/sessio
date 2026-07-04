@@ -2325,10 +2325,14 @@ export interface ThreadWorkSnapshot {
   projectId: string;
   goal: string;
   description: string | null;
+  kind?: ThreadKind;
+  assistants?: ThreadAssistantInfo[];
+  agentParticipants?: ThreadAgentInfo[];
   activeStageId?: string | null;
   focusedStageId?: string | null;
   stages?: ThreadWorkSnapshotStage[];
   threadSessionRefs?: ThreadWorkSnapshotSessionRef[];
+  planRounds?: PlanRoundInfo[];
   relatedContext?: ThreadWorkSnapshotRelatedContext;
   detailRefs?: ThreadWorkSnapshotDetailRefs;
   rollup?: {

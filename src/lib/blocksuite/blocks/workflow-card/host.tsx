@@ -1,4 +1,11 @@
-import { parseWorkflowSnapshot, type WorkflowSnapshotStageView } from "./snapshot";
+import {
+  parseWorkflowSnapshot,
+  type WorkflowSnapshotAssistantView,
+  type WorkflowSnapshotParticipantView,
+  type WorkflowSnapshotRoundView,
+  type WorkflowSnapshotStageView,
+  type WorkflowSnapshotTaskView,
+} from "./snapshot";
 import type { WorkflowOverlay } from "../../workflowLiveProjection";
 import AssistantBotIcon from "../../../../components/AssistantBotIcon";
 
@@ -45,9 +52,19 @@ export function WorkflowCardHost({
     interactionMode === "overlay" ? "pointer-events-auto" : "";
   const snapshot = parseWorkflowSnapshot(workflowSnapshotJson);
   const stages = snapshot?.stages ?? [];
+  const rounds = snapshot?.rounds ?? [];
+  const assistants = snapshot?.assistants ?? [];
+  const participants = snapshot?.participants ?? [];
+  const kind = snapshot?.kind || (stages.length > 0 ? "process" : "");
   const displayStages = stages.map((stage) => mergeStageOverlay(stage, workflowOverlay));
   const displayGoal = threadGoal.trim() || snapshot?.goal.trim() || "";
   const displayId = threadStageId || threadId || snapshot?.threadId || "Unlinked workflow";
+  const memberTitle = kind === "brainstorm" || kind === "debate"
+    ? "Participants"
+    : kind === "teamwork"
+      ? "Team"
+      : "";
+  const displayRounds = rounds.slice(-3).reverse();
 
   const summary = workflowSummaryMarkdown
     .split(/\r?\n/)
@@ -106,6 +123,12 @@ export function WorkflowCardHost({
               {snapshot.rollup.openIssues > 0 && <span>{snapshot.rollup.openIssues} open issues</span>}
             </>
           )}
+          {kind && (
+            <>
+              <span className="h-1 w-1 rounded-full bg-ink/18" />
+              <span>{kindLabel(kind)}</span>
+            </>
+          )}
           {workflowOverlay?.activeCount ? (
             <>
               <span className="h-1 w-1 rounded-full bg-blue/35" />
@@ -121,12 +144,31 @@ export function WorkflowCardHost({
             {workflowOverlay.currentAction}
           </div>
         )}
-        {displayStages.length > 0 ? (
+        {displayStages.length > 0 && kind === "process" ? (
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
             <div className="grid gap-1.5">
               {displayStages.map((stage) => (
                 <WorkflowStageRow key={stage.threadStageId} stage={stage} />
               ))}
+            </div>
+          </div>
+        ) : kind === "teamwork" || kind === "brainstorm" || kind === "debate" ? (
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            <div className="grid gap-2">
+              {memberTitle && (
+                <ThreadMemberSection
+                  title={memberTitle}
+                  assistants={kind === "teamwork" ? assistants : []}
+                  participants={kind === "brainstorm" || kind === "debate" ? participants : []}
+                />
+              )}
+              {displayRounds.length > 0 ? (
+                <ThreadRoundSection rounds={displayRounds} />
+              ) : (
+                <div className="line-clamp-4 text-caption leading-6 text-ink/58">
+                  {summary || "Thread activity is not available yet."}
+                </div>
+              )}
             </div>
           </div>
         ) : (
@@ -135,6 +177,124 @@ export function WorkflowCardHost({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function ThreadMemberSection({
+  title,
+  assistants,
+  participants,
+}: {
+  title: string;
+  assistants: WorkflowSnapshotAssistantView[];
+  participants: WorkflowSnapshotParticipantView[];
+}) {
+  const empty = assistants.length === 0 && participants.length === 0;
+  return (
+    <div className="min-w-0">
+      <div className="mb-1 text-[11px] uppercase text-ink/38">{title}</div>
+      {empty ? (
+        <div className="rounded-md border border-ink/8 bg-card-panel/70 px-2 py-1.5 text-[11px] text-ink/45">
+          No members configured
+        </div>
+      ) : (
+        <div className="grid gap-1.5">
+          {assistants.slice(0, 6).map((assistant) => (
+            <AssistantMemberRow key={assistant.assistantId} assistant={assistant} />
+          ))}
+          {participants.slice(0, 6).map((participant) => (
+            <ParticipantMemberRow key={participant.participantId} participant={participant} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AssistantMemberRow({ assistant }: { assistant: WorkflowSnapshotAssistantView }) {
+  return (
+    <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-ink/8 bg-card-panel/70 px-2 py-1.5">
+      <AssistantBotIcon color={assistant.color} className="h-5 w-5 shrink-0" />
+      <div className="min-w-0">
+        <div className="truncate text-caption font-medium text-ink/72">{assistant.name}</div>
+        <div className="truncate text-[11px] leading-4 text-ink/42">{assistant.agentLabel ?? "Agent"}</div>
+      </div>
+      <span className="rounded border border-blue/15 bg-blue/8 px-1.5 py-0.5 text-[10px] leading-none text-blue">
+        Team
+      </span>
+    </div>
+  );
+}
+
+function ParticipantMemberRow({ participant }: { participant: WorkflowSnapshotParticipantView }) {
+  return (
+    <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-ink/8 bg-card-panel/70 px-2 py-1.5">
+      <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-ink/[0.06] text-[10px] font-medium text-ink/58">
+        {participant.initial}
+      </span>
+      <div className="min-w-0">
+        <div className="truncate text-caption font-medium text-ink/72">{participant.agentLabel}</div>
+        <div className="truncate text-[11px] leading-4 text-ink/42">{participant.model || participant.name}</div>
+      </div>
+      <span className="rounded border border-accent-purple/15 bg-accent-purple/8 px-1.5 py-0.5 text-[10px] leading-none text-accent-purple">
+        Lane
+      </span>
+    </div>
+  );
+}
+
+function ThreadRoundSection({ rounds }: { rounds: WorkflowSnapshotRoundView[] }) {
+  return (
+    <div className="min-w-0">
+      <div className="mb-1 text-[11px] uppercase text-ink/38">Rounds</div>
+      <div className="grid gap-1.5">
+        {rounds.map((round) => (
+          <ThreadRoundRow key={round.roundId} round={round} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ThreadRoundRow({ round }: { round: WorkflowSnapshotRoundView }) {
+  const visibleTasks = round.tasks.slice(0, 3);
+  return (
+    <div className="min-w-0 rounded-md border border-ink/8 bg-card-panel/70 px-2 py-1.5">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+        <div className="truncate text-caption font-medium text-ink/72">Round {round.roundIndex}</div>
+        <div className="flex shrink-0 items-center gap-1">
+          <span className="rounded border border-ink/10 bg-ink/[0.04] px-1.5 py-0.5 text-[10px] leading-none text-ink/45">
+            {round.mode}
+          </span>
+          <span className={"rounded border px-1.5 py-0.5 text-[10px] leading-none " + taskStatusClassName(round.status)}>
+            {statusLabel(round.status)}
+          </span>
+        </div>
+      </div>
+      {round.summary && <div className="mt-0.5 truncate text-[11px] leading-4 text-ink/42">{round.summary}</div>}
+      {visibleTasks.length > 0 && (
+        <div className="mt-1 grid gap-1">
+          {visibleTasks.map((task) => (
+            <ThreadTaskRow key={task.taskId} task={task} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThreadTaskRow({ task }: { task: WorkflowSnapshotTaskView }) {
+  const detail = task.error || task.resultSummary || task.targetLabel;
+  return (
+    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded bg-ink/[0.035] px-2 py-1">
+      <div className="min-w-0">
+        <div className="truncate text-[11px] leading-4 text-ink/62">{task.title}</div>
+        {detail && <div className="truncate text-[10px] leading-3 text-ink/38">{detail}</div>}
+      </div>
+      <span className={"rounded border px-1.5 py-0.5 text-[10px] leading-none " + taskStatusClassName(task.status)}>
+        {statusLabel(task.status)}
+      </span>
     </div>
   );
 }
@@ -277,5 +437,37 @@ function statusClassName(status: string) {
       return "border-ink/10 bg-ink/[0.04] text-ink/38";
     default:
       return "border-ink/10 bg-ink/[0.05] text-ink/45";
+  }
+}
+
+function taskStatusClassName(status: string) {
+  switch (status) {
+    case "completed":
+      return "border-emerald/20 bg-emerald/10 text-emerald";
+    case "running":
+    case "planned":
+      return "border-blue/20 bg-blue/10 text-blue";
+    case "failed":
+    case "errored":
+      return "border-status-error/20 bg-status-error/10 text-status-error";
+    case "cancelled":
+      return "border-ink/10 bg-ink/[0.04] text-ink/38";
+    default:
+      return "border-ink/10 bg-ink/[0.05] text-ink/45";
+  }
+}
+
+function kindLabel(kind: string) {
+  switch (kind) {
+    case "process":
+      return "Process";
+    case "teamwork":
+      return "Teamwork";
+    case "brainstorm":
+      return "Brainstorm";
+    case "debate":
+      return "Debate";
+    default:
+      return kind;
   }
 }

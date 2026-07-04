@@ -244,12 +244,53 @@ export function renderWorkflowSummaryMarkdown(meta: Record<string, unknown>, tit
       : null;
   const snapshot = snapshotJson ? tryParseJson(snapshotJson) : null;
   const stages = Array.isArray(snapshot?.stages) ? snapshot.stages : [];
+  const assistants = Array.isArray(snapshot?.assistants) ? snapshot.assistants : [];
+  const participants = Array.isArray(snapshot?.agentParticipants) ? snapshot.agentParticipants : [];
+  const rounds = Array.isArray(snapshot?.planRounds) ? snapshot.planRounds : [];
   const lines = [
     `# ${title}`,
     "",
     typeof snapshot?.goal === "string" && snapshot.goal.trim() ? snapshot.goal.trim() : "Workflow summary",
     "",
   ];
+  if (typeof snapshot?.kind === "string" && snapshot.kind.trim()) {
+    lines.push(`Mode: ${snapshot.kind.trim()}`, "");
+  }
+  if (assistants.length > 0) {
+    lines.push("## Team", "");
+    for (const assistant of assistants.slice(0, 8)) {
+      if (!assistant || typeof assistant !== "object") continue;
+      const assistantRecord = assistant as Record<string, unknown>;
+      const name = typeof assistantRecord.name === "string" && assistantRecord.name.trim()
+        ? assistantRecord.name.trim()
+        : "Assistant";
+      const agent = assistantRecord.agent && typeof assistantRecord.agent === "object"
+        ? assistantRecord.agent as Record<string, unknown>
+        : null;
+      const agentName = typeof agent?.name === "string" && agent.name.trim()
+        ? agent.name.trim()
+        : typeof agent?.id === "string" && agent.id.trim()
+          ? agent.id.trim()
+          : "";
+      lines.push(`- ${name}${agentName ? ` (${agentName})` : ""}`);
+    }
+    lines.push("");
+  }
+  if (participants.length > 0) {
+    lines.push("## Participants", "");
+    for (const participant of participants.slice(0, 8)) {
+      if (!participant || typeof participant !== "object") continue;
+      const participantRecord = participant as Record<string, unknown>;
+      const agent = typeof participantRecord.agent === "string" && participantRecord.agent.trim()
+        ? participantRecord.agent.trim()
+        : "agent";
+      const model = typeof participantRecord.model === "string" && participantRecord.model.trim()
+        ? participantRecord.model.trim()
+        : "";
+      lines.push(`- ${agent}${model ? ` ${model}` : ""}`);
+    }
+    lines.push("");
+  }
   if (stages.length > 0) {
     lines.push("## Stages", "");
     for (const stage of stages.slice(0, 8)) {
@@ -264,6 +305,20 @@ export function renderWorkflowSummaryMarkdown(meta: Record<string, unknown>, tit
           ? stageRecord.status.trim()
           : "unknown";
       lines.push(`- ${name}: ${status}`);
+    }
+    lines.push("");
+  }
+  if (rounds.length > 0) {
+    lines.push("## Rounds", "");
+    for (const round of rounds.slice(-6)) {
+      if (!round || typeof round !== "object") continue;
+      const roundRecord = round as Record<string, unknown>;
+      const index = typeof roundRecord.roundIndex === "number" ? roundRecord.roundIndex : "?";
+      const status = typeof roundRecord.status === "string" && roundRecord.status.trim()
+        ? roundRecord.status.trim()
+        : "unknown";
+      const taskCount = Array.isArray(roundRecord.tasks) ? roundRecord.tasks.length : 0;
+      lines.push(`- Round ${index}: ${status}${taskCount > 0 ? ` (${taskCount} tasks)` : ""}`);
     }
     lines.push("");
   }

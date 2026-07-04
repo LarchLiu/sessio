@@ -497,11 +497,14 @@ export default function ThreadMultiSessionChatPage({
   const threadWorkflowSnapshot = useMemo(
     () => thread
       ? withThreadChatSessions(
-          buildThreadWorkSnapshot(thread, null, Date.now()),
+          {
+            ...buildThreadWorkSnapshot(thread, null, Date.now()),
+            planRounds,
+          },
           threadChatSessions,
         )
       : null,
-    [thread, threadChatSessions],
+    [planRounds, thread, threadChatSessions],
   );
   const threadWorkActive =
     Boolean(activeAstraRun) ||
@@ -635,7 +638,10 @@ export default function ThreadMultiSessionChatPage({
     }
     const timestamp = Date.now();
     const baseSnapshot = withThreadChatSessions(
-      buildThreadWorkSnapshot(thread, activeStage, timestamp),
+      {
+        ...buildThreadWorkSnapshot(thread, activeStage, timestamp),
+        planRounds,
+      },
       threadChatSessions,
     );
     const { snapshot: snapshotWithSources, historySnapshots } = await collectThreadHistorySnapshots(baseSnapshot);

@@ -8,6 +8,7 @@ function snapshot(): ThreadWorkSnapshot {
     projectId: "project-1",
     goal: "Ship live workflow cards",
     description: null,
+    kind: "process",
     activeStageId: "stage-build",
     focusedStageId: "stage-build",
     stages: [
@@ -99,6 +100,7 @@ describe("parseWorkflowSnapshot", () => {
     const view = parseWorkflowSnapshot(JSON.stringify(snapshot()));
 
     expect(view?.threadId).toBe("thread-1");
+    expect(view?.kind).toBe("process");
     expect(view?.goal).toBe("Ship live workflow cards");
     expect(view?.rollup).toMatchObject({
       completed: 1,
@@ -127,5 +129,117 @@ describe("parseWorkflowSnapshot", () => {
     expect(parseWorkflowSnapshot("")).toBeNull();
     expect(parseWorkflowSnapshot("{bad json")).toBeNull();
     expect(workflowSnapshotToView(null)).toBeNull();
+  });
+
+  it("projects teamwork assistants and round tasks", () => {
+    const view = workflowSnapshotToView({
+      threadId: "thread-team",
+      projectId: "project-1",
+      kind: "teamwork",
+      goal: "Build a feature",
+      description: null,
+      assistants: [
+        {
+          assistantId: "assistant-reviewer",
+          name: "Reviewer",
+          color: "#7257ff",
+          agent: { id: "claude", name: "Claude" },
+          order: 1,
+        },
+        {
+          assistantId: "assistant-builder",
+          name: "Builder",
+          color: "#2f6fed",
+          agent: { id: "codex", name: "Codex" },
+          order: 0,
+        },
+      ],
+      planRounds: [
+        {
+          id: "round-1",
+          roundIndex: 1,
+          status: "running",
+          mode: "parallel",
+          summary: "Dispatching team tasks.",
+          tasks: [
+            {
+              id: "task-1",
+              title: "Implement",
+              status: "running",
+              targetAgent: "codex",
+              assistantId: "assistant-builder",
+              agentParticipantId: null,
+              resultSummary: null,
+              error: null,
+            },
+          ],
+        },
+      ],
+      capturedAt: 1,
+    });
+
+    expect(view?.kind).toBe("teamwork");
+    expect(view?.assistants.map((assistant) => assistant.name)).toEqual(["Builder", "Reviewer"]);
+    expect(view?.rounds[0]).toMatchObject({
+      roundIndex: 1,
+      status: "running",
+      tasks: [
+        {
+          title: "Implement",
+          targetLabel: "Codex",
+          assistantId: "assistant-builder",
+        },
+      ],
+    });
+  });
+
+  it("projects brainstorm and debate participants", () => {
+    const brainstorm = workflowSnapshotToView({
+      threadId: "thread-brainstorm",
+      projectId: "project-1",
+      kind: "brainstorm",
+      goal: "Explore options",
+      description: null,
+      agentParticipants: [
+        {
+          participantId: "participant-codex",
+          agent: "codex",
+          model: "gpt-5.3-codex",
+          effort: "medium",
+          permissionMode: "read-write",
+          order: 0,
+        },
+        {
+          participantId: "participant-claude",
+          agent: "claude",
+          model: "claude-sonnet-4-5",
+          effort: "medium",
+          permissionMode: "read-only",
+          order: 1,
+        },
+      ],
+      capturedAt: 1,
+    });
+    const debate = workflowSnapshotToView({
+      threadId: "thread-debate",
+      projectId: "project-1",
+      kind: "debate",
+      goal: "Cross-check options",
+      description: null,
+      agentParticipants: brainstorm?.participants.map((participant) => ({
+        participantId: participant.participantId,
+        agent: participant.agent,
+        model: participant.model,
+        effort: participant.effort,
+        permissionMode: participant.permissionMode,
+        order: participant.order,
+      })),
+      capturedAt: 1,
+    });
+
+    expect(brainstorm?.kind).toBe("brainstorm");
+    expect(brainstorm?.participants.map((participant) => participant.agentLabel)).toEqual(["Codex", "Claude Code"]);
+    expect(debate?.kind).toBe("debate");
+    expect(debate?.participants).toHaveLength(2);
   });
 });
