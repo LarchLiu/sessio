@@ -8,8 +8,8 @@ allowed-tools:
 
 # Computer Use Skill (macOS)
 
-Sessio bundles this file into the desktop app as `computer-use-skill/SKILL.md`;
-app-specific playbooks are bundled next to it under `playbooks/`.
+Sessio bundles this file into the desktop app as `skills/computer-use/SKILL.md`;
+app-specific playbooks are bundled next to it under `skills/computer-use/playbooks/`.
 
 Drives native macOS apps through two complementary paths:
 

@@ -11,6 +11,10 @@ use walkdir::WalkDir;
 
 use crate::prompt_markers::sessio_prompt_markers;
 
+pub mod computer_use;
+pub mod create_thread;
+pub mod work_state;
+
 const SKILL_MD_FILE_NAME: &str = "SKILL.md";
 pub const SKILLS_UPDATED_EVENT: &str = "skills_updated";
 pub const SELECTED_SKILL_IDS_OPTION: &str = "selectedSkillIds";
@@ -346,17 +350,17 @@ fn scan_builtin_skills() -> Vec<SkillMetadata> {
         (
             BUILTIN_COMPUTER_USE_SKILL_ID,
             Some(BuiltinSkillKind::ComputerUse),
-            crate::computer_use::skill_resource::computer_use_skill_path(),
+            computer_use::computer_use_skill_path(),
         ),
         (
             BUILTIN_CREATE_THREAD_SKILL_ID,
             Some(BuiltinSkillKind::CreateThread),
-            crate::create_thread_skill_resource::create_thread_skill_path(),
+            create_thread::create_thread_skill_path(),
         ),
         (
             BUILTIN_WORK_STATE_SKILL_ID,
             Some(BuiltinSkillKind::WorkState),
-            crate::work_state_skill_resource::work_state_skill_path(),
+            work_state::work_state_skill_path(),
         ),
     ];
 
@@ -765,10 +769,14 @@ fn watch_roots() -> Result<Vec<(PathBuf, RecursiveMode)>> {
 
 fn builtin_skill_files() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(path) = crate::computer_use::skill_resource::computer_use_skill_path() {
-        out.push(path);
-    }
-    if let Some(path) = crate::work_state_skill_resource::work_state_skill_path() {
+    for path in [
+        computer_use::computer_use_skill_path(),
+        create_thread::create_thread_skill_path(),
+        work_state::work_state_skill_path(),
+    ]
+    .into_iter()
+    .flatten()
+    {
         if !out.iter().any(|existing| existing == &path) {
             out.push(path);
         }

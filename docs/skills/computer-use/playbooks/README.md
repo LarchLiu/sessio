@@ -5,7 +5,7 @@ computer-use capability.
 
 The files here are reviewable resources only. They do not define prompt
 injection, runtime selection, or model-context assembly. That ownership stays in
-[computer-use-prompt-refactor-plan.md](../../computer-use-prompt-refactor-plan.md).
+[computer-use-prompt-refactor-plan.md](../../../computer-use-prompt-refactor-plan.md).
 
 ## Resource Shape
 
@@ -37,7 +37,7 @@ Each playbook follows the same shape:
 ## Initial Inventory
 
 The first inventory is seeded from
-[computer-use-skill.md](../../computer-use-skill.md):
+[SKILL.md](../SKILL.md):
 
 - Apple Music
 - Spotify
@@ -45,4 +45,3 @@ The first inventory is seeded from
 - Clock
 - Numbers
 - NetEase Music
-

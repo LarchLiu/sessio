@@ -16,8 +16,6 @@ export interface SessioPromptMarkers {
   skillsPromptEnd: string;
   mcpsPromptStart: string;
   mcpsPromptEnd: string;
-  workStateSkillPromptStart: string;
-  workStateSkillPromptEnd: string;
   threadPromptKindWorkContext: string;
   selectedSkillsPromptKind: string;
   selectedMcpsPromptKind: string;
@@ -44,8 +42,6 @@ const SESSIO_PROMPT_MARKERS: Readonly<SessioPromptMarkers> = Object.freeze({
   skillsPromptEnd: "<!-- sessio-skills:end",
   mcpsPromptStart: "<!-- sessio-mcps:start",
   mcpsPromptEnd: "<!-- sessio-mcps:end",
-  workStateSkillPromptStart: "<!-- sessio-work-state-skill:start",
-  workStateSkillPromptEnd: "<!-- sessio-work-state-skill:end",
   threadPromptKindWorkContext: "work_context",
   selectedSkillsPromptKind: "selected_skills",
   selectedMcpsPromptKind: "selected_mcps",

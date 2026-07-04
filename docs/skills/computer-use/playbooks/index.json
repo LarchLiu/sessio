@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "inventoryVersion": "2026-06-28",
-  "source": "../../computer-use-skill.md",
-  "promptInjectionOwner": "../../computer-use-prompt-refactor-plan.md",
+  "source": "../SKILL.md",
+  "promptInjectionOwner": "../../../computer-use-prompt-refactor-plan.md",
   "defaultCoordinateSpace": "screenshot",
   "sharedConventions": [
     "Call computer_get_app_state before acting.",
@@ -69,4 +69,3 @@
     }
   ]
 }
-

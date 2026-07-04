@@ -1,13 +1,14 @@
 //! Locate the bundled computer-use skill files exposed to agents.
 //!
-//! The canonical source stays in `docs/computer-use-skill.md`. The Tauri bundle
-//! maps that file to `computer-use-skill/SKILL.md` so release builds can point
-//! agents at a stable, readable skill path even when the source tree is absent.
+//! The canonical source stays in `docs/skills/computer-use/SKILL.md`. The Tauri
+//! bundle maps that directory to `skills/computer-use/` so release builds can
+//! point agents at a stable, readable skill path even when the source tree is
+//! absent.
 
 use std::path::PathBuf;
 
-const BUNDLED_SKILL_RELATIVE_PATH: &str = "computer-use-skill/SKILL.md";
-const DEV_SKILL_RELATIVE_PATH: &str = "docs/computer-use-skill.md";
+const BUNDLED_SKILL_RELATIVE_PATH: &str = "skills/computer-use/SKILL.md";
+const DEV_SKILL_RELATIVE_PATH: &str = "docs/skills/computer-use/SKILL.md";
 
 /// Best-effort absolute path to the computer-use skill the agent should read.
 pub fn computer_use_skill_path() -> Option<PathBuf> {
@@ -120,7 +121,7 @@ mod tests {
 
         assert!(note.contains("computer-use"));
         assert!(note.contains("Read it"));
-        assert!(note.contains("SKILL.md") || note.contains("computer-use-skill.md"));
+        assert!(note.contains("SKILL.md"));
     }
 
     #[test]

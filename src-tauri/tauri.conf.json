@@ -41,11 +41,11 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../docs/computer-use-skill.md": "computer-use-skill/SKILL.md",
-      "../docs/computer-use/playbooks": "computer-use-skill/playbooks",
-      "../docs/create-thread-skill.md": "create-thread-skill/SKILL.md",
-      "../docs/sessio-work-state-skill.md": "sessio-work-state-skill/SKILL.md",
-      "resources/pi/sessio-computer-use.ts": "computer-use-pi/sessio-computer-use.ts"
+      "../docs/skills/computer-use/SKILL.md": "skills/computer-use/SKILL.md",
+      "../docs/skills/computer-use/playbooks": "skills/computer-use/playbooks",
+      "../docs/skills/create-thread/SKILL.md": "skills/create-thread/SKILL.md",
+      "../docs/skills/sessio-work-state/SKILL.md": "skills/sessio-work-state/SKILL.md",
+      "resources/skills/computer-use/pi/sessio-computer-use.ts": "skills/computer-use/pi/sessio-computer-use.ts"
     },
     "android": {
       "debugApplicationIdSuffix": ".debug"

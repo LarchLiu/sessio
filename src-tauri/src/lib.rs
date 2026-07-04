@@ -6,7 +6,6 @@ pub mod commands;
 pub mod computer_use;
 pub mod config;
 pub mod config_watch;
-pub mod create_thread_skill_resource;
 pub mod desktop_control;
 pub mod file_preview_watch;
 pub mod im_bridge;
@@ -27,7 +26,6 @@ pub mod terminal;
 pub mod turns;
 pub mod watch;
 pub mod window;
-pub mod work_state_skill_resource;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

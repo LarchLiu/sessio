@@ -10,8 +10,6 @@ pub struct SessioPromptMarkers {
     pub skills_prompt_end: &'static str,
     pub mcps_prompt_start: &'static str,
     pub mcps_prompt_end: &'static str,
-    pub work_state_skill_prompt_start: &'static str,
-    pub work_state_skill_prompt_end: &'static str,
     pub thread_prompt_kind_work_context: &'static str,
     pub selected_skills_prompt_kind: &'static str,
     pub selected_mcps_prompt_kind: &'static str,
@@ -37,9 +35,6 @@ static SESSIO_PROMPT_MARKERS: SessioPromptMarkers = SessioPromptMarkers {
     skills_prompt_end: "<!-- sessio-skills:end",
     mcps_prompt_start: "<!-- sessio-mcps:start",
     mcps_prompt_end: "<!-- sessio-mcps:end",
-    // Legacy marker kept for display cleanup during migration.
-    work_state_skill_prompt_start: "<!-- sessio-work-state-skill:start",
-    work_state_skill_prompt_end: "<!-- sessio-work-state-skill:end",
     thread_prompt_kind_work_context: "work_context",
     selected_skills_prompt_kind: "selected_skills",
     selected_mcps_prompt_kind: "selected_mcps",

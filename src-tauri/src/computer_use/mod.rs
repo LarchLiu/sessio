@@ -26,7 +26,6 @@ pub mod pointer_overlay;
 pub mod provider;
 pub mod screenshot_overlay;
 pub mod settings;
-pub mod skill_resource;
 
 pub use approvals::{AppApproval, ApprovalDecision, ApprovalRegistry, SessionApproval};
 pub use host::{ComputerUseError, ComputerUseHost};

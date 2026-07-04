@@ -274,14 +274,6 @@ export function stripSessioMcpsPromptBlocks(input: string): string {
   );
 }
 
-export function stripSessioWorkStateSkillPromptBlocks(input: string): string {
-  return stripSessioNonceDelimitedPromptBlocks(
-    input,
-    PROMPT_MARKERS.workStateSkillPromptStart,
-    PROMPT_MARKERS.workStateSkillPromptEnd,
-  );
-}
-
 function commentAttr(comment: string, key: string): string | null {
   const match = new RegExp(`\\s${key}="([^"]*)"`).exec(comment);
   return match?.[1] ?? null;
@@ -334,10 +326,8 @@ export function stripInjectedContext(s: string): string {
   }
   return stripSessioMcpsPromptBlocks(
     stripSessioSkillsPromptBlocks(
-      stripSessioWorkStateSkillPromptBlocks(
-        stripSessioAssistantPromptBlocks(
-          stripSessioThreadPromptBlocks(stripImagePlaceholders(text)),
-        ),
+      stripSessioAssistantPromptBlocks(
+        stripSessioThreadPromptBlocks(stripImagePlaceholders(text)),
       ),
     ),
   ).trim();

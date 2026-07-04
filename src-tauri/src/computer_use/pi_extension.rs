@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub const EXTENSION_SOURCE: &str = include_str!("../../resources/pi/sessio-computer-use.ts");
+pub const EXTENSION_SOURCE: &str =
+    include_str!("../../resources/skills/computer-use/pi/sessio-computer-use.ts");
 
 pub fn extension_path() -> Result<PathBuf> {
     Ok(crate::app_paths::app_home()?

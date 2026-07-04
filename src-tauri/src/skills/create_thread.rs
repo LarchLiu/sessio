@@ -1,31 +1,20 @@
-//! Locate the bundled Sessio work-state skill exposed to agents.
+//! Locate the bundled Sessio create-thread skill exposed to agents.
 //!
-//! The canonical source stays in `docs/sessio-work-state-skill.md`. The Tauri
-//! bundle maps that file to `sessio-work-state-skill/SKILL.md` so release builds
-//! can point agents at a stable, readable skill path even when the source tree is
+//! The canonical source stays in `docs/skills/create-thread/SKILL.md`. The Tauri
+//! bundle maps that directory to `skills/create-thread/` so release builds can
+//! point agents at a stable, readable skill path even when the source tree is
 //! absent.
 
 use std::path::PathBuf;
 
-const BUNDLED_SKILL_RELATIVE_PATH: &str = "sessio-work-state-skill/SKILL.md";
-const DEV_SKILL_RELATIVE_PATH: &str = "docs/sessio-work-state-skill.md";
+const BUNDLED_SKILL_RELATIVE_PATH: &str = "skills/create-thread/SKILL.md";
+const DEV_SKILL_RELATIVE_PATH: &str = "docs/skills/create-thread/SKILL.md";
 
-/// Best-effort absolute path to the work-state skill the agent should read.
-pub fn work_state_skill_path() -> Option<PathBuf> {
+/// Best-effort absolute path to the create-thread skill the agent should read.
+pub fn create_thread_skill_path() -> Option<PathBuf> {
     candidate_skill_paths()
         .into_iter()
         .find(|path| path.is_file())
-}
-
-/// Human-readable pointer to the resolved work-state skill path.
-pub fn work_state_skill_prompt_note() -> String {
-    match work_state_skill_path() {
-        Some(path) => format!(
-            "Full Sessio work-state skill is available at `{}`. Read it before updating thread/stage progress, blockers, issues, or outcomes.",
-            path.display()
-        ),
-        None => "Full Sessio work-state skill path could not be resolved; use `~/.sessio/bin/sessio ... --json` and the injected thread/stage context below.".to_string(),
-    }
 }
 
 fn candidate_skill_paths() -> Vec<PathBuf> {
@@ -92,19 +81,10 @@ mod tests {
 
     #[test]
     fn dev_skill_path_resolves_in_repo() {
-        let path = work_state_skill_path().expect("skill path");
+        let path = create_thread_skill_path().expect("skill path");
 
         assert!(path.ends_with(DEV_SKILL_RELATIVE_PATH));
         assert!(path.is_file());
-    }
-
-    #[test]
-    fn prompt_note_points_to_readable_skill_when_available() {
-        let note = work_state_skill_prompt_note();
-
-        assert!(note.contains("work-state"));
-        assert!(note.contains("Read it"));
-        assert!(note.contains("SKILL.md") || note.contains("sessio-work-state-skill.md"));
     }
 
     #[cfg(target_os = "macos")]

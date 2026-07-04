@@ -4,10 +4,10 @@
 
 This document compares the macOS computer-use capability described in the
 versioned in-repo spec
-[computer-use-skill.md](./computer-use-skill.md) with Sessio's current
+[SKILL.md](./skills/computer-use/SKILL.md) with Sessio's current
 implementation, then turns that comparison into a concrete implementation plan.
 
-For repo planning purposes, [computer-use-skill.md](./computer-use-skill.md) is
+For repo planning purposes, [SKILL.md](./skills/computer-use/SKILL.md) is
 the canonical, reviewable truth source. Any external or desktop-local copies
 used while drafting this plan are background inputs, not normative references.
 
@@ -68,7 +68,7 @@ There is also one process-architecture constraint worth keeping explicit here:
 ### Skill reference
 
 - Canonical source of expected behavior for this plan:
-  - [computer-use-skill.md](./computer-use-skill.md)
+  - [SKILL.md](./skills/computer-use/SKILL.md)
 
 ### Sessio current implementation
 
@@ -99,7 +99,7 @@ There is also one process-architecture constraint worth keeping explicit here:
 ## Current Verified Notes
 
 - 2026-06-28 status update: the in-process Sessio implementation now aligns
-  with the core [computer-use-skill.md](./computer-use-skill.md) operating
+  with the core [SKILL.md](./skills/computer-use/SKILL.md) operating
   contract while preserving Sessio naming (`sessio cu`, not `alma cu`).
   Completed parity includes:
   - AX-first unified click via `computer_click`, with `elementId` / `ref`
@@ -122,7 +122,7 @@ There is also one process-architecture constraint worth keeping explicit here:
     warn against `open -a` / AppleScript `activate` / Window-menu fallbacks that
     can report success without restoring a Dock-minimized window
   - bundled computer-use skill resources: release builds include
-    `computer-use-skill/SKILL.md` plus `playbooks/`, and computer-use turns tell
+    `skills/computer-use/SKILL.md` plus `playbooks/`, and computer-use turns tell
     agents the resolved local skill path so they can read the full workflow on
     demand instead of relying only on short prompt hints
   - ScreenCaptureKit-first macOS window screenshots, targeting the selected
@@ -220,7 +220,7 @@ foreground takeover remains a runtime state surfaced by the overlay.
 
 ## What The In-Repo Skill Spec Adds
 
-The in-repo [computer-use-skill.md](./computer-use-skill.md) is important
+The in-repo [SKILL.md](./skills/computer-use/SKILL.md) is important
 because it is the versioned, reviewable capability target for future
 implementation and testing work.
 
@@ -233,7 +233,7 @@ It makes several expectations especially explicit:
 - onboarding should be exposed as explicit computer-use operations
 - app-specific playbooks should exist as first-class skill resources
 
-For Sessio, this means `computer-use-skill.md` should be treated as a local
+For Sessio, this means `docs/skills/computer-use/SKILL.md` should be treated as a local
 capability target, not just as copied documentation.
 
 ## Completion Audit Against SKILL.md
@@ -252,7 +252,7 @@ language should be treated as historical background only.
 | macOS implementation | Complete for the current in-process scope. Screenshots prefer ScreenCaptureKit and fall back to `screencapture -l`; physical events use pid-scoped `CGEventPostToPid`; AX actions include `AXPress`, `AXShowMenu`, scroll actions, `AXValue`, minimized-window restoration, and Electron AX flags. | [macos.rs](../src-tauri/src/computer_use/platform/macos.rs), [build.rs](../src-tauri/build.rs), [Cargo.toml](../src-tauri/Cargo.toml) |
 | Onboarding tools | Complete. `computer_permissions` and `computer_grant` expose permission status and supported OS settings flows through the computer-use MCP surface and `sessio cu`. | [onboarding.rs](../src-tauri/src/computer_use/onboarding.rs), [dispatch.rs](../src-tauri/src/computer_use/mcp_http/dispatch.rs), [cli.rs](../src-tauri/src/cli.rs) |
 | CLI parity | Complete for the in-process architecture. `sessio cu` auto-discovers the running desktop app through a private local broker/discovery file, attaches an external session token on demand, supports `--json`, mirrors the MCP verbs, and fails explicitly instead of starting a separate helper/runtime. | [cli.rs](../src-tauri/src/cli.rs), [broker.rs](../src-tauri/src/computer_use/broker.rs), [server.rs](../src-tauri/src/computer_use/mcp_http/server.rs) |
-| Skill resources and playbooks | Complete. The canonical skill is bundled as `computer-use-skill/SKILL.md`, app playbooks are bundled next to it, and computer-use turns inject the resolved local skill path instead of expanding the full skill into every prompt. | [computer-use-skill.md](./computer-use-skill.md), [computer-use/playbooks](./computer-use/playbooks), [skill_resource.rs](../src-tauri/src/computer_use/skill_resource.rs), [tauri.conf.json](../src-tauri/tauri.conf.json) |
+| Skill resources and playbooks | Complete. The canonical skill is bundled as `skills/computer-use/SKILL.md`, app playbooks are bundled next to it, and computer-use turns inject the resolved local skill path instead of expanding the full skill into every prompt. | [SKILL.md](./skills/computer-use/SKILL.md), [playbooks](./skills/computer-use/playbooks), [computer_use.rs](../src-tauri/src/skills/computer_use.rs), [tauri.conf.json](../src-tauri/tauri.conf.json) |
 
 ## Completed Implementation Phases
 
@@ -353,8 +353,8 @@ Status: complete.
 Evidence:
 
 - App playbooks are versioned under
-  [docs/computer-use/playbooks](./computer-use/playbooks).
-- [index.json](./computer-use/playbooks/index.json) records the inventory,
+  [docs/skills/computer-use/playbooks](./skills/computer-use/playbooks).
+- [index.json](./skills/computer-use/playbooks/index.json) records the inventory,
   target bundles, primary strategy, fallback strategy, and review status.
 - Release builds bundle the skill and playbook directory as app resources.
 
