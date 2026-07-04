@@ -7,11 +7,11 @@ use crate::memory::records::safe_id_part;
 use crate::memory::service::MemoryService;
 use crate::memory::{MemoryRecord, MemorySearchOptions, MemoryStore, RecordContinuation};
 use crate::models::{
-    Agent, IssueSeverity, IssueStatus, SessionHistoryBlock, SessionHistoryTurn, StageStatus,
-    ThreadKind,
+    Agent, AssistantAgentInfo, AssistantType, IssueSeverity, IssueStatus,
+    RuntimeAgentOptionMetadata, SessionHistoryBlock, SessionHistoryTurn, StageStatus, ThreadKind,
 };
 use crate::store::sqlite::SqliteStore;
-use crate::store::SessionStore;
+use crate::store::{NewAssistant, SessionStore};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
@@ -30,6 +30,7 @@ enum Command {
     Sessions(SessionsCommand),
     Memory(MemoryCommand),
     Config(ConfigCommand),
+    Assistant(AssistantCommand),
     Thread(ThreadCommand),
     Stage(StageCommand),
     ComputerUse(ComputerUseCommand),
@@ -100,6 +101,30 @@ enum ThreadCommand {
         thread_id: String,
         agent: Agent,
         session_id: String,
+        db_path: Option<String>,
+        json: bool,
+    },
+}
+
+#[derive(Debug)]
+enum AssistantCommand {
+    List {
+        project: Option<String>,
+        db_path: Option<String>,
+        json: bool,
+    },
+    Create {
+        project: Option<String>,
+        process_template_id: Option<String>,
+        name: String,
+        agent_id: String,
+        model: Option<String>,
+        mode: Option<String>,
+        effort: Option<String>,
+        system_prompt: Option<String>,
+        color: Option<String>,
+        selected_skill_ids: Vec<String>,
+        selected_mcp_ids: Vec<String>,
         db_path: Option<String>,
         json: bool,
     },
@@ -345,6 +370,7 @@ fn run() -> Result<()> {
         Command::Sessions(cmd) => run_sessions(cmd),
         Command::Memory(cmd) => run_memory(cmd),
         Command::Config(cmd) => run_config(cmd),
+        Command::Assistant(cmd) => run_assistant(cmd),
         Command::Thread(cmd) => run_thread(cmd),
         Command::Stage(cmd) => run_stage(cmd),
         Command::ComputerUse(cmd) => run_computer_use(cmd),
@@ -353,6 +379,128 @@ fn run() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn run_assistant(cmd: AssistantCommand) -> Result<()> {
+    match cmd {
+        AssistantCommand::List {
+            project,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let project_id = project
+                .as_deref()
+                .map(|project| resolve_project_id(&store, project))
+                .transpose()?;
+            let assistants = store.list_assistants(project_id.as_deref())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&assistants)?);
+            } else {
+                for assistant in &assistants {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        assistant.id, assistant.name, assistant.agent.id, assistant.agent.model
+                    );
+                }
+            }
+            Ok(())
+        }
+        AssistantCommand::Create {
+            project,
+            process_template_id,
+            name,
+            agent_id,
+            model,
+            mode,
+            effort,
+            system_prompt,
+            color,
+            selected_skill_ids,
+            selected_mcp_ids,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let project_id = project
+                .as_deref()
+                .map(|project| resolve_project_id(&store, project))
+                .transpose()?;
+            let agent = resolve_assistant_agent(&store, &agent_id, model, mode, effort)?;
+            let assistant = store.create_assistant(NewAssistant {
+                name: &name,
+                agent,
+                system_prompt: system_prompt.as_deref(),
+                color: color.as_deref(),
+                selected_skill_ids,
+                selected_mcp_ids,
+                assistant_type: AssistantType::Custom,
+                process_template_id,
+                project_id: project_id.as_deref(),
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&assistant)?);
+            } else {
+                println!(
+                    "assistant\t{}\t{}\t{}",
+                    assistant.id, assistant.name, assistant.agent.id
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn resolve_assistant_agent(
+    store: &SqliteStore,
+    agent_id: &str,
+    model: Option<String>,
+    mode: Option<String>,
+    effort: Option<String>,
+) -> Result<AssistantAgentInfo> {
+    let agent_id = agent_id.trim();
+    let agent = store
+        .list_agents()?
+        .into_iter()
+        .find(|agent| agent.id == agent_id)
+        .with_context(|| format!("agent not found: {agent_id}"))?;
+    let model = choose_agent_option(model, agent.model, &agent.models, "model")?;
+    let mode = choose_agent_option(
+        mode,
+        agent.permission_mode,
+        &agent.permission_modes,
+        "permission mode",
+    )?;
+    let effort = choose_agent_option(effort, agent.effort, &agent.efforts, "effort")?;
+    Ok(AssistantAgentInfo {
+        id: agent.id,
+        name: agent.name,
+        model,
+        mode,
+        effort,
+    })
+}
+
+fn choose_agent_option(
+    explicit: Option<String>,
+    configured: Option<String>,
+    options: &[RuntimeAgentOptionMetadata],
+    label: &str,
+) -> Result<String> {
+    explicit
+        .or(configured)
+        .or_else(|| {
+            options
+                .iter()
+                .find(|option| option.enabled)
+                .or_else(|| options.first())
+                .map(|option| option.value.clone())
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("assistant agent {label} is required"))
 }
 
 fn run_computer_use(cmd: ComputerUseCommand) -> Result<()> {
@@ -1685,6 +1833,7 @@ fn parse_args(args: Vec<String>) -> Result<Cli> {
         "sessions" => parse_sessions(&args[1..]),
         "memory" => parse_memory(&args[1..]),
         "config" => parse_config(&args[1..]),
+        "assistant" | "assistants" => parse_assistant(&args[1..]),
         "thread" => parse_thread(&args[1..]),
         "stage" => parse_stage(&args[1..]),
         "cu" | "computer-use" => parse_computer_use(&args[1..]),
@@ -2526,6 +2675,70 @@ fn parse_thread_kind(value: &str) -> Result<ThreadKind> {
     ThreadKind::from_db_str(value).with_context(|| format!("invalid thread kind: {value}"))
 }
 
+fn parse_assistant(args: &[String]) -> Result<Cli> {
+    let Some(subcommand) = args.first() else {
+        bail!("missing assistant subcommand");
+    };
+    match subcommand.as_str() {
+        "list" => {
+            ensure_known_options_with_flags(&args[1..], &["--project", "--db-path"], &["--json"])?;
+            let rest = &args[1..];
+            Ok(Cli {
+                command: Command::Assistant(AssistantCommand::List {
+                    project: optional_option(rest, "--project")?,
+                    db_path: optional_option(rest, "--db-path")?,
+                    json: has_flag(rest, "--json"),
+                }),
+            })
+        }
+        "create" => {
+            ensure_known_options_with_flags(
+                &args[1..],
+                &[
+                    "--project",
+                    "--process-template-id",
+                    "--name",
+                    "--agent-id",
+                    "--agent",
+                    "--model",
+                    "--mode",
+                    "--permission-mode",
+                    "--effort",
+                    "--system-prompt",
+                    "--color",
+                    "--skill-id",
+                    "--mcp-id",
+                    "--db-path",
+                ],
+                &["--json"],
+            )?;
+            let rest = &args[1..];
+            let mode =
+                optional_option(rest, "--mode")?.or(optional_option(rest, "--permission-mode")?);
+            Ok(Cli {
+                command: Command::Assistant(AssistantCommand::Create {
+                    project: optional_option(rest, "--project")?,
+                    process_template_id: optional_option(rest, "--process-template-id")?,
+                    name: required_option(rest, "--name")?,
+                    agent_id: optional_option(rest, "--agent-id")?
+                        .or(optional_option(rest, "--agent")?)
+                        .context("missing --agent-id")?,
+                    model: optional_option(rest, "--model")?,
+                    mode,
+                    effort: optional_option(rest, "--effort")?,
+                    system_prompt: optional_option(rest, "--system-prompt")?,
+                    color: optional_option(rest, "--color")?,
+                    selected_skill_ids: repeated_option(rest, "--skill-id")?,
+                    selected_mcp_ids: repeated_option(rest, "--mcp-id")?,
+                    db_path: optional_option(rest, "--db-path")?,
+                    json: has_flag(rest, "--json"),
+                }),
+            })
+        }
+        other => bail!("unknown assistant subcommand '{other}'"),
+    }
+}
+
 fn parse_thread(args: &[String]) -> Result<Cli> {
     let Some(subcommand) = args.first() else {
         bail!("missing thread subcommand");
@@ -3352,6 +3565,8 @@ fn print_help() {
 Usage:
   sessio sessions list [--project <path>] [--db-path <path>] [--json]
   sessio sessions messages --agent <codex|claude|opencode|pi> [--session-id <id>] [--file-path <path>] [--json]
+  sessio assistant list [--project <projectPathOrId>] [--db-path <path>] [--json]
+  sessio assistant create [--project <projectPathOrId>] [--process-template-id <id>] --name <text> (--agent-id <agentId>|--agent <agentId>) [--model <model>] [--mode <permissionMode>|--permission-mode <permissionMode>] [--effort <effort>] [--system-prompt <text>] [--color <cssColor>] [--skill-id <skillId> ...] [--mcp-id <mcpId> ...] [--db-path <path>] [--json]
   sessio thread create --project <projectPathOrId> --goal <text> [--description <text>] [--kind <process|teamwork|brainstorm|debate>] [--assistant-id <assistantId> ...] [--db-path <path>] [--json]
   sessio thread list [--project <path>] [--db-path <path>] [--json]
   sessio thread show --id <threadId> [--db-path <path>] [--json]
@@ -3422,6 +3637,65 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_assistant_create_command() {
+        let cli = parse_args(args(&[
+            "assistant",
+            "create",
+            "--project",
+            "/tmp/project",
+            "--name",
+            "Planner",
+            "--agent-id",
+            "codex",
+            "--model",
+            "gpt-5",
+            "--permission-mode",
+            "default",
+            "--effort",
+            "high",
+            "--system-prompt",
+            "Plan the work",
+            "--color",
+            "#2563eb",
+            "--skill-id",
+            "builtin:create-thread",
+            "--mcp-id",
+            "builtin:computer-use",
+            "--json",
+        ]))
+        .unwrap();
+
+        let Command::Assistant(AssistantCommand::Create {
+            project,
+            name,
+            agent_id,
+            model,
+            mode,
+            effort,
+            system_prompt,
+            color,
+            selected_skill_ids,
+            selected_mcp_ids,
+            json,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected assistant create command");
+        };
+        assert_eq!(project.as_deref(), Some("/tmp/project"));
+        assert_eq!(name, "Planner");
+        assert_eq!(agent_id, "codex");
+        assert_eq!(model.as_deref(), Some("gpt-5"));
+        assert_eq!(mode.as_deref(), Some("default"));
+        assert_eq!(effort.as_deref(), Some("high"));
+        assert_eq!(system_prompt.as_deref(), Some("Plan the work"));
+        assert_eq!(color.as_deref(), Some("#2563eb"));
+        assert_eq!(selected_skill_ids, vec!["builtin:create-thread"]);
+        assert_eq!(selected_mcp_ids, vec!["builtin:computer-use"]);
+        assert!(json);
     }
 
     #[test]

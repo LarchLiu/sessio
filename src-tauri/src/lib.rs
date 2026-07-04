@@ -6,6 +6,7 @@ pub mod commands;
 pub mod computer_use;
 pub mod config;
 pub mod config_watch;
+pub mod create_thread_skill_resource;
 pub mod desktop_control;
 pub mod file_preview_watch;
 pub mod im_bridge;

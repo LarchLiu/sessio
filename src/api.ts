@@ -160,7 +160,7 @@ export interface McpServerConfig {
 }
 
 export type SkillSource = "builtin" | "user";
-export type BuiltinSkillKind = "computerUse" | "workState";
+export type BuiltinSkillKind = "computerUse" | "createThread" | "workState";
 
 export interface SkillMetadata {
   id: string;

@@ -17,6 +17,7 @@ pub const SELECTED_SKILL_IDS_OPTION: &str = "selectedSkillIds";
 pub const SELECTED_SKILLS_OPTION: &str = "selectedSkills";
 
 const BUILTIN_COMPUTER_USE_SKILL_ID: &str = "builtin:computer-use";
+const BUILTIN_CREATE_THREAD_SKILL_ID: &str = "builtin:create-thread";
 const BUILTIN_WORK_STATE_SKILL_ID: &str = "builtin:sessio-work-state";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -30,6 +31,7 @@ pub enum SkillSource {
 #[serde(rename_all = "camelCase")]
 pub enum BuiltinSkillKind {
     ComputerUse,
+    CreateThread,
     WorkState,
 }
 
@@ -347,6 +349,11 @@ fn scan_builtin_skills() -> Vec<SkillMetadata> {
             crate::computer_use::skill_resource::computer_use_skill_path(),
         ),
         (
+            BUILTIN_CREATE_THREAD_SKILL_ID,
+            Some(BuiltinSkillKind::CreateThread),
+            crate::create_thread_skill_resource::create_thread_skill_path(),
+        ),
+        (
             BUILTIN_WORK_STATE_SKILL_ID,
             Some(BuiltinSkillKind::WorkState),
             crate::work_state_skill_resource::work_state_skill_path(),
@@ -588,6 +595,7 @@ fn builtin_skill_kind_label(kind: BuiltinSkillKind) -> &'static str {
     let markers = sessio_prompt_markers();
     match kind {
         BuiltinSkillKind::ComputerUse => markers.builtin_skill_kind_computer_use,
+        BuiltinSkillKind::CreateThread => markers.builtin_skill_kind_create_thread,
         BuiltinSkillKind::WorkState => markers.builtin_skill_kind_work_state,
     }
 }

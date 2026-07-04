@@ -25,6 +25,7 @@ export interface SessioPromptMarkers {
   skillSourceBuiltin: SkillSource;
   skillSourceUser: SkillSource;
   builtinSkillKindComputerUse: BuiltinSkillKind;
+  builtinSkillKindCreateThread: BuiltinSkillKind;
   builtinSkillKindWorkState: BuiltinSkillKind;
   mcpSourceBuiltin: McpServerSource;
   mcpSourceCustom: McpServerSource;
@@ -52,6 +53,7 @@ const SESSIO_PROMPT_MARKERS: Readonly<SessioPromptMarkers> = Object.freeze({
   skillSourceBuiltin: "builtin",
   skillSourceUser: "user",
   builtinSkillKindComputerUse: "computerUse",
+  builtinSkillKindCreateThread: "createThread",
   builtinSkillKindWorkState: "workState",
   mcpSourceBuiltin: "builtin",
   mcpSourceCustom: "custom",
