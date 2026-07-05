@@ -22,6 +22,8 @@ export interface ChatCanvasViewProps {
   liveState: LiveRuntimeState;
   runtimeSessionAliases: Record<string, string>;
   fallbackWorkflowSnapshot?: ThreadWorkSnapshot | null;
+  autoThreadIds?: string[];
+  autoThreadRefreshKey?: string;
   selectedCanvasFileRequest?: {
     paths: string[];
     requestId: number;
@@ -44,6 +46,8 @@ export default function ChatCanvasView({
   liveState,
   runtimeSessionAliases,
   fallbackWorkflowSnapshot = null,
+  autoThreadIds = [],
+  autoThreadRefreshKey = "",
   selectedCanvasFileRequest = null,
   composer,
   onError,
@@ -140,6 +144,8 @@ export default function ChatCanvasView({
             liveState={liveState}
             runtimeSessionAliases={runtimeSessionAliases}
             fallbackWorkflowSnapshot={fallbackWorkflowSnapshot}
+            autoThreadIds={autoThreadIds}
+            autoThreadRefreshKey={autoThreadRefreshKey}
             selectedFileRequest={selectedCanvasFileRequest}
             initialState={state}
             initialSnapshot={initialSnapshot}

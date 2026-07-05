@@ -159,6 +159,11 @@ import {
   renderItemKeys,
   type AcpRenderItem,
 } from "../acpRenderItems";
+import {
+  createCreatedThreadCollector,
+  isSessioThreadCreateCommand,
+  type CreatedThreadIds,
+} from "../lib/chatCreatedThreads";
 import ChatFilesView, { type ChatFilesSubview } from "../components/ChatFilesView";
 import ChatCanvasView from "../components/ChatCanvasView";
 import {
@@ -1819,6 +1824,10 @@ export function AcpTranscriptPanel({
     () => liveOrLatestTurnFileEdits(acpViewModel, liveTurnIds),
     [acpViewModel, liveTurnIds],
   );
+  const autoCanvasThreads = useMemo(
+    () => createdThreadIdsFromViewModel(acpViewModel),
+    [acpViewModel],
+  );
   const selectedProjectFilePath = selectedProjectFileRequest?.path.trim() || null;
   const fileViewEdits = useMemo(() => {
     if (!selectedProjectFilePath) return sessionFileEdits.edits;
@@ -1903,6 +1912,8 @@ export function AcpTranscriptPanel({
               .filter((path): path is string => Boolean(path))}
             liveState={liveState}
             runtimeSessionAliases={runtimeSessionAliases}
+            autoThreadIds={autoCanvasThreads.threadIds}
+            autoThreadRefreshKey={autoCanvasThreads.refreshKey}
             selectedCanvasFileRequest={selectedCanvasFileRequest}
             composer={chatComposerController}
             onError={setComposerError}
@@ -3233,6 +3244,42 @@ function compactFileLabel(label: string): string {
   return `${head}...${stem.slice(-tailBudget)}${extension}`;
 }
 
+function createdThreadIdsFromViewModel(viewModel: AcpViewModel): CreatedThreadIds {
+  const collector = createCreatedThreadCollector();
+  const addRefreshText = (text: string | null | undefined) => {
+    if (!text) return;
+    collector.addRefreshPart(`${text.length}:${text.slice(-80)}`);
+  };
+  for (const turn of viewModel.turns) {
+    collector.addRefreshPart(`${turn.turnId}:${turn.status}:${turn.updatedAt}`);
+    for (const block of turn.blocks) {
+      if (block.kind === "assistant" || block.kind === "thought") {
+        addRefreshText(contentBlocksText(block.blocks));
+      }
+    }
+    for (const tool of turn.tools) {
+      const inputText = acpToolInputText(tool);
+      const outputText = acpToolOutputText(tool);
+      const rawOutputContentText = contentBlocksText(toolOutputContentBlocks(tool.rawOutput));
+      const contentText = contentBlocksText(acpToolContentBlocks(tool));
+      addRefreshText(inputText);
+      addRefreshText(outputText);
+      addRefreshText(rawOutputContentText);
+      addRefreshText(contentText);
+      if (!isSuccessfulToolStatus(tool.status) || !isSessioThreadCreateCommand(inputText)) continue;
+      collector.collectText(outputText);
+      collector.collectText(rawOutputContentText);
+      collector.collectText(contentText);
+    }
+  }
+  return collector.result();
+}
+
+function isSuccessfulToolStatus(status: string): boolean {
+  const normalized = status.trim().toLowerCase();
+  return normalized !== "failed" && normalized !== "cancelled" && normalized !== "error";
+}
+
 function filePathFromResourceBlock(block: AcpContentBlock): string | null {
   const uri =
     block.type === "resource" || block.type === "resource_link"
@@ -3732,6 +3779,12 @@ function acpToolOutputText(tool: AcpToolCall): string {
   if (toolOutputContentBlocks(tool.rawOutput).length > 0) return "";
   if (tool.rawOutput !== null) return JSON.stringify(tool.rawOutput, null, 2);
   return "";
+}
+
+function acpToolContentBlocks(tool: AcpToolCall): AcpContentBlock[] {
+  return tool.content.flatMap((item) => (
+    item.type === "content" ? [item.content] : []
+  ));
 }
 
 function toolOutputContentBlocks(value: unknown): AcpContentBlock[] {

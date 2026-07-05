@@ -58,7 +58,7 @@ export function WorkflowCardHost({
   const kind = snapshot?.kind || (stages.length > 0 ? "process" : "");
   const displayStages = stages.map((stage) => mergeStageOverlay(stage, workflowOverlay));
   const displayGoal = threadGoal.trim() || snapshot?.goal.trim() || "";
-  const displayId = threadStageId || threadId || snapshot?.threadId || "Unlinked workflow";
+  const displayId = threadStageId || threadId || snapshot?.threadId || "Unlinked thread";
   const memberTitle = kind === "brainstorm" || kind === "debate"
     ? "Participants"
     : kind === "teamwork"
@@ -77,7 +77,7 @@ export function WorkflowCardHost({
     <div className={"h-full w-full overflow-hidden rounded-[20px] border border-ink/10 bg-surface-panel/95 text-ink/80 shadow-[0_16px_40px_rgba(18,24,33,0.08)] " + overlayRootClassName}>
       <div className="relative flex items-start justify-between gap-3 px-4 py-3 after:pointer-events-none after:absolute after:bottom-0 after:left-0 after:right-0 after:h-px after:bg-ink/10 after:content-['']">
         <div className="min-w-0">
-          <div className="truncate text-body-sm font-medium text-ink/88">{title || "Workflow"}</div>
+          <div className="truncate text-body-sm font-medium text-ink/88">{title || "Thread"}</div>
           <div className="truncate font-mono text-[11px] text-ink/48">{displayId}</div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -137,7 +137,7 @@ export function WorkflowCardHost({
           ) : null}
         </div>
         <div className="shrink-0 truncate text-caption leading-5 text-ink/68">
-          {displayGoal || "Workflow goal is not available yet."}
+          {displayGoal || "Thread goal is not available yet."}
         </div>
         {workflowOverlay?.currentAction && (
           <div className="shrink-0 truncate rounded bg-blue/8 px-2 py-1 text-[11px] leading-4 text-blue">
@@ -173,7 +173,7 @@ export function WorkflowCardHost({
           </div>
         ) : (
           <div className="line-clamp-4 text-caption leading-6 text-ink/58">
-            {summary || "Workflow summary is not available yet."}
+            {summary || "Thread summary is not available yet."}
           </div>
         )}
       </div>

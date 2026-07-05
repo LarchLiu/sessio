@@ -595,6 +595,8 @@ export interface BlockSuiteCanvasHostProps {
   liveState: LiveRuntimeState;
   runtimeSessionAliases: Record<string, string>;
   fallbackWorkflowSnapshot?: ThreadWorkSnapshot | null;
+  autoThreadIds?: string[];
+  autoThreadRefreshKey?: string;
   selectedFileRequest?: {
     paths: string[];
     requestId: number;
@@ -812,6 +814,34 @@ function terminalWorkflowCardStatus(status: RuntimeTurnStatus): "completed" | "f
   return status === "failed" || status === "cancelled" ? status : "completed";
 }
 
+function workflowCardPatchForSnapshot(
+  model: WorkflowCardBlockModel,
+  threadId: string,
+  snapshot: ThreadWorkSnapshot,
+): Record<string, unknown> {
+  const nextSnapshotJson = JSON.stringify(snapshot);
+  const nextSnapshotDiff = canonicalWorkflowSnapshotForDiff(snapshot);
+  const nextSummary = workflowSnapshotToMarkdown(snapshot);
+  const nextTitle = snapshot.goal?.trim() || "Thread";
+  const patch: Record<string, unknown> = {};
+  if ((model.threadId || "") !== threadId) {
+    patch.threadId = threadId;
+  }
+  if ((model.threadGoal || "") !== (snapshot.goal ?? "")) {
+    patch.threadGoal = snapshot.goal ?? "";
+  }
+  if ((model.title || "") !== nextTitle) {
+    patch.title = nextTitle;
+  }
+  if ((model.workflowSummaryMarkdown || "") !== nextSummary) {
+    patch.workflowSummaryMarkdown = nextSummary;
+  }
+  if (canonicalWorkflowSnapshotJsonForDiff(model.workflowSnapshotJson || "") !== nextSnapshotDiff) {
+    patch.workflowSnapshotJson = nextSnapshotJson;
+  }
+  return patch;
+}
+
 function boundsOverlapWithPadding(a: Bound, b: Bound, padding: number): boolean {
   return (
     a.x < b.x + b.w + padding &&
@@ -951,6 +981,8 @@ export default function BlockSuiteCanvasHost({
   liveState,
   runtimeSessionAliases,
   fallbackWorkflowSnapshot = null,
+  autoThreadIds = [],
+  autoThreadRefreshKey = "",
   selectedFileRequest = null,
   initialState,
   initialSnapshot,
@@ -1068,7 +1100,7 @@ export default function BlockSuiteCanvasHost({
     },
     { key: "file", label: "Choose files", icon: <FolderOpen className="h-4 w-4" /> },
     { key: "image", label: "Add image", icon: <FileImage className="h-4 w-4" /> },
-    { key: "workflow", label: "Add workflow", icon: <Workflow className="h-4 w-4" /> },
+    { key: "workflow", label: "Add thread", icon: <Workflow className="h-4 w-4" /> },
     { key: "note", label: "Add note", icon: <StickyNote className="h-4 w-4" /> },
   ], [availableEditedFiles.length]);
 
@@ -1833,13 +1865,23 @@ export default function BlockSuiteCanvasHost({
     if (!doc || !rootService) return false;
     const threadId = options?.threadId?.trim() || snapshot?.threadId?.trim() || sessionThreadId || "";
     const stageId = options?.stageId?.trim() ?? "";
-    const snapshotResult = canvasKey.kind === "session"
+    const explicitThreadSnapshot = options?.threadId?.trim()
+      ? await getThreadWorkState(options.threadId.trim())
+          .then((thread) => {
+            const focusedStage = stageId
+              ? thread.stages.find((stage) => stage.id === stageId) ?? null
+              : thread.stages.find((stage) => stage.id === thread.stageId) ?? null;
+            return buildThreadWorkSnapshot(thread, focusedStage, Date.now());
+          })
+          .catch(() => null)
+      : null;
+    const snapshotResult = !explicitThreadSnapshot && canvasKey.kind === "session"
       ? await getThreadWorkSnapshot(sessionAgent, canvasKey.id).catch(() => null)
       : null;
-    const resolvedSnapshot = snapshotResult?.snapshot ?? snapshot ?? null;
-    const resolvedThreadId = snapshotResult?.threadId ?? threadId;
+    const resolvedSnapshot = explicitThreadSnapshot ?? snapshotResult?.snapshot ?? snapshot ?? null;
+    const resolvedThreadId = explicitThreadSnapshot?.threadId ?? snapshotResult?.threadId ?? threadId;
     const resolvedStageId = snapshotResult?.stageId ?? stageId;
-    const title = resolvedSnapshot?.goal?.trim() || "Workflow";
+    const title = resolvedSnapshot?.goal?.trim() || "Thread";
     const summaryMarkdown = workflowSnapshotToMarkdown(resolvedSnapshot);
     const [bound] = placeCanvasNodes(doc, rootService, [{
       width: DEFAULT_WORKFLOW_CARD_WIDTH,
@@ -1900,29 +1942,10 @@ export default function BlockSuiteCanvasHost({
     }
 
     autoWorkflowCardSeedRef.current = seedKey;
-    const nextSnapshotJson = JSON.stringify(fallbackWorkflowSnapshot);
-    const nextSnapshotDiff = canonicalWorkflowSnapshotForDiff(fallbackWorkflowSnapshot);
-    const nextSummary = workflowSnapshotToMarkdown(fallbackWorkflowSnapshot);
-    const nextTitle = fallbackWorkflowSnapshot.goal?.trim() || "Workflow";
     let changed = false;
 
     for (const model of cards) {
-      const patch: Record<string, unknown> = {};
-      if ((model.threadId || "") !== threadId) {
-        patch.threadId = threadId;
-      }
-      if ((model.threadGoal || "") !== (fallbackWorkflowSnapshot.goal ?? "")) {
-        patch.threadGoal = fallbackWorkflowSnapshot.goal ?? "";
-      }
-      if ((model.title || "") !== nextTitle) {
-        patch.title = nextTitle;
-      }
-      if ((model.workflowSummaryMarkdown || "") !== nextSummary) {
-        patch.workflowSummaryMarkdown = nextSummary;
-      }
-      if (canonicalWorkflowSnapshotJsonForDiff(model.workflowSnapshotJson || "") !== nextSnapshotDiff) {
-        patch.workflowSnapshotJson = nextSnapshotJson;
-      }
+      const patch = workflowCardPatchForSnapshot(model, threadId, fallbackWorkflowSnapshot);
       if (Object.keys(patch).length === 0) continue;
       doc.updateBlock(model, patch);
       changed = true;
@@ -1955,6 +1978,61 @@ export default function BlockSuiteCanvasHost({
       onError(`Failed to sync workflow card: ${String(error)}`);
     });
   }, [onError, syncThreadWorkflowCard]);
+
+  const syncAutoThreadCards = useCallback(async () => {
+    if (!isReady || canvasKey.kind !== "session" || autoThreadIds.length === 0) return;
+    const doc = getDoc();
+    if (!doc) return;
+    let changed = false;
+    for (const threadId of autoThreadIds) {
+      const normalizedThreadId = threadId.trim();
+      if (!normalizedThreadId) continue;
+      const thread = await getThreadWorkState(normalizedThreadId).catch(() => null);
+      if (!thread) continue;
+      const focusedStage = thread.stages.find((stage) => stage.id === thread.stageId) ?? null;
+      const snapshot = buildThreadWorkSnapshot(thread, focusedStage, Date.now());
+      const cards = workflowCardsForThread(doc, normalizedThreadId);
+      if (cards.length === 0) {
+        const inserted = await insertWorkflowCardForSnapshot(snapshot, {
+          threadId: normalizedThreadId,
+          stageId: "",
+          focus: false,
+        });
+        changed = changed || inserted;
+        continue;
+      }
+      for (const model of cards) {
+        const patch = workflowCardPatchForSnapshot(model, normalizedThreadId, snapshot);
+        if (Object.keys(patch).length === 0) continue;
+        doc.updateBlock(model, patch);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    const snapshotJson = snapshotToJson(doc);
+    if (snapshotJson) {
+      await flushSaveRef.current(snapshotJson);
+    }
+    await syncCanvasBlocks(doc);
+    rebuildWorkflowOverlayCardContexts(doc);
+    updateSelectionState();
+  }, [
+    autoThreadIds,
+    autoThreadRefreshKey,
+    canvasKey.kind,
+    getDoc,
+    insertWorkflowCardForSnapshot,
+    isReady,
+    rebuildWorkflowOverlayCardContexts,
+    syncCanvasBlocks,
+    updateSelectionState,
+  ]);
+
+  useEffect(() => {
+    void syncAutoThreadCards().catch((error) => {
+      onError(`Failed to show created thread on canvas: ${String(error)}`);
+    });
+  }, [onError, syncAutoThreadCards]);
 
   const groupSelection = useCallback(() => {
     const rootService = getRootService();
