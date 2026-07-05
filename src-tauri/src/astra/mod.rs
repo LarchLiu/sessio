@@ -48,11 +48,13 @@ use orchestrator::{
     dedicated_backend_required_error, push_internal_planner_session_id, RustNativeWorkerOutcome,
 };
 pub(crate) use plan_persistence::astra_task_from_plan_task;
+#[cfg(test)]
+use plan_persistence::create_plan_round_for_astra_tasks_in_store;
 use plan_persistence::{
-    create_plan_round_for_astra_tasks_in_store, link_astra_plan_task_session_in_store,
+    create_plan_round_record_for_astra_tasks_in_store, link_astra_plan_task_session_in_store,
     mark_astra_plan_tasks_running_in_store, record_plan_task_result_in_store, record_to_run,
     relink_astra_plan_task_session_in_store, run_to_record, stable_run_id,
-    update_process_stage_after_task_result_in_store,
+    update_process_stage_after_task_result_in_store, CreatedAstraPlanRound,
 };
 use planner::next_dispatchable_tasks;
 use prompt::{
@@ -101,10 +103,11 @@ fn validate_astra_tasks_for_thread(thread: &ThreadInfo, tasks: &[AstraTaskPropos
 }
 
 fn task_with_prior_teamwork_context(
-    run: &AstraRun,
+    _run: &AstraRun,
     thread: &ThreadInfo,
     task: &AstraTaskProposal,
     prior_completions: &[AstraTaskCompletion],
+    prior_artifact_paths: &HashMap<String, String>,
 ) -> Option<AstraTaskProposal> {
     if thread.kind != ThreadKind::Teamwork || prior_completions.is_empty() {
         return None;
@@ -130,15 +133,12 @@ fn task_with_prior_teamwork_context(
         "These tasks completed earlier in this Astra round. Read the workspace-relative artifact files before continuing when your task builds on their work.".to_string(),
     ];
     for completion in relevant {
-        let artifact_path = artifacts::task_artifact_relative_path(
-            &run.run_id,
-            &completion.task.id,
-            &completion.task.title,
-        );
         let output = final_task_output(&completion.result.output);
         lines.push(format!("- {}", completion.task.title));
         lines.push(format!("  - taskId: {}", completion.task.id));
-        lines.push(format!("  - artifact: `{artifact_path}`"));
+        if let Some(artifact_path) = prior_artifact_paths.get(&completion.task.id) {
+            lines.push(format!("  - artifact: `{artifact_path}`"));
+        }
         let excerpt = structured_response::truncate_chars(&output, 800);
         if !excerpt.trim().is_empty() {
             lines.push("  - excerpt:".to_string());
@@ -377,10 +377,31 @@ impl AstraService {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
+            let live_run_ids = active_runs
+                .iter()
+                .filter(|record| self.is_worker_registered(&record.run_id))
+                .map(|record| record.run_id.clone())
+                .collect::<Vec<_>>();
             if let Some(live) = active_runs
                 .iter()
-                .find(|record| self.is_worker_registered(&record.run_id))
+                .find(|record| live_run_ids.iter().any(|run_id| run_id == &record.run_id))
             {
+                let interrupted = self
+                    .inner
+                    .store
+                    .interrupt_active_astra_runs_for_thread_except(&req.thread_id, &live_run_ids)?;
+                for record in interrupted {
+                    let interrupted = record_to_run(record)?;
+                    self.emit(
+                        &interrupted,
+                        "interrupted",
+                        json!({
+                            "reason": interrupted.terminal_reason,
+                            "errorCode": interrupted.last_error_code,
+                            "message": interrupted.last_error_message,
+                        }),
+                    );
+                }
                 return Ok(self.run_to_handle(record_to_run(live.clone())?));
             }
 
@@ -575,8 +596,8 @@ impl AstraService {
         mode: PlanRoundMode,
         round_index: u32,
         tasks: Vec<AstraTaskProposal>,
-    ) -> Result<Vec<AstraTaskProposal>> {
-        create_plan_round_for_astra_tasks_in_store(
+    ) -> Result<CreatedAstraPlanRound> {
+        create_plan_round_record_for_astra_tasks_in_store(
             self.inner.store.as_ref(),
             run,
             thread,
@@ -697,11 +718,17 @@ impl AstraService {
         thread: &ThreadInfo,
         task: &AstraTaskProposal,
         prior_completions: &[AstraTaskCompletion],
+        prior_artifact_paths: &HashMap<String, String>,
         attempt: DelegatedAttempt<'_>,
         task_waiter: Option<mpsc::Sender<AstraTaskResult>>,
     ) -> Result<AgentSessionHandle> {
-        let contextual_task =
-            task_with_prior_teamwork_context(run, thread, task, prior_completions);
+        let contextual_task = task_with_prior_teamwork_context(
+            run,
+            thread,
+            task,
+            prior_completions,
+            prior_artifact_paths,
+        );
         let mut owned_task = contextual_task.unwrap_or_else(|| task.clone());
         if let Some(with_artifacts) =
             self.task_with_canonical_artifact_context(thread, &owned_task)?
@@ -1019,6 +1046,7 @@ impl AstraService {
         run: &AstraRun,
         tasks: &[AstraTaskProposal],
         prior_completions: &[AstraTaskCompletion],
+        prior_artifact_paths: &HashMap<String, String>,
     ) -> Result<Vec<AstraTaskResult>> {
         if tasks.is_empty() {
             return Ok(Vec::new());
@@ -1046,6 +1074,7 @@ impl AstraService {
                 &thread,
                 task,
                 prior_completions,
+                prior_artifact_paths,
                 DelegatedAttempt {
                     thread_stage_id: task.target_stage_id.as_deref(),
                     attempt_count,
@@ -2534,7 +2563,7 @@ mod tests {
             task,
         };
 
-        let planner_value = planner_task_completion_value("run-1", &completion);
+        let planner_value = planner_task_completion_value(&completion, &HashMap::new());
         let filtered_value = filtered_task_completion_value(&completion);
 
         assert_eq!(planner_value["result"]["finalOutput"], long_output);
@@ -2547,7 +2576,7 @@ mod tests {
             result: test_task_result("task-1", "session-1", &oversized),
             task: test_task("task-1", "stage-1"),
         };
-        let oversized_value = planner_task_completion_value("run-1", &oversized_completion);
+        let oversized_value = planner_task_completion_value(&oversized_completion, &HashMap::new());
         let oversized_output = oversized_value["result"]["finalOutput"].as_str().unwrap();
         assert_eq!(
             oversized_output.chars().count(),
@@ -2560,7 +2589,8 @@ mod tests {
             task: test_task("task-1", "stage-1"),
         };
         assert_eq!(
-            planner_task_completion_value("run-1", &empty_completion)["result"]["finalOutput"],
+            planner_task_completion_value(&empty_completion, &HashMap::new())["result"]
+                ["finalOutput"],
             "Astra delegated task completed."
         );
     }
@@ -2598,20 +2628,29 @@ mod tests {
             task: test_task("task-skip", "stage-1"),
         };
 
+        let artifact_paths = HashMap::from([(
+            "task-ok".to_string(),
+            task_artifact_relative_path("run-1", "task-ok", "实现登录接口"),
+        )]);
         let entry = teamwork_round_journal_entry(
-            "run-1",
             3,
+            Some("round-3"),
+            Some(9),
             &format!("第 3 轮总结 {}", "决定 ".repeat(300)),
             &[ok_completion, failed_completion, cancelled_completion],
+            &artifact_paths,
             42,
         );
 
         assert_eq!(entry["kind"], TEAMWORK_ROUND_JOURNAL_KIND);
         assert_eq!(entry["roundIndex"], 3);
+        assert_eq!(entry["roundId"], "round-3");
+        assert_eq!(entry["threadRoundIndex"], 9);
         assert_eq!(entry["recordedAt"], 42);
         let summary = entry["plannerSummary"].as_str().unwrap();
         assert_eq!(summary.chars().count(), TEAMWORK_JOURNAL_SUMMARY_CHAR_LIMIT);
         let tasks = entry["tasks"].as_array().unwrap();
+        assert_eq!(tasks[0]["taskId"], "task-ok");
         assert_eq!(tasks[0]["title"], "实现登录接口");
         assert_eq!(tasks[0]["assistantId"], "assistant-codex");
         assert_eq!(tasks[0]["risk"], "high");
@@ -2682,7 +2721,11 @@ mod tests {
             result: test_task_result("task-ok", "session-1", "Final result: done"),
             task: test_task("task-ok", "stage-1"),
         };
-        let value = planner_task_completion_value("run-1", &completion);
+        let artifact_paths = HashMap::from([(
+            "task-ok".to_string(),
+            task_artifact_relative_path("run-1", "task-ok", "Advance stage"),
+        )]);
+        let value = planner_task_completion_value(&completion, &artifact_paths);
         assert_eq!(
             value["result"]["fullOutputPath"],
             task_artifact_relative_path("run-1", "task-ok", "Advance stage")
@@ -2694,8 +2737,13 @@ mod tests {
             result: cancelled_result,
             task: test_task("task-skip", "stage-1"),
         };
-        let value = planner_task_completion_value("run-1", &cancelled);
+        let value = planner_task_completion_value(&cancelled, &artifact_paths);
         assert!(value["result"].get("fullOutputPath").is_none());
+
+        let without_written_path = planner_task_completion_value(&completion, &HashMap::new());
+        assert!(without_written_path["result"]
+            .get("fullOutputPath")
+            .is_none());
 
         // The generic excerpt path used by non-teamwork prompts stays
         // path-free: debate lanes must not learn where peers' full text lives.
@@ -2801,12 +2849,17 @@ mod tests {
         downstream_task.target_stage_id = None;
         downstream_task.prompt = "写长篇小说总纲。".to_string();
         downstream_task.depends_on = vec!["task-research".to_string()];
+        let artifact_paths = HashMap::from([(
+            "task-research".to_string(),
+            task_artifact_relative_path("run-1", "task-research", "末日废土题材调研与创作定位"),
+        )]);
 
         let contextual = task_with_prior_teamwork_context(
             &test_run("run-1"),
             &thread,
             &downstream_task,
             &completions,
+            &artifact_paths,
         )
         .unwrap();
 
@@ -2838,6 +2891,10 @@ mod tests {
         let mut downstream_task = test_task("task-outline", "stage-1");
         downstream_task.target_stage_id = None;
         downstream_task.depends_on = Vec::new();
+        let artifact_paths = HashMap::from([(
+            "task-research".to_string(),
+            task_artifact_relative_path("run-1", "task-research", "调研"),
+        )]);
 
         let contextual = task_with_prior_teamwork_context(
             &test_run("run-1"),
@@ -2847,12 +2904,45 @@ mod tests {
                 task: upstream_task,
                 result: upstream_result,
             }],
+            &artifact_paths,
         )
         .unwrap();
 
         assert!(contextual
             .prompt
             .contains(".sessio/astra/run-1/tasks/调研--task-research.md"));
+        assert!(contextual.prompt.contains("prior notes"));
+    }
+
+    #[test]
+    fn prior_teamwork_context_does_not_invent_missing_artifact_paths() {
+        let mut thread = test_thread(Vec::new());
+        thread.kind = ThreadKind::Teamwork;
+        let mut upstream_task = test_task("task-research", "stage-1");
+        upstream_task.title = "调研".to_string();
+        upstream_task.target_stage_id = None;
+        let mut upstream_result = test_task_result(
+            "task-research",
+            "runtime-research",
+            "Final result: prior notes",
+        );
+        upstream_result.thread_stage_id = None;
+        let mut downstream_task = test_task("task-outline", "stage-1");
+        downstream_task.target_stage_id = None;
+
+        let contextual = task_with_prior_teamwork_context(
+            &test_run("run-1"),
+            &thread,
+            &downstream_task,
+            &[AstraTaskCompletion {
+                task: upstream_task,
+                result: upstream_result,
+            }],
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert!(!contextual.prompt.contains(".sessio/astra/run-1/tasks/"));
         assert!(contextual.prompt.contains("prior notes"));
     }
 

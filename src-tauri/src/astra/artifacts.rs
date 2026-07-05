@@ -45,26 +45,33 @@ pub(super) fn filtered_task_completion_value(completion: &AstraTaskCompletion) -
 }
 
 /// Teamwork planner variant: keeps far more of each task output than the
-/// generic 1000-char excerpt and points at the on-disk artifact with the
-/// complete output so the planner can read details on demand.
+/// generic 1000-char excerpt and includes the on-disk artifact path only when
+/// the complete output was actually written.
 pub(super) fn planner_task_completion_value(
-    run_id: &str,
     completion: &AstraTaskCompletion,
+    artifact_paths: &HashMap<String, String>,
 ) -> Value {
     let mut value = task_completion_value(completion, TEAMWORK_PLANNER_OUTPUT_CHAR_LIMIT);
     if completion.result.status != AstraTaskResultStatus::Cancelled {
-        if let Some(result) = value.get_mut("result").and_then(Value::as_object_mut) {
-            result.insert(
-                "fullOutputPath".to_string(),
-                json!(task_artifact_relative_path(
-                    run_id,
-                    &completion.task.id,
-                    &completion.task.title
-                )),
-            );
+        if let Some(path) = artifact_paths.get(&completion.task.id) {
+            if let Some(result) = value.get_mut("result").and_then(Value::as_object_mut) {
+                result.insert("fullOutputPath".to_string(), json!(path));
+            }
         }
     }
     value
+}
+
+fn insert_task_artifact_path(
+    record: &mut serde_json::Map<String, Value>,
+    completion: &AstraTaskCompletion,
+    artifact_paths: &HashMap<String, String>,
+) {
+    if completion.result.status != AstraTaskResultStatus::Cancelled {
+        if let Some(path) = artifact_paths.get(&completion.task.id) {
+            record.insert("outputPath".to_string(), json!(path));
+        }
+    }
 }
 
 /// Workspace-relative path of the markdown artifact holding a task's complete
@@ -147,6 +154,9 @@ pub(super) fn write_task_artifacts(
         }
     }
     for completion in completions {
+        if completion.result.status == AstraTaskResultStatus::Cancelled {
+            continue;
+        }
         let relative =
             task_artifact_relative_path(run_id, &completion.task.id, &completion.task.title);
         let path = std::path::Path::new(project_path).join(&relative);
@@ -207,16 +217,20 @@ fn task_artifact_markdown(completion: &AstraTaskCompletion) -> String {
 /// Compact per-round journal entry persisted into run diagnostics so the next
 /// planning rounds keep memory of earlier work after `completions` is cleared.
 pub(super) fn teamwork_round_journal_entry(
-    run_id: &str,
     round_index: u32,
+    round_id: Option<&str>,
+    thread_round_index: Option<i64>,
     planner_summary: &str,
     completions: &[AstraTaskCompletion],
+    artifact_paths: &HashMap<String, String>,
     recorded_at: i64,
 ) -> Value {
     let tasks = completions
         .iter()
         .map(|completion| {
             let mut task = json!({
+                "taskId": completion.task.id,
+                "planTaskId": completion.task.plan_task_id,
                 "title": completion.task.title,
                 "assistantId": completion.task.assistant_id,
                 "risk": completion.task.risk,
@@ -227,16 +241,7 @@ pub(super) fn teamwork_round_journal_entry(
                 ),
             });
             if let Some(record) = task.as_object_mut() {
-                if completion.result.status != AstraTaskResultStatus::Cancelled {
-                    record.insert(
-                        "outputPath".to_string(),
-                        json!(task_artifact_relative_path(
-                            run_id,
-                            &completion.task.id,
-                            &completion.task.title
-                        )),
-                    );
-                }
+                insert_task_artifact_path(record, completion, artifact_paths);
                 if let Some(error) = completion
                     .result
                     .error
@@ -256,7 +261,7 @@ pub(super) fn teamwork_round_journal_entry(
             task
         })
         .collect::<Vec<_>>();
-    json!({
+    let mut entry = json!({
         "kind": TEAMWORK_ROUND_JOURNAL_KIND,
         "roundIndex": round_index,
         "plannerSummary": structured_response::truncate_chars(
@@ -265,7 +270,16 @@ pub(super) fn teamwork_round_journal_entry(
         ),
         "tasks": tasks,
         "recordedAt": recorded_at,
-    })
+    });
+    if let Some(record) = entry.as_object_mut() {
+        if let Some(round_id) = round_id {
+            record.insert("roundId".to_string(), json!(round_id));
+        }
+        if let Some(thread_round_index) = thread_round_index {
+            record.insert("threadRoundIndex".to_string(), json!(thread_round_index));
+        }
+    }
+    entry
 }
 
 /// Extracts journal entries for the teamwork planner prompt. The round whose

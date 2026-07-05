@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 use super::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
 use super::brainstorm_facilitator::{
@@ -67,6 +68,7 @@ impl OrchestratorBackend for BrainstormBackend {
         user_prompt: Option<&str>,
         round_index: u32,
         completions: &[AstraTaskCompletion],
+        completion_artifact_paths: &std::collections::HashMap<String, String>,
         _planner_context: &AstraPlannerContext,
         _config: &Value,
     ) -> Result<BackendResponse<AstraOrchestration>, BackendFailure> {
@@ -84,6 +86,7 @@ impl OrchestratorBackend for BrainstormBackend {
             user_prompt,
             round_index,
             completions,
+            completion_artifact_paths,
             self.facilitator.as_ref(),
         );
         Ok(BackendResponse {
@@ -101,6 +104,7 @@ fn brainstorm_orchestration(
     user_prompt: Option<&str>,
     round_index: u32,
     completions: &[AstraTaskCompletion],
+    completion_artifact_paths: &HashMap<String, String>,
     facilitator: &dyn BrainstormFacilitator,
 ) -> (AstraOrchestration, Option<String>) {
     if let Some(failure) = completions.iter().find(|completion| {
@@ -175,6 +179,7 @@ fn brainstorm_orchestration(
             thread,
             round_index.saturating_sub(1),
             completions,
+            completion_artifact_paths,
             None,
             None,
         );
@@ -273,6 +278,7 @@ fn brainstorm_orchestration(
         thread,
         round_index.saturating_sub(1),
         completions,
+        completion_artifact_paths,
         Some(&facilitator_board),
         Some(&meta),
     );
@@ -519,10 +525,11 @@ fn participant_label(participant: &ThreadAgentInfo) -> String {
 }
 
 fn shared_board_value(
-    run: &AstraRun,
+    _run: &AstraRun,
     thread: &ThreadInfo,
     source_round_index: u32,
     completions: &[AstraTaskCompletion],
+    artifact_paths: &HashMap<String, String>,
     facilitator_board: Option<&FacilitatorBoard>,
     meta: Option<&FacilitatorMeta>,
 ) -> Value {
@@ -530,19 +537,20 @@ fn shared_board_value(
         .iter()
         .map(|completion| {
             let output = summarize_task_output(&final_task_output(&completion.result.output));
-            json!({
+            let mut opinion = json!({
                 "taskId": completion.task.id,
                 "participantId": completion.task.agent_participant_id,
                 "agent": completion.task.target_agent.as_str(),
                 "title": completion.task.title,
                 "status": completion.result.status.as_str(),
                 "opinion": output,
-                "fullOutputPath": super::artifacts::task_artifact_relative_path(
-                    &run.run_id,
-                    &completion.task.id,
-                    &completion.task.title
-                ),
-            })
+            });
+            if let Some(path) = artifact_paths.get(&completion.task.id) {
+                if let Some(record) = opinion.as_object_mut() {
+                    record.insert("fullOutputPath".to_string(), json!(path));
+                }
+            }
+            opinion
         })
         .collect::<Vec<_>>();
     let highlights = opinions
@@ -724,6 +732,7 @@ fn push_board_list(lines: &mut Vec<String>, heading: &str, values: Option<&Value
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     use super::*;
@@ -842,6 +851,7 @@ mod tests {
             user_prompt,
             round_index,
             completions,
+            &artifact_paths_for(run, completions),
             &HeuristicFacilitator,
         )
         .0
@@ -856,17 +866,38 @@ mod tests {
             .collect()
     }
 
+    fn artifact_paths_for(
+        run: &AstraRun,
+        completions: &[AstraTaskCompletion],
+    ) -> HashMap<String, String> {
+        completions
+            .iter()
+            .map(|completion| {
+                (
+                    completion.task.id.clone(),
+                    super::super::artifacts::task_artifact_relative_path(
+                        &run.run_id,
+                        &completion.task.id,
+                        &completion.task.title,
+                    ),
+                )
+            })
+            .collect()
+    }
+
     fn synthesis_completions(
         run: &AstraRun,
         facilitator: &dyn BrainstormFacilitator,
         output: &str,
     ) -> Vec<AstraTaskCompletion> {
+        let opinions = opinion_completions(run);
         let board_round = brainstorm_orchestration(
             run,
             &thread(),
             None,
             1,
-            &opinion_completions(run),
+            &opinions,
+            &artifact_paths_for(run, &opinions),
             facilitator,
         )
         .0;
@@ -1051,8 +1082,16 @@ mod tests {
             Ok(runtime_response(fake_report())),
         );
 
-        let (next, session_id) =
-            brainstorm_orchestration(&run, &thread(), None, 1, &opinion_completions(&run), &fake);
+        let opinions = opinion_completions(&run);
+        let (next, session_id) = brainstorm_orchestration(
+            &run,
+            &thread(),
+            None,
+            1,
+            &opinions,
+            &artifact_paths_for(&run, &opinions),
+            &fake,
+        );
 
         assert_eq!(next.run_intent, AstraRunIntent::Continue);
         assert_eq!(next.reason, "brainstorm_shared_board_ready");
@@ -1083,8 +1122,16 @@ mod tests {
             Ok(runtime_response(fake_report())),
         );
 
-        let (next, session_id) =
-            brainstorm_orchestration(&run, &thread(), None, 1, &opinion_completions(&run), &fake);
+        let opinions = opinion_completions(&run);
+        let (next, session_id) = brainstorm_orchestration(
+            &run,
+            &thread(),
+            None,
+            1,
+            &opinions,
+            &artifact_paths_for(&run, &opinions),
+            &fake,
+        );
 
         assert_eq!(next.run_intent, AstraRunIntent::Continue);
         assert!(session_id.is_none());
@@ -1106,8 +1153,15 @@ mod tests {
         );
         let completions = synthesis_completions(&run, &fake, "Final result: 同意渐进迁移。");
 
-        let (terminal, session_id) =
-            brainstorm_orchestration(&run, &thread(), None, 2, &completions, &fake);
+        let (terminal, session_id) = brainstorm_orchestration(
+            &run,
+            &thread(),
+            None,
+            2,
+            &completions,
+            &artifact_paths_for(&run, &completions),
+            &fake,
+        );
 
         assert_eq!(terminal.run_intent, AstraRunIntent::Complete);
         assert_eq!(terminal.reason, "brainstorm_synthesis_complete");
@@ -1143,8 +1197,15 @@ mod tests {
             )),
         );
 
-        let (terminal, session_id) =
-            brainstorm_orchestration(&run, &thread(), None, 2, &completions, &failing);
+        let (terminal, session_id) = brainstorm_orchestration(
+            &run,
+            &thread(),
+            None,
+            2,
+            &completions,
+            &artifact_paths_for(&run, &completions),
+            &failing,
+        );
 
         assert_eq!(terminal.run_intent, AstraRunIntent::Complete);
         assert!(session_id.is_none());
@@ -1167,7 +1228,15 @@ mod tests {
         );
         let completions = synthesis_completions(&run, &fake, "Final result: 同意。");
 
-        let _ = brainstorm_orchestration(&run, &thread(), None, 2, &completions, &fake);
+        let _ = brainstorm_orchestration(
+            &run,
+            &thread(),
+            None,
+            2,
+            &completions,
+            &artifact_paths_for(&run, &completions),
+            &fake,
+        );
 
         let contexts = fake.seen_board_contexts.lock().unwrap();
         let context = contexts.last().unwrap().as_deref().unwrap();
@@ -1196,6 +1265,7 @@ mod tests {
                 None,
                 2,
                 &completions,
+                &artifact_paths_for(&run, &completions),
                 &Default::default(),
                 &json!({}),
             )
@@ -1211,6 +1281,7 @@ mod tests {
                 None,
                 2,
                 &completions,
+                &artifact_paths_for(&run, &completions),
                 &Default::default(),
                 &json!({}),
             )
@@ -1226,8 +1297,16 @@ mod tests {
             Ok(runtime_response(fake_report())),
         );
 
-        let (next, _) =
-            brainstorm_orchestration(&run, &thread(), None, 1, &opinion_completions(&run), &fake);
+        let opinions = opinion_completions(&run);
+        let (next, _) = brainstorm_orchestration(
+            &run,
+            &thread(),
+            None,
+            1,
+            &opinions,
+            &artifact_paths_for(&run, &opinions),
+            &fake,
+        );
 
         assert_eq!(next.run_intent, AstraRunIntent::Continue);
         assert_eq!(next.reason, "brainstorm_critique_round");
@@ -1249,12 +1328,14 @@ mod tests {
             Ok(runtime_response(unready_board())),
             Ok(runtime_response(fake_report())),
         );
+        let opinions = opinion_completions(&run);
         let critique_round = brainstorm_orchestration(
             &run,
             &thread(),
             None,
             1,
-            &opinion_completions(&run),
+            &opinions,
+            &artifact_paths_for(&run, &opinions),
             &unready,
         )
         .0;
@@ -1268,8 +1349,15 @@ mod tests {
             Ok(runtime_response(fake_board())),
             Ok(runtime_response(fake_report())),
         );
-        let (next, _) =
-            brainstorm_orchestration(&run, &thread(), None, 2, &critique_completions, &ready);
+        let (next, _) = brainstorm_orchestration(
+            &run,
+            &thread(),
+            None,
+            2,
+            &critique_completions,
+            &artifact_paths_for(&run, &critique_completions),
+            &ready,
+        );
 
         // The facilitator saw the previous board while rebuilding it, and the
         // now-ready board moves the flow to synthesis.
@@ -1290,12 +1378,14 @@ mod tests {
             Ok(runtime_response(unready_board())),
             Ok(runtime_response(fake_report())),
         );
+        let opinions = opinion_completions(&run);
         let critique_round = brainstorm_orchestration(
             &run,
             &thread(),
             None,
             1,
-            &opinion_completions(&run),
+            &opinions,
+            &artifact_paths_for(&run, &opinions),
             &unready,
         )
         .0;
@@ -1307,7 +1397,16 @@ mod tests {
 
         // Critique continues while the facilitator reports the shared board is
         // not ready to synthesize; legacy round limit metadata is ignored.
-        let second = brainstorm_orchestration(&run, &thread(), None, 2, &completions, &unready).0;
+        let second = brainstorm_orchestration(
+            &run,
+            &thread(),
+            None,
+            2,
+            &completions,
+            &artifact_paths_for(&run, &completions),
+            &unready,
+        )
+        .0;
         assert_eq!(second.reason, "brainstorm_critique_round");
         completions = second
             .tasks
@@ -1315,7 +1414,16 @@ mod tests {
             .map(|task| completion(task, "仍有分歧。"))
             .collect();
 
-        let third = brainstorm_orchestration(&run, &thread(), None, 3, &completions, &unready).0;
+        let third = brainstorm_orchestration(
+            &run,
+            &thread(),
+            None,
+            3,
+            &completions,
+            &artifact_paths_for(&run, &completions),
+            &unready,
+        )
+        .0;
         assert_eq!(third.reason, "brainstorm_critique_round");
         assert!(third
             .tasks
@@ -1334,12 +1442,14 @@ mod tests {
             Ok(runtime_response(fake_report())),
         );
 
+        let opinions = opinion_completions(&run);
         let (next, _) = brainstorm_orchestration(
             &run,
             &thread(),
             None,
             1,
-            &opinion_completions(&run),
+            &opinions,
+            &artifact_paths_for(&run, &opinions),
             &unready,
         );
 
@@ -1358,8 +1468,16 @@ mod tests {
             Ok(runtime_response(fake_report())),
         );
 
-        let (next, _) =
-            brainstorm_orchestration(&run, &thread(), None, 1, &opinion_completions(&run), &fake);
+        let opinions = opinion_completions(&run);
+        let (next, _) = brainstorm_orchestration(
+            &run,
+            &thread(),
+            None,
+            1,
+            &opinions,
+            &artifact_paths_for(&run, &opinions),
+            &fake,
+        );
 
         let board = &next.diagnostics[0];
         let path = board["opinions"][0]["fullOutputPath"].as_str().unwrap();

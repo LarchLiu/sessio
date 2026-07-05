@@ -18,6 +18,7 @@ impl OrchestratorBackend for DeterministicOrchestratorBackend {
         user_prompt: Option<&str>,
         round_index: u32,
         completions: &[AstraTaskCompletion],
+        _completion_artifact_paths: &std::collections::HashMap<String, String>,
         _planner_context: &AstraPlannerContext,
         _config: &Value,
     ) -> Result<BackendResponse<AstraOrchestration>, BackendFailure> {

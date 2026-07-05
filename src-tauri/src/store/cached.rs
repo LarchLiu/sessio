@@ -957,6 +957,15 @@ impl SessionStore for CachedStore {
         self.inner.interrupt_active_astra_runs_for_thread(thread_id)
     }
 
+    fn interrupt_active_astra_runs_for_thread_except(
+        &self,
+        thread_id: &str,
+        excluded_run_ids: &[String],
+    ) -> Result<Vec<AstraRunRecord>> {
+        self.inner
+            .interrupt_active_astra_runs_for_thread_except(thread_id, excluded_run_ids)
+    }
+
     fn reconcile_terminal_astra_run_plan_work(&self, run_id: &str) -> Result<usize> {
         self.inner.reconcile_terminal_astra_run_plan_work(run_id)
     }

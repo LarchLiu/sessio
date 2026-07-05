@@ -57,6 +57,7 @@ impl OrchestratorBackend for RuntimeAgentOrchestrator {
         user_prompt: Option<&str>,
         round_index: u32,
         completions: &[AstraTaskCompletion],
+        completion_artifact_paths: &std::collections::HashMap<String, String>,
         planner_context: &AstraPlannerContext,
         _backend_config: &Value,
     ) -> Result<BackendResponse<AstraOrchestration>, BackendFailure> {
@@ -66,6 +67,7 @@ impl OrchestratorBackend for RuntimeAgentOrchestrator {
             user_prompt,
             round_index,
             completions,
+            completion_artifact_paths,
             planner_context,
         );
 

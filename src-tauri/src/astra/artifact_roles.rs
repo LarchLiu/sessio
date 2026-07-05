@@ -80,8 +80,10 @@ pub(crate) fn normalize_artifact_role_catalog(values: &[String]) -> Result<Vec<S
     let mut seen = HashSet::new();
     let mut roles = Vec::new();
     for value in values {
-        let role = normalize_artifact_role(value)
-            .ok_or_else(|| anyhow!("invalid artifact role catalog entry: {value}"))?;
+        let Some(role) = normalize_artifact_role(value) else {
+            log::warn!("[astra:artifact-role] skipped invalid catalog entry: {value}");
+            continue;
+        };
         if seen.insert(role.clone()) {
             roles.push(role);
         }
@@ -104,6 +106,20 @@ mod tests {
         assert_eq!(
             resolve_artifact_role("custom_spec", &["custom_spec".to_string()]).unwrap(),
             "custom_spec"
+        );
+    }
+
+    #[test]
+    fn catalog_skips_invalid_entries_without_failing() {
+        assert_eq!(
+            normalize_artifact_role_catalog(&[
+                "story bible".to_string(),
+                "计划".to_string(),
+                "Story-Bible".to_string(),
+                "draft".to_string(),
+            ])
+            .unwrap(),
+            vec!["story_bible", "draft"]
         );
     }
 }

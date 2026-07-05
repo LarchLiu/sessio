@@ -2664,6 +2664,15 @@ impl SessionStore for SqliteStore {
         astra::interrupt_active_astra_runs_for_thread(&mut conn, thread_id)
     }
 
+    fn interrupt_active_astra_runs_for_thread_except(
+        &self,
+        thread_id: &str,
+        excluded_run_ids: &[String],
+    ) -> Result<Vec<AstraRunRecord>> {
+        let mut conn = self.conn.lock().unwrap();
+        astra::interrupt_active_astra_runs_for_thread_except(&mut conn, thread_id, excluded_run_ids)
+    }
+
     fn reconcile_terminal_astra_run_plan_work(&self, run_id: &str) -> Result<usize> {
         let mut conn = self.conn.lock().unwrap();
         astra::reconcile_terminal_astra_run_plan_work(&mut conn, run_id)
@@ -4287,6 +4296,12 @@ mod schema_tests {
             vec!["active-new", "active-old"]
         );
         assert!(interrupted.iter().all(|run| run.status == "interrupted"));
+        assert!(interrupted.iter().all(|run| {
+            run.terminal_reason.as_deref() == Some("zombie_active_run")
+                && run.last_error_code.as_deref() == Some("worker_missing")
+                && run.last_error_message.as_deref()
+                    == Some("Astra run had no registered worker when starting a new run")
+        }));
         assert!(store.get_active_astra_run(&thread.id).unwrap().is_none());
         assert_eq!(
             store
@@ -4299,6 +4314,100 @@ mod schema_tests {
         let recovered_round = store.get_plan_round(&round.id).unwrap().unwrap();
         assert_eq!(recovered_round.status, PlanRoundStatus::Errored);
         assert_eq!(recovered_round.tasks[0].status, PlanTaskStatus::Errored);
+        assert_eq!(
+            recovered_round.tasks[0].error.as_deref(),
+            Some("Astra task was active but its worker was missing when starting a new run")
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&project_path);
+    }
+
+    #[test]
+    fn thread_scoped_astra_recovery_keeps_excluded_live_runs_active() {
+        let path = unique_db("astra-thread-recovery-except");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let project_path =
+            std::env::temp_dir().join(format!("astra-thread-recovery-except-{}", unique_suffix()));
+        std::fs::create_dir_all(&project_path).unwrap();
+        let project = store
+            .add_project(
+                &project_path.to_string_lossy(),
+                Some("Astra Thread Recovery Except Project"),
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Recover zombie siblings only", None)
+            .unwrap();
+
+        let live = AstraRunRecord {
+            run_id: "active-live".to_string(),
+            thread_id: thread.id.clone(),
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            continued_from_run_id: None,
+            status: "running".to_string(),
+            mode: "auto".to_string(),
+            planner_backend: Some("deterministic".to_string()),
+            round_index: Some(1),
+            round_limit: 3,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+            internal_planner_sessions: Vec::new(),
+            run_diagnostics_json: "[]".to_string(),
+            error: None,
+            created_at: 10,
+            updated_at: 30,
+        };
+        let zombie = AstraRunRecord {
+            run_id: "active-zombie".to_string(),
+            status: "thinking".to_string(),
+            created_at: 5,
+            updated_at: 20,
+            ..live.clone()
+        };
+        store.upsert_astra_run(&live).unwrap();
+        store.upsert_astra_run(&zombie).unwrap();
+
+        let interrupted = store
+            .interrupt_active_astra_runs_for_thread_except(&thread.id, &["active-live".to_string()])
+            .unwrap();
+
+        assert_eq!(
+            interrupted
+                .iter()
+                .map(|run| run.run_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["active-zombie"]
+        );
+        assert_eq!(
+            interrupted[0].terminal_reason.as_deref(),
+            Some("zombie_active_run")
+        );
+        assert_eq!(
+            store
+                .get_active_astra_run(&thread.id)
+                .unwrap()
+                .unwrap()
+                .run_id,
+            "active-live"
+        );
+        assert_eq!(
+            store.get_astra_run("active-live").unwrap().unwrap().status,
+            "running"
+        );
+        assert_eq!(
+            store
+                .get_astra_run("active-zombie")
+                .unwrap()
+                .unwrap()
+                .status,
+            "interrupted"
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&project_path);

@@ -34,6 +34,7 @@ impl OrchestratorBackend for DebateBackend {
         user_prompt: Option<&str>,
         round_index: u32,
         completions: &[AstraTaskCompletion],
+        _completion_artifact_paths: &std::collections::HashMap<String, String>,
         _planner_context: &AstraPlannerContext,
         _config: &Value,
     ) -> Result<BackendResponse<AstraOrchestration>, BackendFailure> {
@@ -1073,6 +1074,7 @@ mod tests {
                 None,
                 2,
                 &completions,
+                &std::collections::HashMap::new(),
                 &Default::default(),
                 &json!({}),
             )
@@ -1088,6 +1090,7 @@ mod tests {
                 None,
                 2,
                 &completions,
+                &std::collections::HashMap::new(),
                 &Default::default(),
                 &json!({}),
             )

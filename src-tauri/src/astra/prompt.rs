@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::diagnostics::dedupe_session_ref_values;
@@ -66,7 +67,7 @@ Interrupted work: interruptedTasks contains unresolved planned, running, failed,
 
 previousRounds is the run journal: one entry per earlier completed round, with the planner summary and each task's title, assistantId, risk, status, and outputExcerpt. completedTasks carries the full outputs of the most recent round only; the round already covered by completedTasks is not repeated in previousRounds. Use previousRounds to recall earlier results and decisions, avoid re-running finished work, and keep new tasks consistent with what was already built.
 
-Full outputs on demand: each completedTasks result includes result.fullOutputPath, previousRounds tasks may include outputPath, and threadProgress tasks may include artifactPath - workspace-relative markdown files containing complete task output. finalOutput, outputExcerpt, summaries, errors, and prompts are truncated; read the file when planning needs details beyond the excerpt.
+Full outputs on demand: completedTasks results may include result.fullOutputPath, previousRounds tasks may include outputPath, and threadProgress tasks may include artifactPath - workspace-relative markdown files containing complete task output. These path fields appear only when the file was written successfully. finalOutput, outputExcerpt, summaries, errors, and prompts are truncated; read the file when planning needs details beyond the excerpt.
 
 canonicalArtifacts lists current long-lived Astra artifacts for this thread. Each item has role, title, path, summary, sourceTaskId, and updatedAt. Read the referenced path when your next decision depends on details beyond the summary. Set artifactRole when a task creates or updates the current plan, outline, research brief, draft, or synthesis. Set usesArtifactRoles when a task must build on a current canonical artifact. Use only roles from artifactRoleCatalog.
 
@@ -148,6 +149,7 @@ pub(super) fn build_astra_orchestration_prompt(
     user_prompt: Option<&str>,
     round_index: u32,
     completions: &[AstraTaskCompletion],
+    completion_artifact_paths: &HashMap<String, String>,
     planner_context: &AstraPlannerContext,
 ) -> String {
     let stages = if thread.kind == ThreadKind::Teamwork {
@@ -188,7 +190,10 @@ pub(super) fn build_astra_orchestration_prompt(
         completions
             .iter()
             .map(|completion| {
-                super::artifacts::planner_task_completion_value(&run.run_id, completion)
+                super::artifacts::planner_task_completion_value(
+                    completion,
+                    completion_artifact_paths,
+                )
             })
             .collect::<Vec<_>>()
     } else {
@@ -1592,6 +1597,7 @@ mod tests {
             Some("user request"),
             2,
             &[completion],
+            &std::collections::HashMap::new(),
             &AstraPlannerContext::default(),
         );
         let value: Value = serde_json::from_str(thread_prompt_body(&prompt)).unwrap();
@@ -1634,6 +1640,7 @@ mod tests {
             Some("split work"),
             1,
             &[completion],
+            &std::collections::HashMap::new(),
             &AstraPlannerContext::default(),
         );
         let value: Value = serde_json::from_str(thread_prompt_body(&prompt)).unwrap();
@@ -1700,8 +1707,15 @@ mod tests {
             thread_progress: None,
             interrupted_tasks: Vec::new(),
         };
-        let prompt =
-            build_astra_orchestration_prompt(&run(), &teamwork_thread(), None, 0, &[], &context);
+        let prompt = build_astra_orchestration_prompt(
+            &run(),
+            &teamwork_thread(),
+            None,
+            0,
+            &[],
+            &std::collections::HashMap::new(),
+            &context,
+        );
         let value: Value = serde_json::from_str(thread_prompt_body(&prompt)).unwrap();
         let instruction = value["instruction"].as_str().unwrap();
 
@@ -1754,6 +1768,10 @@ mod tests {
             None,
             2,
             &[completion],
+            &std::collections::HashMap::from([(
+                "task-teamwork-1".to_string(),
+                ".sessio/astra/run-1/tasks/协作任务--task-teamwork-1.md".to_string(),
+            )]),
             &AstraPlannerContext::default(),
         );
         let value: Value = serde_json::from_str(thread_prompt_body(&prompt)).unwrap();
@@ -1828,8 +1846,15 @@ mod tests {
             ..AstraPlannerContext::default()
         };
 
-        let prompt =
-            build_astra_orchestration_prompt(&run, &teamwork_thread(), Some(""), 0, &[], &context);
+        let prompt = build_astra_orchestration_prompt(
+            &run,
+            &teamwork_thread(),
+            Some(""),
+            0,
+            &[],
+            &std::collections::HashMap::new(),
+            &context,
+        );
         let value: Value = serde_json::from_str(thread_prompt_body(&prompt)).unwrap();
         let instruction = value["instruction"].as_str().unwrap();
 

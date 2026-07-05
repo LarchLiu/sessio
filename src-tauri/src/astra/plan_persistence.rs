@@ -16,6 +16,12 @@ use super::{
     AstraTaskResultStatus, AstraTaskRisk, LEGACY_ASTRA_RUN_ROUND_LIMIT_METADATA,
 };
 
+pub(crate) struct CreatedAstraPlanRound {
+    pub(crate) round_id: String,
+    pub(crate) thread_round_index: i64,
+    pub(crate) tasks: Vec<AstraTaskProposal>,
+}
+
 struct OwnedAstraPlanTask {
     thread_stage_id: Option<String>,
     assistant_id: Option<String>,
@@ -169,6 +175,7 @@ pub(super) fn stable_run_id(thread_id: &str, now: i64) -> String {
     format!("astra-{}-{}", short_hash(thread_id), now)
 }
 
+#[cfg(test)]
 pub(super) fn create_plan_round_for_astra_tasks_in_store(
     store: &dyn SessionStore,
     run: &AstraRun,
@@ -178,6 +185,27 @@ pub(super) fn create_plan_round_for_astra_tasks_in_store(
     _round_index: u32,
     tasks: Vec<AstraTaskProposal>,
 ) -> Result<Vec<AstraTaskProposal>> {
+    Ok(create_plan_round_record_for_astra_tasks_in_store(
+        store,
+        run,
+        thread,
+        summary,
+        mode,
+        _round_index,
+        tasks,
+    )?
+    .tasks)
+}
+
+pub(super) fn create_plan_round_record_for_astra_tasks_in_store(
+    store: &dyn SessionStore,
+    run: &AstraRun,
+    thread: &ThreadInfo,
+    summary: &str,
+    mode: PlanRoundMode,
+    _round_index: u32,
+    tasks: Vec<AstraTaskProposal>,
+) -> Result<CreatedAstraPlanRound> {
     let mut owned_tasks = tasks
         .iter()
         .enumerate()
@@ -237,7 +265,11 @@ pub(super) fn create_plan_round_for_astra_tasks_in_store(
             }
         }
     }
-    Ok(next_tasks)
+    Ok(CreatedAstraPlanRound {
+        round_id: round.id,
+        thread_round_index: round.round_index,
+        tasks: next_tasks,
+    })
 }
 
 fn astra_task_to_plan_task(

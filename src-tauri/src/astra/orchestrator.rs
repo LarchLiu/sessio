@@ -79,12 +79,13 @@ impl AstraService {
         }
         let mut dispatch_batch = Vec::new();
         let mut completions = Vec::new();
+        let mut completion_artifact_paths = HashMap::<String, String>::new();
         // Tasks of the current parallel round whose dependsOn is not yet
         // satisfied; dispatched in waves as their dependencies complete.
         let mut pending_wave_tasks: Vec<super::AstraTaskProposal> = Vec::new();
         // Round index and planner summary of the last dispatched teamwork
         // round, journaled once its completions arrive at the next planning.
-        let mut pending_journal: Option<(u32, String)> = None;
+        let mut pending_journal: Option<PendingRoundJournal> = None;
 
         loop {
             if dispatch_batch.is_empty() {
@@ -104,12 +105,14 @@ impl AstraService {
                     .store
                     .get_thread_work_state(&current_run.thread_id)?;
                 if latest_thread.kind == ThreadKind::Teamwork && !completions.is_empty() {
-                    if let Some((journal_round_index, planner_summary)) = pending_journal.take() {
+                    if let Some(journal) = pending_journal.take() {
                         let entry = super::artifacts::teamwork_round_journal_entry(
-                            &current_run.run_id,
-                            journal_round_index,
-                            &planner_summary,
+                            journal.run_round_index,
+                            journal.round_id.as_deref(),
+                            journal.thread_round_index,
+                            &journal.planner_summary,
                             &completions,
+                            &completion_artifact_paths,
                             now_ms(),
                         );
                         current_run = self.record_round_journal(&current_run.run_id, entry)?;
@@ -121,6 +124,7 @@ impl AstraService {
                     prompt.as_deref(),
                     current_round_index,
                     &completions,
+                    &completion_artifact_paths,
                 ) {
                     Ok(orchestration) => orchestration,
                     Err(error) => {
@@ -147,9 +151,15 @@ impl AstraService {
                 dispatch_batch = applied.dispatch_batch;
                 pending_wave_tasks = applied.deferred;
                 if !dispatch_batch.is_empty() {
-                    pending_journal = Some((current_round_index, plan_summary));
+                    pending_journal = Some(PendingRoundJournal {
+                        run_round_index: current_round_index,
+                        round_id: applied.plan_round_id,
+                        thread_round_index: applied.thread_round_index,
+                        planner_summary: plan_summary,
+                    });
                 }
                 completions.clear();
+                completion_artifact_paths.clear();
                 if dispatch_batch.is_empty() {
                     self.error_run(
                         &current_run.run_id,
@@ -170,6 +180,7 @@ impl AstraService {
                 &current_run,
                 &dispatch_batch,
                 &completions,
+                &completion_artifact_paths,
             ) {
                 Ok(results) => results,
                 Err(error) => {
@@ -205,6 +216,7 @@ impl AstraService {
                         &artifact_paths,
                     );
                 }
+                completion_artifact_paths.extend(artifact_paths);
             }
             // Accumulate across sequential batches: the whole round's results
             // must reach the next planning, not just the last task's.
@@ -240,6 +252,7 @@ impl AstraService {
         prompt: Option<&str>,
         round_index: u32,
         completions: &[AstraTaskCompletion],
+        completion_artifact_paths: &HashMap<String, String>,
     ) -> std::result::Result<(AstraOrchestration, String), BackendFailure> {
         let backend_config = self.astra_backend_config();
         let orchestrator_backend: Box<dyn OrchestratorBackend> =
@@ -261,6 +274,7 @@ impl AstraService {
             prompt,
             round_index,
             completions,
+            completion_artifact_paths,
             &planner_context,
             &config_value,
         ) {
@@ -372,7 +386,7 @@ impl AstraService {
             .iter()
             .map(|artifact| (artifact.role.as_str(), artifact))
             .collect::<HashMap<_, _>>();
-        let journal_by_run_round = teamwork_journal_by_run_round(&runs);
+        let journal_by_round_id = teamwork_journals(&runs);
         let run_round_index_by_round_id = run_round_indices_for_rounds(&rounds);
         let astra_round_count = rounds
             .iter()
@@ -393,7 +407,7 @@ impl AstraService {
                 detailed_thread_round_value(
                     round,
                     &run_round_index_by_round_id,
-                    &journal_by_run_round,
+                    &journal_by_round_id,
                     &current_artifacts_by_role,
                 )
             })
@@ -439,7 +453,7 @@ impl AstraService {
                 );
                 continue;
             };
-            let summary = self.canonical_artifact_summary(run, completion);
+            let summary = self.canonical_artifact_summary(completion);
             if let Err(error) =
                 self.inner
                     .store
@@ -461,21 +475,8 @@ impl AstraService {
         }
     }
 
-    fn canonical_artifact_summary(
-        &self,
-        run: &AstraRun,
-        completion: &AstraTaskCompletion,
-    ) -> String {
-        let persisted_summary = self
-            .load_astra_plan_task(&run.thread_id, completion.task.plan_task_id.as_deref())
-            .ok()
-            .flatten()
-            .and_then(|task| task.result_summary)
-            .map(|summary| summary.trim().to_string())
-            .filter(|summary| !summary.is_empty());
-        let summary = persisted_summary.unwrap_or_else(|| {
-            summarize_task_output(&final_task_output(&completion.result.output))
-        });
+    fn canonical_artifact_summary(&self, completion: &AstraTaskCompletion) -> String {
+        let summary = summarize_task_output(&final_task_output(&completion.result.output));
         let char_count = summary.chars().count();
         let mut truncated = if char_count > 600 {
             summary.chars().take(597).collect::<String>()
@@ -708,7 +709,7 @@ impl AstraService {
             )?;
             return Ok(AppliedOrchestration::terminal(self.load_run(&run.run_id)?));
         }
-        let tasks = self.create_plan_round_for_astra_tasks(
+        let created_round = self.create_plan_round_for_astra_tasks(
             run,
             &latest_thread,
             &summary,
@@ -716,6 +717,7 @@ impl AstraService {
             round_index,
             tasks,
         )?;
+        let tasks = created_round.tasks;
         let orchestrator_backend_for_run = orchestrator_backend.to_string();
         let (planned, ()) = self.mutate_run(&run.run_id, move |next| {
             if !next.status.active() {
@@ -747,6 +749,8 @@ impl AstraService {
         };
         Ok(AppliedOrchestration {
             run: planned,
+            plan_round_id: Some(created_round.round_id),
+            thread_round_index: Some(created_round.thread_round_index),
             dispatch_batch,
             deferred,
         })
@@ -883,14 +887,25 @@ impl AstraService {
 
 struct AppliedOrchestration {
     run: AstraRun,
+    plan_round_id: Option<String>,
+    thread_round_index: Option<i64>,
     dispatch_batch: Vec<super::AstraTaskProposal>,
     deferred: Vec<super::AstraTaskProposal>,
+}
+
+struct PendingRoundJournal {
+    run_round_index: u32,
+    round_id: Option<String>,
+    thread_round_index: Option<i64>,
+    planner_summary: String,
 }
 
 impl AppliedOrchestration {
     fn terminal(run: AstraRun) -> Self {
         Self {
             run,
+            plan_round_id: None,
+            thread_round_index: None,
             dispatch_batch: Vec::new(),
             deferred: Vec::new(),
         }
@@ -1030,10 +1045,8 @@ fn continuation_context_value(
     })
 }
 
-fn teamwork_journal_by_run_round(
-    runs: &[crate::store::AstraRunRecord],
-) -> HashMap<(String, u32), Value> {
-    let mut journal = HashMap::new();
+fn teamwork_journals(runs: &[crate::store::AstraRunRecord]) -> HashMap<String, Value> {
+    let mut by_round_id = HashMap::new();
     for run in runs {
         let Ok(diagnostics) = serde_json::from_str::<Vec<Value>>(&run.run_diagnostics_json) else {
             continue;
@@ -1044,17 +1057,12 @@ fn teamwork_journal_by_run_round(
             {
                 continue;
             }
-            let Some(round_index) = diagnostic
-                .get("roundIndex")
-                .and_then(Value::as_u64)
-                .and_then(|value| u32::try_from(value).ok())
-            else {
-                continue;
-            };
-            journal.insert((run.run_id.clone(), round_index), diagnostic);
+            if let Some(round_id) = diagnostic.get("roundId").and_then(Value::as_str) {
+                by_round_id.insert(round_id.to_string(), diagnostic);
+            }
         }
     }
-    journal
+    by_round_id
 }
 
 fn run_round_indices_for_rounds(rounds: &[PlanRoundInfo]) -> HashMap<String, u32> {
@@ -1090,27 +1098,24 @@ fn compact_thread_round_value(round: &PlanRoundInfo) -> Value {
 fn detailed_thread_round_value(
     round: &PlanRoundInfo,
     run_round_index_by_round_id: &HashMap<String, u32>,
-    journal_by_run_round: &HashMap<(String, u32), Value>,
+    journal_by_round_id: &HashMap<String, Value>,
     current_artifacts_by_role: &HashMap<&str, &ThreadAstraArtifactInfo>,
 ) -> Value {
     let run_round_index = run_round_index_by_round_id.get(&round.id).copied();
-    let journal =
-        round
-            .astra_run_id
-            .as_ref()
-            .zip(run_round_index)
-            .and_then(|(run_id, run_round_index)| {
-                journal_by_run_round.get(&(run_id.clone(), run_round_index))
-            });
+    let journal = journal_by_round_id.get(&round.id);
     let journal_tasks = journal
         .and_then(|value| value.get("tasks"))
         .and_then(Value::as_array);
+    let journal_task_by_id = journal_tasks.map(|tasks| journal_tasks_by_id(tasks.as_slice()));
     let tasks = round
         .tasks
         .iter()
         .enumerate()
         .map(|(index, task)| {
-            let journal_task = journal_tasks.and_then(|tasks| tasks.get(index));
+            let journal_task = journal_task_by_id
+                .as_ref()
+                .and_then(|tasks| tasks.get(task.id.as_str()).copied())
+                .or_else(|| journal_tasks.and_then(|tasks| tasks.get(index)));
             thread_task_value(round, task, journal_task, current_artifacts_by_role, false)
         })
         .collect::<Vec<_>>();
@@ -1134,6 +1139,18 @@ fn detailed_thread_round_value(
         "createdAt": round.created_at,
         "updatedAt": round.updated_at,
     })
+}
+
+fn journal_tasks_by_id(tasks: &[Value]) -> HashMap<&str, &Value> {
+    tasks
+        .iter()
+        .filter_map(|task| {
+            task.get("taskId")
+                .or_else(|| task.get("planTaskId"))
+                .and_then(Value::as_str)
+                .map(|task_id| (task_id, task))
+        })
+        .collect()
 }
 
 fn thread_task_value(
@@ -1201,7 +1218,7 @@ fn thread_task_value(
 }
 
 fn ordinary_task_artifact_path(
-    round: &PlanRoundInfo,
+    _round: &PlanRoundInfo,
     task: &PlanTaskInfo,
     journal_task: Option<&Value>,
     current_artifacts_by_role: &HashMap<&str, &ThreadAstraArtifactInfo>,
@@ -1221,11 +1238,6 @@ fn ordinary_task_artifact_path(
         .and_then(|task| task.get("outputPath"))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| {
-            round.astra_run_id.as_deref().map(|run_id| {
-                super::artifacts::task_artifact_relative_path(run_id, &task.id, &task.title)
-            })
-        })
 }
 
 fn interrupted_thread_tasks(
@@ -1233,19 +1245,6 @@ fn interrupted_thread_tasks(
     run_round_index_by_round_id: &HashMap<String, u32>,
     current_artifacts_by_role: &HashMap<&str, &ThreadAstraArtifactInfo>,
 ) -> Vec<Value> {
-    let mut latest_completed_by_key = HashMap::<String, i64>::new();
-    for round in rounds {
-        for task in &round.tasks {
-            if task.status != PlanTaskStatus::Completed {
-                continue;
-            }
-            latest_completed_by_key
-                .entry(task_replacement_key(task))
-                .and_modify(|round_index| *round_index = (*round_index).max(round.round_index))
-                .or_insert(round.round_index);
-        }
-    }
-
     let mut values = Vec::new();
     for round in rounds {
         let run_round_index = run_round_index_by_round_id.get(&round.id).copied();
@@ -1258,12 +1257,6 @@ fn interrupted_thread_tasks(
                     | PlanTaskStatus::Errored
                     | PlanTaskStatus::Cancelled
             ) {
-                continue;
-            }
-            if latest_completed_by_key
-                .get(&task_replacement_key(task))
-                .is_some_and(|completed_round| *completed_round > round.round_index)
-            {
                 continue;
             }
             let mut value = thread_task_value(round, task, None, current_artifacts_by_role, true);
@@ -1287,21 +1280,6 @@ fn task_status_counts(tasks: &[PlanTaskInfo]) -> Value {
         counts.insert(key, json!(current + 1));
     }
     Value::Object(counts)
-}
-
-fn task_replacement_key(task: &PlanTaskInfo) -> String {
-    format!(
-        "{}\0{}\0{}\0{}\0{}",
-        task.title
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase(),
-        task.assistant_id.as_deref().unwrap_or(""),
-        task.agent_participant_id.as_deref().unwrap_or(""),
-        task.target_agent.as_str(),
-        task.artifact_role.as_deref().unwrap_or(""),
-    )
 }
 
 fn orchestrator_backend_failure_diagnostic(
@@ -1453,6 +1431,120 @@ mod tests {
     }
 
     #[test]
+    fn teamwork_journals_ignore_legacy_entries_without_round_id() {
+        let runs = vec![crate::store::AstraRunRecord {
+            run_id: "run-old".to_string(),
+            thread_id: "thread-1".to_string(),
+            project_id: "project-1".to_string(),
+            project_path: "/tmp/project".to_string(),
+            continued_from_run_id: None,
+            status: "completed".to_string(),
+            mode: "auto".to_string(),
+            planner_backend: Some("deterministic".to_string()),
+            round_index: Some(2),
+            round_limit: 3,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+            internal_planner_sessions: Vec::new(),
+            run_diagnostics_json: serde_json::to_string(&vec![
+                json!({
+                    "kind": crate::astra::artifacts::TEAMWORK_ROUND_JOURNAL_KIND,
+                    "roundIndex": 0,
+                    "plannerSummary": "legacy journal without stable round id",
+                    "tasks": [{
+                        "taskId": "legacy-task",
+                        "outputExcerpt": "legacy excerpt",
+                    }],
+                }),
+                json!({
+                    "kind": crate::astra::artifacts::TEAMWORK_ROUND_JOURNAL_KIND,
+                    "roundId": "round-current",
+                    "roundIndex": 1,
+                    "plannerSummary": "stable journal",
+                    "tasks": [{
+                        "taskId": "current-task",
+                        "outputExcerpt": "current excerpt",
+                    }],
+                }),
+            ])
+            .unwrap(),
+            error: None,
+            created_at: 10,
+            updated_at: 20,
+        }];
+
+        let journals = teamwork_journals(&runs);
+
+        assert_eq!(journals.len(), 1);
+        assert_eq!(
+            journals["round-current"]["plannerSummary"],
+            "stable journal"
+        );
+        assert!(journals
+            .values()
+            .all(|journal| journal.get("roundId").and_then(Value::as_str).is_some()));
+    }
+
+    fn round_for_progress(id: &str, round_index: i64, tasks: Vec<PlanTaskInfo>) -> PlanRoundInfo {
+        PlanRoundInfo {
+            id: id.to_string(),
+            thread_id: "thread-1".to_string(),
+            astra_run_id: Some("run-old".to_string()),
+            round_index,
+            summary: Some("persisted summary".to_string()),
+            mode: PlanRoundMode::Parallel,
+            source: PlanRoundSource::Astra,
+            status: crate::models::PlanRoundStatus::Completed,
+            created_at: 10,
+            updated_at: 20,
+            tasks,
+        }
+    }
+
+    fn task_for_progress(
+        round_id: &str,
+        id: &str,
+        title: &str,
+        sort_order: i64,
+        status: PlanTaskStatus,
+    ) -> PlanTaskInfo {
+        PlanTaskInfo {
+            id: id.to_string(),
+            round_id: round_id.to_string(),
+            thread_stage_id: None,
+            assistant_id: Some("assistant-codex".to_string()),
+            agent_participant_id: None,
+            target_agent: Agent::Codex,
+            stage_snapshot_json: None,
+            assistant_snapshot_json: None,
+            agent_snapshot_json: r#"{"agent":"codex"}"#.to_string(),
+            title: title.to_string(),
+            prompt: "Do the work".to_string(),
+            expected_output: Some("Result".to_string()),
+            artifact_role: None,
+            uses_artifact_roles: Vec::new(),
+            risk: crate::models::PlanTaskRisk::Low,
+            sort_order,
+            status,
+            result_summary: Some("result summary".to_string()),
+            error: if matches!(
+                status,
+                PlanTaskStatus::Failed | PlanTaskStatus::Errored | PlanTaskStatus::Cancelled
+            ) {
+                Some("task did not complete".to_string())
+            } else {
+                None
+            },
+            started_at: Some(11),
+            completed_at: Some(12),
+            created_at: 10,
+            updated_at: 20,
+            sessions: Vec::new(),
+        }
+    }
+
+    #[test]
     fn thread_progress_round_value_includes_artifact_paths_and_round_indices() {
         let round = PlanRoundInfo {
             id: "round-1".to_string(),
@@ -1494,12 +1586,14 @@ mod tests {
         };
         let mut run_round_indices = HashMap::new();
         run_round_indices.insert("round-1".to_string(), 2);
-        let mut journals = HashMap::new();
-        journals.insert(
-            ("run-old".to_string(), 2),
+        let mut journal_by_round_id = HashMap::new();
+        journal_by_round_id.insert(
+            "round-1".to_string(),
             json!({
+                "roundId": "round-1",
                 "plannerSummary": "journal summary",
                 "tasks": [{
+                    "taskId": "task-done",
                     "outputExcerpt": "journal excerpt",
                     "outputPath": ".sessio/astra/run-old/tasks/完成需求分析--task-done.md",
                 }],
@@ -1507,8 +1601,12 @@ mod tests {
         );
         let current_artifacts = HashMap::new();
 
-        let value =
-            detailed_thread_round_value(&round, &run_round_indices, &journals, &current_artifacts);
+        let value = detailed_thread_round_value(
+            &round,
+            &run_round_indices,
+            &journal_by_round_id,
+            &current_artifacts,
+        );
 
         assert_eq!(value["threadRoundIndex"], 7);
         assert_eq!(value["runRoundIndex"], 2);
@@ -1518,6 +1616,146 @@ mod tests {
             value["tasks"][0]["artifactPath"],
             ".sessio/astra/run-old/tasks/完成需求分析--task-done.md"
         );
+    }
+
+    #[test]
+    fn thread_progress_matches_journal_tasks_by_task_id_before_index() {
+        let round = round_for_progress(
+            "round-1",
+            7,
+            vec![
+                task_for_progress(
+                    "round-1",
+                    "task-a",
+                    "声明顺序中的第一个任务",
+                    0,
+                    PlanTaskStatus::Completed,
+                ),
+                task_for_progress(
+                    "round-1",
+                    "task-b",
+                    "声明顺序中的第二个任务",
+                    1,
+                    PlanTaskStatus::Completed,
+                ),
+            ],
+        );
+        let mut run_round_indices = HashMap::new();
+        run_round_indices.insert("round-1".to_string(), 2);
+        let mut journal_by_round_id = HashMap::new();
+        journal_by_round_id.insert(
+            "round-1".to_string(),
+            json!({
+                "roundId": "round-1",
+                "plannerSummary": "journal summary",
+                "tasks": [
+                    {
+                        "taskId": "task-b",
+                        "outputExcerpt": "second task output",
+                        "outputPath": ".sessio/astra/run-old/tasks/second--task-b.md",
+                    },
+                    {
+                        "taskId": "task-a",
+                        "outputExcerpt": "first task output",
+                        "outputPath": ".sessio/astra/run-old/tasks/first--task-a.md",
+                    }
+                ],
+            }),
+        );
+        let current_artifacts = HashMap::new();
+
+        let value = detailed_thread_round_value(
+            &round,
+            &run_round_indices,
+            &journal_by_round_id,
+            &current_artifacts,
+        );
+
+        assert_eq!(value["tasks"][0]["id"], "task-a");
+        assert_eq!(value["tasks"][0]["outputExcerpt"], "first task output");
+        assert_eq!(
+            value["tasks"][0]["artifactPath"],
+            ".sessio/astra/run-old/tasks/first--task-a.md"
+        );
+        assert_eq!(value["tasks"][1]["id"], "task-b");
+        assert_eq!(value["tasks"][1]["outputExcerpt"], "second task output");
+        assert_eq!(
+            value["tasks"][1]["artifactPath"],
+            ".sessio/astra/run-old/tasks/second--task-b.md"
+        );
+    }
+
+    #[test]
+    fn thread_progress_uses_journal_by_persisted_round_id() {
+        let round = round_for_progress(
+            "round-1",
+            7,
+            vec![task_for_progress(
+                "round-1",
+                "task-done",
+                "完成需求分析",
+                0,
+                PlanTaskStatus::Completed,
+            )],
+        );
+        let mut run_round_indices = HashMap::new();
+        run_round_indices.insert("round-1".to_string(), 99);
+        let mut journal_by_round_id = HashMap::new();
+        journal_by_round_id.insert(
+            "round-1".to_string(),
+            json!({
+                "roundId": "round-1",
+                "roundIndex": 0,
+                "plannerSummary": "round id journal summary",
+                "tasks": [{
+                    "taskId": "task-done",
+                    "outputExcerpt": "round id excerpt",
+                    "outputPath": ".sessio/astra/run-old/tasks/done--task-done.md",
+                }],
+            }),
+        );
+        let current_artifacts = HashMap::new();
+
+        let value = detailed_thread_round_value(
+            &round,
+            &run_round_indices,
+            &journal_by_round_id,
+            &current_artifacts,
+        );
+
+        assert_eq!(value["summary"], "round id journal summary");
+        assert_eq!(value["tasks"][0]["outputExcerpt"], "round id excerpt");
+        assert_eq!(
+            value["tasks"][0]["artifactPath"],
+            ".sessio/astra/run-old/tasks/done--task-done.md"
+        );
+    }
+
+    #[test]
+    fn thread_progress_does_not_invent_artifact_path_without_journal_path() {
+        let round = round_for_progress(
+            "round-1",
+            7,
+            vec![task_for_progress(
+                "round-1",
+                "task-done",
+                "完成需求分析",
+                0,
+                PlanTaskStatus::Completed,
+            )],
+        );
+        let run_round_indices = HashMap::new();
+        let current_artifacts = HashMap::new();
+        let journal_by_round_id = HashMap::new();
+
+        let value = detailed_thread_round_value(
+            &round,
+            &run_round_indices,
+            &journal_by_round_id,
+            &current_artifacts,
+        );
+
+        assert!(value["tasks"][0].get("artifactPath").is_none());
     }
 
     #[test]
@@ -1578,12 +1816,107 @@ mod tests {
         let mut current_artifacts = HashMap::new();
         current_artifacts.insert(artifact.role.as_str(), &artifact);
         let run_round_indices = HashMap::new();
-        let journals = HashMap::new();
+        let journal_by_round_id = HashMap::new();
 
-        let value =
-            detailed_thread_round_value(&round, &run_round_indices, &journals, &current_artifacts);
+        let value = detailed_thread_round_value(
+            &round,
+            &run_round_indices,
+            &journal_by_round_id,
+            &current_artifacts,
+        );
 
         assert!(value["tasks"][0].get("artifactPath").is_none());
+    }
+
+    #[test]
+    fn interrupted_tasks_keep_failed_work_despite_later_same_title_completion() {
+        let failed_round = round_for_progress(
+            "round-failed",
+            1,
+            vec![task_for_progress(
+                "round-failed",
+                "task-review-failed",
+                "Review",
+                0,
+                PlanTaskStatus::Errored,
+            )],
+        );
+        let completed_round = round_for_progress(
+            "round-completed",
+            2,
+            vec![task_for_progress(
+                "round-completed",
+                "task-review-completed",
+                "Review",
+                0,
+                PlanTaskStatus::Completed,
+            )],
+        );
+        let run_round_indices = HashMap::new();
+        let current_artifacts = HashMap::new();
+
+        let interrupted = interrupted_thread_tasks(
+            &[failed_round, completed_round],
+            &run_round_indices,
+            &current_artifacts,
+        );
+
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0]["id"], "task-review-failed");
+        assert_eq!(interrupted[0]["status"], "errored");
+    }
+
+    #[test]
+    fn interrupted_tasks_keep_planned_and_running_same_title_work() {
+        let planned_round = round_for_progress(
+            "round-planned",
+            1,
+            vec![task_for_progress(
+                "round-planned",
+                "task-review-planned",
+                "Review",
+                0,
+                PlanTaskStatus::Planned,
+            )],
+        );
+        let running_round = round_for_progress(
+            "round-running",
+            2,
+            vec![task_for_progress(
+                "round-running",
+                "task-review-running",
+                "Review",
+                0,
+                PlanTaskStatus::Running,
+            )],
+        );
+        let completed_round = round_for_progress(
+            "round-completed",
+            3,
+            vec![task_for_progress(
+                "round-completed",
+                "task-review-completed",
+                "Review",
+                0,
+                PlanTaskStatus::Completed,
+            )],
+        );
+        let run_round_indices = HashMap::new();
+        let current_artifacts = HashMap::new();
+
+        let interrupted = interrupted_thread_tasks(
+            &[planned_round, running_round, completed_round],
+            &run_round_indices,
+            &current_artifacts,
+        );
+
+        assert_eq!(
+            interrupted
+                .iter()
+                .map(|task| task["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["task-review-planned", "task-review-running"]
+        );
     }
 
     #[test]

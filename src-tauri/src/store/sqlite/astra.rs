@@ -17,6 +17,31 @@ const ACTIVE_ASTRA_RUN_STATUS_SQL: &str =
 const ASTRA_ARTIFACT_SELECT: &str = "id, thread_id, astra_run_id, source_task_id, role, title,
     path, summary, is_current, created_at, updated_at, superseded_at";
 
+#[derive(Clone, Copy)]
+struct ActiveRunInterruption {
+    terminal_reason: &'static str,
+    error_code: &'static str,
+    message: &'static str,
+    task_error: &'static str,
+    task_summary: &'static str,
+}
+
+const STARTUP_RECOVERY_INTERRUPTION: ActiveRunInterruption = ActiveRunInterruption {
+    terminal_reason: "process_recovered_active_run",
+    error_code: "worker_interrupted",
+    message: "Astra run was active during startup recovery",
+    task_error: "Astra task was active during startup recovery",
+    task_summary: "Interrupted during startup recovery",
+};
+
+const WORKERLESS_RUN_INTERRUPTION: ActiveRunInterruption = ActiveRunInterruption {
+    terminal_reason: "zombie_active_run",
+    error_code: "worker_missing",
+    message: "Astra run had no registered worker when starting a new run",
+    task_error: "Astra task was active but its worker was missing when starting a new run",
+    task_summary: "Interrupted while recovering a workerless Astra run",
+};
+
 fn astra_run_from_row_without_sessions(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<AstraRunRecord> {
@@ -442,36 +467,61 @@ pub(super) fn register_current_astra_artifact(
 }
 
 pub(super) fn interrupt_active_astra_runs(conn: &mut Connection) -> Result<Vec<AstraRunRecord>> {
-    interrupt_active_astra_runs_matching(conn, None)
+    interrupt_active_astra_runs_matching(conn, None, &[], STARTUP_RECOVERY_INTERRUPTION)
 }
 
 pub(super) fn interrupt_active_astra_runs_for_thread(
     conn: &mut Connection,
     thread_id: &str,
 ) -> Result<Vec<AstraRunRecord>> {
-    interrupt_active_astra_runs_matching(conn, Some(thread_id))
+    interrupt_active_astra_runs_matching(conn, Some(thread_id), &[], WORKERLESS_RUN_INTERRUPTION)
+}
+
+pub(super) fn interrupt_active_astra_runs_for_thread_except(
+    conn: &mut Connection,
+    thread_id: &str,
+    excluded_run_ids: &[String],
+) -> Result<Vec<AstraRunRecord>> {
+    interrupt_active_astra_runs_matching(
+        conn,
+        Some(thread_id),
+        excluded_run_ids,
+        WORKERLESS_RUN_INTERRUPTION,
+    )
 }
 
 fn interrupt_active_astra_runs_matching(
     conn: &mut Connection,
     thread_id: Option<&str>,
+    excluded_run_ids: &[String],
+    interruption: ActiveRunInterruption,
 ) -> Result<Vec<AstraRunRecord>> {
     let tx = conn.transaction()?;
     let now = now_ms();
+    let mut predicates = String::new();
+    let mut match_params = Vec::<SqlValue>::new();
+    if let Some(thread_id) = thread_id {
+        predicates.push_str(" AND thread_id = ?");
+        match_params.push(SqlValue::from(thread_id.to_string()));
+    }
+    if !excluded_run_ids.is_empty() {
+        let placeholders = std::iter::repeat("?")
+            .take(excluded_run_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        predicates.push_str(&format!(" AND run_id NOT IN ({placeholders})"));
+        match_params.extend(excluded_run_ids.iter().cloned().map(SqlValue::from));
+    }
     let mut active: Vec<AstraRunRecord> = {
-        let thread_predicate = thread_id.map(|_| " AND thread_id = ?").unwrap_or("");
         let sql = format!(
             "SELECT {ASTRA_RUN_SELECT}
              FROM astra_runs
-             WHERE status IN ({ACTIVE_ASTRA_RUN_STATUS_SQL}){thread_predicate}
+             WHERE status IN ({ACTIVE_ASTRA_RUN_STATUS_SQL}){predicates}
              ORDER BY updated_at DESC, created_at DESC"
         );
-        let select_params = thread_id
-            .map(|thread_id| vec![SqlValue::from(thread_id.to_string())])
-            .unwrap_or_default();
         let mut stmt = tx.prepare(&sql)?;
         let rows = stmt.query_map(
-            params_from_iter(select_params.iter()),
+            params_from_iter(match_params.iter()),
             astra_run_from_row_without_sessions,
         )?;
         let mut runs = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -503,21 +553,24 @@ fn interrupt_active_astra_runs_matching(
             }
         }
     }
-    let thread_predicate = thread_id.map(|_| " AND thread_id = ?").unwrap_or("");
     let update_active_runs_sql = format!(
         "UPDATE astra_runs
          SET status = 'interrupted',
-             terminal_reason = COALESCE(terminal_reason, 'process_recovered_active_run'),
-             last_error_code = COALESCE(last_error_code, 'worker_interrupted'),
-             last_error_message = COALESCE(last_error_message, 'Astra run was active during startup recovery'),
-             error = COALESCE(error, 'Astra run was active during startup recovery'),
+             terminal_reason = COALESCE(terminal_reason, ?),
+             last_error_code = COALESCE(last_error_code, ?),
+             last_error_message = COALESCE(last_error_message, ?),
+             error = COALESCE(error, ?),
              updated_at = ?
-         WHERE status IN ({ACTIVE_ASTRA_RUN_STATUS_SQL}){thread_predicate}"
+         WHERE status IN ({ACTIVE_ASTRA_RUN_STATUS_SQL}){predicates}"
     );
-    let mut update_params = vec![SqlValue::from(now)];
-    if let Some(thread_id) = thread_id {
-        update_params.push(SqlValue::from(thread_id.to_string()));
-    }
+    let mut update_params = vec![
+        SqlValue::from(interruption.terminal_reason.to_string()),
+        SqlValue::from(interruption.error_code.to_string()),
+        SqlValue::from(interruption.message.to_string()),
+        SqlValue::from(interruption.message.to_string()),
+        SqlValue::from(now),
+    ];
+    update_params.extend(match_params.iter().cloned());
     tx.execute(
         &update_active_runs_sql,
         params_from_iter(update_params.iter()),
@@ -526,8 +579,8 @@ fn interrupt_active_astra_runs_matching(
         tx.execute(
             "UPDATE thread_plan_tasks
              SET status = 'errored',
-                 error = COALESCE(error, 'Astra task was active during startup recovery'),
-                 result_summary = COALESCE(result_summary, 'Interrupted during startup recovery'),
+                 error = COALESCE(error, ?),
+                 result_summary = COALESCE(result_summary, ?),
                  completed_at = COALESCE(completed_at, ?),
                  updated_at = ?
              WHERE status = 'running'
@@ -536,7 +589,13 @@ fn interrupt_active_astra_runs_matching(
                    FROM thread_plan_rounds
                    WHERE astra_run_id = ?
                )",
-            params![now, now, run.run_id],
+            params![
+                interruption.task_error,
+                interruption.task_summary,
+                now,
+                now,
+                run.run_id
+            ],
         )?;
         tx.execute(
             "UPDATE thread_plan_rounds
@@ -562,17 +621,16 @@ fn interrupt_active_astra_runs_matching(
     for run in &mut active {
         run.status = "interrupted".to_string();
         if run.terminal_reason.is_none() {
-            run.terminal_reason = Some("process_recovered_active_run".to_string());
+            run.terminal_reason = Some(interruption.terminal_reason.to_string());
         }
         if run.last_error_code.is_none() {
-            run.last_error_code = Some("worker_interrupted".to_string());
+            run.last_error_code = Some(interruption.error_code.to_string());
         }
         if run.last_error_message.is_none() {
-            run.last_error_message =
-                Some("Astra run was active during startup recovery".to_string());
+            run.last_error_message = Some(interruption.message.to_string());
         }
         if run.error.is_none() {
-            run.error = Some("Astra run was active during startup recovery".to_string());
+            run.error = Some(interruption.message.to_string());
         }
         run.updated_at = now;
     }

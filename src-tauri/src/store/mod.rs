@@ -752,6 +752,11 @@ pub trait SessionStore: Send + Sync {
         &self,
         thread_id: &str,
     ) -> Result<Vec<AstraRunRecord>>;
+    fn interrupt_active_astra_runs_for_thread_except(
+        &self,
+        thread_id: &str,
+        excluded_run_ids: &[String],
+    ) -> Result<Vec<AstraRunRecord>>;
     fn reconcile_terminal_astra_run_plan_work(&self, run_id: &str) -> Result<usize>;
     fn reconcile_terminal_astra_runs_plan_work(&self) -> Result<usize>;
     fn reconcile_terminal_astra_runs_plan_work_for_thread(&self, thread_id: &str) -> Result<usize>;
