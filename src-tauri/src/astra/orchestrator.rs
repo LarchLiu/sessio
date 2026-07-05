@@ -159,7 +159,11 @@ impl AstraService {
             if !current_run.status.active() {
                 return Ok(RustNativeWorkerOutcome::Claimed);
             }
-            let results = match self.dispatch_task_batch_and_wait(&current_run, &dispatch_batch) {
+            let results = match self.dispatch_task_batch_and_wait(
+                &current_run,
+                &dispatch_batch,
+                &completions,
+            ) {
                 Ok(results) => results,
                 Err(error) => {
                     self.fail_run(&current_run.run_id, error.to_string())?;

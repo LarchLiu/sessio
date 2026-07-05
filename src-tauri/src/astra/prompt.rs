@@ -54,9 +54,9 @@ tasks:
 
 assistantId must reference one of thread.assistants. targetAgent should match that assistant's runtime agent. If you create an agent-level task without assistantId, targetAgent is required, but prefer assistantId so Sessio can preserve team-member history and assistant snapshots.
 
-dependsOn declares execution-order dependencies inside one parallel round and is only valid with mode: parallel; a sequential round with dependsOn is rejected. Tasks with an empty or omitted dependsOn start immediately and run concurrently. A task starts only after every task it depends on completed successfully; if any dependency fails, errors, or is cancelled, the dependent task is cancelled automatically and reported as cancelled with the blocking dependency in its error. dependsOn must be a YAML list of task ids from this same response, with no self references, no unknown ids, and no cycles. id is required for any task that other tasks depend on, and a referenced id must be unique in the response. Prefer one parallel round with dependsOn over several single-task rounds when work fans out and joins (for example: t1 and t2 independent, then t3 with dependsOn: [t1, t2]).
+dependsOn declares execution-order dependencies inside one parallel round and is only valid with mode: parallel; a sequential round with dependsOn is rejected. Tasks with an empty or omitted dependsOn start immediately and run concurrently. A task starts only after every task it depends on completed successfully; if any dependency fails, errors, or is cancelled, the dependent task is cancelled automatically and reported as cancelled with the blocking dependency in its error. dependsOn must be a YAML list of task ids from this same response, with no self references, no unknown ids, and no cycles. id is required for any task that other tasks depend on, and a referenced id must be unique in the response. Use mode: sequential for strictly linear handoffs where task B must build directly on task A's output. Use mode: parallel with dependsOn only for fan-out/fan-in work where independent roots can run concurrently and downstream tasks wait for them (for example: t1 and t2 independent, then t3 with dependsOn: [t1, t2]).
 
-Plan the next useful batch from the shared thread goal, userPrompt, thread.assistants, completedTasks, and prior session refs. Tasks in a parallel batch may target different assistants when independent. Use sequential only when the whole round is strictly linear; when a round mixes independent and dependent tasks, use parallel with dependsOn.
+Plan the next useful batch from the shared thread goal, userPrompt, thread.assistants, completedTasks, and prior session refs. Tasks in a parallel batch may target different assistants only when their work is independent. Do not place two tasks in the same immediate parallel wave if one needs the other's research, outline, draft, decisions, or artifact. For downstream tasks, explicitly tell the assistant to use upstream artifacts when available; Sessio also injects completed dependency artifact paths into the delegated task prompt.
 
 previousRounds is the run journal: one entry per earlier completed round, with the planner summary and each task's title, assistantId, risk, status, and outputExcerpt. completedTasks carries the full outputs of the most recent round only; the round already covered by completedTasks is not repeated in previousRounds. Use previousRounds to recall earlier results and decisions, avoid re-running finished work, and keep new tasks consistent with what was already built.
 
@@ -1586,6 +1586,9 @@ mod tests {
         assert!(instruction.contains("response schema is closed"));
         assert!(instruction.contains("dependsOn: [ids of other tasks in this response]"));
         assert!(instruction.contains("only valid with mode: parallel"));
+        assert!(instruction.contains("Use mode: sequential for strictly linear handoffs"));
+        assert!(instruction.contains("Do not place two tasks in the same immediate parallel wave"));
+        assert!(instruction.contains("Sessio also injects completed dependency artifact paths"));
         assert!(instruction.contains("previousRounds is the run journal"));
         assert!(instruction.contains("Full outputs on demand"));
         assert!(instruction.contains("acceptance criteria"));

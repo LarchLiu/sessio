@@ -96,6 +96,59 @@ fn validate_astra_tasks_for_thread(thread: &ThreadInfo, tasks: &[AstraTaskPropos
     Ok(())
 }
 
+fn task_with_prior_teamwork_context(
+    run: &AstraRun,
+    thread: &ThreadInfo,
+    task: &AstraTaskProposal,
+    prior_completions: &[AstraTaskCompletion],
+) -> Option<AstraTaskProposal> {
+    if thread.kind != ThreadKind::Teamwork || prior_completions.is_empty() {
+        return None;
+    }
+
+    let relevant = prior_completions
+        .iter()
+        .filter(|completion| completion.result.status == AstraTaskResultStatus::Completed)
+        .filter(|completion| {
+            task.depends_on.is_empty()
+                || task
+                    .depends_on
+                    .iter()
+                    .any(|dependency| dependency == &completion.task.id)
+        })
+        .collect::<Vec<_>>();
+    if relevant.is_empty() {
+        return None;
+    }
+
+    let mut lines = vec![
+        "## Completed prior teamwork outputs".to_string(),
+        "These tasks completed earlier in this Astra round. Read the workspace-relative artifact files before continuing when your task builds on their work.".to_string(),
+    ];
+    for completion in relevant {
+        let artifact_path = artifacts::task_artifact_relative_path(
+            &run.run_id,
+            &completion.task.id,
+            &completion.task.title,
+        );
+        let output = final_task_output(&completion.result.output);
+        lines.push(format!("- {}", completion.task.title));
+        lines.push(format!("  - taskId: {}", completion.task.id));
+        lines.push(format!("  - artifact: `{artifact_path}`"));
+        let excerpt = structured_response::truncate_chars(&output, 800);
+        if !excerpt.trim().is_empty() {
+            lines.push("  - excerpt:".to_string());
+            for line in excerpt.lines() {
+                lines.push(format!("    {}", line.trim_end()));
+            }
+        }
+    }
+
+    let mut next = task.clone();
+    next.prompt = format!("{}\n\n{}", task.prompt.trim_end(), lines.join("\n"));
+    Some(next)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateAstraRunRequest {
@@ -571,9 +624,13 @@ impl AstraService {
         run: &AstraRun,
         thread: &ThreadInfo,
         task: &AstraTaskProposal,
+        prior_completions: &[AstraTaskCompletion],
         attempt: DelegatedAttempt<'_>,
         task_waiter: Option<mpsc::Sender<AstraTaskResult>>,
     ) -> Result<AgentSessionHandle> {
+        let contextual_task =
+            task_with_prior_teamwork_context(run, thread, task, prior_completions);
+        let task = contextual_task.as_ref().unwrap_or(task);
         let plan_task = self.load_astra_plan_task(&run.thread_id, task.plan_task_id.as_deref())?;
         let stage_context = match plan_task
             .as_ref()
@@ -883,6 +940,7 @@ impl AstraService {
         &self,
         run: &AstraRun,
         tasks: &[AstraTaskProposal],
+        prior_completions: &[AstraTaskCompletion],
     ) -> Result<Vec<AstraTaskResult>> {
         if tasks.is_empty() {
             return Ok(Vec::new());
@@ -909,6 +967,7 @@ impl AstraService {
                 &next,
                 &thread,
                 task,
+                prior_completions,
                 DelegatedAttempt {
                     thread_stage_id: task.target_stage_id.as_deref(),
                     attempt_count,
@@ -2434,7 +2493,7 @@ mod tests {
         assert!(!excerpt.contains("Final result:"));
         assert_eq!(
             tasks[0]["outputPath"],
-            task_artifact_relative_path("run-1", "task-ok")
+            task_artifact_relative_path("run-1", "task-ok", "实现登录接口")
         );
         assert_eq!(tasks[1]["status"], "failed");
         assert!(tasks[0].get("error").is_none());
@@ -2458,17 +2517,27 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sessio-artifact-test-{}", now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let project_path = dir.to_string_lossy().to_string();
+        let mut task = test_task("task-ok", "stage-1");
+        task.title = "末日废土题材调研与创作定位".to_string();
         let completion = AstraTaskCompletion {
             result: test_task_result("task-ok", "session-1", "Final result: 完整结论正文。"),
-            task: test_task("task-ok", "stage-1"),
+            task,
         };
 
         write_task_artifacts(&project_path, "run/1", &[completion]);
 
-        let relative = task_artifact_relative_path("run/1", "task-ok");
-        assert_eq!(relative, ".sessio/astra/run-1/tasks/task-ok.md");
+        let relative =
+            task_artifact_relative_path("run/1", "task-ok", "末日废土题材调研与创作定位");
+        assert_eq!(
+            relative,
+            ".sessio/astra/run-1/tasks/末日废土题材调研与创作定位--task-ok.md"
+        );
+        assert_eq!(
+            task_artifact_relative_path("run/1", "task/ok", "  Research / Outline: v1?  "),
+            ".sessio/astra/run-1/tasks/Research-Outline-v1--task-ok.md"
+        );
         let body = std::fs::read_to_string(dir.join(&relative)).unwrap();
-        assert!(body.contains("# Advance stage"));
+        assert!(body.contains("# 末日废土题材调研与创作定位"));
         assert!(body.contains("完整结论正文。"));
         assert!(!body.contains("Final result:"));
         let gitignore = std::fs::read_to_string(dir.join(".sessio/astra/.gitignore")).unwrap();
@@ -2485,7 +2554,7 @@ mod tests {
         let value = planner_task_completion_value("run-1", &completion);
         assert_eq!(
             value["result"]["fullOutputPath"],
-            task_artifact_relative_path("run-1", "task-ok")
+            task_artifact_relative_path("run-1", "task-ok", "Advance stage")
         );
 
         let mut cancelled_result = test_task_result("task-skip", "", "");
@@ -2565,6 +2634,95 @@ mod tests {
         let error = validate_astra_tasks_for_thread(&test_thread(Vec::new()), &[teamwork_task])
             .unwrap_err();
         assert!(error.to_string().contains("no targetStageId"));
+    }
+
+    #[test]
+    fn teamwork_dependency_tasks_receive_prior_artifact_context() {
+        let mut thread = test_thread(Vec::new());
+        thread.kind = ThreadKind::Teamwork;
+        let mut upstream_task = test_task("task-research", "stage-1");
+        upstream_task.title = "末日废土题材调研与创作定位".to_string();
+        upstream_task.target_stage_id = None;
+        let mut unrelated_task = test_task("task-side", "stage-1");
+        unrelated_task.title = "旁路线索整理".to_string();
+        unrelated_task.target_stage_id = None;
+        let mut upstream_result = test_task_result(
+            "task-research",
+            "runtime-research",
+            "Final result: 废土设定应强调资源稀缺、迁徙路线和社区冲突。",
+        );
+        upstream_result.thread_stage_id = None;
+        let mut unrelated_result =
+            test_task_result("task-side", "runtime-side", "Final result: unrelated");
+        unrelated_result.thread_stage_id = None;
+        let completions = vec![
+            AstraTaskCompletion {
+                task: upstream_task,
+                result: upstream_result,
+            },
+            AstraTaskCompletion {
+                task: unrelated_task,
+                result: unrelated_result,
+            },
+        ];
+        let mut downstream_task = test_task("task-outline", "stage-1");
+        downstream_task.title = "长篇小说总纲与章节路线".to_string();
+        downstream_task.target_stage_id = None;
+        downstream_task.prompt = "写长篇小说总纲。".to_string();
+        downstream_task.depends_on = vec!["task-research".to_string()];
+
+        let contextual = task_with_prior_teamwork_context(
+            &test_run("run-1"),
+            &thread,
+            &downstream_task,
+            &completions,
+        )
+        .unwrap();
+
+        assert!(contextual
+            .prompt
+            .contains("## Completed prior teamwork outputs"));
+        assert!(contextual
+            .prompt
+            .contains(".sessio/astra/run-1/tasks/末日废土题材调研与创作定位--task-research.md"));
+        assert!(contextual
+            .prompt
+            .contains("废土设定应强调资源稀缺、迁徙路线和社区冲突"));
+        assert!(!contextual.prompt.contains("旁路线索整理"));
+    }
+
+    #[test]
+    fn sequential_teamwork_tasks_receive_all_prior_outputs() {
+        let mut thread = test_thread(Vec::new());
+        thread.kind = ThreadKind::Teamwork;
+        let mut upstream_task = test_task("task-research", "stage-1");
+        upstream_task.title = "调研".to_string();
+        upstream_task.target_stage_id = None;
+        let mut upstream_result = test_task_result(
+            "task-research",
+            "runtime-research",
+            "Final result: prior notes",
+        );
+        upstream_result.thread_stage_id = None;
+        let mut downstream_task = test_task("task-outline", "stage-1");
+        downstream_task.target_stage_id = None;
+        downstream_task.depends_on = Vec::new();
+
+        let contextual = task_with_prior_teamwork_context(
+            &test_run("run-1"),
+            &thread,
+            &downstream_task,
+            &[AstraTaskCompletion {
+                task: upstream_task,
+                result: upstream_result,
+            }],
+        )
+        .unwrap();
+
+        assert!(contextual
+            .prompt
+            .contains(".sessio/astra/run-1/tasks/调研--task-research.md"));
+        assert!(contextual.prompt.contains("prior notes"));
     }
 
     #[test]

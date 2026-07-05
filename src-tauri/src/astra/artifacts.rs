@@ -54,7 +54,11 @@ pub(super) fn planner_task_completion_value(
         if let Some(result) = value.get_mut("result").and_then(Value::as_object_mut) {
             result.insert(
                 "fullOutputPath".to_string(),
-                json!(task_artifact_relative_path(run_id, &completion.task.id)),
+                json!(task_artifact_relative_path(
+                    run_id,
+                    &completion.task.id,
+                    &completion.task.title
+                )),
             );
         }
     }
@@ -63,10 +67,11 @@ pub(super) fn planner_task_completion_value(
 
 /// Workspace-relative path of the markdown artifact holding a task's complete
 /// final output. The scheme is deterministic so prompt builders never need IO.
-pub(super) fn task_artifact_relative_path(run_id: &str, task_id: &str) -> String {
+pub(super) fn task_artifact_relative_path(run_id: &str, task_id: &str, task_title: &str) -> String {
     format!(
-        "{ASTRA_ARTIFACT_ROOT_DIR}/{}/tasks/{}.md",
+        "{ASTRA_ARTIFACT_ROOT_DIR}/{}/tasks/{}--{}.md",
         artifact_path_component(run_id),
+        artifact_title_component(task_title),
         artifact_path_component(task_id)
     )
 }
@@ -86,6 +91,30 @@ fn artifact_path_component(value: &str) -> String {
         "unknown".to_string()
     } else {
         component
+    }
+}
+
+fn artifact_title_component(value: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_dash = false;
+    for ch in value.trim().chars() {
+        let is_word = ch.is_alphanumeric() || ch == '_' || ch == '-';
+        if is_word {
+            out.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash && !out.is_empty() {
+            out.push('-');
+            last_was_dash = true;
+        }
+        if out.chars().count() >= 80 {
+            break;
+        }
+    }
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        "task".to_string()
+    } else {
+        out
     }
 }
 
@@ -115,7 +144,8 @@ pub(super) fn write_task_artifacts(
         }
     }
     for completion in completions {
-        let relative = task_artifact_relative_path(run_id, &completion.task.id);
+        let relative =
+            task_artifact_relative_path(run_id, &completion.task.id, &completion.task.title);
         let path = std::path::Path::new(project_path).join(&relative);
         let result = path
             .parent()
@@ -194,7 +224,11 @@ pub(super) fn teamwork_round_journal_entry(
                 if completion.result.status != AstraTaskResultStatus::Cancelled {
                     record.insert(
                         "outputPath".to_string(),
-                        json!(task_artifact_relative_path(run_id, &completion.task.id)),
+                        json!(task_artifact_relative_path(
+                            run_id,
+                            &completion.task.id,
+                            &completion.task.title
+                        )),
                     );
                 }
                 if let Some(error) = completion
