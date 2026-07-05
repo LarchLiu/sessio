@@ -262,7 +262,8 @@ fn wait_for_agent_output(
     timeout_ms: u64,
     backend_type: &str,
 ) -> Result<String, BackendFailure> {
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let idle_timeout = Duration::from_millis(timeout_ms);
+    let mut deadline = Instant::now() + idle_timeout;
     let mut output = String::new();
     loop {
         let now = Instant::now();
@@ -270,7 +271,7 @@ fn wait_for_agent_output(
             return Err(BackendFailure::new(
                 backend_type.to_string(),
                 "timeout",
-                format!("Agent session timed out after {timeout_ms}ms"),
+                format!("Agent session timed out after {timeout_ms}ms without runtime activity"),
             )
             .with_session_id(Some(session_id.to_string())));
         }
@@ -289,6 +290,10 @@ fn wait_for_agent_output(
                 .with_session_id(Some(session_id.to_string())));
             }
         };
+
+        if agent_output_event_refreshes_deadline(&event.payload, session_id) {
+            deadline = Instant::now() + idle_timeout;
+        }
 
         match event.payload {
             AgentRuntimeEventPayload::TextDelta {
@@ -330,6 +335,63 @@ fn wait_for_agent_output(
             } if sessio_runtime_session_id == session_id => return Ok(output),
             _ => {}
         }
+    }
+}
+
+fn agent_output_event_refreshes_deadline(
+    payload: &AgentRuntimeEventPayload,
+    session_id: &str,
+) -> bool {
+    match payload {
+        AgentRuntimeEventPayload::TurnStarted {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::TextDelta {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::ReasoningDelta {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::ToolStarted {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::ToolInputDelta {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::ToolOutputDelta {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::ToolStatusChanged {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::SessionUpdate {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::AcpProtocolMessage {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::PermissionRequested {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::PermissionResolved {
+            sessio_runtime_session_id,
+            ..
+        } => sessio_runtime_session_id == session_id,
+        AgentRuntimeEventPayload::SessionStarted { .. }
+        | AgentRuntimeEventPayload::TurnCompleted { .. }
+        | AgentRuntimeEventPayload::TurnError { .. }
+        | AgentRuntimeEventPayload::TurnCancelled { .. }
+        | AgentRuntimeEventPayload::SessionEnded { .. } => false,
     }
 }
 
@@ -392,5 +454,41 @@ mod tests {
                 .unwrap();
 
         assert_eq!(output, r#"{"summary":"ok"}"#);
+    }
+
+    #[test]
+    fn wait_for_agent_output_uses_idle_timeout() {
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            sender
+                .send(event(AgentRuntimeEventPayload::TextDelta {
+                    sessio_runtime_session_id: "target-session".to_string(),
+                    turn_id: "turn-target".to_string(),
+                    text: "{\"summary\":\"still alive\"".to_string(),
+                }))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            sender
+                .send(event(AgentRuntimeEventPayload::TextDelta {
+                    sessio_runtime_session_id: "target-session".to_string(),
+                    turn_id: "turn-target".to_string(),
+                    text: "}".to_string(),
+                }))
+                .unwrap();
+            sender
+                .send(event(AgentRuntimeEventPayload::TurnCompleted {
+                    sessio_runtime_session_id: "target-session".to_string(),
+                    turn_id: "turn-target".to_string(),
+                    result: None,
+                }))
+                .unwrap();
+        });
+
+        let output =
+            wait_for_agent_output(receiver, "target-session", 150, "runtime_agent_codex")
+                .unwrap();
+
+        assert_eq!(output, r#"{"summary":"still alive"}"#);
     }
 }
