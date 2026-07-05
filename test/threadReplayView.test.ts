@@ -568,6 +568,7 @@ function astraRun(patch: Partial<AstraHandle>): AstraHandle {
     runId: "run-1",
     threadId: "thread-1",
     projectId: "project-1",
+    continuedFromRunId: null,
     status: "running",
     mode: "automatic",
     plannerBackend: "brainstorm_backend",

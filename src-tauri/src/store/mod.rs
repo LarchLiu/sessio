@@ -146,6 +146,9 @@ pub struct AstraRunRecord {
     pub thread_id: String,
     pub project_id: String,
     pub project_path: String,
+    /// Informational continuation lineage. Intentionally not a self-FK in
+    /// SQLite; callers must tolerate stale or dangling ids.
+    pub continued_from_run_id: Option<String>,
     pub status: String,
     pub mode: String,
     pub planner_backend: Option<String>,
@@ -745,6 +748,10 @@ pub trait SessionStore: Send + Sync {
     /// Transition every active run to `interrupted` and return the rows that
     /// changed (with their patched status), so callers can notify listeners.
     fn interrupt_active_astra_runs(&self) -> Result<Vec<AstraRunRecord>>;
+    fn interrupt_active_astra_runs_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<AstraRunRecord>>;
     fn cleanup_partial_astra_sessions(&self, session_ids: &[String]) -> Result<usize>;
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
     /// Attach a scheduled task lineage to every existing row of an

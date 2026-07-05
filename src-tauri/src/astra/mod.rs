@@ -364,32 +364,46 @@ impl AstraService {
                 .run_write_lock
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Astra run write lock poisoned"))?;
-            if let Some(active) = self.inner.store.get_active_astra_run(&req.thread_id)? {
-                let run = record_to_run(active)?;
-                if self.is_worker_registered(&run.run_id) {
-                    return Ok(self.run_to_handle(run));
-                }
-                let mut interrupted = run.clone();
-                let message =
-                    "Astra run was active but no rust-native worker is registered".to_string();
-                interrupted.status = AstraRunStatus::Interrupted;
-                interrupted.terminal_reason = Some("zombie_active_run".to_string());
-                interrupted.last_error_code = Some("worker_missing".to_string());
-                interrupted.last_error_message = Some(message.clone());
-                interrupted.error = Some(message);
-                interrupted.updated_at = now_ms();
-                self.inner
+            let existing_runs = self.inner.store.list_astra_runs(&req.thread_id)?;
+            let active_runs = existing_runs
+                .iter()
+                .filter(|record| {
+                    AstraRunStatus::from_db_str(&record.status)
+                        .is_some_and(|status| status.active())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if let Some(live) = active_runs
+                .iter()
+                .find(|record| self.is_worker_registered(&record.run_id))
+            {
+                return Ok(self.run_to_handle(record_to_run(live.clone())?));
+            }
+
+            let mut continued_from_run_id = existing_runs
+                .first()
+                .filter(|record| {
+                    AstraRunStatus::from_db_str(&record.status) == Some(AstraRunStatus::Interrupted)
+                })
+                .map(|record| record.run_id.clone());
+            if !active_runs.is_empty() {
+                let interrupted = self
+                    .inner
                     .store
-                    .upsert_astra_run(&run_to_record(&interrupted))?;
-                self.emit(
-                    &interrupted,
-                    "interrupted",
-                    json!({
-                        "reason": interrupted.terminal_reason,
-                        "errorCode": interrupted.last_error_code,
-                        "message": interrupted.last_error_message,
-                    }),
-                );
+                    .interrupt_active_astra_runs_for_thread(&req.thread_id)?;
+                continued_from_run_id = interrupted.first().map(|record| record.run_id.clone());
+                for record in interrupted {
+                    let interrupted = record_to_run(record)?;
+                    self.emit(
+                        &interrupted,
+                        "interrupted",
+                        json!({
+                            "reason": interrupted.terminal_reason,
+                            "errorCode": interrupted.last_error_code,
+                            "message": interrupted.last_error_message,
+                        }),
+                    );
+                }
             }
 
             let now = now_ms();
@@ -398,6 +412,7 @@ impl AstraService {
                 thread_id: thread.id.clone(),
                 project_id: thread.project_id.clone(),
                 project_path: project.path.clone(),
+                continued_from_run_id,
                 status: AstraRunStatus::Planning,
                 mode: "rust_native".to_string(),
                 planner_backend: None,
@@ -1833,6 +1848,7 @@ impl AstraService {
             run_id: run.run_id,
             thread_id: run.thread_id,
             project_id: run.project_id,
+            continued_from_run_id: run.continued_from_run_id,
             status: run.status,
             mode: run.mode,
             planner_backend: run.planner_backend,
@@ -2417,6 +2433,34 @@ mod tests {
     }
 
     #[test]
+    fn continued_from_run_id_roundtrips_through_run_records() {
+        let mut run = test_run("continuation-run");
+        run.continued_from_run_id = Some("interrupted-run".to_string());
+        run.status = AstraRunStatus::Thinking;
+        run.run_diagnostics.push(json!({"kind": "diagnostic"}));
+
+        let record = run_to_record(&run);
+        assert_eq!(
+            record.continued_from_run_id.as_deref(),
+            Some("interrupted-run")
+        );
+
+        let mut roundtripped = record_to_run(record).unwrap();
+        assert_eq!(
+            roundtripped.continued_from_run_id.as_deref(),
+            Some("interrupted-run")
+        );
+
+        roundtripped.status = AstraRunStatus::Errored;
+        roundtripped.last_error_code = Some("worker_interrupted".to_string());
+        let mutated = run_to_record(&roundtripped);
+        assert_eq!(
+            mutated.continued_from_run_id.as_deref(),
+            Some("interrupted-run")
+        );
+    }
+
+    #[test]
     fn extracts_runtime_result_text_from_common_shapes() {
         assert_eq!(
             extract_result_text(&json!({ "content": [{ "text": "hello" }, { "text": " world" }] })),
@@ -2885,6 +2929,7 @@ mod tests {
             thread_id: thread.id.clone(),
             project_id: project.id.clone(),
             project_path: project.path.clone(),
+            continued_from_run_id: None,
             status: AstraRunStatus::Running,
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
@@ -3119,6 +3164,7 @@ mod tests {
             thread_id: thread.id.clone(),
             project_id: project.id.clone(),
             project_path: project.path.clone(),
+            continued_from_run_id: None,
             status: AstraRunStatus::Running,
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
@@ -3271,6 +3317,7 @@ mod tests {
             thread_id: thread.id.clone(),
             project_id: project.id.clone(),
             project_path: project.path.clone(),
+            continued_from_run_id: None,
             status: AstraRunStatus::Running,
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
@@ -3361,6 +3408,7 @@ mod tests {
             thread_id: thread.id.clone(),
             project_id: project.id.clone(),
             project_path: project.path.clone(),
+            continued_from_run_id: None,
             status: AstraRunStatus::Running,
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
@@ -3478,6 +3526,7 @@ mod tests {
             thread_id: thread.id.clone(),
             project_id: project.id.clone(),
             project_path: project.path.clone(),
+            continued_from_run_id: None,
             status: AstraRunStatus::Running,
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
@@ -3696,6 +3745,7 @@ mod tests {
             thread_id: thread.id.clone(),
             project_id: project.id.clone(),
             project_path: project.path.clone(),
+            continued_from_run_id: None,
             status: AstraRunStatus::Running,
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
@@ -4352,6 +4402,7 @@ mod tests {
             thread_id: "thread-1".to_string(),
             project_id: "project-1".to_string(),
             project_path: "/tmp".to_string(),
+            continued_from_run_id: None,
             status: AstraRunStatus::Running,
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),

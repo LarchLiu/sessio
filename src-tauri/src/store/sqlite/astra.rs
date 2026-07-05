@@ -9,8 +9,8 @@ use crate::store::{
 
 use super::identity::{downgrade_session_origin_when_unlinked, upgrade_session_origin_to_thread};
 
-const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, status, mode,
-    planner_backend, round_index, round_limit, terminal_reason,
+const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path,
+    continued_from_run_id, status, mode, planner_backend, round_index, round_limit, terminal_reason,
     last_error_code, last_error_message, run_diagnostics_json, error, created_at, updated_at";
 const ACTIVE_ASTRA_RUN_STATUS_SQL: &str =
     "'planning', 'thinking', 'awaiting_approval', 'dispatching', 'running'";
@@ -25,19 +25,20 @@ fn astra_run_from_row_without_sessions(
         thread_id: row.get(1)?,
         project_id: row.get(2)?,
         project_path: row.get(3)?,
-        status: row.get(4)?,
-        mode: row.get(5)?,
-        planner_backend: row.get(6)?,
-        round_index: row.get(7)?,
-        round_limit: row.get(8)?,
-        terminal_reason: row.get(9)?,
-        last_error_code: row.get(10)?,
-        last_error_message: row.get(11)?,
+        continued_from_run_id: row.get(4)?,
+        status: row.get(5)?,
+        mode: row.get(6)?,
+        planner_backend: row.get(7)?,
+        round_index: row.get(8)?,
+        round_limit: row.get(9)?,
+        terminal_reason: row.get(10)?,
+        last_error_code: row.get(11)?,
+        last_error_message: row.get(12)?,
         internal_planner_sessions: Vec::new(),
-        run_diagnostics_json: row.get(12)?,
-        error: row.get(13)?,
-        created_at: row.get(14)?,
-        updated_at: row.get(15)?,
+        run_diagnostics_json: row.get(13)?,
+        error: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
     })
 }
 
@@ -260,15 +261,16 @@ pub(super) fn upsert_astra_run(conn: &mut Connection, run: &AstraRunRecord) -> R
     let tx = conn.transaction()?;
     tx.execute(
         "INSERT INTO astra_runs (
-            run_id, thread_id, project_id, project_path, status, mode,
+            run_id, thread_id, project_id, project_path, continued_from_run_id, status, mode,
             planner_backend, round_index, round_limit, terminal_reason,
             last_error_code, last_error_message, run_diagnostics_json,
             error, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
             thread_id = excluded.thread_id,
             project_id = excluded.project_id,
             project_path = excluded.project_path,
+            continued_from_run_id = excluded.continued_from_run_id,
             status = excluded.status,
             mode = excluded.mode,
             planner_backend = excluded.planner_backend,
@@ -285,6 +287,7 @@ pub(super) fn upsert_astra_run(conn: &mut Connection, run: &AstraRunRecord) -> R
             run.thread_id,
             run.project_id,
             run.project_path,
+            run.continued_from_run_id,
             run.status,
             run.mode,
             run.planner_backend,
@@ -439,16 +442,38 @@ pub(super) fn register_current_astra_artifact(
 }
 
 pub(super) fn interrupt_active_astra_runs(conn: &mut Connection) -> Result<Vec<AstraRunRecord>> {
+    interrupt_active_astra_runs_matching(conn, None)
+}
+
+pub(super) fn interrupt_active_astra_runs_for_thread(
+    conn: &mut Connection,
+    thread_id: &str,
+) -> Result<Vec<AstraRunRecord>> {
+    interrupt_active_astra_runs_matching(conn, Some(thread_id))
+}
+
+fn interrupt_active_astra_runs_matching(
+    conn: &mut Connection,
+    thread_id: Option<&str>,
+) -> Result<Vec<AstraRunRecord>> {
     let tx = conn.transaction()?;
     let now = now_ms();
     let mut active: Vec<AstraRunRecord> = {
+        let thread_predicate = thread_id.map(|_| " AND thread_id = ?").unwrap_or("");
         let sql = format!(
             "SELECT {ASTRA_RUN_SELECT}
              FROM astra_runs
-             WHERE status IN ({ACTIVE_ASTRA_RUN_STATUS_SQL})"
+             WHERE status IN ({ACTIVE_ASTRA_RUN_STATUS_SQL}){thread_predicate}
+             ORDER BY updated_at DESC, created_at DESC"
         );
+        let select_params = thread_id
+            .map(|thread_id| vec![SqlValue::from(thread_id.to_string())])
+            .unwrap_or_default();
         let mut stmt = tx.prepare(&sql)?;
-        let rows = stmt.query_map([], astra_run_from_row_without_sessions)?;
+        let rows = stmt.query_map(
+            params_from_iter(select_params.iter()),
+            astra_run_from_row_without_sessions,
+        )?;
         let mut runs = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         hydrate_astra_run_sessions(&tx, &mut runs)?;
         runs
@@ -478,6 +503,7 @@ pub(super) fn interrupt_active_astra_runs(conn: &mut Connection) -> Result<Vec<A
             }
         }
     }
+    let thread_predicate = thread_id.map(|_| " AND thread_id = ?").unwrap_or("");
     let update_active_runs_sql = format!(
         "UPDATE astra_runs
          SET status = 'interrupted',
@@ -486,9 +512,16 @@ pub(super) fn interrupt_active_astra_runs(conn: &mut Connection) -> Result<Vec<A
              last_error_message = COALESCE(last_error_message, 'Astra run was active during startup recovery'),
              error = COALESCE(error, 'Astra run was active during startup recovery'),
              updated_at = ?
-         WHERE status IN ({ACTIVE_ASTRA_RUN_STATUS_SQL})"
+         WHERE status IN ({ACTIVE_ASTRA_RUN_STATUS_SQL}){thread_predicate}"
     );
-    tx.execute(&update_active_runs_sql, params![now])?;
+    let mut update_params = vec![SqlValue::from(now)];
+    if let Some(thread_id) = thread_id {
+        update_params.push(SqlValue::from(thread_id.to_string()));
+    }
+    tx.execute(
+        &update_active_runs_sql,
+        params_from_iter(update_params.iter()),
+    )?;
     for run in &active {
         tx.execute(
             "UPDATE thread_plan_tasks

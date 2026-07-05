@@ -117,6 +117,7 @@ function astraRun(): AstraHandle {
     runId: "astra-1",
     threadId: "thread-1",
     projectId: "project-1",
+    continuedFromRunId: null,
     status: "completed",
     mode: "auto",
     plannerBackend: "pi",

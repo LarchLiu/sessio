@@ -555,6 +555,10 @@ CREATE TABLE IF NOT EXISTS astra_runs (
     thread_id                  TEXT NOT NULL,
     project_id                 TEXT NOT NULL,
     project_path               TEXT NOT NULL,
+    -- Informational run lineage only. This intentionally has no self-FK:
+    -- old runs can disappear with their thread, and continuation audit code
+    -- must tolerate a dangling id.
+    continued_from_run_id      TEXT,
     status                     TEXT NOT NULL,
     mode                       TEXT NOT NULL DEFAULT 'auto',
     planner_backend            TEXT,
@@ -901,6 +905,12 @@ pub(crate) fn initialize_base_schema(conn: &Connection) -> Result<()> {
         "threads",
         "artifact_role_catalog_json",
         "ALTER TABLE threads ADD COLUMN artifact_role_catalog_json TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    ensure_column(
+        conn,
+        "astra_runs",
+        "continued_from_run_id",
+        "ALTER TABLE astra_runs ADD COLUMN continued_from_run_id TEXT",
     )?;
     Ok(())
 }

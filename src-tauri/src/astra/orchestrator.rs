@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::{
     artifact_roles::built_in_artifact_roles, astra_task_from_plan_task, final_task_output,
@@ -20,11 +20,20 @@ use crate::astra::debate_judge::{DebateJudge, HeuristicJudge, RuntimeAgentJudge}
 use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
 use crate::astra::runtime_agent_backend::{RuntimeAgentBackendConfig, RuntimeAgentOrchestrator};
 use crate::astra::types::{AstraTaskResult, AstraTaskResultStatus};
-use crate::models::{PlanRoundMode, PlanTaskStatus, StageStatus, ThreadInfo, ThreadKind};
+use crate::models::{
+    PlanRoundInfo, PlanRoundMode, PlanRoundSource, PlanTaskInfo, PlanTaskStatus, StageStatus,
+    ThreadAstraArtifactInfo, ThreadInfo, ThreadKind,
+};
 use crate::store::{NewThreadAstraArtifact, SessionStore};
 
 pub(super) const MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS: usize = 50;
 const MAX_RUN_DIAGNOSTICS: usize = 100;
+const THREAD_PROGRESS_DETAILED_ROUND_LIMIT: usize = 8;
+const THREAD_PROGRESS_INTERRUPTED_TASK_LIMIT: usize = 24;
+const THREAD_PROGRESS_SUMMARY_CHAR_LIMIT: usize = 700;
+const THREAD_PROGRESS_TASK_TEXT_CHAR_LIMIT: usize = 900;
+const THREAD_PROGRESS_TASK_ERROR_CHAR_LIMIT: usize = 500;
+const THREAD_PROGRESS_TASK_PROMPT_CHAR_LIMIT: usize = 1200;
 
 fn trim_vec_front<T>(values: &mut Vec<T>, max_len: usize) {
     if values.len() > max_len {
@@ -88,6 +97,18 @@ impl AstraService {
                         "round_limit_reached",
                         "round_limit_reached",
                         "Astra round limit reached before planning the next round".to_string(),
+                    )?;
+                    return Ok(RustNativeWorkerOutcome::Claimed);
+                }
+                let thread_round_count = self.thread_astra_round_count(&current_run.thread_id)?;
+                if thread_round_count >= round_limit {
+                    self.error_run(
+                        run_id,
+                        "thread_round_limit_reached",
+                        "thread_round_limit_reached",
+                        format!(
+                            "Astra thread-level round limit reached after {thread_round_count} persisted Astra rounds"
+                        ),
                     )?;
                     return Ok(RustNativeWorkerOutcome::Claimed);
                 }
@@ -239,13 +260,15 @@ impl AstraService {
         let orchestrator_backend: Box<dyn OrchestratorBackend> =
             self.create_orchestrator_backend(thread, &backend_config);
         let config_value = json!({});
-        let planner_context = self.build_astra_planner_context(thread).map_err(|error| {
-            BackendFailure::new(
-                "planner_context",
-                "planner_context_failed",
-                error.to_string(),
-            )
-        })?;
+        let planner_context = self
+            .build_astra_planner_context(run, thread, round_index)
+            .map_err(|error| {
+                BackendFailure::new(
+                    "planner_context",
+                    "planner_context_failed",
+                    error.to_string(),
+                )
+            })?;
 
         match orchestrator_backend.orchestrate(
             run,
@@ -303,28 +326,123 @@ impl AstraService {
         }
     }
 
-    fn build_astra_planner_context(&self, thread: &ThreadInfo) -> Result<AstraPlannerContext> {
-        let canonical_artifacts = if thread.kind == ThreadKind::Teamwork {
-            self.inner
-                .store
-                .list_current_astra_artifacts(&thread.id)?
-                .into_iter()
-                .map(|artifact| AstraPlannerCanonicalArtifact {
-                    role: artifact.role,
-                    title: artifact.title,
-                    path: artifact.path,
-                    summary: artifact.summary,
-                    source_task_id: artifact.source_task_id,
-                    updated_at: artifact.updated_at,
-                })
-                .collect()
+    fn build_astra_planner_context(
+        &self,
+        run: &AstraRun,
+        thread: &ThreadInfo,
+        run_round_index: u32,
+    ) -> Result<AstraPlannerContext> {
+        let current_artifacts = if thread.kind == ThreadKind::Teamwork {
+            self.inner.store.list_current_astra_artifacts(&thread.id)?
         } else {
             Vec::new()
         };
+        let canonical_artifacts = current_artifacts
+            .iter()
+            .map(|artifact| AstraPlannerCanonicalArtifact {
+                role: artifact.role.clone(),
+                title: artifact.title.clone(),
+                path: artifact.path.clone(),
+                summary: artifact.summary.clone(),
+                source_task_id: artifact.source_task_id.clone(),
+                updated_at: artifact.updated_at,
+            })
+            .collect::<Vec<_>>();
+        let (continuation, thread_progress, interrupted_tasks) =
+            if thread.kind == ThreadKind::Teamwork {
+                self.build_teamwork_continuation_context(
+                    run,
+                    thread,
+                    run_round_index,
+                    &current_artifacts,
+                )?
+            } else {
+                (None, None, Vec::new())
+            };
         Ok(AstraPlannerContext {
             canonical_artifacts,
             artifact_role_catalog: planner_artifact_role_catalog(thread),
+            continuation,
+            thread_progress,
+            interrupted_tasks,
         })
+    }
+
+    fn thread_astra_round_count(&self, thread_id: &str) -> Result<u32> {
+        let count = self
+            .inner
+            .store
+            .list_plan_rounds(thread_id)?
+            .into_iter()
+            .filter(|round| round.source == PlanRoundSource::Astra)
+            .count();
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    fn build_teamwork_continuation_context(
+        &self,
+        run: &AstraRun,
+        thread: &ThreadInfo,
+        run_round_index: u32,
+        current_artifacts: &[ThreadAstraArtifactInfo],
+    ) -> Result<(Option<Value>, Option<Value>, Vec<Value>)> {
+        let mut rounds = self.inner.store.list_plan_rounds(&thread.id)?;
+        rounds.sort_by_key(|round| (round.round_index, round.created_at));
+        let runs = self.inner.store.list_astra_runs(&thread.id)?;
+        let run_records_by_id = runs
+            .iter()
+            .map(|record| (record.run_id.clone(), record))
+            .collect::<HashMap<_, _>>();
+        let continuation = Some(continuation_context_value(run, &run_records_by_id));
+        let current_artifacts_by_role = current_artifacts
+            .iter()
+            .map(|artifact| (artifact.role.as_str(), artifact))
+            .collect::<HashMap<_, _>>();
+        let journal_by_run_round = teamwork_journal_by_run_round(&runs);
+        let run_round_index_by_round_id = run_round_indices_for_rounds(&rounds);
+        let astra_round_count = rounds
+            .iter()
+            .filter(|round| round.source == PlanRoundSource::Astra)
+            .count();
+        let detailed_start = rounds
+            .len()
+            .saturating_sub(THREAD_PROGRESS_DETAILED_ROUND_LIMIT);
+        let older_rounds = rounds
+            .iter()
+            .take(detailed_start)
+            .map(compact_thread_round_value)
+            .collect::<Vec<_>>();
+        let recent_rounds = rounds
+            .iter()
+            .skip(detailed_start)
+            .map(|round| {
+                detailed_thread_round_value(
+                    round,
+                    &run_round_index_by_round_id,
+                    &journal_by_run_round,
+                    &current_artifacts_by_role,
+                )
+            })
+            .collect::<Vec<_>>();
+        let thread_progress = Some(json!({
+            "runRoundIndex": run_round_index,
+            "roundBudget": {
+                "roundLimit": run.round_limit,
+                "threadAstraRoundCount": astra_round_count,
+                "remainingAutomaticRounds": usize::try_from(run.round_limit)
+                    .ok()
+                    .map(|limit| limit.saturating_sub(astra_round_count))
+                    .unwrap_or(0),
+            },
+            "olderRounds": older_rounds,
+            "recentRounds": recent_rounds,
+        }));
+        let interrupted_tasks = interrupted_thread_tasks(
+            &rounds,
+            &run_round_index_by_round_id,
+            &current_artifacts_by_role,
+        );
+        Ok((continuation, thread_progress, interrupted_tasks))
     }
 
     fn register_canonical_artifacts_for_completions(
@@ -918,6 +1036,306 @@ fn planner_artifact_role_catalog(thread: &ThreadInfo) -> Vec<String> {
     artifact_role_catalog
 }
 
+fn continuation_context_value(
+    run: &AstraRun,
+    run_records_by_id: &HashMap<String, &crate::store::AstraRunRecord>,
+) -> Value {
+    let interrupted_run = run
+        .continued_from_run_id
+        .as_ref()
+        .and_then(|run_id| run_records_by_id.get(run_id))
+        .map(|record| {
+            json!({
+                "runId": record.run_id,
+                "status": record.status,
+                "terminalReason": record.terminal_reason,
+                "lastErrorCode": record.last_error_code,
+                "lastErrorMessage": record.last_error_message,
+                "error": record.error,
+                "updatedAt": record.updated_at,
+            })
+        });
+    json!({
+        "continuedFromRunId": run.continued_from_run_id.as_deref(),
+        "isContinuation": run.continued_from_run_id.is_some(),
+        "interruptedRun": interrupted_run,
+    })
+}
+
+fn teamwork_journal_by_run_round(
+    runs: &[crate::store::AstraRunRecord],
+) -> HashMap<(String, u32), Value> {
+    let mut journal = HashMap::new();
+    for run in runs {
+        let Ok(diagnostics) = serde_json::from_str::<Vec<Value>>(&run.run_diagnostics_json) else {
+            continue;
+        };
+        for diagnostic in diagnostics {
+            if diagnostic.get("kind").and_then(Value::as_str)
+                != Some(super::artifacts::TEAMWORK_ROUND_JOURNAL_KIND)
+            {
+                continue;
+            }
+            let Some(round_index) = diagnostic
+                .get("roundIndex")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+            else {
+                continue;
+            };
+            journal.insert((run.run_id.clone(), round_index), diagnostic);
+        }
+    }
+    journal
+}
+
+fn run_round_indices_for_rounds(rounds: &[PlanRoundInfo]) -> HashMap<String, u32> {
+    let mut counters = HashMap::<String, u32>::new();
+    let mut indices = HashMap::new();
+    for round in rounds {
+        let Some(run_id) = round.astra_run_id.as_ref() else {
+            continue;
+        };
+        let index = counters.entry(run_id.clone()).or_insert(0);
+        indices.insert(round.id.clone(), *index);
+        *index = index.saturating_add(1);
+    }
+    indices
+}
+
+fn compact_thread_round_value(round: &PlanRoundInfo) -> Value {
+    json!({
+        "id": round.id,
+        "astraRunId": round.astra_run_id,
+        "threadRoundIndex": round.round_index,
+        "mode": round.mode.as_str(),
+        "source": round.source.as_str(),
+        "status": round.status.as_str(),
+        "summary": round.summary.as_deref().map(|summary| {
+            super::structured_response::truncate_chars(summary, THREAD_PROGRESS_SUMMARY_CHAR_LIMIT)
+        }),
+        "taskCount": round.tasks.len(),
+        "taskStatusCounts": task_status_counts(&round.tasks),
+    })
+}
+
+fn detailed_thread_round_value(
+    round: &PlanRoundInfo,
+    run_round_index_by_round_id: &HashMap<String, u32>,
+    journal_by_run_round: &HashMap<(String, u32), Value>,
+    current_artifacts_by_role: &HashMap<&str, &ThreadAstraArtifactInfo>,
+) -> Value {
+    let run_round_index = run_round_index_by_round_id.get(&round.id).copied();
+    let journal =
+        round
+            .astra_run_id
+            .as_ref()
+            .zip(run_round_index)
+            .and_then(|(run_id, run_round_index)| {
+                journal_by_run_round.get(&(run_id.clone(), run_round_index))
+            });
+    let journal_tasks = journal
+        .and_then(|value| value.get("tasks"))
+        .and_then(Value::as_array);
+    let tasks = round
+        .tasks
+        .iter()
+        .enumerate()
+        .map(|(index, task)| {
+            let journal_task = journal_tasks.and_then(|tasks| tasks.get(index));
+            thread_task_value(round, task, journal_task, current_artifacts_by_role, false)
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "id": round.id,
+        "astraRunId": round.astra_run_id,
+        "threadRoundIndex": round.round_index,
+        "runRoundIndex": run_round_index,
+        "mode": round.mode.as_str(),
+        "source": round.source.as_str(),
+        "status": round.status.as_str(),
+        "summary": journal
+            .and_then(|value| value.get("plannerSummary"))
+            .and_then(Value::as_str)
+            .or(round.summary.as_deref())
+            .map(|summary| {
+                super::structured_response::truncate_chars(summary, THREAD_PROGRESS_SUMMARY_CHAR_LIMIT)
+            }),
+        "taskStatusCounts": task_status_counts(&round.tasks),
+        "tasks": tasks,
+        "createdAt": round.created_at,
+        "updatedAt": round.updated_at,
+    })
+}
+
+fn thread_task_value(
+    round: &PlanRoundInfo,
+    task: &PlanTaskInfo,
+    journal_task: Option<&Value>,
+    current_artifacts_by_role: &HashMap<&str, &ThreadAstraArtifactInfo>,
+    include_prompt: bool,
+) -> Value {
+    let mut value = json!({
+        "id": task.id,
+        "roundId": round.id,
+        "threadRoundIndex": round.round_index,
+        "astraRunId": round.astra_run_id,
+        "title": super::structured_response::truncate_chars(&task.title, THREAD_PROGRESS_TASK_TEXT_CHAR_LIMIT),
+        "status": task.status.as_str(),
+        "resultSummary": task.result_summary.as_deref().map(|summary| {
+            super::structured_response::truncate_chars(summary, THREAD_PROGRESS_TASK_TEXT_CHAR_LIMIT)
+        }),
+        "error": task.error.as_deref().map(|error| {
+            super::structured_response::truncate_chars(error, THREAD_PROGRESS_TASK_ERROR_CHAR_LIMIT)
+        }),
+        "risk": task.risk.as_str(),
+        "assistantId": task.assistant_id,
+        "agentParticipantId": task.agent_participant_id,
+        "targetAgent": task.target_agent.as_str(),
+        "artifactRole": task.artifact_role,
+        "usesArtifactRoles": task.uses_artifact_roles,
+        "sortOrder": task.sort_order,
+        "startedAt": task.started_at,
+        "completedAt": task.completed_at,
+        "createdAt": task.created_at,
+        "updatedAt": task.updated_at,
+    });
+    let Some(record) = value.as_object_mut() else {
+        return value;
+    };
+    if include_prompt {
+        record.insert(
+            "prompt".to_string(),
+            json!(super::structured_response::truncate_chars(
+                &task.prompt,
+                THREAD_PROGRESS_TASK_PROMPT_CHAR_LIMIT,
+            )),
+        );
+    }
+    if let Some(excerpt) = journal_task
+        .and_then(|task| task.get("outputExcerpt"))
+        .and_then(Value::as_str)
+        .map(|excerpt| {
+            super::structured_response::truncate_chars(
+                excerpt,
+                THREAD_PROGRESS_TASK_TEXT_CHAR_LIMIT,
+            )
+        })
+    {
+        record.insert("outputExcerpt".to_string(), json!(excerpt));
+    }
+    if let Some(path) =
+        ordinary_task_artifact_path(round, task, journal_task, current_artifacts_by_role)
+    {
+        record.insert("artifactPath".to_string(), json!(path));
+    }
+    value
+}
+
+fn ordinary_task_artifact_path(
+    round: &PlanRoundInfo,
+    task: &PlanTaskInfo,
+    journal_task: Option<&Value>,
+    current_artifacts_by_role: &HashMap<&str, &ThreadAstraArtifactInfo>,
+) -> Option<String> {
+    if task.status != PlanTaskStatus::Completed {
+        return None;
+    }
+    if task
+        .artifact_role
+        .as_deref()
+        .and_then(|role| current_artifacts_by_role.get(role))
+        .is_some()
+    {
+        return None;
+    }
+    journal_task
+        .and_then(|task| task.get("outputPath"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            round.astra_run_id.as_deref().map(|run_id| {
+                super::artifacts::task_artifact_relative_path(run_id, &task.id, &task.title)
+            })
+        })
+}
+
+fn interrupted_thread_tasks(
+    rounds: &[PlanRoundInfo],
+    run_round_index_by_round_id: &HashMap<String, u32>,
+    current_artifacts_by_role: &HashMap<&str, &ThreadAstraArtifactInfo>,
+) -> Vec<Value> {
+    let mut latest_completed_by_key = HashMap::<String, i64>::new();
+    for round in rounds {
+        for task in &round.tasks {
+            if task.status != PlanTaskStatus::Completed {
+                continue;
+            }
+            latest_completed_by_key
+                .entry(task_replacement_key(task))
+                .and_modify(|round_index| *round_index = (*round_index).max(round.round_index))
+                .or_insert(round.round_index);
+        }
+    }
+
+    let mut values = Vec::new();
+    for round in rounds {
+        let run_round_index = run_round_index_by_round_id.get(&round.id).copied();
+        for task in &round.tasks {
+            if !matches!(
+                task.status,
+                PlanTaskStatus::Planned
+                    | PlanTaskStatus::Running
+                    | PlanTaskStatus::Failed
+                    | PlanTaskStatus::Errored
+                    | PlanTaskStatus::Cancelled
+            ) {
+                continue;
+            }
+            if latest_completed_by_key
+                .get(&task_replacement_key(task))
+                .is_some_and(|completed_round| *completed_round > round.round_index)
+            {
+                continue;
+            }
+            let mut value = thread_task_value(round, task, None, current_artifacts_by_role, true);
+            if let Some(record) = value.as_object_mut() {
+                record.insert("runRoundIndex".to_string(), json!(run_round_index));
+            }
+            values.push(value);
+            if values.len() >= THREAD_PROGRESS_INTERRUPTED_TASK_LIMIT {
+                return values;
+            }
+        }
+    }
+    values
+}
+
+fn task_status_counts(tasks: &[PlanTaskInfo]) -> Value {
+    let mut counts = serde_json::Map::new();
+    for task in tasks {
+        let key = task.status.as_str().to_string();
+        let current = counts.get(&key).and_then(Value::as_u64).unwrap_or(0);
+        counts.insert(key, json!(current + 1));
+    }
+    Value::Object(counts)
+}
+
+fn task_replacement_key(task: &PlanTaskInfo) -> String {
+    format!(
+        "{}\0{}\0{}\0{}\0{}",
+        task.title
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase(),
+        task.assistant_id.as_deref().unwrap_or(""),
+        task.agent_participant_id.as_deref().unwrap_or(""),
+        task.target_agent.as_str(),
+        task.artifact_role.as_deref().unwrap_or(""),
+    )
+}
+
 fn orchestrator_backend_failure_diagnostic(
     failure: &BackendFailure,
     round_index: u32,
@@ -1052,6 +1470,140 @@ mod tests {
                 "character_sheet",
             ]
         );
+    }
+
+    #[test]
+    fn thread_progress_round_value_includes_artifact_paths_and_round_indices() {
+        let round = PlanRoundInfo {
+            id: "round-1".to_string(),
+            thread_id: "thread-1".to_string(),
+            astra_run_id: Some("run-old".to_string()),
+            round_index: 7,
+            summary: Some("persisted summary".to_string()),
+            mode: PlanRoundMode::Parallel,
+            source: PlanRoundSource::Astra,
+            status: crate::models::PlanRoundStatus::Completed,
+            created_at: 10,
+            updated_at: 20,
+            tasks: vec![PlanTaskInfo {
+                id: "task-done".to_string(),
+                round_id: "round-1".to_string(),
+                thread_stage_id: None,
+                assistant_id: Some("assistant-codex".to_string()),
+                agent_participant_id: None,
+                target_agent: Agent::Codex,
+                stage_snapshot_json: None,
+                assistant_snapshot_json: None,
+                agent_snapshot_json: r#"{"agent":"codex"}"#.to_string(),
+                title: "完成需求分析".to_string(),
+                prompt: "Analyse requirements".to_string(),
+                expected_output: Some("Requirements".to_string()),
+                artifact_role: None,
+                uses_artifact_roles: Vec::new(),
+                risk: crate::models::PlanTaskRisk::Low,
+                sort_order: 0,
+                status: PlanTaskStatus::Completed,
+                result_summary: Some("需求已明确".to_string()),
+                error: None,
+                started_at: Some(11),
+                completed_at: Some(12),
+                created_at: 10,
+                updated_at: 20,
+                sessions: Vec::new(),
+            }],
+        };
+        let mut run_round_indices = HashMap::new();
+        run_round_indices.insert("round-1".to_string(), 2);
+        let mut journals = HashMap::new();
+        journals.insert(
+            ("run-old".to_string(), 2),
+            json!({
+                "plannerSummary": "journal summary",
+                "tasks": [{
+                    "outputExcerpt": "journal excerpt",
+                    "outputPath": ".sessio/astra/run-old/tasks/完成需求分析--task-done.md",
+                }],
+            }),
+        );
+        let current_artifacts = HashMap::new();
+
+        let value =
+            detailed_thread_round_value(&round, &run_round_indices, &journals, &current_artifacts);
+
+        assert_eq!(value["threadRoundIndex"], 7);
+        assert_eq!(value["runRoundIndex"], 2);
+        assert_eq!(value["summary"], "journal summary");
+        assert_eq!(value["tasks"][0]["outputExcerpt"], "journal excerpt");
+        assert_eq!(
+            value["tasks"][0]["artifactPath"],
+            ".sessio/astra/run-old/tasks/完成需求分析--task-done.md"
+        );
+    }
+
+    #[test]
+    fn thread_progress_omits_ordinary_artifact_path_when_current_canonical_exists() {
+        let round = PlanRoundInfo {
+            id: "round-1".to_string(),
+            thread_id: "thread-1".to_string(),
+            astra_run_id: Some("run-old".to_string()),
+            round_index: 7,
+            summary: Some("persisted summary".to_string()),
+            mode: PlanRoundMode::Parallel,
+            source: PlanRoundSource::Astra,
+            status: crate::models::PlanRoundStatus::Completed,
+            created_at: 10,
+            updated_at: 20,
+            tasks: vec![PlanTaskInfo {
+                id: "task-outline".to_string(),
+                round_id: "round-1".to_string(),
+                thread_stage_id: None,
+                assistant_id: Some("assistant-codex".to_string()),
+                agent_participant_id: None,
+                target_agent: Agent::Codex,
+                stage_snapshot_json: None,
+                assistant_snapshot_json: None,
+                agent_snapshot_json: r#"{"agent":"codex"}"#.to_string(),
+                title: "更新大纲".to_string(),
+                prompt: "Update outline".to_string(),
+                expected_output: Some("Outline".to_string()),
+                artifact_role: Some("outline".to_string()),
+                uses_artifact_roles: Vec::new(),
+                risk: crate::models::PlanTaskRisk::Low,
+                sort_order: 0,
+                status: PlanTaskStatus::Completed,
+                result_summary: Some("大纲已更新".to_string()),
+                error: None,
+                started_at: Some(11),
+                completed_at: Some(12),
+                created_at: 10,
+                updated_at: 20,
+                sessions: Vec::new(),
+            }],
+        };
+        let artifact = ThreadAstraArtifactInfo {
+            id: "artifact-outline".to_string(),
+            thread_id: "thread-1".to_string(),
+            astra_run_id: "run-latest".to_string(),
+            source_task_id: "task-outline-latest".to_string(),
+            role: "outline".to_string(),
+            title: "Current outline".to_string(),
+            path: ".sessio/astra/run-latest/tasks/current-outline--task-outline-latest.md"
+                .to_string(),
+            summary: "Canonical outline summary".to_string(),
+            is_current: true,
+            created_at: 30,
+            updated_at: 40,
+            superseded_at: None,
+        };
+        let mut current_artifacts = HashMap::new();
+        current_artifacts.insert(artifact.role.as_str(), &artifact);
+        let run_round_indices = HashMap::new();
+        let journals = HashMap::new();
+
+        let value =
+            detailed_thread_round_value(&round, &run_round_indices, &journals, &current_artifacts);
+
+        assert!(value["tasks"][0].get("artifactPath").is_none());
     }
 
     #[test]

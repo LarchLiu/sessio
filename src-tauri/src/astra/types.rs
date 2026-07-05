@@ -101,6 +101,7 @@ pub struct AstraHandle {
     pub run_id: String,
     pub thread_id: String,
     pub project_id: String,
+    pub continued_from_run_id: Option<String>,
     pub status: AstraRunStatus,
     pub mode: String,
     pub planner_backend: Option<String>,
@@ -123,6 +124,7 @@ pub struct AstraRun {
     pub thread_id: String,
     pub project_id: String,
     pub project_path: String,
+    pub continued_from_run_id: Option<String>,
     pub status: AstraRunStatus,
     pub mode: String,
     pub planner_backend: Option<String>,
@@ -194,6 +196,12 @@ pub(crate) struct AstraPlannerContext {
     pub canonical_artifacts: Vec<AstraPlannerCanonicalArtifact>,
     #[serde(default)]
     pub artifact_role_catalog: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_progress: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interrupted_tasks: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

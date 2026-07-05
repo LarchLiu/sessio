@@ -481,6 +481,7 @@ mod tests {
             thread_id: "thread-1".to_string(),
             project_id: "project-1".to_string(),
             project_path: "/tmp/project".to_string(),
+            continued_from_run_id: None,
             status: AstraRunStatus::Planning,
             mode: "auto".to_string(),
             planner_backend: None,

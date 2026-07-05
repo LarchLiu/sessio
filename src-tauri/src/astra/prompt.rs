@@ -58,11 +58,15 @@ assistantId must reference one of thread.assistants. targetAgent should match th
 
 dependsOn declares execution-order dependencies inside one parallel round and is only valid with mode: parallel; a sequential round with dependsOn is rejected. Tasks with an empty or omitted dependsOn start immediately and run concurrently. A task starts only after every task it depends on completed successfully; if any dependency fails, errors, or is cancelled, the dependent task is cancelled automatically and reported as cancelled with the blocking dependency in its error. dependsOn must be a YAML list of task ids from this same response, with no self references, no unknown ids, and no cycles. id is required for any task that other tasks depend on, and a referenced id must be unique in the response. Use mode: sequential for strictly linear handoffs where task B must build directly on task A's output. Use mode: parallel with dependsOn only for fan-out/fan-in work where independent roots can run concurrently and downstream tasks wait for them (for example: t1 and t2 independent, then t3 with dependsOn: [t1, t2]).
 
-Plan the next useful batch from the shared thread goal, userPrompt, thread.assistants, completedTasks, and prior session refs. Tasks in a parallel batch may target different assistants only when their work is independent. Do not place two tasks in the same immediate parallel wave if one needs the other's research, outline, draft, decisions, or artifact. For downstream tasks, explicitly tell the assistant to use upstream artifacts when available; Sessio also injects completed dependency artifact paths into the delegated task prompt.
+Plan the next useful batch from the shared thread goal, userPrompt, thread.assistants, completedTasks, continuation, threadProgress, interruptedTasks, and prior session refs. Tasks in a parallel batch may target different assistants only when their work is independent. Do not place two tasks in the same immediate parallel wave if one needs the other's research, outline, draft, decisions, or artifact. For downstream tasks, explicitly tell the assistant to use upstream artifacts when available; Sessio also injects completed dependency artifact paths into the delegated task prompt.
+
+Continuation: if continuation.continuedFromRunId is present, this is a new run continuing persisted thread progress after an interrupted run. An empty userPrompt in a continuation means continue unresolved persisted work, not that there is no work. Do not restart completed work. Use threadProgress.recentRounds and threadProgress.olderRounds as the cross-run source of truth; previousRounds is only the compact journal from this current run. run.runRoundIndex is local to this run, while threadProgress rounds use threadRoundIndex for thread-global ordering.
+
+Interrupted work: interruptedTasks contains unresolved planned, running, failed, errored, or cancelled work from the thread that has not been superseded by a later completed replacement. Prioritize it only when it is still necessary for the thread goal; otherwise explicitly skip or replace it in your summary/reason.
 
 previousRounds is the run journal: one entry per earlier completed round, with the planner summary and each task's title, assistantId, risk, status, and outputExcerpt. completedTasks carries the full outputs of the most recent round only; the round already covered by completedTasks is not repeated in previousRounds. Use previousRounds to recall earlier results and decisions, avoid re-running finished work, and keep new tasks consistent with what was already built.
 
-Full outputs on demand: each completedTasks result includes result.fullOutputPath and each previousRounds task includes outputPath - a workspace-relative markdown file containing that task's complete final output. finalOutput and outputExcerpt are truncated; read the file when planning needs details beyond the excerpt.
+Full outputs on demand: each completedTasks result includes result.fullOutputPath, previousRounds tasks may include outputPath, and threadProgress tasks may include artifactPath - workspace-relative markdown files containing complete task output. finalOutput, outputExcerpt, summaries, errors, and prompts are truncated; read the file when planning needs details beyond the excerpt.
 
 canonicalArtifacts lists current long-lived Astra artifacts for this thread. Each item has role, title, path, summary, sourceTaskId, and updatedAt. Read the referenced path when your next decision depends on details beyond the summary. Set artifactRole when a task creates or updates the current plan, outline, research brief, draft, or synthesis. Set usesArtifactRoles when a task must build on a current canonical artifact. Use only roles from artifactRoleCatalog.
 
@@ -207,6 +211,8 @@ pub(super) fn build_astra_orchestration_prompt(
         "run": {
             "id": run.run_id,
             "roundIndex": round_index,
+            "runRoundIndex": round_index,
+            "continuedFromRunId": run.continued_from_run_id.as_deref(),
         },
         "userPrompt": user_prompt.unwrap_or(""),
         "completedTasks": completed_tasks,
@@ -227,6 +233,35 @@ pub(super) fn build_astra_orchestration_prompt(
                     &run.run_diagnostics,
                     round_index,
                 )),
+            );
+            record.insert(
+                "continuation".to_string(),
+                planner_context.continuation.clone().unwrap_or_else(|| {
+                    json!({
+                        "continuedFromRunId": null,
+                        "isContinuation": false,
+                        "interruptedRun": null,
+                    })
+                }),
+            );
+            record.insert(
+                "threadProgress".to_string(),
+                planner_context.thread_progress.clone().unwrap_or_else(|| {
+                    json!({
+                        "runRoundIndex": round_index,
+                        "roundBudget": {
+                            "roundLimit": run.round_limit,
+                            "threadAstraRoundCount": 0,
+                            "remainingAutomaticRounds": run.round_limit,
+                        },
+                        "olderRounds": [],
+                        "recentRounds": [],
+                    })
+                }),
+            );
+            record.insert(
+                "interruptedTasks".to_string(),
+                Value::Array(planner_context.interrupted_tasks.clone()),
             );
         }
     }
@@ -1349,6 +1384,7 @@ mod tests {
             thread_id: "thread-1".to_string(),
             project_id: "project-1".to_string(),
             project_path: "/tmp/project".to_string(),
+            continued_from_run_id: None,
             status: AstraRunStatus::Planning,
             mode: "auto".to_string(),
             planner_backend: None,
@@ -1579,6 +1615,9 @@ mod tests {
         assert_eq!(value["userPrompt"], "user request");
         assert_eq!(value["completedTasks"][0]["task"]["id"], "task-1");
         assert!(value.get("previousRounds").is_none());
+        assert!(value.get("continuation").is_none());
+        assert!(value.get("threadProgress").is_none());
+        assert!(value.get("interruptedTasks").is_none());
     }
 
     #[test]
@@ -1658,6 +1697,9 @@ mod tests {
                 updated_at: 42,
             }],
             artifact_role_catalog: vec!["plan".to_string(), "outline".to_string()],
+            continuation: None,
+            thread_progress: None,
+            interrupted_tasks: Vec::new(),
         };
         let prompt =
             build_astra_orchestration_prompt(&run(), &teamwork_thread(), None, 0, &[], &context);
@@ -1738,6 +1780,87 @@ mod tests {
             .unwrap();
         assert!(full_output_path.starts_with(".sessio/astra/run-1/tasks/"));
         assert!(full_output_path.ends_with(".md"));
+    }
+
+    #[test]
+    fn teamwork_orchestration_prompt_includes_continuation_thread_progress() {
+        let mut run = run();
+        run.continued_from_run_id = Some("run-interrupted".to_string());
+        let context = AstraPlannerContext {
+            continuation: Some(json!({
+                "continuedFromRunId": "run-interrupted",
+                "isContinuation": true,
+                "interruptedRun": {
+                    "runId": "run-interrupted",
+                    "status": "interrupted",
+                    "terminalReason": "process_recovered_active_run",
+                    "lastErrorCode": "worker_interrupted",
+                    "lastErrorMessage": "Astra run was active during startup recovery",
+                },
+            })),
+            thread_progress: Some(json!({
+                "runRoundIndex": 0,
+                "roundBudget": {
+                    "roundLimit": 3,
+                    "threadAstraRoundCount": 2,
+                    "remainingAutomaticRounds": 1,
+                },
+                "olderRounds": [],
+                "recentRounds": [{
+                    "id": "round-1",
+                    "astraRunId": "run-interrupted",
+                    "threadRoundIndex": 7,
+                    "runRoundIndex": 1,
+                    "summary": "已完成需求分析",
+                    "tasks": [{
+                        "id": "task-done",
+                        "title": "需求分析",
+                        "status": "completed",
+                        "artifactPath": ".sessio/astra/run-interrupted/tasks/需求分析--task-done.md",
+                    }],
+                }],
+            })),
+            interrupted_tasks: vec![json!({
+                "id": "task-retry",
+                "title": "继续实现",
+                "status": "errored",
+                "threadRoundIndex": 8,
+                "error": "Astra task was active during startup recovery",
+            })],
+            ..AstraPlannerContext::default()
+        };
+
+        let prompt =
+            build_astra_orchestration_prompt(&run, &teamwork_thread(), Some(""), 0, &[], &context);
+        let value: Value = serde_json::from_str(thread_prompt_body(&prompt)).unwrap();
+        let instruction = value["instruction"].as_str().unwrap();
+
+        assert!(instruction.contains(
+            "empty userPrompt in a continuation means continue unresolved persisted work"
+        ));
+        assert!(instruction.contains("Do not restart completed work"));
+        assert!(instruction.contains("run.runRoundIndex is local to this run"));
+        assert_eq!(value["run"]["runRoundIndex"], 0);
+        assert_eq!(value["run"]["continuedFromRunId"], "run-interrupted");
+        assert_eq!(value["userPrompt"], "");
+        assert_eq!(
+            value["continuation"]["continuedFromRunId"],
+            "run-interrupted"
+        );
+        assert_eq!(value["continuation"]["isContinuation"], true);
+        assert_eq!(
+            value["threadProgress"]["recentRounds"][0]["threadRoundIndex"],
+            7
+        );
+        assert_eq!(
+            value["threadProgress"]["recentRounds"][0]["runRoundIndex"],
+            1
+        );
+        assert_eq!(
+            value["threadProgress"]["recentRounds"][0]["tasks"][0]["artifactPath"],
+            ".sessio/astra/run-interrupted/tasks/需求分析--task-done.md"
+        );
+        assert_eq!(value["interruptedTasks"][0]["id"], "task-retry");
     }
 
     #[test]

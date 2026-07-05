@@ -49,6 +49,7 @@ function run(runId: string, updatedAt: number): AstraHandle {
     runId,
     threadId: "thread-1",
     projectId: "project-1",
+    continuedFromRunId: null,
     status: "running",
     mode: "auto",
     plannerBackend: null,

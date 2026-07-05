@@ -801,6 +801,7 @@ export interface AstraHandle {
   runId: string;
   threadId: string;
   projectId: string;
+  continuedFromRunId: string | null;
   status: AstraRunStatus;
   mode: string;
   plannerBackend: string | null;

@@ -596,6 +596,7 @@ mod tests {
             thread_id: "thread-1".to_string(),
             project_id: "project-1".to_string(),
             project_path: "/tmp".to_string(),
+            continued_from_run_id: None,
             status: super::super::AstraRunStatus::Planning,
             mode: "rust_native".to_string(),
             planner_backend: None,

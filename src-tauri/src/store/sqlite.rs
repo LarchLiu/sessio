@@ -2656,6 +2656,14 @@ impl SessionStore for SqliteStore {
         astra::interrupt_active_astra_runs(&mut conn)
     }
 
+    fn interrupt_active_astra_runs_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<AstraRunRecord>> {
+        let mut conn = self.conn.lock().unwrap();
+        astra::interrupt_active_astra_runs_for_thread(&mut conn, thread_id)
+    }
+
     fn cleanup_partial_astra_sessions(&self, session_ids: &[String]) -> Result<usize> {
         let mut conn = self.conn.lock().unwrap();
         astra::cleanup_partial_astra_sessions(&mut conn, session_ids)
@@ -3612,6 +3620,7 @@ mod schema_tests {
             "thread_id",
             "project_id",
             "project_path",
+            "continued_from_run_id",
             "status",
             "mode",
             "planner_backend",
@@ -4062,6 +4071,7 @@ mod schema_tests {
             thread_id: thread.id.clone(),
             project_id: project.id.clone(),
             project_path: project.path.clone(),
+            continued_from_run_id: Some("prior-astra-run".to_string()),
             status: "running".to_string(),
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
@@ -4088,6 +4098,10 @@ mod schema_tests {
         let active = store.get_active_astra_run(&thread.id).unwrap().unwrap();
         assert_eq!(active.run_id, "astra-run-1");
         assert_eq!(active.status, "running");
+        assert_eq!(
+            active.continued_from_run_id.as_deref(),
+            Some("prior-astra-run")
+        );
         assert_eq!(
             active
                 .internal_planner_sessions
@@ -4116,6 +4130,10 @@ mod schema_tests {
         assert!(store.get_active_astra_run(&thread.id).unwrap().is_none());
         let interrupted = store.get_astra_run("astra-run-1").unwrap().unwrap();
         assert_eq!(interrupted.status, "interrupted");
+        assert_eq!(
+            interrupted.continued_from_run_id.as_deref(),
+            Some("prior-astra-run")
+        );
 
         let pending_review = AstraRunRecord {
             run_id: "astra-run-pending-review".to_string(),
@@ -4153,6 +4171,125 @@ mod schema_tests {
     }
 
     #[test]
+    fn thread_scoped_astra_recovery_interrupts_all_zombies_for_thread() {
+        let path = unique_db("astra-thread-recovery");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let project_path =
+            std::env::temp_dir().join(format!("astra-thread-recovery-{}", unique_suffix()));
+        std::fs::create_dir_all(&project_path).unwrap();
+        let project = store
+            .add_project(
+                &project_path.to_string_lossy(),
+                Some("Astra Thread Recovery Project"),
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Recover this thread", None)
+            .unwrap();
+        let other_thread = store
+            .create_thread(&project.id, "Keep this thread running", None)
+            .unwrap();
+
+        let active_new = AstraRunRecord {
+            run_id: "active-new".to_string(),
+            thread_id: thread.id.clone(),
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            continued_from_run_id: None,
+            status: "running".to_string(),
+            mode: "auto".to_string(),
+            planner_backend: Some("deterministic".to_string()),
+            round_index: Some(1),
+            round_limit: 3,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+            internal_planner_sessions: Vec::new(),
+            run_diagnostics_json: "[]".to_string(),
+            error: None,
+            created_at: 10,
+            updated_at: 30,
+        };
+        let active_old = AstraRunRecord {
+            run_id: "active-old".to_string(),
+            status: "thinking".to_string(),
+            round_index: Some(0),
+            created_at: 5,
+            updated_at: 20,
+            ..active_new.clone()
+        };
+        let other_active = AstraRunRecord {
+            run_id: "other-active".to_string(),
+            thread_id: other_thread.id.clone(),
+            created_at: 15,
+            updated_at: 40,
+            ..active_new.clone()
+        };
+        store.upsert_astra_run(&active_old).unwrap();
+        store.upsert_astra_run(&active_new).unwrap();
+        store.upsert_astra_run(&other_active).unwrap();
+        let round = store
+            .create_plan_round(NewPlanRound {
+                thread_id: &thread.id,
+                astra_run_id: Some("active-old"),
+                round_index: None,
+                summary: Some("running zombie round"),
+                mode: PlanRoundMode::Parallel,
+                source: PlanRoundSource::Astra,
+                status: PlanRoundStatus::Running,
+                tasks: vec![NewPlanTask {
+                    thread_stage_id: None,
+                    assistant_id: None,
+                    agent_participant_id: None,
+                    target_agent: Agent::Codex,
+                    stage_snapshot_json: None,
+                    assistant_snapshot_json: None,
+                    agent_snapshot_json: r#"{"agent":"codex"}"#,
+                    title: "Zombie task",
+                    prompt: "This task was running.",
+                    expected_output: None,
+                    artifact_role: None,
+                    uses_artifact_roles: &[],
+                    risk: PlanTaskRisk::Low,
+                    sort_order: 0,
+                    status: PlanTaskStatus::Running,
+                }],
+            })
+            .unwrap();
+
+        let interrupted = store
+            .interrupt_active_astra_runs_for_thread(&thread.id)
+            .unwrap();
+
+        assert_eq!(
+            interrupted
+                .iter()
+                .map(|run| run.run_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["active-new", "active-old"]
+        );
+        assert!(interrupted.iter().all(|run| run.status == "interrupted"));
+        assert!(store.get_active_astra_run(&thread.id).unwrap().is_none());
+        assert_eq!(
+            store
+                .get_active_astra_run(&other_thread.id)
+                .unwrap()
+                .unwrap()
+                .run_id,
+            "other-active"
+        );
+        let recovered_round = store.get_plan_round(&round.id).unwrap().unwrap();
+        assert_eq!(recovered_round.status, PlanRoundStatus::Errored);
+        assert_eq!(recovered_round.tasks[0].status, PlanTaskStatus::Errored);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&project_path);
+    }
+
+    #[test]
     fn astra_artifact_registry_keeps_one_current_per_role() {
         let path = unique_db("astra-artifacts");
         let store = SqliteStore::open(&path).unwrap();
@@ -4176,6 +4313,7 @@ mod schema_tests {
             thread_id: thread.id.clone(),
             project_id: project.id.clone(),
             project_path: project.path.clone(),
+            continued_from_run_id: None,
             status: "running".to_string(),
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
@@ -4191,6 +4329,12 @@ mod schema_tests {
             updated_at: 20,
         };
         store.upsert_astra_run(&run).unwrap();
+        assert!(store
+            .get_astra_run(&run.run_id)
+            .unwrap()
+            .unwrap()
+            .continued_from_run_id
+            .is_none());
         let round = store
             .create_plan_round(NewPlanRound {
                 thread_id: &thread.id,
@@ -4291,6 +4435,7 @@ mod schema_tests {
             thread_id: thread.id.clone(),
             project_id: project.id.clone(),
             project_path: project.path.clone(),
+            continued_from_run_id: None,
             status: "thinking".to_string(),
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
@@ -7065,6 +7210,7 @@ mod schema_tests {
                 thread_id: thread.id.clone(),
                 project_id: project.id.clone(),
                 project_path: project.path.clone(),
+                continued_from_run_id: None,
                 status: "completed".to_string(),
                 mode: "auto".to_string(),
                 planner_backend: Some("runtime_agent_pi".to_string()),
@@ -7376,6 +7522,7 @@ mod schema_tests {
                 thread_id: thread.id.clone(),
                 project_id: project.id.clone(),
                 project_path: project.path.clone(),
+                continued_from_run_id: None,
                 status: "completed".to_string(),
                 mode: "auto".to_string(),
                 planner_backend: Some("runtime_agent_pi".to_string()),

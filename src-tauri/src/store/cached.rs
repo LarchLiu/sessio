@@ -950,6 +950,13 @@ impl SessionStore for CachedStore {
         self.inner.interrupt_active_astra_runs()
     }
 
+    fn interrupt_active_astra_runs_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<AstraRunRecord>> {
+        self.inner.interrupt_active_astra_runs_for_thread(thread_id)
+    }
+
     fn cleanup_partial_astra_sessions(&self, session_ids: &[String]) -> Result<usize> {
         let changed = self.inner.cleanup_partial_astra_sessions(session_ids)?;
         if changed > 0 {
