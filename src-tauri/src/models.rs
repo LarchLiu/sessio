@@ -702,6 +702,8 @@ pub struct ThreadInfo {
     /// Populated when `origin == ScheduledTask`. NULL otherwise.
     #[serde(default)]
     pub scheduled_task_id: Option<String>,
+    #[serde(default)]
+    pub artifact_role_catalog: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default)]
@@ -1036,6 +1038,9 @@ pub struct PlanTaskInfo {
     pub title: String,
     pub prompt: String,
     pub expected_output: Option<String>,
+    pub artifact_role: Option<String>,
+    #[serde(default)]
+    pub uses_artifact_roles: Vec<String>,
     pub risk: PlanTaskRisk,
     pub sort_order: i64,
     pub status: PlanTaskStatus,
@@ -1047,6 +1052,23 @@ pub struct PlanTaskInfo {
     pub updated_at: i64,
     #[serde(default)]
     pub sessions: Vec<PlanTaskSessionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadAstraArtifactInfo {
+    pub id: String,
+    pub thread_id: String,
+    pub astra_run_id: String,
+    pub source_task_id: String,
+    pub role: String,
+    pub title: String,
+    pub path: String,
+    pub summary: String,
+    pub is_current: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub superseded_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

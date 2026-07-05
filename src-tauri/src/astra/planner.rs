@@ -65,6 +65,8 @@ fn deterministic_teamwork_plan(
                         .to_string(),
                 risk: AstraTaskRisk::Low,
                 depends_on: Vec::new(),
+                artifact_role: None,
+                uses_artifact_roles: Vec::new(),
             })
         })
         .collect::<Vec<_>>();
@@ -137,6 +139,8 @@ fn deterministic_process_plan(
                             .to_string(),
                     risk: AstraTaskRisk::Low,
                     depends_on: Vec::new(),
+                    artifact_role: None,
+                    uses_artifact_roles: Vec::new(),
                 })
             })
             .collect::<Vec<_>>();

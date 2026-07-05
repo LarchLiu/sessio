@@ -3,6 +3,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use serde::Deserialize;
 use serde_yaml::Value as YamlValue;
 
+use super::artifact_roles::{
+    normalize_artifact_role_catalog, resolve_artifact_role, resolve_artifact_roles,
+};
 use super::{short_hash, AstraOrchestration, AstraRun, AstraRunIntent, AstraTaskCompletion};
 use crate::astra::types::{AstraTaskProposal, AstraTaskRisk};
 use crate::models::{Agent, PlanRoundMode, ThreadInfo, ThreadKind};
@@ -49,17 +52,25 @@ struct RawAstraTask {
     risk: Option<String>,
     #[serde(default)]
     depends_on: Option<Vec<String>>,
+    artifact_role: Option<String>,
+    #[serde(default)]
+    uses_artifact_roles: Vec<String>,
 }
 
-pub(super) fn parse_astra_orchestration_response(
+pub(super) fn parse_astra_orchestration_response_with_role_catalog(
     response: &str,
     run: &AstraRun,
     thread: &ThreadInfo,
     round_index: u32,
     completions: &[AstraTaskCompletion],
+    artifact_role_catalog: &[String],
 ) -> Result<AstraOrchestration, AstraOrchestrationParseFailure> {
     let value = parse_yaml_mapping(response)?;
     reject_legacy_orchestration_fields(&value)?;
+    let artifact_role_catalog =
+        normalize_artifact_role_catalog(artifact_role_catalog).map_err(|error| {
+            AstraOrchestrationParseFailure::new("validation_failed", error.to_string())
+        })?;
     let raw: RawAstraOrchestration = serde_yaml::from_value(value)
         .map_err(|error| AstraOrchestrationParseFailure::new("invalid_yaml", error.to_string()))?;
     let RawAstraOrchestration {
@@ -103,7 +114,7 @@ pub(super) fn parse_astra_orchestration_response(
     let mut invalid_messages = Vec::new();
     for (idx, mut task) in raw_tasks.into_iter().enumerate() {
         raw_deps.push(task.depends_on.take());
-        match sanitize_astra_task(task, run, thread, round_index, idx) {
+        match sanitize_astra_task(task, run, thread, round_index, idx, &artifact_role_catalog) {
             Ok(task) => tasks.push(task),
             Err(error) => invalid_messages.push(error.message),
         }
@@ -319,6 +330,7 @@ fn sanitize_astra_task(
     thread: &ThreadInfo,
     round_index: u32,
     idx: usize,
+    artifact_role_catalog: &[String],
 ) -> Result<AstraTaskProposal, AstraOrchestrationParseFailure> {
     let _raw_id = raw.id;
     let prompt = raw
@@ -375,6 +387,19 @@ fn sanitize_astra_task(
         .title
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| format!("{} teamwork task", assistant.name));
+    let artifact_role = raw
+        .artifact_role
+        .as_deref()
+        .map(|role| {
+            resolve_artifact_role(role, artifact_role_catalog).map_err(|error| {
+                AstraOrchestrationParseFailure::new("validation_failed", error.to_string())
+            })
+        })
+        .transpose()?;
+    let uses_artifact_roles =
+        resolve_artifact_roles(&raw.uses_artifact_roles, artifact_role_catalog).map_err(
+            |error| AstraOrchestrationParseFailure::new("validation_failed", error.to_string()),
+        )?;
     let id = format!(
         "task-{}",
         short_hash(&format!(
@@ -400,6 +425,8 @@ fn sanitize_astra_task(
             }),
         risk: parse_task_risk(raw.risk.as_deref()),
         depends_on: Vec::new(),
+        artifact_role,
+        uses_artifact_roles,
     })
 }
 
@@ -440,4 +467,168 @@ fn parse_yaml_mapping(response: &str) -> Result<YamlValue, AstraOrchestrationPar
         ));
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::astra::AstraRunStatus;
+    use crate::models::{AssistantAgentInfo, ThreadAssistantInfo, ThreadOrigin};
+
+    fn run() -> AstraRun {
+        AstraRun {
+            run_id: "run-1".to_string(),
+            thread_id: "thread-1".to_string(),
+            project_id: "project-1".to_string(),
+            project_path: "/tmp/project".to_string(),
+            status: AstraRunStatus::Planning,
+            mode: "auto".to_string(),
+            planner_backend: None,
+            round_index: None,
+            round_limit: 3,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+            internal_planner_session_ids: Vec::new(),
+            run_diagnostics: Vec::new(),
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn teamwork_thread() -> ThreadInfo {
+        ThreadInfo {
+            id: "thread-1".to_string(),
+            project_id: "project-1".to_string(),
+            goal: "Build the outline".to_string(),
+            description: None,
+            stage_id: None,
+            kind: ThreadKind::Teamwork,
+            enabled: true,
+            origin: ThreadOrigin::Manual,
+            scheduled_task_id: None,
+            artifact_role_catalog: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            assistants: vec![ThreadAssistantInfo {
+                assistant_id: "assistant-codex".to_string(),
+                name: "Builder".to_string(),
+                color: None,
+                agent: AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: String::new(),
+                    mode: String::new(),
+                    effort: String::new(),
+                },
+                system_prompt: None,
+                selected_skill_ids: Vec::new(),
+                selected_mcp_ids: Vec::new(),
+                order: 0,
+            }],
+            agent_participants: Vec::new(),
+            stages: Vec::new(),
+            sessions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn parser_normalizes_artifact_roles() {
+        let parsed = parse_astra_orchestration_response_with_role_catalog(
+            r#"
+summary: continue work
+runIntent: continue
+reason: continue
+mode: parallel
+tasks:
+  - id: t1
+    title: Update brief
+    assistantId: assistant-codex
+    targetAgent: codex
+    prompt: Update the brief.
+    expectedOutput: Updated brief.
+    risk: low
+    artifactRole: Research-Brief
+    usesArtifactRoles: [outline, research brief, outline]
+"#,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed.tasks[0].artifact_role.as_deref(),
+            Some("research_brief")
+        );
+        assert_eq!(
+            parsed.tasks[0].uses_artifact_roles,
+            vec!["outline", "research_brief"]
+        );
+    }
+
+    #[test]
+    fn parser_rejects_undeclared_artifact_roles() {
+        let error = parse_astra_orchestration_response_with_role_catalog(
+            r#"
+summary: continue work
+runIntent: continue
+reason: continue
+mode: parallel
+tasks:
+  - id: t1
+    title: Update typo
+    assistantId: assistant-codex
+    targetAgent: codex
+    prompt: Update the typo role.
+    expectedOutput: Updated typo role.
+    risk: low
+    artifactRole: outlien
+"#,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("undeclared artifact role"));
+    }
+
+    #[test]
+    fn parser_accepts_catalog_declared_custom_artifact_roles() {
+        let parsed = parse_astra_orchestration_response_with_role_catalog(
+            r#"
+summary: continue work
+runIntent: continue
+reason: continue
+mode: parallel
+tasks:
+  - id: t1
+    title: Update custom artifact
+    assistantId: assistant-codex
+    targetAgent: codex
+    prompt: Update the custom artifact.
+    expectedOutput: Updated custom artifact.
+    risk: low
+    artifactRole: character sheet
+"#,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+            &["character_sheet".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed.tasks[0].artifact_role.as_deref(),
+            Some("character_sheet")
+        );
+    }
 }

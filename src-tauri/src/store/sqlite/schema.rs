@@ -315,6 +315,7 @@ CREATE TABLE IF NOT EXISTS threads (
     enabled     INTEGER NOT NULL DEFAULT 1,
     origin      TEXT NOT NULL DEFAULT 'manual' CHECK(origin IN ('manual', 'scheduled_task')),
     scheduled_task_id TEXT,
+    artifact_role_catalog_json TEXT NOT NULL DEFAULT '[]',
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
@@ -594,6 +595,33 @@ CREATE INDEX IF NOT EXISTS idx_astra_run_sessions_run
 CREATE INDEX IF NOT EXISTS idx_astra_run_sessions_session
     ON astra_run_sessions(agent, session_id);
 
+CREATE TABLE IF NOT EXISTS thread_astra_artifacts (
+    id              TEXT PRIMARY KEY,
+    thread_id       TEXT NOT NULL,
+    astra_run_id    TEXT NOT NULL,
+    source_task_id  TEXT NOT NULL,
+    role            TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    path            TEXT NOT NULL,
+    summary         TEXT NOT NULL,
+    is_current      INTEGER NOT NULL DEFAULT 1,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    superseded_at   INTEGER,
+    CHECK(role != '' AND role NOT GLOB '*[^a-z0-9_]*'),
+    CHECK(path != ''),
+    CHECK(is_current IN (0, 1)),
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE,
+    FOREIGN KEY(astra_run_id) REFERENCES astra_runs(run_id) ON DELETE CASCADE,
+    FOREIGN KEY(source_task_id) REFERENCES thread_plan_tasks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_astra_artifacts_thread_role
+    ON thread_astra_artifacts(thread_id, role, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_astra_artifacts_current_role
+    ON thread_astra_artifacts(thread_id, role)
+    WHERE is_current = 1;
+
 CREATE TABLE IF NOT EXISTS thread_plan_rounds (
     id           TEXT PRIMARY KEY,
     thread_id    TEXT NOT NULL,
@@ -633,6 +661,8 @@ CREATE TABLE IF NOT EXISTS thread_plan_tasks (
     title                   TEXT NOT NULL,
     prompt                  TEXT NOT NULL,
     expected_output         TEXT,
+    artifact_role           TEXT,
+    uses_artifact_roles_json TEXT NOT NULL DEFAULT '[]',
     risk                    TEXT NOT NULL,
     sort_order              INTEGER NOT NULL,
     status                  TEXT NOT NULL,
@@ -644,6 +674,7 @@ CREATE TABLE IF NOT EXISTS thread_plan_tasks (
     updated_at              INTEGER NOT NULL,
     CHECK(risk IN ('low', 'medium', 'high')),
     CHECK(status IN ('planned', 'running', 'completed', 'failed', 'errored', 'cancelled')),
+    CHECK(artifact_role IS NULL OR (artifact_role != '' AND artifact_role NOT GLOB '*[^a-z0-9_]*')),
     FOREIGN KEY(round_id) REFERENCES thread_plan_rounds(id) ON DELETE CASCADE,
     FOREIGN KEY(thread_stage_id) REFERENCES thread_stages(id) ON DELETE SET NULL,
     FOREIGN KEY(assistant_id) REFERENCES assistants(id) ON DELETE SET NULL
@@ -852,6 +883,24 @@ pub(crate) fn initialize_base_schema(conn: &Connection) -> Result<()> {
         "assistants",
         "selected_mcp_ids_json",
         "ALTER TABLE assistants ADD COLUMN selected_mcp_ids_json TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    ensure_column(
+        conn,
+        "thread_plan_tasks",
+        "artifact_role",
+        "ALTER TABLE thread_plan_tasks ADD COLUMN artifact_role TEXT CHECK(artifact_role IS NULL OR (artifact_role != '' AND artifact_role NOT GLOB '*[^a-z0-9_]*'))",
+    )?;
+    ensure_column(
+        conn,
+        "thread_plan_tasks",
+        "uses_artifact_roles_json",
+        "ALTER TABLE thread_plan_tasks ADD COLUMN uses_artifact_roles_json TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    ensure_column(
+        conn,
+        "threads",
+        "artifact_role_catalog_json",
+        "ALTER TABLE threads ADD COLUMN artifact_role_catalog_json TEXT NOT NULL DEFAULT '[]'",
     )?;
     Ok(())
 }

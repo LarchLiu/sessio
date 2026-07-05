@@ -61,6 +61,7 @@ enum ThreadCommand {
         description: Option<String>,
         kind: ThreadKind,
         assistant_ids: Vec<String>,
+        artifact_role_catalog: Vec<String>,
         db_path: Option<String>,
         json: bool,
     },
@@ -81,6 +82,7 @@ enum ThreadCommand {
         kind: Option<ThreadKind>,
         enabled: Option<bool>,
         assistant_ids: Option<Vec<String>>,
+        artifact_role_catalog: Option<Vec<String>>,
         db_path: Option<String>,
         json: bool,
     },
@@ -1165,6 +1167,7 @@ fn run_thread(cmd: ThreadCommand) -> Result<()> {
             description,
             kind,
             assistant_ids,
+            artifact_role_catalog,
             db_path,
             json,
         } => {
@@ -1178,6 +1181,7 @@ fn run_thread(cmd: ThreadCommand) -> Result<()> {
                 kind,
                 &assistant_ids,
                 &[],
+                &artifact_role_catalog,
             )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&thread)?);
@@ -1253,6 +1257,7 @@ fn run_thread(cmd: ThreadCommand) -> Result<()> {
             kind,
             enabled,
             assistant_ids,
+            artifact_role_catalog,
             db_path,
             json,
         } => {
@@ -1267,6 +1272,7 @@ fn run_thread(cmd: ThreadCommand) -> Result<()> {
                 kind,
                 assistant_ids.as_deref(),
                 None,
+                artifact_role_catalog.as_deref(),
             )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&thread)?);
@@ -2753,6 +2759,7 @@ fn parse_thread(args: &[String]) -> Result<Cli> {
                     "--description",
                     "--kind",
                     "--assistant-id",
+                    "--artifact-role",
                     "--db-path",
                 ],
                 &["--json"],
@@ -2769,6 +2776,7 @@ fn parse_thread(args: &[String]) -> Result<Cli> {
                             .unwrap_or(ThreadKind::Process.as_str()),
                     )?,
                     assistant_ids: repeated_option(rest, "--assistant-id")?,
+                    artifact_role_catalog: repeated_option(rest, "--artifact-role")?,
                     db_path: optional_option(rest, "--db-path")?,
                     json: has_flag(rest, "--json"),
                 }),
@@ -2840,6 +2848,7 @@ fn parse_thread(args: &[String]) -> Result<Cli> {
                     "--kind",
                     "--enabled",
                     "--assistant-id",
+                    "--artifact-role",
                     "--db-path",
                 ],
                 &["--json"],
@@ -2847,6 +2856,11 @@ fn parse_thread(args: &[String]) -> Result<Cli> {
             let rest = &args[1..];
             let assistant_ids = if has_option(rest, "--assistant-id") {
                 Some(repeated_option(rest, "--assistant-id")?)
+            } else {
+                None
+            };
+            let artifact_role_catalog = if has_option(rest, "--artifact-role") {
+                Some(repeated_option(rest, "--artifact-role")?)
             } else {
                 None
             };
@@ -2864,6 +2878,7 @@ fn parse_thread(args: &[String]) -> Result<Cli> {
                         .map(parse_config_bool)
                         .transpose()?,
                     assistant_ids,
+                    artifact_role_catalog,
                     db_path: optional_option(rest, "--db-path")?,
                     json: has_flag(rest, "--json"),
                 }),

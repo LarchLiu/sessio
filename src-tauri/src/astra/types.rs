@@ -89,6 +89,10 @@ pub struct AstraTaskProposal {
     /// persisted to the plan task table.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uses_artifact_roles: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +185,26 @@ pub struct AstraPlan {
 pub struct AstraTaskCompletion {
     pub task: AstraTaskProposal,
     pub result: AstraTaskResult,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AstraPlannerContext {
+    #[serde(default)]
+    pub canonical_artifacts: Vec<AstraPlannerCanonicalArtifact>,
+    #[serde(default)]
+    pub artifact_role_catalog: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AstraPlannerCanonicalArtifact {
+    pub role: String,
+    pub title: String,
+    pub path: String,
+    pub summary: String,
+    pub source_task_id: String,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

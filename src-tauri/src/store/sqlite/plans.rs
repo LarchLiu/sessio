@@ -233,6 +233,8 @@ fn insert_plan_task(
     let agent_snapshot_json =
         clean_required(task.agent_snapshot_json, "plan task agent snapshot json")?;
     let expected_output = clean_optional(task.expected_output);
+    let artifact_role = clean_optional(task.artifact_role);
+    let uses_artifact_roles_json = serde_json::to_string(task.uses_artifact_roles)?;
     let stage_snapshot_json = clean_optional(task.stage_snapshot_json);
     let assistant_snapshot_json = clean_optional(task.assistant_snapshot_json);
     let started_at = if matches!(task.status, PlanTaskStatus::Running) || task.status.is_terminal()
@@ -251,9 +253,10 @@ fn insert_plan_task(
         "INSERT INTO thread_plan_tasks (
             id, round_id, thread_stage_id, assistant_id, agent_participant_id, target_agent,
             stage_snapshot_json, assistant_snapshot_json, agent_snapshot_json,
-            title, prompt, expected_output, risk, sort_order, status,
+            title, prompt, expected_output, artifact_role, uses_artifact_roles_json,
+            risk, sort_order, status,
             result_summary, error, started_at, completed_at, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)",
         params![
             id,
             round_id,
@@ -267,6 +270,8 @@ fn insert_plan_task(
             title,
             prompt,
             expected_output,
+            artifact_role,
+            uses_artifact_roles_json,
             task.risk.as_str(),
             task.sort_order,
             task.status.as_str(),

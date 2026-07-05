@@ -20,6 +20,7 @@ use crate::models::{
 };
 use crate::store::{SessionStore, ThreadWorkSnapshotRecord};
 
+pub(crate) mod artifact_roles;
 mod artifacts;
 mod backend;
 mod brainstorm_backend;
@@ -66,7 +67,10 @@ pub use types::{
     AstraHandle, AstraPlan, AstraRun, AstraRunStatus, AstraTaskProposal, AstraTaskResult,
     AstraTaskResultStatus, AstraTaskRisk,
 };
-pub(crate) use types::{AstraOrchestration, AstraRunIntent, AstraTaskCompletion};
+pub(crate) use types::{
+    AstraOrchestration, AstraPlannerCanonicalArtifact, AstraPlannerContext, AstraRunIntent,
+    AstraTaskCompletion,
+};
 
 pub const ASTRA_EVENT_NAME: &str = "astra-run-event";
 const RUST_NATIVE_ROUND_LIMIT: u32 = 12;
@@ -619,6 +623,43 @@ impl AstraService {
         }
     }
 
+    fn task_with_canonical_artifact_context(
+        &self,
+        thread: &ThreadInfo,
+        task: &AstraTaskProposal,
+    ) -> Result<Option<AstraTaskProposal>> {
+        if thread.kind != ThreadKind::Teamwork || task.uses_artifact_roles.is_empty() {
+            return Ok(None);
+        }
+        let current_artifacts = self.inner.store.list_current_astra_artifacts(&thread.id)?;
+        let mut lines = vec![
+            "## Current canonical artifacts".to_string(),
+            "Read these workspace-relative artifact files before working when the task depends on their details.".to_string(),
+        ];
+        for role in &task.uses_artifact_roles {
+            let artifact = current_artifacts
+                .iter()
+                .find(|artifact| &artifact.role == role);
+            lines.push(format!("- role: {role}"));
+            if let Some(artifact) = artifact {
+                lines.push(format!("  - title: {}", artifact.title));
+                lines.push(format!("  - path: `{}`", artifact.path));
+                lines.push(format!("  - sourceTaskId: {}", artifact.source_task_id));
+                if !artifact.summary.trim().is_empty() {
+                    lines.push("  - summary:".to_string());
+                    for line in artifact.summary.lines() {
+                        lines.push(format!("    {}", line.trim_end()));
+                    }
+                }
+            } else {
+                lines.push("  - currentArtifact: none".to_string());
+            }
+        }
+        let mut next = task.clone();
+        next.prompt = format!("{}\n\n{}", task.prompt.trim_end(), lines.join("\n"));
+        Ok(Some(next))
+    }
+
     fn dispatch_task(
         &self,
         run: &AstraRun,
@@ -630,7 +671,13 @@ impl AstraService {
     ) -> Result<AgentSessionHandle> {
         let contextual_task =
             task_with_prior_teamwork_context(run, thread, task, prior_completions);
-        let task = contextual_task.as_ref().unwrap_or(task);
+        let mut owned_task = contextual_task.unwrap_or_else(|| task.clone());
+        if let Some(with_artifacts) =
+            self.task_with_canonical_artifact_context(thread, &owned_task)?
+        {
+            owned_task = with_artifacts;
+        }
+        let task = &owned_task;
         let plan_task = self.load_astra_plan_task(&run.thread_id, task.plan_task_id.as_deref())?;
         let stage_context = match plan_task
             .as_ref()
@@ -2874,6 +2921,8 @@ mod tests {
                     expected_output: "Implementation summary.".to_string(),
                     risk: AstraTaskRisk::Medium,
                     depends_on: Vec::new(),
+                    artifact_role: Some("outline".to_string()),
+                    uses_artifact_roles: Vec::new(),
                 },
                 AstraTaskProposal {
                     id: "task-2".to_string(),
@@ -2887,6 +2936,8 @@ mod tests {
                     expected_output: "Review summary.".to_string(),
                     risk: AstraTaskRisk::Low,
                     depends_on: vec!["task-1".to_string()],
+                    artifact_role: None,
+                    uses_artifact_roles: vec!["outline".to_string()],
                 },
             ],
         )
@@ -2896,6 +2947,8 @@ mod tests {
         assert_eq!(tasks[1].id, tasks[1].plan_task_id.clone().unwrap());
         // depends_on references are remapped onto the persisted plan task ids.
         assert_eq!(tasks[1].depends_on, vec![tasks[0].id.clone()]);
+        assert_eq!(tasks[0].artifact_role.as_deref(), Some("outline"));
+        assert_eq!(tasks[1].uses_artifact_roles, vec!["outline"]);
 
         let rounds = store.list_plan_rounds(&thread.id).unwrap();
         assert_eq!(rounds.len(), 1);
@@ -2921,6 +2974,8 @@ mod tests {
         );
         assert_eq!(round.tasks[0].sort_order, 0);
         assert_eq!(round.tasks[1].sort_order, 1);
+        assert_eq!(round.tasks[0].artifact_role.as_deref(), Some("outline"));
+        assert_eq!(round.tasks[1].uses_artifact_roles, vec!["outline"]);
         assert_eq!(round.tasks[0].status, PlanTaskStatus::Planned);
         assert!(round.tasks[0]
             .stage_snapshot_json
@@ -3100,6 +3155,8 @@ mod tests {
                     expected_output: "Build result.".to_string(),
                     risk: AstraTaskRisk::Low,
                     depends_on: Vec::new(),
+                    artifact_role: None,
+                    uses_artifact_roles: Vec::new(),
                 },
                 AstraTaskProposal {
                     id: "task-review".to_string(),
@@ -3113,6 +3170,8 @@ mod tests {
                     expected_output: "Review result.".to_string(),
                     risk: AstraTaskRisk::Low,
                     depends_on: Vec::new(),
+                    artifact_role: None,
+                    uses_artifact_roles: Vec::new(),
                 },
             ],
         )
@@ -3290,6 +3349,7 @@ mod tests {
                 ThreadKind::Teamwork,
                 std::slice::from_ref(&assistant.id),
                 &[],
+                &[],
             )
             .unwrap();
         let thread = store.get_thread_work_state(&thread.id).unwrap();
@@ -3336,6 +3396,8 @@ mod tests {
                 expected_output: "Implementation summary.".to_string(),
                 risk: AstraTaskRisk::Medium,
                 depends_on: Vec::new(),
+                artifact_role: None,
+                uses_artifact_roles: Vec::new(),
             }],
         )
         .unwrap();
@@ -3408,6 +3470,8 @@ mod tests {
             expected_output: "Stage result.".to_string(),
             risk: AstraTaskRisk::Low,
             depends_on: Vec::new(),
+            artifact_role: None,
+            uses_artifact_roles: Vec::new(),
         };
         let run = AstraRun {
             run_id: "astra-run-stage-link".to_string(),
@@ -3528,6 +3592,8 @@ mod tests {
             expected_output: "Focused worker result.".to_string(),
             risk: AstraTaskRisk::Low,
             depends_on: Vec::new(),
+            artifact_role: None,
+            uses_artifact_roles: Vec::new(),
         };
         let context = build_stage_task_context(&thread, &stage.id, &task).unwrap();
 
@@ -3613,6 +3679,8 @@ mod tests {
             expected_output: "Research summary.".to_string(),
             risk: AstraTaskRisk::Low,
             depends_on: Vec::new(),
+            artifact_role: None,
+            uses_artifact_roles: Vec::new(),
         };
         store
             .update_thread_stage_state(&stage.id, Some(StageStatus::InProgress), None, None)
@@ -3863,6 +3931,7 @@ mod tests {
             enabled: true,
             origin: crate::models::ThreadOrigin::Manual,
             scheduled_task_id: None,
+            artifact_role_catalog: Vec::new(),
             created_at: 1,
             updated_at: 1,
             assistants: Vec::new(),
@@ -3882,6 +3951,8 @@ mod tests {
             expected_output: "Implementation summary and verification.".to_string(),
             risk: AstraTaskRisk::Medium,
             depends_on: Vec::new(),
+            artifact_role: None,
+            uses_artifact_roles: Vec::new(),
         };
 
         let context = build_stage_task_context(&thread, "thread-stage-1", &task).unwrap();
@@ -4220,6 +4291,7 @@ mod tests {
             enabled: true,
             origin: crate::models::ThreadOrigin::Manual,
             scheduled_task_id: None,
+            artifact_role_catalog: Vec::new(),
             created_at: 1,
             updated_at: 1,
             assistants: Vec::new(),
@@ -4269,6 +4341,8 @@ mod tests {
             expected_output: "Stage progress.".to_string(),
             risk: AstraTaskRisk::Low,
             depends_on: Vec::new(),
+            artifact_role: None,
+            uses_artifact_roles: Vec::new(),
         }
     }
 

@@ -8,16 +8,17 @@ use crate::models::{
     ChannelSessionInfo, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
     PlanTaskInfo, PlanTaskSessionInfo, PlanTaskSessionRole, ProcessTemplateInfo, ProjectInfo,
     ProjectStageInfo, SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo,
-    ThreadAgentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin, ThreadReplayInfo,
+    ThreadAgentInfo, ThreadAstraArtifactInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind,
+    ThreadOrigin, ThreadReplayInfo,
 };
 use crate::store::{
     file_mtime_for, is_placeholder_indexed_session, is_real_session_file_path,
     is_virtual_session_ref, now_ms, AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord,
     ChannelSessionRecord, IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound,
-    NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord,
-    RuntimeAgentSelection, RuntimeAgentSessionConfigRecord, ScheduledTaskRecord,
-    ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef, SessionStore,
-    ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
+    NewPlanTaskSession, NewThreadAstraArtifact, PlanTaskStatusPatch, ProjectStagePatch,
+    RuntimeAgentCapabilityRecord, RuntimeAgentSelection, RuntimeAgentSessionConfigRecord,
+    ScheduledTaskRecord, ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef,
+    SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
 };
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
@@ -468,6 +469,7 @@ impl SessionStore for CachedStore {
         kind: ThreadKind,
         assistant_ids: &[String],
         agent_participants: &[ThreadAgentInfo],
+        artifact_role_catalog: &[String],
     ) -> Result<ThreadInfo> {
         self.inner.create_thread_with_options(
             project_id,
@@ -476,6 +478,7 @@ impl SessionStore for CachedStore {
             kind,
             assistant_ids,
             agent_participants,
+            artifact_role_catalog,
         )
     }
 
@@ -487,6 +490,7 @@ impl SessionStore for CachedStore {
         kind: ThreadKind,
         assistant_ids: &[String],
         agent_participants: &[ThreadAgentInfo],
+        artifact_role_catalog: &[String],
         origin: ThreadOrigin,
         scheduled_task_id: Option<&str>,
     ) -> Result<ThreadInfo> {
@@ -497,6 +501,7 @@ impl SessionStore for CachedStore {
             kind,
             assistant_ids,
             agent_participants,
+            artifact_role_catalog,
             origin,
             scheduled_task_id,
         )
@@ -522,6 +527,7 @@ impl SessionStore for CachedStore {
         kind: Option<ThreadKind>,
         assistant_ids: Option<&[String]>,
         agent_participants: Option<&[ThreadAgentInfo]>,
+        artifact_role_catalog: Option<&[String]>,
     ) -> Result<ThreadInfo> {
         self.inner.update_thread_with_options(
             thread_id,
@@ -531,6 +537,7 @@ impl SessionStore for CachedStore {
             kind,
             assistant_ids,
             agent_participants,
+            artifact_role_catalog,
         )
     }
 
@@ -589,6 +596,28 @@ impl SessionStore for CachedStore {
 
     fn list_plan_task_sessions(&self, task_id: &str) -> Result<Vec<PlanTaskSessionInfo>> {
         self.inner.list_plan_task_sessions(task_id)
+    }
+
+    fn list_current_astra_artifacts(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<ThreadAstraArtifactInfo>> {
+        self.inner.list_current_astra_artifacts(thread_id)
+    }
+
+    fn list_astra_artifacts_by_role(
+        &self,
+        thread_id: &str,
+        role: &str,
+    ) -> Result<Vec<ThreadAstraArtifactInfo>> {
+        self.inner.list_astra_artifacts_by_role(thread_id, role)
+    }
+
+    fn register_current_astra_artifact(
+        &self,
+        artifact: NewThreadAstraArtifact<'_>,
+    ) -> Result<ThreadAstraArtifactInfo> {
+        self.inner.register_current_astra_artifact(artifact)
     }
 
     fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>> {

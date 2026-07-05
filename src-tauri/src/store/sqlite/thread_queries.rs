@@ -28,6 +28,7 @@ pub(super) fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Threa
         updated_at: row.get(8)?,
         origin: ThreadOrigin::from_db_str(&origin_raw).unwrap_or_default(),
         scheduled_task_id: row.get(10)?,
+        artifact_role_catalog: parse_string_array_json(&row.get::<_, String>(11)?),
         assistants: Vec::new(),
         agent_participants: Vec::new(),
         stages: Vec::new(),
@@ -39,7 +40,7 @@ pub(super) fn load_thread_by_id(conn: &Connection, thread_id: &str) -> Result<Th
     let mut thread = conn
         .query_row(
             "SELECT id, project_id, goal, description, stage_id, kind, enabled, created_at, updated_at,
-                    origin, scheduled_task_id
+                    origin, scheduled_task_id, artifact_role_catalog_json
              FROM threads
              WHERE id = ?",
             params![thread_id],

@@ -667,6 +667,7 @@ impl SchedulerState {
             kind,
             &assistant_ids,
             &agent_participants,
+            &[],
             crate::models::ThreadOrigin::ScheduledTask,
             Some(task.id.as_str()),
         )?;

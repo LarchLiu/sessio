@@ -6,6 +6,10 @@ use crate::models::{
     PlanTaskRisk, PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus,
 };
 
+fn artifact_roles_from_json(raw: String) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default()
+}
+
 pub(super) fn plan_round_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanRoundInfo> {
     let mode_raw: String = row.get(5)?;
     let source_raw: String = row.get(6)?;
@@ -27,8 +31,8 @@ pub(super) fn plan_round_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<P
 
 fn plan_task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanTaskInfo> {
     let target_agent_raw: String = row.get(5)?;
-    let risk_raw: String = row.get(12)?;
-    let status_raw: String = row.get(14)?;
+    let risk_raw: String = row.get(14)?;
+    let status_raw: String = row.get(16)?;
     Ok(PlanTaskInfo {
         id: row.get(0)?,
         round_id: row.get(1)?,
@@ -42,15 +46,17 @@ fn plan_task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanTaskInfo>
         title: row.get(9)?,
         prompt: row.get(10)?,
         expected_output: row.get(11)?,
+        artifact_role: row.get(12)?,
+        uses_artifact_roles: artifact_roles_from_json(row.get(13)?),
         risk: PlanTaskRisk::from_db_str(&risk_raw).unwrap_or(PlanTaskRisk::Medium),
-        sort_order: row.get(13)?,
+        sort_order: row.get(15)?,
         status: PlanTaskStatus::from_db_str(&status_raw).unwrap_or(PlanTaskStatus::Planned),
-        result_summary: row.get(15)?,
-        error: row.get(16)?,
-        started_at: row.get(17)?,
-        completed_at: row.get(18)?,
-        created_at: row.get(19)?,
-        updated_at: row.get(20)?,
+        result_summary: row.get(17)?,
+        error: row.get(18)?,
+        started_at: row.get(19)?,
+        completed_at: row.get(20)?,
+        created_at: row.get(21)?,
+        updated_at: row.get(22)?,
         sessions: Vec::new(),
     })
 }
@@ -93,7 +99,8 @@ pub(super) fn load_plan_task_by_id(conn: &Connection, task_id: &str) -> Result<P
         .query_row(
             "SELECT id, round_id, thread_stage_id, assistant_id, agent_participant_id, target_agent,
                     stage_snapshot_json, assistant_snapshot_json, agent_snapshot_json,
-                    title, prompt, expected_output, risk, sort_order, status,
+                    title, prompt, expected_output, artifact_role, uses_artifact_roles_json,
+                    risk, sort_order, status,
                     result_summary, error, started_at, completed_at, created_at, updated_at
              FROM thread_plan_tasks
              WHERE id = ?",
@@ -110,7 +117,8 @@ pub(super) fn load_plan_tasks(conn: &Connection, round_id: &str) -> Result<Vec<P
     let mut stmt = conn.prepare(
         "SELECT id, round_id, thread_stage_id, assistant_id, agent_participant_id, target_agent,
                 stage_snapshot_json, assistant_snapshot_json, agent_snapshot_json,
-                title, prompt, expected_output, risk, sort_order, status,
+                title, prompt, expected_output, artifact_role, uses_artifact_roles_json,
+                risk, sort_order, status,
                 result_summary, error, started_at, completed_at, created_at, updated_at
          FROM thread_plan_tasks
          WHERE round_id = ?

@@ -4,10 +4,11 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::{
-    astra_task_from_plan_task, is_runtime_placeholder_session_id, next_dispatchable_tasks, now_ms,
-    validate_astra_tasks_for_thread, AstraBackendConfig, AstraOrchestration, AstraRun,
-    AstraRunIntent, AstraRunStatus, AstraService, AstraTaskCompletion,
-    ASTRA_ORCHESTRATOR_TIMEOUT_MS,
+    artifact_roles::built_in_artifact_roles, astra_task_from_plan_task, final_task_output,
+    is_runtime_placeholder_session_id, next_dispatchable_tasks, now_ms, summarize_task_output,
+    validate_astra_tasks_for_thread, AstraBackendConfig, AstraOrchestration,
+    AstraPlannerCanonicalArtifact, AstraPlannerContext, AstraRun, AstraRunIntent, AstraRunStatus,
+    AstraService, AstraTaskCompletion, ASTRA_ORCHESTRATOR_TIMEOUT_MS,
 };
 use crate::astra::backend::{BackendFailure, OrchestratorBackend};
 use crate::astra::brainstorm_backend::BrainstormBackend;
@@ -20,7 +21,7 @@ use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
 use crate::astra::runtime_agent_backend::{RuntimeAgentBackendConfig, RuntimeAgentOrchestrator};
 use crate::astra::types::{AstraTaskResult, AstraTaskResultStatus};
 use crate::models::{PlanRoundMode, PlanTaskStatus, StageStatus, ThreadInfo, ThreadKind};
-use crate::store::SessionStore;
+use crate::store::{NewThreadAstraArtifact, SessionStore};
 
 pub(super) const MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS: usize = 50;
 const MAX_RUN_DIAGNOSTICS: usize = 100;
@@ -186,11 +187,18 @@ impl AstraService {
             // Persist full outputs as workspace artifacts so later rounds can
             // read them on demand. Debate is skipped to preserve lane isolation.
             if matches!(thread.kind, ThreadKind::Teamwork | ThreadKind::Brainstorm) {
-                super::artifacts::write_task_artifacts(
+                let artifact_paths = super::artifacts::write_task_artifacts(
                     &current_run.project_path,
                     &current_run.run_id,
                     &batch_completions,
                 );
+                if thread.kind == ThreadKind::Teamwork {
+                    self.register_canonical_artifacts_for_completions(
+                        &current_run,
+                        &batch_completions,
+                        &artifact_paths,
+                    );
+                }
             }
             // Accumulate across sequential batches: the whole round's results
             // must reach the next planning, not just the last task's.
@@ -231,6 +239,13 @@ impl AstraService {
         let orchestrator_backend: Box<dyn OrchestratorBackend> =
             self.create_orchestrator_backend(thread, &backend_config);
         let config_value = json!({});
+        let planner_context = self.build_astra_planner_context(thread).map_err(|error| {
+            BackendFailure::new(
+                "planner_context",
+                "planner_context_failed",
+                error.to_string(),
+            )
+        })?;
 
         match orchestrator_backend.orchestrate(
             run,
@@ -238,6 +253,7 @@ impl AstraService {
             prompt,
             round_index,
             completions,
+            &planner_context,
             &config_value,
         ) {
             Ok(response) => {
@@ -284,6 +300,110 @@ impl AstraService {
                 }
                 Err(failure)
             }
+        }
+    }
+
+    fn build_astra_planner_context(&self, thread: &ThreadInfo) -> Result<AstraPlannerContext> {
+        let canonical_artifacts = if thread.kind == ThreadKind::Teamwork {
+            self.inner
+                .store
+                .list_current_astra_artifacts(&thread.id)?
+                .into_iter()
+                .map(|artifact| AstraPlannerCanonicalArtifact {
+                    role: artifact.role,
+                    title: artifact.title,
+                    path: artifact.path,
+                    summary: artifact.summary,
+                    source_task_id: artifact.source_task_id,
+                    updated_at: artifact.updated_at,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(AstraPlannerContext {
+            canonical_artifacts,
+            artifact_role_catalog: planner_artifact_role_catalog(thread),
+        })
+    }
+
+    fn register_canonical_artifacts_for_completions(
+        &self,
+        run: &AstraRun,
+        completions: &[AstraTaskCompletion],
+        artifact_paths: &HashMap<String, String>,
+    ) {
+        for completion in completions {
+            if completion.result.status != AstraTaskResultStatus::Completed {
+                continue;
+            }
+            let Some(role) = completion.task.artifact_role.as_deref() else {
+                continue;
+            };
+            let Some(plan_task_id) = completion.task.plan_task_id.as_deref() else {
+                log::warn!(
+                    "[astra:artifacts] skipped canonical artifact without plan task id task={}",
+                    completion.task.id
+                );
+                continue;
+            };
+            let Some(path) = artifact_paths.get(&completion.task.id) else {
+                log::warn!(
+                    "[astra:artifacts] skipped canonical artifact without written path task={}",
+                    completion.task.id
+                );
+                continue;
+            };
+            let summary = self.canonical_artifact_summary(run, completion);
+            if let Err(error) =
+                self.inner
+                    .store
+                    .register_current_astra_artifact(NewThreadAstraArtifact {
+                        thread_id: &run.thread_id,
+                        astra_run_id: &run.run_id,
+                        source_task_id: plan_task_id,
+                        role,
+                        title: &completion.task.title,
+                        path,
+                        summary: &summary,
+                    })
+            {
+                log::warn!(
+                    "[astra:artifacts] failed to register canonical artifact task={} role={role}: {error}",
+                    completion.task.id
+                );
+            }
+        }
+    }
+
+    fn canonical_artifact_summary(
+        &self,
+        run: &AstraRun,
+        completion: &AstraTaskCompletion,
+    ) -> String {
+        let persisted_summary = self
+            .load_astra_plan_task(&run.thread_id, completion.task.plan_task_id.as_deref())
+            .ok()
+            .flatten()
+            .and_then(|task| task.result_summary)
+            .map(|summary| summary.trim().to_string())
+            .filter(|summary| !summary.is_empty());
+        let summary = persisted_summary.unwrap_or_else(|| {
+            summarize_task_output(&final_task_output(&completion.result.output))
+        });
+        let char_count = summary.chars().count();
+        let mut truncated = if char_count > 600 {
+            summary.chars().take(597).collect::<String>()
+        } else {
+            summary
+        };
+        if char_count > 600 {
+            truncated.push_str("...");
+        }
+        if truncated.trim().is_empty() {
+            "Astra delegated task completed.".to_string()
+        } else {
+            truncated
         }
     }
 
@@ -785,6 +905,19 @@ pub(super) fn push_internal_planner_session_id(values: &mut Vec<String>, value: 
     push_unique_bounded(values, value, MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS);
 }
 
+fn planner_artifact_role_catalog(thread: &ThreadInfo) -> Vec<String> {
+    let mut artifact_role_catalog = built_in_artifact_roles();
+    for role in &thread.artifact_role_catalog {
+        if !artifact_role_catalog
+            .iter()
+            .any(|existing| existing == role)
+        {
+            artifact_role_catalog.push(role.clone());
+        }
+    }
+    artifact_role_catalog
+}
+
 fn orchestrator_backend_failure_diagnostic(
     failure: &BackendFailure,
     round_index: u32,
@@ -893,6 +1026,32 @@ mod tests {
         thread.kind = ThreadKind::Debate;
 
         assert!(dedicated_backend_required_error(&thread).is_none());
+    }
+
+    #[test]
+    fn planner_artifact_role_catalog_merges_thread_custom_roles() {
+        let mut thread = test_thread(Vec::new());
+        thread.artifact_role_catalog = vec![
+            "story_bible".to_string(),
+            "outline".to_string(),
+            "character_sheet".to_string(),
+        ];
+
+        let catalog = planner_artifact_role_catalog(&thread);
+
+        assert!(catalog.starts_with(&built_in_artifact_roles()));
+        assert_eq!(
+            catalog,
+            vec![
+                "plan",
+                "outline",
+                "research_brief",
+                "draft",
+                "synthesis",
+                "story_bible",
+                "character_sheet",
+            ]
+        );
     }
 
     #[test]
@@ -1014,6 +1173,8 @@ mod tests {
                 expected_output: "Plan.".to_string(),
                 risk: super::super::AstraTaskRisk::Low,
                 depends_on: Vec::new(),
+                artifact_role: None,
+                uses_artifact_roles: Vec::new(),
             },
             super::super::AstraTaskProposal {
                 id: "task-review".to_string(),
@@ -1027,6 +1188,8 @@ mod tests {
                 expected_output: "Review notes.".to_string(),
                 risk: super::super::AstraTaskRisk::Medium,
                 depends_on: Vec::new(),
+                artifact_role: None,
+                uses_artifact_roles: Vec::new(),
             },
         ];
         let thread = test_thread(vec![research, plan]);
@@ -1055,6 +1218,8 @@ mod tests {
                 expected_output: "Plan.".to_string(),
                 risk: super::super::AstraTaskRisk::Low,
                 depends_on: Vec::new(),
+                artifact_role: None,
+                uses_artifact_roles: Vec::new(),
             },
             super::super::AstraTaskProposal {
                 id: "task-blocked".to_string(),
@@ -1068,6 +1233,8 @@ mod tests {
                 expected_output: "Recovery notes.".to_string(),
                 risk: super::super::AstraTaskRisk::High,
                 depends_on: Vec::new(),
+                artifact_role: None,
+                uses_artifact_roles: Vec::new(),
             },
         ];
         let thread = test_thread(vec![blocked, plan]);
@@ -1114,6 +1281,8 @@ mod tests {
             expected_output: "Notes".to_string(),
             risk: super::super::AstraTaskRisk::Low,
             depends_on: Vec::new(),
+            artifact_role: None,
+            uses_artifact_roles: Vec::new(),
         }
     }
 

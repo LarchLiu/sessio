@@ -6,8 +6,9 @@ use super::debate_judge::{
 };
 use super::prompt::wrap_thread_prompt;
 use super::{
-    final_task_output, short_hash, summarize_task_output, AstraOrchestration, AstraRun,
-    AstraRunIntent, AstraTaskCompletion, AstraTaskProposal, AstraTaskResultStatus, AstraTaskRisk,
+    final_task_output, short_hash, summarize_task_output, AstraOrchestration, AstraPlannerContext,
+    AstraRun, AstraRunIntent, AstraTaskCompletion, AstraTaskProposal, AstraTaskResultStatus,
+    AstraTaskRisk,
 };
 use crate::models::{PlanRoundMode, ThreadAgentInfo, ThreadInfo, ThreadKind};
 
@@ -33,6 +34,7 @@ impl OrchestratorBackend for DebateBackend {
         user_prompt: Option<&str>,
         round_index: u32,
         completions: &[AstraTaskCompletion],
+        _planner_context: &AstraPlannerContext,
         _config: &Value,
     ) -> Result<BackendResponse<AstraOrchestration>, BackendFailure> {
         if thread.kind != ThreadKind::Debate {
@@ -410,6 +412,8 @@ fn debate_lane_tasks(
                 },
                 risk: AstraTaskRisk::Low,
                 depends_on: Vec::new(),
+                artifact_role: None,
+                uses_artifact_roles: Vec::new(),
             };
             task.prompt.push_str(&format!("\n\nLane id: {lane_id}"));
             task.prompt = wrap_thread_prompt(
@@ -780,6 +784,7 @@ mod tests {
             enabled: true,
             origin: crate::models::ThreadOrigin::Manual,
             scheduled_task_id: None,
+            artifact_role_catalog: Vec::new(),
             created_at: 1,
             updated_at: 1,
             assistants: Vec::new(),
@@ -1149,14 +1154,30 @@ mod tests {
             ))),
         }));
         let response = runtime_backend
-            .orchestrate(&run, &thread(), None, 2, &completions, &json!({}))
+            .orchestrate(
+                &run,
+                &thread(),
+                None,
+                2,
+                &completions,
+                &Default::default(),
+                &json!({}),
+            )
             .unwrap();
         assert_eq!(response.session_id, "agent-session-x");
         assert_eq!(response.backend_type, DEBATE_BACKEND_TYPE);
 
         let heuristic_backend = DebateBackend::new(Box::new(HeuristicJudge));
         let response = heuristic_backend
-            .orchestrate(&run, &thread(), None, 2, &completions, &json!({}))
+            .orchestrate(
+                &run,
+                &thread(),
+                None,
+                2,
+                &completions,
+                &Default::default(),
+                &json!({}),
+            )
             .unwrap();
         assert_eq!(response.session_id, "debate-backend-run-1-2");
     }

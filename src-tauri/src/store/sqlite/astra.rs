@@ -2,8 +2,10 @@ use anyhow::Result;
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 
-use crate::models::{Agent, AstraConfig, PlanTaskSessionRole};
-use crate::store::{now_ms, AstraConfigPatch, AstraRunRecord, AstraRunSessionRecord};
+use crate::models::{Agent, AstraConfig, PlanTaskSessionRole, ThreadAstraArtifactInfo};
+use crate::store::{
+    now_ms, AstraConfigPatch, AstraRunRecord, AstraRunSessionRecord, NewThreadAstraArtifact,
+};
 
 use super::identity::{downgrade_session_origin_when_unlinked, upgrade_session_origin_to_thread};
 
@@ -12,6 +14,8 @@ const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, sta
     last_error_code, last_error_message, run_diagnostics_json, error, created_at, updated_at";
 const ACTIVE_ASTRA_RUN_STATUS_SQL: &str =
     "'planning', 'thinking', 'awaiting_approval', 'dispatching', 'running'";
+const ASTRA_ARTIFACT_SELECT: &str = "id, thread_id, astra_run_id, source_task_id, role, title,
+    path, summary, is_current, created_at, updated_at, superseded_at";
 
 fn astra_run_from_row_without_sessions(
     row: &rusqlite::Row<'_>,
@@ -34,6 +38,24 @@ fn astra_run_from_row_without_sessions(
         error: row.get(13)?,
         created_at: row.get(14)?,
         updated_at: row.get(15)?,
+    })
+}
+
+fn astra_artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadAstraArtifactInfo> {
+    let is_current: i64 = row.get(8)?;
+    Ok(ThreadAstraArtifactInfo {
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        astra_run_id: row.get(2)?,
+        source_task_id: row.get(3)?,
+        role: row.get(4)?,
+        title: row.get(5)?,
+        path: row.get(6)?,
+        summary: row.get(7)?,
+        is_current: is_current != 0,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+        superseded_at: row.get(11)?,
     })
 }
 
@@ -332,6 +354,88 @@ pub(super) fn list_astra_runs(conn: &Connection, thread_id: &str) -> Result<Vec<
     let mut runs = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     hydrate_astra_run_sessions(conn, &mut runs)?;
     Ok(runs)
+}
+
+pub(super) fn list_current_astra_artifacts(
+    conn: &Connection,
+    thread_id: &str,
+) -> Result<Vec<ThreadAstraArtifactInfo>> {
+    let sql = format!(
+        "SELECT {ASTRA_ARTIFACT_SELECT}
+         FROM thread_astra_artifacts
+         WHERE thread_id = ? AND is_current = 1
+         ORDER BY role ASC, updated_at DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![thread_id], astra_artifact_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(super) fn list_astra_artifacts_by_role(
+    conn: &Connection,
+    thread_id: &str,
+    role: &str,
+) -> Result<Vec<ThreadAstraArtifactInfo>> {
+    let sql = format!(
+        "SELECT {ASTRA_ARTIFACT_SELECT}
+         FROM thread_astra_artifacts
+         WHERE thread_id = ? AND role = ?
+         ORDER BY is_current DESC, updated_at DESC, created_at DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![thread_id, role], astra_artifact_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(super) fn register_current_astra_artifact(
+    conn: &mut Connection,
+    artifact: NewThreadAstraArtifact<'_>,
+) -> Result<ThreadAstraArtifactInfo> {
+    let now = now_ms();
+    let id = format!(
+        "artifact-{}-{}",
+        crate::astra::short_hash(&format!(
+            "{}:{}:{}:{}:{}:{}",
+            artifact.thread_id,
+            artifact.astra_run_id,
+            artifact.source_task_id,
+            artifact.role,
+            artifact.path,
+            artifact.title
+        )),
+        now
+    );
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE thread_astra_artifacts
+         SET is_current = 0,
+             superseded_at = COALESCE(superseded_at, ?),
+             updated_at = ?
+         WHERE thread_id = ? AND role = ? AND is_current = 1",
+        params![now, now, artifact.thread_id, artifact.role],
+    )?;
+    tx.execute(
+        "INSERT INTO thread_astra_artifacts (
+            id, thread_id, astra_run_id, source_task_id, role, title, path, summary,
+            is_current, created_at, updated_at, superseded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)",
+        params![
+            id,
+            artifact.thread_id,
+            artifact.astra_run_id,
+            artifact.source_task_id,
+            artifact.role,
+            artifact.title,
+            artifact.path,
+            artifact.summary,
+            now,
+            now,
+        ],
+    )?;
+    let sql = format!("SELECT {ASTRA_ARTIFACT_SELECT} FROM thread_astra_artifacts WHERE id = ?");
+    let inserted = tx.query_row(&sql, params![id], astra_artifact_from_row)?;
+    tx.commit()?;
+    Ok(inserted)
 }
 
 pub(super) fn interrupt_active_astra_runs(conn: &mut Connection) -> Result<Vec<AstraRunRecord>> {

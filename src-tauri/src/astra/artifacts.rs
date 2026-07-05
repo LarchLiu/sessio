@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde_json::{json, Value};
 
 use super::{final_task_output, structured_response, AstraTaskCompletion, AstraTaskResultStatus};
@@ -126,9 +128,10 @@ pub(super) fn write_task_artifacts(
     project_path: &str,
     run_id: &str,
     completions: &[AstraTaskCompletion],
-) {
+) -> HashMap<String, String> {
+    let mut written = HashMap::new();
     if completions.is_empty() {
-        return;
+        return written;
     }
     let root = std::path::Path::new(project_path).join(ASTRA_ARTIFACT_ROOT_DIR);
     let gitignore = root.join(".gitignore");
@@ -140,7 +143,7 @@ pub(super) fn write_task_artifacts(
                 "[astra:artifacts] failed to prepare artifact root {}: {error}",
                 root.display()
             );
-            return;
+            return written;
         }
     }
     for completion in completions {
@@ -157,8 +160,11 @@ pub(super) fn write_task_artifacts(
                 "[astra:artifacts] failed to write task artifact {}: {error}",
                 path.display()
             );
+        } else {
+            written.insert(completion.task.id.clone(), relative);
         }
     }
+    written
 }
 
 fn task_artifact_markdown(completion: &AstraTaskCompletion) -> String {

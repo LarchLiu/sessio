@@ -21,8 +21,8 @@ use crate::models::{
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
     ProjectStageInfo, RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
-    StageIssueInfo, StageStatus, SubagentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind,
-    ThreadOrigin, ThreadReplayInfo,
+    StageIssueInfo, StageStatus, SubagentInfo, ThreadAstraArtifactInfo, ThreadIndexItemInfo,
+    ThreadInfo, ThreadKind, ThreadOrigin, ThreadReplayInfo,
 };
 
 /// Optional patch fields shared by the agent-preference update methods. Every
@@ -91,9 +91,21 @@ pub struct NewPlanTask<'a> {
     pub title: &'a str,
     pub prompt: &'a str,
     pub expected_output: Option<&'a str>,
+    pub artifact_role: Option<&'a str>,
+    pub uses_artifact_roles: &'a [String],
     pub risk: PlanTaskRisk,
     pub sort_order: i64,
     pub status: PlanTaskStatus,
+}
+
+pub struct NewThreadAstraArtifact<'a> {
+    pub thread_id: &'a str,
+    pub astra_run_id: &'a str,
+    pub source_task_id: &'a str,
+    pub role: &'a str,
+    pub title: &'a str,
+    pub path: &'a str,
+    pub summary: &'a str,
 }
 
 pub struct NewPlanRound<'a> {
@@ -481,6 +493,7 @@ pub trait SessionStore: Send + Sync {
         kind: ThreadKind,
         assistant_ids: &[String],
         agent_participants: &[crate::models::ThreadAgentInfo],
+        artifact_role_catalog: &[String],
     ) -> Result<ThreadInfo>;
     /// Full thread creation entry point — `create_thread_with_options` forwards
     /// here with `ThreadOrigin::Manual`. The scheduled-task path in
@@ -495,6 +508,7 @@ pub trait SessionStore: Send + Sync {
         kind: ThreadKind,
         assistant_ids: &[String],
         agent_participants: &[crate::models::ThreadAgentInfo],
+        artifact_role_catalog: &[String],
         origin: ThreadOrigin,
         scheduled_task_id: Option<&str>,
     ) -> Result<ThreadInfo>;
@@ -515,6 +529,7 @@ pub trait SessionStore: Send + Sync {
         kind: Option<ThreadKind>,
         assistant_ids: Option<&[String]>,
         agent_participants: Option<&[crate::models::ThreadAgentInfo]>,
+        artifact_role_catalog: Option<&[String]>,
     ) -> Result<ThreadInfo>;
     fn delete_thread(&self, thread_id: &str) -> Result<()>;
     fn create_plan_round(&self, round: NewPlanRound<'_>) -> Result<PlanRoundInfo>;
@@ -716,6 +731,17 @@ pub trait SessionStore: Send + Sync {
     fn get_astra_run(&self, run_id: &str) -> Result<Option<AstraRunRecord>>;
     fn get_active_astra_run(&self, thread_id: &str) -> Result<Option<AstraRunRecord>>;
     fn list_astra_runs(&self, thread_id: &str) -> Result<Vec<AstraRunRecord>>;
+    fn list_current_astra_artifacts(&self, thread_id: &str)
+        -> Result<Vec<ThreadAstraArtifactInfo>>;
+    fn list_astra_artifacts_by_role(
+        &self,
+        thread_id: &str,
+        role: &str,
+    ) -> Result<Vec<ThreadAstraArtifactInfo>>;
+    fn register_current_astra_artifact(
+        &self,
+        artifact: NewThreadAstraArtifact<'_>,
+    ) -> Result<ThreadAstraArtifactInfo>;
     /// Transition every active run to `interrupted` and return the rows that
     /// changed (with their patched status), so callers can notify listeners.
     fn interrupt_active_astra_runs(&self) -> Result<Vec<AstraRunRecord>>;

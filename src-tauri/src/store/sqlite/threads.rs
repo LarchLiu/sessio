@@ -2,6 +2,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
 
+use crate::astra::artifact_roles::normalize_artifact_role_catalog;
 use crate::models::{Agent, AssistantInfo, ThreadAgentInfo, ThreadInfo, ThreadKind, ThreadOrigin};
 use crate::store::now_ms;
 
@@ -133,7 +134,7 @@ pub(super) fn list_threads(conn: &Connection, project_id: &str) -> Result<Vec<Th
     load_project_by_id(conn, project_id)?;
     let mut stmt = conn.prepare(
         "SELECT id, project_id, goal, description, stage_id, kind, enabled, created_at, updated_at,
-                origin, scheduled_task_id
+                origin, scheduled_task_id, artifact_role_catalog_json
          FROM threads
          WHERE project_id = ?
          ORDER BY updated_at DESC, created_at DESC",
@@ -164,6 +165,7 @@ pub(super) fn create_thread(
         ThreadKind::Process,
         &[],
         &[],
+        &[],
     )
 }
 
@@ -175,6 +177,7 @@ pub(super) fn create_thread_with_options(
     kind: ThreadKind,
     assistant_ids: &[String],
     agent_participants: &[ThreadAgentInfo],
+    artifact_role_catalog: &[String],
 ) -> Result<ThreadInfo> {
     create_thread_with_origin(
         conn,
@@ -184,6 +187,7 @@ pub(super) fn create_thread_with_options(
         kind,
         assistant_ids,
         agent_participants,
+        artifact_role_catalog,
         ThreadOrigin::Manual,
         None,
     )
@@ -198,6 +202,7 @@ pub(super) fn create_thread_with_origin(
     kind: ThreadKind,
     assistant_ids: &[String],
     agent_participants: &[ThreadAgentInfo],
+    artifact_role_catalog: &[String],
     origin: ThreadOrigin,
     scheduled_task_id: Option<&str>,
 ) -> Result<ThreadInfo> {
@@ -206,6 +211,8 @@ pub(super) fn create_thread_with_origin(
         anyhow::bail!("thread goal cannot be empty");
     }
     let description = description.map(str::trim).filter(|s| !s.is_empty());
+    let artifact_role_catalog = normalize_artifact_role_catalog(artifact_role_catalog)?;
+    let artifact_role_catalog_json = serde_json::to_string(&artifact_role_catalog)?;
     let tx = conn.transaction()?;
     load_project_by_id(&tx, project_id)?;
     let assistants = validate_assistants_for_project(&tx, project_id, assistant_ids)?;
@@ -213,8 +220,8 @@ pub(super) fn create_thread_with_origin(
     let id = stable_thread_id(project_id, goal, now);
     tx.execute(
         "INSERT INTO threads (id, project_id, goal, description, stage_id, kind, enabled,
-                              origin, scheduled_task_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?, ?, ?)",
+                              origin, scheduled_task_id, artifact_role_catalog_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?, ?, ?, ?)",
         params![
             id,
             project_id,
@@ -223,6 +230,7 @@ pub(super) fn create_thread_with_origin(
             kind.as_str(),
             origin.as_str(),
             scheduled_task_id,
+            artifact_role_catalog_json,
             now,
             now
         ],
@@ -250,6 +258,7 @@ pub(super) fn update_thread(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -263,6 +272,7 @@ pub(super) fn update_thread_with_options(
     kind: Option<ThreadKind>,
     assistant_ids: Option<&[String]>,
     agent_participants: Option<&[ThreadAgentInfo]>,
+    artifact_role_catalog: Option<&[String]>,
 ) -> Result<ThreadInfo> {
     let tx = conn.transaction()?;
     let current = load_thread_by_id(&tx, thread_id)?;
@@ -289,19 +299,25 @@ pub(super) fn update_thread_with_options(
     };
     let next_enabled = enabled.unwrap_or(current.enabled);
     let next_kind = kind.unwrap_or(current.kind);
+    let next_artifact_role_catalog = match artifact_role_catalog {
+        Some(values) => normalize_artifact_role_catalog(values)?,
+        None => current.artifact_role_catalog,
+    };
+    let next_artifact_role_catalog_json = serde_json::to_string(&next_artifact_role_catalog)?;
     let assistant_bindings = assistant_ids
         .map(|ids| validate_assistants_for_project(&tx, &current.project_id, ids))
         .transpose()?;
     let now = now_ms();
     tx.execute(
         "UPDATE threads
-         SET goal = ?, description = ?, kind = ?, enabled = ?, updated_at = ?
+         SET goal = ?, description = ?, kind = ?, enabled = ?, artifact_role_catalog_json = ?, updated_at = ?
          WHERE id = ?",
         params![
             next_goal,
             next_description,
             next_kind.as_str(),
             next_enabled as i64,
+            next_artifact_role_catalog_json,
             now,
             thread_id
         ],

@@ -891,6 +891,7 @@ fn create_thread(
     kind: Option<ThreadKind>,
     assistant_ids: Option<Vec<String>>,
     agent_participants: Option<Vec<ThreadAgentInfo>>,
+    artifact_role_catalog: Option<Vec<String>>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ThreadInfo, String> {
@@ -902,6 +903,7 @@ fn create_thread(
             kind.unwrap_or_default(),
             assistant_ids.as_deref().unwrap_or(&[]),
             agent_participants.as_deref().unwrap_or(&[]),
+            artifact_role_catalog.as_deref().unwrap_or(&[]),
         )
         .map_err(|e| e.to_string())?;
     emit_threads_updated(
@@ -922,6 +924,7 @@ fn update_thread(
     kind: Option<ThreadKind>,
     assistant_ids: Option<Vec<String>>,
     agent_participants: Option<Vec<ThreadAgentInfo>>,
+    artifact_role_catalog: Option<Vec<String>>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ThreadInfo, String> {
@@ -935,6 +938,7 @@ fn update_thread(
             kind,
             assistant_ids.as_deref(),
             agent_participants.as_deref(),
+            artifact_role_catalog.as_deref(),
         )
         .map_err(|e| e.to_string())?;
     emit_threads_updated(
@@ -977,6 +981,8 @@ fn create_plan_round(
             title: &task.title,
             prompt: &task.prompt,
             expected_output: task.expected_output.as_deref(),
+            artifact_role: None,
+            uses_artifact_roles: &[],
             risk: task.risk,
             sort_order: task.sort_order,
             status: task.status,

@@ -4,11 +4,12 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
-use super::orchestration_response::parse_astra_orchestration_response;
+use super::orchestration_response::parse_astra_orchestration_response_with_role_catalog;
 use super::prompt::build_astra_orchestration_prompt;
 use super::{
-    AstraOrchestration, AstraRun, AstraTaskCompletion, ASTRA_ORCHESTRATOR_TIMEOUT_MS,
-    ASTRA_RUNTIME_CLEANUP_TIMEOUT_MS, ASTRA_RUNTIME_STARTUP_TIMEOUT_MS,
+    AstraOrchestration, AstraPlannerContext, AstraRun, AstraTaskCompletion,
+    ASTRA_ORCHESTRATOR_TIMEOUT_MS, ASTRA_RUNTIME_CLEANUP_TIMEOUT_MS,
+    ASTRA_RUNTIME_STARTUP_TIMEOUT_MS,
 };
 use crate::agents::runtime::types::{
     AgentInput, AgentRuntimeEventPayload, RuntimeMetadata, StartAgentSession,
@@ -56,10 +57,17 @@ impl OrchestratorBackend for RuntimeAgentOrchestrator {
         user_prompt: Option<&str>,
         round_index: u32,
         completions: &[AstraTaskCompletion],
+        planner_context: &AstraPlannerContext,
         _backend_config: &Value,
     ) -> Result<BackendResponse<AstraOrchestration>, BackendFailure> {
-        let prompt =
-            build_astra_orchestration_prompt(run, thread, user_prompt, round_index, completions);
+        let prompt = build_astra_orchestration_prompt(
+            run,
+            thread,
+            user_prompt,
+            round_index,
+            completions,
+            planner_context,
+        );
 
         match execute_agent_session(
             &self.runtime,
@@ -71,12 +79,13 @@ impl OrchestratorBackend for RuntimeAgentOrchestrator {
             "orchestration",
         ) {
             Ok((text, session_id)) => {
-                match parse_astra_orchestration_response(
+                match parse_astra_orchestration_response_with_role_catalog(
                     &text,
                     run,
                     thread,
                     round_index,
                     completions,
+                    &planner_context.artifact_role_catalog,
                 ) {
                     Ok(orchestration) => Ok(BackendResponse {
                         data: orchestration,
@@ -486,8 +495,7 @@ mod tests {
         });
 
         let output =
-            wait_for_agent_output(receiver, "target-session", 150, "runtime_agent_codex")
-                .unwrap();
+            wait_for_agent_output(receiver, "target-session", 150, "runtime_agent_codex").unwrap();
 
         assert_eq!(output, r#"{"summary":"still alive"}"#);
     }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use super::{AstraOrchestration, AstraRun, AstraTaskCompletion};
+use super::{AstraOrchestration, AstraPlannerContext, AstraRun, AstraTaskCompletion};
 use crate::models::ThreadInfo;
 
 #[derive(Debug, Clone)]
@@ -68,6 +68,7 @@ pub trait OrchestratorBackend: Send + Sync {
         user_prompt: Option<&str>,
         round_index: u32,
         completions: &[AstraTaskCompletion],
+        planner_context: &AstraPlannerContext,
         config: &Value,
     ) -> Result<BackendResponse<AstraOrchestration>, BackendFailure>;
 }

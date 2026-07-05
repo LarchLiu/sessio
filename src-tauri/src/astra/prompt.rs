@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::diagnostics::dedupe_session_ref_values;
 use super::{
-    pick_stage_agent, short_hash, stage_label, status_label, AstraRun, AstraTaskCompletion,
-    AstraTaskProposal, StageTaskContext,
+    pick_stage_agent, short_hash, stage_label, status_label, AstraPlannerContext, AstraRun,
+    AstraTaskCompletion, AstraTaskProposal, StageTaskContext,
 };
 use crate::models::{IssueStatus, SessionInfo, StageStatus, ThreadInfo, ThreadKind};
 use crate::prompt_markers::sessio_prompt_markers;
@@ -51,6 +51,8 @@ tasks:
     expectedOutput: string
     risk: low|medium|high
     dependsOn: [ids of other tasks in this response]
+    artifactRole: plan|outline|research_brief|draft|synthesis|null
+    usesArtifactRoles: [plan, outline, research_brief, draft, synthesis]
 
 assistantId must reference one of thread.assistants. targetAgent should match that assistant's runtime agent. If you create an agent-level task without assistantId, targetAgent is required, but prefer assistantId so Sessio can preserve team-member history and assistant snapshots.
 
@@ -61,6 +63,8 @@ Plan the next useful batch from the shared thread goal, userPrompt, thread.assis
 previousRounds is the run journal: one entry per earlier completed round, with the planner summary and each task's title, assistantId, risk, status, and outputExcerpt. completedTasks carries the full outputs of the most recent round only; the round already covered by completedTasks is not repeated in previousRounds. Use previousRounds to recall earlier results and decisions, avoid re-running finished work, and keep new tasks consistent with what was already built.
 
 Full outputs on demand: each completedTasks result includes result.fullOutputPath and each previousRounds task includes outputPath - a workspace-relative markdown file containing that task's complete final output. finalOutput and outputExcerpt are truncated; read the file when planning needs details beyond the excerpt.
+
+canonicalArtifacts lists current long-lived Astra artifacts for this thread. Each item has role, title, path, summary, sourceTaskId, and updatedAt. Read the referenced path when your next decision depends on details beyond the summary. Set artifactRole when a task creates or updates the current plan, outline, research brief, draft, or synthesis. Set usesArtifactRoles when a task must build on a current canonical artifact. Use only roles from artifactRoleCatalog.
 
 Write each expectedOutput as concrete acceptance criteria: the artifacts, behaviors, or checks a reviewer could verify, not a restatement of the prompt.
 
@@ -140,6 +144,7 @@ pub(super) fn build_astra_orchestration_prompt(
     user_prompt: Option<&str>,
     round_index: u32,
     completions: &[AstraTaskCompletion],
+    planner_context: &AstraPlannerContext,
 ) -> String {
     let stages = if thread.kind == ThreadKind::Teamwork {
         Vec::new()
@@ -208,6 +213,14 @@ pub(super) fn build_astra_orchestration_prompt(
     });
     if thread.kind == ThreadKind::Teamwork {
         if let Some(record) = body.as_object_mut() {
+            record.insert(
+                "canonicalArtifacts".to_string(),
+                json!(planner_context.canonical_artifacts),
+            );
+            record.insert(
+                "artifactRoleCatalog".to_string(),
+                json!(planner_context.artifact_role_catalog),
+            );
             record.insert(
                 "previousRounds".to_string(),
                 Value::Array(super::artifacts::previous_rounds_from_diagnostics(
@@ -339,6 +352,8 @@ pub(super) fn build_plan_task_snapshot_context(
                 "targetAgent": task.target_agent,
                 "expectedOutput": task.expected_output,
                 "risk": task.risk,
+                "artifactRole": task.artifact_role,
+                "usesArtifactRoles": task.uses_artifact_roles,
             }),
         );
         snapshot_object.insert("stageSnapshot".to_string(), json!(stage_snapshot));
@@ -1319,7 +1334,10 @@ fn session_ref_json(session: &SessionInfo, source_kind: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::astra::{AstraRunStatus, AstraTaskResult, AstraTaskResultStatus, AstraTaskRisk};
+    use crate::astra::{
+        AstraPlannerCanonicalArtifact, AstraRunStatus, AstraTaskResult, AstraTaskResultStatus,
+        AstraTaskRisk,
+    };
     use crate::models::{
         Agent, AssistantAgentInfo, ProjectStageType, SessionInfo, StageAssistantInfo, StageInfo,
         ThreadAssistantInfo, ThreadKind,
@@ -1374,6 +1392,7 @@ mod tests {
             enabled: true,
             origin: crate::models::ThreadOrigin::Manual,
             scheduled_task_id: None,
+            artifact_role_catalog: Vec::new(),
             created_at: 1,
             updated_at: 1,
             assistants: Vec::new(),
@@ -1419,6 +1438,8 @@ mod tests {
             expected_output: "Research notes.".to_string(),
             risk: AstraTaskRisk::Low,
             depends_on: Vec::new(),
+            artifact_role: None,
+            uses_artifact_roles: Vec::new(),
         }
     }
 
@@ -1476,6 +1497,8 @@ mod tests {
             expected_output: "Implementation result and verification.".to_string(),
             risk: AstraTaskRisk::Medium,
             depends_on: Vec::new(),
+            artifact_role: None,
+            uses_artifact_roles: Vec::new(),
         }
     }
 
@@ -1534,6 +1557,7 @@ mod tests {
             Some("user request"),
             2,
             &[completion],
+            &AstraPlannerContext::default(),
         );
         let value: Value = serde_json::from_str(thread_prompt_body(&prompt)).unwrap();
         let instruction = value["instruction"].as_str().unwrap();
@@ -1572,6 +1596,7 @@ mod tests {
             Some("split work"),
             1,
             &[completion],
+            &AstraPlannerContext::default(),
         );
         let value: Value = serde_json::from_str(thread_prompt_body(&prompt)).unwrap();
         let instruction = value["instruction"].as_str().unwrap();
@@ -1622,6 +1647,36 @@ mod tests {
     }
 
     #[test]
+    fn teamwork_orchestration_prompt_includes_canonical_artifacts() {
+        let context = AstraPlannerContext {
+            canonical_artifacts: vec![AstraPlannerCanonicalArtifact {
+                role: "outline".to_string(),
+                title: "Current outline".to_string(),
+                path: ".sessio/astra/run-1/tasks/current-outline--task-1.md".to_string(),
+                summary: "Outline summary".to_string(),
+                source_task_id: "task-1".to_string(),
+                updated_at: 42,
+            }],
+            artifact_role_catalog: vec!["plan".to_string(), "outline".to_string()],
+        };
+        let prompt =
+            build_astra_orchestration_prompt(&run(), &teamwork_thread(), None, 0, &[], &context);
+        let value: Value = serde_json::from_str(thread_prompt_body(&prompt)).unwrap();
+        let instruction = value["instruction"].as_str().unwrap();
+
+        assert!(instruction.contains("canonicalArtifacts lists current long-lived Astra artifacts"));
+        assert!(
+            instruction.contains("artifactRole: plan|outline|research_brief|draft|synthesis|null")
+        );
+        assert_eq!(value["canonicalArtifacts"][0]["role"], "outline");
+        assert_eq!(
+            value["canonicalArtifacts"][0]["path"],
+            ".sessio/astra/run-1/tasks/current-outline--task-1.md"
+        );
+        assert_eq!(value["artifactRoleCatalog"], json!(["plan", "outline"]));
+    }
+
+    #[test]
     fn teamwork_orchestration_prompt_injects_previous_rounds_and_full_outputs() {
         let mut task = teamwork_task();
         task.target_stage_id = None;
@@ -1652,8 +1707,14 @@ mod tests {
             }),
         ];
 
-        let prompt =
-            build_astra_orchestration_prompt(&run, &teamwork_thread(), None, 2, &[completion]);
+        let prompt = build_astra_orchestration_prompt(
+            &run,
+            &teamwork_thread(),
+            None,
+            2,
+            &[completion],
+            &AstraPlannerContext::default(),
+        );
         let value: Value = serde_json::from_str(thread_prompt_body(&prompt)).unwrap();
 
         // Round 1 feeds completedTasks and is excluded; the failure diagnostic
@@ -1901,6 +1962,7 @@ mod tests {
             enabled: true,
             origin: crate::models::ThreadOrigin::Manual,
             scheduled_task_id: None,
+            artifact_role_catalog: Vec::new(),
             created_at: 1,
             updated_at: 1,
             assistants: Vec::new(),
@@ -1969,6 +2031,8 @@ mod tests {
             expected_output: "Proofreading notes.".to_string(),
             risk: AstraTaskRisk::Low,
             depends_on: Vec::new(),
+            artifact_role: None,
+            uses_artifact_roles: Vec::new(),
         };
 
         let context = build_plan_task_snapshot_context(

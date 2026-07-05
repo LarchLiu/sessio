@@ -623,6 +623,7 @@ mod tests {
             enabled: true,
             origin: crate::models::ThreadOrigin::Manual,
             scheduled_task_id: None,
+            artifact_role_catalog: Vec::new(),
             created_at: 1,
             updated_at: 1,
             assistants: Vec::new(),

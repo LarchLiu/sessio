@@ -19,8 +19,8 @@ use crate::models::{
     KanbanItem, KanbanStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo,
     PlanTaskSessionRole, ProcessTemplateInfo, ProcessTemplateType, ProjectInfo, ProjectStageInfo,
     RuntimeAgentOptionMetadata, SessionInfo, SessionOrigin, StageInfo, StageIssueInfo, StageStatus,
-    SubagentInfo, ThreadAgentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
-    ThreadReplayInfo,
+    SubagentInfo, ThreadAgentInfo, ThreadAstraArtifactInfo, ThreadIndexItemInfo, ThreadInfo,
+    ThreadKind, ThreadOrigin, ThreadReplayInfo,
 };
 #[cfg(test)]
 use crate::models::{
@@ -33,10 +33,10 @@ use crate::store::{
     better_session_candidate, file_mtime_for, is_virtual_session_ref, now_ms,
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, AstraRunSessionRecord,
     ChannelSessionRecord, IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound,
-    NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord,
-    RuntimeAgentSelection, RuntimeAgentSessionConfigRecord, ScheduledTaskRecord,
-    ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef, SessionStore,
-    ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
+    NewPlanTaskSession, NewThreadAstraArtifact, PlanTaskStatusPatch, ProjectStagePatch,
+    RuntimeAgentCapabilityRecord, RuntimeAgentSelection, RuntimeAgentSessionConfigRecord,
+    ScheduledTaskRecord, ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef,
+    SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
 };
 
 mod assistants;
@@ -1960,6 +1960,7 @@ impl SessionStore for SqliteStore {
         kind: ThreadKind,
         assistant_ids: &[String],
         agent_participants: &[ThreadAgentInfo],
+        artifact_role_catalog: &[String],
     ) -> Result<ThreadInfo> {
         let mut conn = self.conn.lock().unwrap();
         threads::create_thread_with_options(
@@ -1970,6 +1971,7 @@ impl SessionStore for SqliteStore {
             kind,
             assistant_ids,
             agent_participants,
+            artifact_role_catalog,
         )
     }
 
@@ -1981,6 +1983,7 @@ impl SessionStore for SqliteStore {
         kind: ThreadKind,
         assistant_ids: &[String],
         agent_participants: &[ThreadAgentInfo],
+        artifact_role_catalog: &[String],
         origin: ThreadOrigin,
         scheduled_task_id: Option<&str>,
     ) -> Result<ThreadInfo> {
@@ -1993,6 +1996,7 @@ impl SessionStore for SqliteStore {
             kind,
             assistant_ids,
             agent_participants,
+            artifact_role_catalog,
             origin,
             scheduled_task_id,
         )
@@ -2018,6 +2022,7 @@ impl SessionStore for SqliteStore {
         kind: Option<ThreadKind>,
         assistant_ids: Option<&[String]>,
         agent_participants: Option<&[ThreadAgentInfo]>,
+        artifact_role_catalog: Option<&[String]>,
     ) -> Result<ThreadInfo> {
         let mut conn = self.conn.lock().unwrap();
         threads::update_thread_with_options(
@@ -2029,6 +2034,7 @@ impl SessionStore for SqliteStore {
             kind,
             assistant_ids,
             agent_participants,
+            artifact_role_catalog,
         )
     }
 
@@ -2618,6 +2624,31 @@ impl SessionStore for SqliteStore {
     fn list_astra_runs(&self, thread_id: &str) -> Result<Vec<AstraRunRecord>> {
         let conn = self.conn.lock().unwrap();
         astra::list_astra_runs(&conn, thread_id)
+    }
+
+    fn list_current_astra_artifacts(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<ThreadAstraArtifactInfo>> {
+        let conn = self.conn.lock().unwrap();
+        astra::list_current_astra_artifacts(&conn, thread_id)
+    }
+
+    fn list_astra_artifacts_by_role(
+        &self,
+        thread_id: &str,
+        role: &str,
+    ) -> Result<Vec<ThreadAstraArtifactInfo>> {
+        let conn = self.conn.lock().unwrap();
+        astra::list_astra_artifacts_by_role(&conn, thread_id, role)
+    }
+
+    fn register_current_astra_artifact(
+        &self,
+        artifact: NewThreadAstraArtifact<'_>,
+    ) -> Result<ThreadAstraArtifactInfo> {
+        let mut conn = self.conn.lock().unwrap();
+        astra::register_current_astra_artifact(&mut conn, artifact)
     }
 
     fn interrupt_active_astra_runs(&self) -> Result<Vec<AstraRunRecord>> {
@@ -3850,6 +3881,21 @@ mod schema_tests {
             rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
         assert!(thread_columns.contains(&"kind".to_string()));
+        assert!(thread_columns.contains(&"artifact_role_catalog_json".to_string()));
+
+        let plan_task_schema: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='thread_plan_tasks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            plan_task_schema.contains(
+                "CHECK(artifact_role IS NULL OR (artifact_role != '' AND artifact_role NOT GLOB '*[^a-z0-9_]*'))"
+            ),
+            "thread_plan_tasks should constrain artifact_role to canonical role ids"
+        );
 
         let artifact_table: i64 = conn
             .query_row(
@@ -4107,6 +4153,119 @@ mod schema_tests {
     }
 
     #[test]
+    fn astra_artifact_registry_keeps_one_current_per_role() {
+        let path = unique_db("astra-artifacts");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let project_path =
+            std::env::temp_dir().join(format!("astra-artifacts-{}", unique_suffix()));
+        std::fs::create_dir_all(&project_path).unwrap();
+        let project = store
+            .add_project(
+                &project_path.to_string_lossy(),
+                Some("Astra Artifact Project"),
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Track canonical artifacts", None)
+            .unwrap();
+        let run = AstraRunRecord {
+            run_id: "astra-artifact-run".to_string(),
+            thread_id: thread.id.clone(),
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            status: "running".to_string(),
+            mode: "auto".to_string(),
+            planner_backend: Some("deterministic".to_string()),
+            round_index: Some(0),
+            round_limit: 3,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+            internal_planner_sessions: Vec::new(),
+            run_diagnostics_json: "[]".to_string(),
+            error: None,
+            created_at: 10,
+            updated_at: 20,
+        };
+        store.upsert_astra_run(&run).unwrap();
+        let round = store
+            .create_plan_round(NewPlanRound {
+                thread_id: &thread.id,
+                astra_run_id: Some(&run.run_id),
+                round_index: Some(0),
+                summary: Some("artifact round"),
+                mode: PlanRoundMode::Parallel,
+                source: PlanRoundSource::Astra,
+                status: PlanRoundStatus::Planned,
+                tasks: vec![NewPlanTask {
+                    thread_stage_id: None,
+                    assistant_id: None,
+                    agent_participant_id: None,
+                    target_agent: Agent::Codex,
+                    stage_snapshot_json: None,
+                    assistant_snapshot_json: None,
+                    agent_snapshot_json: r#"{"agent":"codex"}"#,
+                    title: "Write outline",
+                    prompt: "Write the outline.",
+                    expected_output: Some("Outline"),
+                    artifact_role: Some("outline"),
+                    uses_artifact_roles: &[],
+                    risk: PlanTaskRisk::Low,
+                    sort_order: 0,
+                    status: PlanTaskStatus::Planned,
+                }],
+            })
+            .unwrap();
+        let task_id = round.tasks[0].id.as_str();
+
+        let first = store
+            .register_current_astra_artifact(NewThreadAstraArtifact {
+                thread_id: &thread.id,
+                astra_run_id: &run.run_id,
+                source_task_id: task_id,
+                role: "outline",
+                title: "Outline v1",
+                path: ".sessio/astra/run/tasks/outline-v1.md",
+                summary: "First outline",
+            })
+            .unwrap();
+        let second = store
+            .register_current_astra_artifact(NewThreadAstraArtifact {
+                thread_id: &thread.id,
+                astra_run_id: &run.run_id,
+                source_task_id: task_id,
+                role: "outline",
+                title: "Outline v2",
+                path: ".sessio/astra/run/tasks/outline-v2.md",
+                summary: "Second outline",
+            })
+            .unwrap();
+
+        let current = store.list_current_astra_artifacts(&thread.id).unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].id, second.id);
+        assert_eq!(current[0].path, ".sessio/astra/run/tasks/outline-v2.md");
+
+        let history = store
+            .list_astra_artifacts_by_role(&thread.id, "outline")
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].id, second.id);
+        let superseded = history
+            .iter()
+            .find(|artifact| artifact.id == first.id)
+            .unwrap();
+        assert!(!superseded.is_current);
+        assert!(superseded.superseded_at.is_some());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&project_path);
+    }
+
+    #[test]
     fn startup_recovery_closes_thinking_run_tasks_and_placeholders() {
         let path = unique_db("astra-recovery-task-sessions");
         let store = SqliteStore::open(&path).unwrap();
@@ -4183,6 +4342,8 @@ mod schema_tests {
                     title: "Recover running task",
                     prompt: "This task was running when the app quit.",
                     expected_output: None,
+                    artifact_role: None,
+                    uses_artifact_roles: &[],
                     risk: PlanTaskRisk::Low,
                     sort_order: 0,
                     status: PlanTaskStatus::Running,
@@ -6246,6 +6407,8 @@ mod schema_tests {
                     title: "Origin task",
                     prompt: "Track session origin",
                     expected_output: None,
+                    artifact_role: None,
+                    uses_artifact_roles: &[],
                     risk: PlanTaskRisk::Low,
                     sort_order: 0,
                     status: PlanTaskStatus::Running,
@@ -6369,6 +6532,7 @@ mod schema_tests {
                 ThreadKind::Teamwork,
                 std::slice::from_ref(&assistant.id),
                 &[],
+                &[],
             )
             .unwrap();
         let stage_template = store
@@ -6406,6 +6570,8 @@ mod schema_tests {
                         title: "Research",
                         prompt: "Research prompt",
                         expected_output: Some("Notes"),
+                        artifact_role: None,
+                        uses_artifact_roles: &[],
                         risk: PlanTaskRisk::Medium,
                         sort_order: 0,
                         status: PlanTaskStatus::Running,
@@ -6421,6 +6587,8 @@ mod schema_tests {
                         title: "Review",
                         prompt: "Review prompt",
                         expected_output: Some("Review notes"),
+                        artifact_role: None,
+                        uses_artifact_roles: &[],
                         risk: PlanTaskRisk::High,
                         sort_order: 1,
                         status: PlanTaskStatus::Running,
@@ -6562,6 +6730,8 @@ mod schema_tests {
                         title: "First planned",
                         prompt: "First prompt",
                         expected_output: None,
+                        artifact_role: None,
+                        uses_artifact_roles: &[],
                         risk: PlanTaskRisk::Low,
                         sort_order: 0,
                         status: PlanTaskStatus::Planned,
@@ -6577,6 +6747,8 @@ mod schema_tests {
                         title: "Second running",
                         prompt: "Second prompt",
                         expected_output: None,
+                        artifact_role: None,
+                        uses_artifact_roles: &[],
                         risk: PlanTaskRisk::Low,
                         sort_order: 1,
                         status: PlanTaskStatus::Running,
@@ -6608,6 +6780,8 @@ mod schema_tests {
                         title: "Step 1",
                         prompt: "Step one",
                         expected_output: None,
+                        artifact_role: None,
+                        uses_artifact_roles: &[],
                         risk: PlanTaskRisk::Low,
                         sort_order: 0,
                         status: PlanTaskStatus::Running,
@@ -6623,6 +6797,8 @@ mod schema_tests {
                         title: "Step 2",
                         prompt: "Step two",
                         expected_output: None,
+                        artifact_role: None,
+                        uses_artifact_roles: &[],
                         risk: PlanTaskRisk::Low,
                         sort_order: 1,
                         status: PlanTaskStatus::Planned,
@@ -6764,6 +6940,7 @@ mod schema_tests {
                 ThreadKind::Teamwork,
                 std::slice::from_ref(&assistant.id),
                 &[],
+                &[],
             )
             .unwrap();
         let stage_template = store
@@ -6863,6 +7040,8 @@ mod schema_tests {
                     title: "Replay task",
                     prompt: "Do traceable work",
                     expected_output: Some("Trace"),
+                    artifact_role: None,
+                    uses_artifact_roles: &[],
                     risk: PlanTaskRisk::Low,
                     sort_order: 0,
                     status: PlanTaskStatus::Running,
@@ -7151,6 +7330,8 @@ mod schema_tests {
                     title: "Runtime task",
                     prompt: "Do runtime work",
                     expected_output: None,
+                    artifact_role: None,
+                    uses_artifact_roles: &[],
                     risk: PlanTaskRisk::Low,
                     sort_order: 0,
                     status: PlanTaskStatus::Running,
@@ -7337,6 +7518,11 @@ mod schema_tests {
         assert_eq!(persisted_kind, "process");
 
         let assistant_ids = vec![builder.id.clone(), reviewer.id.clone()];
+        let artifact_role_catalog = vec![
+            "Character Sheet".to_string(),
+            "outline".to_string(),
+            "character-sheet".to_string(),
+        ];
         let teamwork = store
             .create_thread_with_options(
                 &project.id,
@@ -7345,9 +7531,14 @@ mod schema_tests {
                 ThreadKind::Teamwork,
                 &assistant_ids,
                 &[],
+                &artifact_role_catalog,
             )
             .unwrap();
         assert_eq!(teamwork.kind, ThreadKind::Teamwork);
+        assert_eq!(
+            teamwork.artifact_role_catalog,
+            vec!["character_sheet".to_string(), "outline".to_string()]
+        );
         assert_eq!(
             teamwork
                 .assistants
@@ -7394,6 +7585,7 @@ mod schema_tests {
                 ThreadKind::Brainstorm,
                 &[],
                 &brainstorm_participants,
+                &[],
             )
             .unwrap();
         assert_eq!(brainstorm.kind, ThreadKind::Brainstorm);
@@ -7414,6 +7606,7 @@ mod schema_tests {
                 ThreadKind::Debate,
                 &[],
                 &brainstorm_participants[0..1],
+                &[],
             )
             .unwrap();
         assert_eq!(debate.kind, ThreadKind::Debate);
@@ -7439,6 +7632,7 @@ mod schema_tests {
                 ThreadKind::Brainstorm,
                 &[],
                 &empty_runtime_option_participants,
+                &[],
             )
             .unwrap();
         assert_eq!(empty_runtime_option_thread.agent_participants.len(), 1);
@@ -7465,6 +7659,8 @@ mod schema_tests {
             && thread.agent_participants.len() == 1));
 
         let reordered = vec![reviewer.id.clone(), builder.id.clone()];
+        let updated_artifact_role_catalog =
+            vec!["Story Bible".to_string(), "research-brief".to_string()];
         let updated = store
             .update_thread_with_options(
                 &teamwork.id,
@@ -7474,10 +7670,15 @@ mod schema_tests {
                 Some(ThreadKind::Teamwork),
                 Some(&reordered),
                 None,
+                Some(&updated_artifact_role_catalog),
             )
             .unwrap();
         assert_eq!(updated.goal, "Teamwork lane updated");
         assert_eq!(updated.description.as_deref(), Some("reordered"));
+        assert_eq!(
+            updated.artifact_role_catalog,
+            vec!["story_bible".to_string(), "research_brief".to_string()]
+        );
         assert_eq!(
             updated
                 .assistants
@@ -7508,6 +7709,7 @@ mod schema_tests {
                 Some(ThreadKind::Brainstorm),
                 None,
                 Some(&updated_participants),
+                None,
             )
             .unwrap();
         assert!(updated_brainstorm.assistants.is_empty());

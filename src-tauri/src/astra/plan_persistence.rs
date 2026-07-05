@@ -27,6 +27,8 @@ struct OwnedAstraPlanTask {
     title: String,
     prompt: String,
     expected_output: Option<String>,
+    artifact_role: Option<String>,
+    uses_artifact_roles: Vec<String>,
     risk: PlanTaskRisk,
     sort_order: i64,
     status: PlanTaskStatus,
@@ -156,6 +158,8 @@ pub(crate) fn astra_task_from_plan_task(task: &PlanTaskInfo) -> AstraTaskProposa
             .unwrap_or_else(|| "Task result.".to_string()),
         risk: astra_task_risk_from_plan(task.risk),
         depends_on: Vec::new(),
+        artifact_role: task.artifact_role.clone(),
+        uses_artifact_roles: task.uses_artifact_roles.clone(),
     }
 }
 
@@ -195,6 +199,8 @@ pub(super) fn create_plan_round_for_astra_tasks_in_store(
             title: &task.title,
             prompt: &task.prompt,
             expected_output: task.expected_output.as_deref(),
+            artifact_role: task.artifact_role.as_deref(),
+            uses_artifact_roles: &task.uses_artifact_roles,
             risk: task.risk,
             sort_order: task.sort_order,
             status: task.status,
@@ -328,6 +334,8 @@ fn astra_task_to_plan_task(
         title: task.title.clone(),
         prompt: task.prompt.clone(),
         expected_output: Some(task.expected_output.clone()),
+        artifact_role: task.artifact_role.clone(),
+        uses_artifact_roles: task.uses_artifact_roles.clone(),
         risk: plan_task_risk_from_astra(task.risk),
         sort_order: i64::try_from(idx).unwrap_or(i64::MAX),
         status: PlanTaskStatus::Planned,

@@ -2,7 +2,9 @@ use serde_json::Value;
 
 use super::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
 use super::planner::{deterministic_plan, remaining_process_stages};
-use super::{AstraOrchestration, AstraRun, AstraRunIntent, AstraTaskCompletion};
+use super::{
+    AstraOrchestration, AstraPlannerContext, AstraRun, AstraRunIntent, AstraTaskCompletion,
+};
 use crate::models::{PlanRoundMode, ThreadInfo, ThreadKind};
 
 /// Deterministic Orchestrator backend (rule-based, no external agent).
@@ -16,6 +18,7 @@ impl OrchestratorBackend for DeterministicOrchestratorBackend {
         user_prompt: Option<&str>,
         round_index: u32,
         completions: &[AstraTaskCompletion],
+        _planner_context: &AstraPlannerContext,
         _config: &Value,
     ) -> Result<BackendResponse<AstraOrchestration>, BackendFailure> {
         let orchestration =
