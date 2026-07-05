@@ -232,7 +232,7 @@ export function renderThreadOrchestrationContext({
     for (const run of astraRuns.slice().sort((a, b) => a.createdAt - b.createdAt)) {
       lines.push(
         `- [${run.status}] ${run.runId}` +
-          (run.roundIndex !== null ? ` round ${run.roundIndex}/${run.roundLimit}` : "") +
+          (run.roundIndex !== null ? ` round ${run.roundIndex}` : "") +
           (run.plannerBackend ? ` via ${run.plannerBackend}` : ""),
       );
       if (run.terminalReason) lines.push(`    terminal reason: ${compactContextField(run.terminalReason)}`);

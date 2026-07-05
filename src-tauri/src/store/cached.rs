@@ -957,6 +957,19 @@ impl SessionStore for CachedStore {
         self.inner.interrupt_active_astra_runs_for_thread(thread_id)
     }
 
+    fn reconcile_terminal_astra_run_plan_work(&self, run_id: &str) -> Result<usize> {
+        self.inner.reconcile_terminal_astra_run_plan_work(run_id)
+    }
+
+    fn reconcile_terminal_astra_runs_plan_work(&self) -> Result<usize> {
+        self.inner.reconcile_terminal_astra_runs_plan_work()
+    }
+
+    fn reconcile_terminal_astra_runs_plan_work_for_thread(&self, thread_id: &str) -> Result<usize> {
+        self.inner
+            .reconcile_terminal_astra_runs_plan_work_for_thread(thread_id)
+    }
+
     fn cleanup_partial_astra_sessions(&self, session_ids: &[String]) -> Result<usize> {
         let changed = self.inner.cleanup_partial_astra_sessions(session_ids)?;
         if changed > 0 {

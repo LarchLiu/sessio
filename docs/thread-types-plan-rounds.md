@@ -152,8 +152,7 @@ plan task 如果只保存 `thread_stage_id`、`assistant_id`、`agent_participan
 - 每个参与模型运行在 isolated lane 中，彼此不共享完整上下文。
 - 第一轮各 lane 只看到同一份初始问题。
 - 交叉验证时，lane A 只能看到 lane B 的阶段性产物，不看 B 的完整对话过程；lane B 同理。
-- Astra 比较各 lane 结论，若一致则输出统一答案；若不一致则生成下一轮交叉验证 task。
-- 达到 round limit 仍不一致时，输出共识部分、分歧部分和 Astra 裁决建议。
+- Astra 比较各 lane 结论，若一致则输出统一答案；若不一致则生成下一轮交叉验证 task，直到收敛或明确需要人工处理。
 
 命名说明：
 
@@ -245,12 +244,12 @@ debate 的目标是让两个或多个模型彼此独立思考，再交叉验证�
 5. Astra 比较修正后的答案：
    - 如果一致，生成统一结论。
    - 如果不一致，生成下一轮交叉验证 task。
-   - 如果达到 round limit，输出共识、分歧和裁决建议。
+   - 如果无法继续自动推进，输出共识、分歧和裁决建议并转人工处理。
 
 实现重点：
 
 - `parallel` / `sequential` 只描述某一轮的 dispatch 方式，不足以表达 debate 的 lane 隔离、artifact 可见范围和一致性判断。
-- Astra orchestrator 需要新增 debate 专用编排能力，例如 `debate_backend` 或等价策略模块，负责 lane lifecycle、cross-check task 生成、阶段性产物交换、convergence 判断和 round limit 处理。
+- Astra orchestrator 需要新增 debate 专用编排能力，例如 `debate_backend` 或等价策略模块，负责 lane lifecycle、cross-check task 生成、阶段性产物交换和 convergence 判断。
 - 需要给 plan task 或 plan round 增加 lane 概念，至少能区分 A/B。
 - lane context 必须隔离；不能把一个 lane 的完整 transcript 直接喂给另一个 lane。
 - cross-check 只能传递对方阶段性产物和 Astra 摘要。
@@ -831,12 +830,11 @@ brainstorm/debate 不把 participant 偷偷写成 assistant；它们优先使用
 - 新增 debate 专用 orchestrator 策略，例如 `debate_backend`，不能只复用普通 task-centric planner。
 - `debate_backend` 负责为每个 agent participant 创建和维护 isolated lane，并记录 lane id、lane artifact 和可见 artifact 范围。
 - `debate_backend` 负责生成 cross-check tasks：只向某个 lane 暴露对方阶段性产物或 Astra 摘要，不暴露完整 transcript。
-- `debate_backend` 负责比较各 lane 的最新结论，判断 converged / diverged / need_more_cross_check / round_limit_reached。
+- `debate_backend` 负责比较各 lane 的最新结论，判断 converged / diverged / need_more_cross_check。
 - Debate 为每个 participant 创建 lane，lane 之间不共享完整 transcript。
 - Round 1 各 lane 只看到同一份初始问题。
 - Cross-check round 只交换对方阶段性产物或 Astra 摘要，不交换完整上下文。
-- Astra 比较 lane 输出，若一致则 complete；不一致则生成下一轮 cross-check tasks。
-- Round limit 到达仍不一致时，输出共识、分歧和裁决建议。
+- Astra 比较 lane 输出，若一致则 complete；不一致则生成下一轮 cross-check tasks，直到收敛或明确需要人工处理。
 - `lane_id` 和可见 artifact 范围 v1 可先放入 task metadata/diagnostics，后续结构化。
 - 如果 v1 不实现 debate 专用 orchestrator，则 Phase 6 只能标记为 schema/API 准备，真正 isolated-lane 编排推迟到 v2，不能宣称已实现 debate mode。
 
@@ -845,9 +843,9 @@ brainstorm/debate 不把 participant 偷偷写成 assistant；它们优先使用
 - Debate lane A/B 的完整上下文互不泄漏。
 - Cross-check task 只能看到对方阶段性产物。
 - 每个 lane 的可见 artifact 范围可审计，reload 后仍能解释某个 task 当时看到了什么。
-- Convergence 判断由 debate backend 明确记录，包括一致、不一致、继续交叉验证或达到 round limit 的理由。
+- Convergence 判断由 debate backend 明确记录，包括一致、不一致或继续交叉验证的理由。
 - 一致时输出统一结论。
-- 不一致且达到 round limit 时输出共识和分歧。
+- 不一致且无法继续自动推进时输出共识和分歧。
 
 ### Phase 7: 前端展示和 reload 恢复
 

@@ -579,6 +579,137 @@ fn interrupt_active_astra_runs_matching(
     Ok(active)
 }
 
+pub(super) fn reconcile_terminal_astra_run_plan_work(
+    conn: &mut Connection,
+    run_id: &str,
+) -> Result<usize> {
+    reconcile_terminal_astra_runs_plan_work_matching(conn, Some(run_id), None)
+}
+
+pub(super) fn reconcile_terminal_astra_runs_plan_work(conn: &mut Connection) -> Result<usize> {
+    reconcile_terminal_astra_runs_plan_work_matching(conn, None, None)
+}
+
+pub(super) fn reconcile_terminal_astra_runs_plan_work_for_thread(
+    conn: &mut Connection,
+    thread_id: &str,
+) -> Result<usize> {
+    reconcile_terminal_astra_runs_plan_work_matching(conn, None, Some(thread_id))
+}
+
+fn reconcile_terminal_astra_runs_plan_work_matching(
+    conn: &mut Connection,
+    run_id: Option<&str>,
+    thread_id: Option<&str>,
+) -> Result<usize> {
+    let tx = conn.transaction()?;
+    let now = now_ms();
+    let mut predicates = vec!["status IN ('cancelled', 'errored', 'interrupted')".to_string()];
+    let mut values = Vec::<SqlValue>::new();
+    if let Some(run_id) = run_id {
+        predicates.push("run_id = ?".to_string());
+        values.push(SqlValue::from(run_id.to_string()));
+    }
+    if let Some(thread_id) = thread_id {
+        predicates.push("thread_id = ?".to_string());
+        values.push(SqlValue::from(thread_id.to_string()));
+    }
+    let sql = format!(
+        "SELECT run_id, status
+         FROM astra_runs
+         WHERE {}
+         ORDER BY updated_at DESC, created_at DESC",
+        predicates.join(" AND ")
+    );
+    let runs = {
+        let mut stmt = tx.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let mut changed = 0usize;
+    for (run_id, status) in runs {
+        changed += reconcile_terminal_astra_run_plan_work_on_conn(&tx, &run_id, &status, now)?;
+    }
+    tx.commit()?;
+    Ok(changed)
+}
+
+fn reconcile_terminal_astra_run_plan_work_on_conn(
+    conn: &Connection,
+    run_id: &str,
+    run_status: &str,
+    now: i64,
+) -> Result<usize> {
+    let Some(patch) = terminal_plan_work_patch(run_status) else {
+        return Ok(0);
+    };
+    let task_changed = conn.execute(
+        "UPDATE thread_plan_tasks
+         SET status = ?,
+             error = COALESCE(error, ?),
+             result_summary = COALESCE(result_summary, ?),
+             completed_at = COALESCE(completed_at, ?),
+             updated_at = ?
+         WHERE status IN ('planned', 'running')
+           AND round_id IN (
+               SELECT id
+               FROM thread_plan_rounds
+               WHERE astra_run_id = ?
+           )",
+        params![
+            patch.task_status,
+            patch.task_error,
+            patch.result_summary,
+            now,
+            now,
+            run_id,
+        ],
+    )?;
+    let round_changed = conn.execute(
+        "UPDATE thread_plan_rounds
+         SET status = ?,
+             updated_at = ?
+         WHERE astra_run_id = ?
+           AND status IN ('planned', 'running')",
+        params![patch.round_status, now, run_id],
+    )?;
+    Ok(task_changed + round_changed)
+}
+
+struct TerminalPlanWorkPatch {
+    task_status: &'static str,
+    round_status: &'static str,
+    task_error: &'static str,
+    result_summary: &'static str,
+}
+
+fn terminal_plan_work_patch(run_status: &str) -> Option<TerminalPlanWorkPatch> {
+    match run_status {
+        "cancelled" => Some(TerminalPlanWorkPatch {
+            task_status: "cancelled",
+            round_status: "cancelled",
+            task_error: "Astra task was cancelled with its run",
+            result_summary: "Cancelled with Astra run",
+        }),
+        "interrupted" => Some(TerminalPlanWorkPatch {
+            task_status: "errored",
+            round_status: "errored",
+            task_error: "Astra task was active when its run was interrupted",
+            result_summary: "Interrupted with Astra run",
+        }),
+        "errored" => Some(TerminalPlanWorkPatch {
+            task_status: "errored",
+            round_status: "errored",
+            task_error: "Astra task was active when its run errored",
+            result_summary: "Errored with Astra run",
+        }),
+        _ => None,
+    }
+}
+
 pub(super) fn cleanup_partial_astra_sessions(
     conn: &mut Connection,
     session_ids: &[String],

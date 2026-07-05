@@ -2664,6 +2664,21 @@ impl SessionStore for SqliteStore {
         astra::interrupt_active_astra_runs_for_thread(&mut conn, thread_id)
     }
 
+    fn reconcile_terminal_astra_run_plan_work(&self, run_id: &str) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        astra::reconcile_terminal_astra_run_plan_work(&mut conn, run_id)
+    }
+
+    fn reconcile_terminal_astra_runs_plan_work(&self) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        astra::reconcile_terminal_astra_runs_plan_work(&mut conn)
+    }
+
+    fn reconcile_terminal_astra_runs_plan_work_for_thread(&self, thread_id: &str) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        astra::reconcile_terminal_astra_runs_plan_work_for_thread(&mut conn, thread_id)
+    }
+
     fn cleanup_partial_astra_sessions(&self, session_ids: &[String]) -> Result<usize> {
         let mut conn = self.conn.lock().unwrap();
         astra::cleanup_partial_astra_sessions(&mut conn, session_ids)
@@ -4284,6 +4299,103 @@ mod schema_tests {
         let recovered_round = store.get_plan_round(&round.id).unwrap().unwrap();
         assert_eq!(recovered_round.status, PlanRoundStatus::Errored);
         assert_eq!(recovered_round.tasks[0].status, PlanTaskStatus::Errored);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&project_path);
+    }
+
+    #[test]
+    fn terminal_astra_run_repair_closes_cancelled_run_running_plan_work() {
+        let path = unique_db("astra-terminal-plan-repair");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let project_path =
+            std::env::temp_dir().join(format!("astra-terminal-plan-repair-{}", unique_suffix()));
+        std::fs::create_dir_all(&project_path).unwrap();
+        let project = store
+            .add_project(
+                &project_path.to_string_lossy(),
+                Some("Astra Terminal Plan Repair Project"),
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Repair cancelled Astra task", None)
+            .unwrap();
+        let run = AstraRunRecord {
+            run_id: "cancelled-run-with-running-task".to_string(),
+            thread_id: thread.id.clone(),
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            continued_from_run_id: None,
+            status: "cancelled".to_string(),
+            mode: "auto".to_string(),
+            planner_backend: Some("deterministic".to_string()),
+            round_index: Some(13),
+            round_limit: 3,
+            terminal_reason: Some("user_cancelled".to_string()),
+            last_error_code: None,
+            last_error_message: None,
+            internal_planner_sessions: Vec::new(),
+            run_diagnostics_json: "[]".to_string(),
+            error: None,
+            created_at: 10,
+            updated_at: 20,
+        };
+        store.upsert_astra_run(&run).unwrap();
+        let round = store
+            .create_plan_round(NewPlanRound {
+                thread_id: &thread.id,
+                astra_run_id: Some(&run.run_id),
+                round_index: Some(13),
+                summary: Some("cancelled run left a running task"),
+                mode: PlanRoundMode::Sequential,
+                source: PlanRoundSource::Astra,
+                status: PlanRoundStatus::Running,
+                tasks: vec![NewPlanTask {
+                    thread_stage_id: None,
+                    assistant_id: None,
+                    agent_participant_id: None,
+                    target_agent: Agent::Codex,
+                    stage_snapshot_json: None,
+                    assistant_snapshot_json: None,
+                    agent_snapshot_json: r#"{"agent":"codex"}"#,
+                    title: "Draft chapter",
+                    prompt: "Draft chapter.",
+                    expected_output: None,
+                    artifact_role: None,
+                    uses_artifact_roles: &[],
+                    risk: PlanTaskRisk::Low,
+                    sort_order: 0,
+                    status: PlanTaskStatus::Running,
+                }],
+            })
+            .unwrap();
+
+        let changed = store
+            .reconcile_terminal_astra_run_plan_work(&run.run_id)
+            .unwrap();
+
+        assert_eq!(changed, 2);
+        assert!(store
+            .get_astra_run(&run.run_id)
+            .unwrap()
+            .unwrap()
+            .continued_from_run_id
+            .is_none());
+        let repaired_round = store.get_plan_round(&round.id).unwrap().unwrap();
+        assert_eq!(repaired_round.status, PlanRoundStatus::Cancelled);
+        assert_eq!(repaired_round.tasks[0].status, PlanTaskStatus::Cancelled);
+        assert_eq!(
+            repaired_round.tasks[0].error.as_deref(),
+            Some("Astra task was cancelled with its run")
+        );
+        assert_eq!(
+            repaired_round.tasks[0].result_summary.as_deref(),
+            Some("Cancelled with Astra run")
+        );
+        assert!(repaired_round.tasks[0].completed_at.is_some());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&project_path);

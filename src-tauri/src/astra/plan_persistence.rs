@@ -13,7 +13,7 @@ use crate::store::{
 use super::{
     delegated_attempt_id, final_task_output, is_runtime_placeholder_session_id, short_hash,
     summarize_task_output, AstraRun, AstraRunStatus, AstraTaskProposal, AstraTaskResult,
-    AstraTaskResultStatus, AstraTaskRisk, RUST_NATIVE_ROUND_LIMIT,
+    AstraTaskResultStatus, AstraTaskRisk, LEGACY_ASTRA_RUN_ROUND_LIMIT_METADATA,
 };
 
 struct OwnedAstraPlanTask {
@@ -92,7 +92,7 @@ pub(super) fn record_to_run(record: AstraRunRecord) -> Result<AstraRun> {
         round_limit: u32::try_from(record.round_limit)
             .ok()
             .filter(|value| *value > 0)
-            .unwrap_or(RUST_NATIVE_ROUND_LIMIT),
+            .unwrap_or(LEGACY_ASTRA_RUN_ROUND_LIMIT_METADATA),
         terminal_reason: record.terminal_reason,
         last_error_code: record.last_error_code,
         last_error_message: record.last_error_message,

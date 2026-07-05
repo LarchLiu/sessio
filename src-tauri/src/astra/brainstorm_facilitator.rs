@@ -464,7 +464,7 @@ fn parse_facilitator_report(
 fn push_prompt_header(
     lines: &mut Vec<String>,
     contract: &str,
-    run: &AstraRun,
+    _run: &AstraRun,
     thread: &ThreadInfo,
     user_prompt: Option<&str>,
     source_round_index: u32,
@@ -484,7 +484,6 @@ fn push_prompt_header(
         lines.push(format!("User brainstorm instruction: {prompt}"));
     }
     lines.push(format!("Source round: {source_round_index}"));
-    lines.push(format!("Round limit: {}", run.round_limit));
 }
 
 fn push_opinion_sections(lines: &mut Vec<String>, heading: &str, opinions: &[FacilitatorOpinion]) {

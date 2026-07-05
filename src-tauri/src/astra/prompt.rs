@@ -60,7 +60,7 @@ dependsOn declares execution-order dependencies inside one parallel round and is
 
 Plan the next useful batch from the shared thread goal, userPrompt, thread.assistants, completedTasks, continuation, threadProgress, interruptedTasks, and prior session refs. Tasks in a parallel batch may target different assistants only when their work is independent. Do not place two tasks in the same immediate parallel wave if one needs the other's research, outline, draft, decisions, or artifact. For downstream tasks, explicitly tell the assistant to use upstream artifacts when available; Sessio also injects completed dependency artifact paths into the delegated task prompt.
 
-Continuation: if continuation.continuedFromRunId is present, this is a new run continuing persisted thread progress after an interrupted run. An empty userPrompt in a continuation means continue unresolved persisted work, not that there is no work. Do not restart completed work. Use threadProgress.recentRounds and threadProgress.olderRounds as the cross-run source of truth; previousRounds is only the compact journal from this current run. run.runRoundIndex is local to this run, while threadProgress rounds use threadRoundIndex for thread-global ordering.
+Continuation: if continuation.continuedFromRunId is present, this is a new run continuing persisted thread progress after an interrupted run. An empty userPrompt in a continuation means continue unresolved persisted work, not that there is no work. Do not restart completed work. Use threadProgress.recentRounds and threadProgress.olderRounds as the cross-run source of truth; previousRounds is only the compact journal from this current run. run.runRoundIndex is local to this run, while threadProgress rounds use threadRoundIndex for thread-global ordering. Astra automatic round limits are disabled; threadProgress.roundProgress is informational only and must not be treated as a budget.
 
 Interrupted work: interruptedTasks contains unresolved planned, running, failed, errored, or cancelled work from the thread that has not been superseded by a later completed replacement. Prioritize it only when it is still necessary for the thread goal; otherwise explicitly skip or replace it in your summary/reason.
 
@@ -249,10 +249,9 @@ pub(super) fn build_astra_orchestration_prompt(
                 planner_context.thread_progress.clone().unwrap_or_else(|| {
                     json!({
                         "runRoundIndex": round_index,
-                        "roundBudget": {
-                            "roundLimit": run.round_limit,
+                        "roundProgress": {
+                            "roundLimitsDisabled": true,
                             "threadAstraRoundCount": 0,
-                            "remainingAutomaticRounds": run.round_limit,
                         },
                         "olderRounds": [],
                         "recentRounds": [],
@@ -1800,10 +1799,9 @@ mod tests {
             })),
             thread_progress: Some(json!({
                 "runRoundIndex": 0,
-                "roundBudget": {
-                    "roundLimit": 3,
+                "roundProgress": {
+                    "roundLimitsDisabled": true,
                     "threadAstraRoundCount": 2,
-                    "remainingAutomaticRounds": 1,
                 },
                 "olderRounds": [],
                 "recentRounds": [{

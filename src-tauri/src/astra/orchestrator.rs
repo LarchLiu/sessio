@@ -41,6 +41,13 @@ fn trim_vec_front<T>(values: &mut Vec<T>, max_len: usize) {
     }
 }
 
+fn astra_thread_round_progress_value(thread_astra_round_count: usize) -> Value {
+    json!({
+        "roundLimitsDisabled": true,
+        "threadAstraRoundCount": thread_astra_round_count,
+    })
+}
+
 pub(super) enum RustNativeWorkerOutcome {
     Claimed,
     Duplicate,
@@ -56,7 +63,6 @@ impl AstraService {
             Some(worker) => worker,
             None => return Ok(RustNativeWorkerOutcome::Duplicate),
         };
-        let round_limit = self.load_run(run_id)?.round_limit;
         let mut round_index = 0u32;
 
         let mut current_run = self.load_run(run_id)?;
@@ -89,27 +95,6 @@ impl AstraService {
                     "planning_round",
                 )?;
                 if !current_run.status.active() {
-                    return Ok(RustNativeWorkerOutcome::Claimed);
-                }
-                if round_index >= round_limit {
-                    self.error_run(
-                        run_id,
-                        "round_limit_reached",
-                        "round_limit_reached",
-                        "Astra round limit reached before planning the next round".to_string(),
-                    )?;
-                    return Ok(RustNativeWorkerOutcome::Claimed);
-                }
-                let thread_round_count = self.thread_astra_round_count(&current_run.thread_id)?;
-                if thread_round_count >= round_limit {
-                    self.error_run(
-                        run_id,
-                        "thread_round_limit_reached",
-                        "thread_round_limit_reached",
-                        format!(
-                            "Astra thread-level round limit reached after {thread_round_count} persisted Astra rounds"
-                        ),
-                    )?;
                     return Ok(RustNativeWorkerOutcome::Claimed);
                 }
                 let current_round_index = round_index;
@@ -368,17 +353,6 @@ impl AstraService {
         })
     }
 
-    fn thread_astra_round_count(&self, thread_id: &str) -> Result<u32> {
-        let count = self
-            .inner
-            .store
-            .list_plan_rounds(thread_id)?
-            .into_iter()
-            .filter(|round| round.source == PlanRoundSource::Astra)
-            .count();
-        Ok(u32::try_from(count).unwrap_or(u32::MAX))
-    }
-
     fn build_teamwork_continuation_context(
         &self,
         run: &AstraRun,
@@ -426,14 +400,7 @@ impl AstraService {
             .collect::<Vec<_>>();
         let thread_progress = Some(json!({
             "runRoundIndex": run_round_index,
-            "roundBudget": {
-                "roundLimit": run.round_limit,
-                "threadAstraRoundCount": astra_round_count,
-                "remainingAutomaticRounds": usize::try_from(run.round_limit)
-                    .ok()
-                    .map(|limit| limit.saturating_sub(astra_round_count))
-                    .unwrap_or(0),
-            },
+            "roundProgress": astra_thread_round_progress_value(astra_round_count),
             "olderRounds": older_rounds,
             "recentRounds": recent_rounds,
         }));
@@ -808,6 +775,7 @@ impl AstraService {
                 "error",
                 json!({ "message": message, "reason": reason, "errorCode": code }),
             );
+            self.reconcile_terminal_plan_work_best_effort(&errored);
         }
         Ok(())
     }
@@ -1470,6 +1438,18 @@ mod tests {
                 "character_sheet",
             ]
         );
+    }
+
+    #[test]
+    fn thread_round_progress_reports_counts_without_limits() {
+        let progress = astra_thread_round_progress_value(125);
+
+        assert_eq!(progress["roundLimitsDisabled"].as_bool(), Some(true));
+        assert_eq!(progress["threadAstraRoundCount"].as_u64(), Some(125));
+        assert!(progress.get("roundLimit").is_none());
+        assert!(progress.get("runRoundLimit").is_none());
+        assert!(progress.get("threadRoundLimit").is_none());
+        assert!(progress.get("remainingAutomaticRounds").is_none());
     }
 
     #[test]

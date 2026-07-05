@@ -190,38 +190,6 @@ fn debate_orchestration(
         }
 
         let status = verdict.status.as_str();
-        if !has_room_for_terminal_after_followup(run, round_index) {
-            let mut terminal = convergence;
-            if let Some(record) = terminal.as_object_mut() {
-                record.insert(
-                    "terminalReason".to_string(),
-                    Value::String("round_limit_reached".to_string()),
-                );
-                record.insert("roundLimit".to_string(), json!(run.round_limit));
-                record.insert(
-                    "nextAction".to_string(),
-                    Value::String(
-                        "Preserve consensus, disagreements, and arbitration recommendation for human review."
-                            .to_string(),
-                    ),
-                );
-            }
-            return (
-                AstraOrchestration {
-                    summary: format!(
-                        "Debate reached the round limit with {} cross-check status; diagnostics preserve the remaining disagreements.",
-                        status
-                    ),
-                    run_intent: AstraRunIntent::Complete,
-                    reason: "debate_round_limit_reached".to_string(),
-                    mode: None,
-                    tasks: Vec::new(),
-                    diagnostics: vec![artifact_set, terminal],
-                },
-                judge_session_id,
-            );
-        }
-
         let tasks = debate_lane_tasks(
             run,
             thread,
@@ -262,58 +230,6 @@ fn debate_orchestration(
         );
     }
 
-    if !has_room_for_terminal_after_followup(run, round_index) {
-        let verdict = JudgeVerdict {
-            status: JudgeStatus::NeedsReview,
-            agreements: Vec::new(),
-            disagreements: Vec::new(),
-            arbitration: None,
-            rationale:
-                "Round limit reached before a cross-check round; no judge verdict was produced."
-                    .to_string(),
-            attempts: 0,
-        };
-        let meta = JudgeMeta {
-            backend: "none".to_string(),
-            session_id: None,
-            error: None,
-        };
-        let mut convergence = convergence_diagnostic(
-            thread,
-            round_index.saturating_sub(1),
-            &artifact_set,
-            &verdict,
-            &meta,
-        );
-        if let Some(record) = convergence.as_object_mut() {
-            record.insert(
-                "terminalReason".to_string(),
-                Value::String("round_limit_reached_before_cross_check".to_string()),
-            );
-            record.insert("roundLimit".to_string(), json!(run.round_limit));
-            record.insert(
-                "nextAction".to_string(),
-                Value::String(
-                    "Review isolated lane artifacts manually; no round budget remains for cross-check."
-                        .to_string(),
-                ),
-            );
-        }
-        return (
-            AstraOrchestration {
-                summary:
-                    "Debate reached the round limit before a cross-check round; isolated lane artifacts are recorded."
-                        .to_string(),
-                run_intent: AstraRunIntent::Complete,
-                reason: "debate_round_limit_reached".to_string(),
-                mode: None,
-                tasks: Vec::new(),
-                diagnostics: vec![artifact_set, convergence],
-            },
-            None,
-        );
-    }
-
     let tasks = debate_lane_tasks(
         run,
         thread,
@@ -351,10 +267,6 @@ fn debate_orchestration(
         },
         None,
     )
-}
-
-fn has_room_for_terminal_after_followup(run: &AstraRun, round_index: u32) -> bool {
-    round_index.saturating_add(1) < run.round_limit
 }
 
 fn debate_lane_tasks(
@@ -957,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn divergent_cross_check_continues_when_round_budget_remains() {
+    fn divergent_cross_check_continues_without_round_limit() {
         let first = orchestrate_with_heuristic(&run(), &thread(), None, 0, &[]);
         let first_completions = first
             .tasks
@@ -987,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    fn divergent_cross_check_finishes_with_round_limit_diagnostic() {
+    fn divergent_cross_check_ignores_legacy_round_limit_metadata() {
         let run = run_with_limit(3);
         let first = orchestrate_with_heuristic(&run, &thread(), None, 0, &[]);
         let first_completions = first
@@ -1002,16 +914,16 @@ mod tests {
             .map(|task| completion(task, "Final result: disagree; assumptions conflict."))
             .collect::<Vec<_>>();
 
-        let terminal =
-            orchestrate_with_heuristic(&run, &thread(), None, 2, &cross_check_completions);
+        let next = orchestrate_with_heuristic(&run, &thread(), None, 2, &cross_check_completions);
 
-        assert_eq!(terminal.run_intent, AstraRunIntent::Complete);
-        assert_eq!(terminal.reason, "debate_round_limit_reached");
-        assert!(terminal.tasks.is_empty());
-        assert!(terminal.diagnostics.iter().any(|diagnostic| {
+        assert_eq!(next.run_intent, AstraRunIntent::Continue);
+        assert_eq!(next.reason, "debate_need_more_cross_check");
+        assert_eq!(next.mode, Some(PlanRoundMode::Parallel));
+        assert!(!next.tasks.is_empty());
+        assert!(next.diagnostics.iter().any(|diagnostic| {
             diagnostic["kind"] == "debate_convergence"
                 && diagnostic["status"] == "diverged"
-                && diagnostic["terminalReason"] == "round_limit_reached"
+                && diagnostic.get("terminalReason").is_none()
         }));
     }
 
@@ -1121,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn diverged_round_limit_terminal_preserves_judge_disagreements() {
+    fn diverged_judge_verdict_continues_with_disagreement_diagnostic() {
         let run = run_with_limit(3);
         let completions = cross_check_completions(&run, "我不接受对方结论。");
         let disagreement = "对方未回应安全性质疑。";
@@ -1132,14 +1044,14 @@ mod tests {
             })),
         };
 
-        let (terminal, _) = debate_orchestration(&run, &thread(), None, 2, &completions, &judge);
+        let (next, _) = debate_orchestration(&run, &thread(), None, 2, &completions, &judge);
 
-        assert_eq!(terminal.run_intent, AstraRunIntent::Complete);
-        assert_eq!(terminal.reason, "debate_round_limit_reached");
-        assert!(terminal.tasks.is_empty());
-        assert!(terminal.diagnostics.iter().any(|diagnostic| {
+        assert_eq!(next.run_intent, AstraRunIntent::Continue);
+        assert_eq!(next.reason, "debate_need_more_cross_check");
+        assert!(!next.tasks.is_empty());
+        assert!(next.diagnostics.iter().any(|diagnostic| {
             diagnostic["kind"] == "debate_convergence"
-                && diagnostic["terminalReason"] == "round_limit_reached"
+                && diagnostic.get("terminalReason").is_none()
                 && diagnostic["disagreements"][0] == disagreement
         }));
     }

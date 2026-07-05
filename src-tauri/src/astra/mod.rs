@@ -73,7 +73,7 @@ pub(crate) use types::{
 };
 
 pub const ASTRA_EVENT_NAME: &str = "astra-run-event";
-const RUST_NATIVE_ROUND_LIMIT: u32 = 12;
+const LEGACY_ASTRA_RUN_ROUND_LIMIT_METADATA: u32 = 12;
 const ASTRA_ORCHESTRATOR_TIMEOUT_MS: u64 = 300_000;
 const ASTRA_DELEGATED_QUEUE_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const ASTRA_RUNTIME_STARTUP_TIMEOUT_MS: u64 = 60_000;
@@ -340,6 +340,10 @@ impl AstraService {
                 record.status
             );
         }
+        let repaired = self.inner.store.reconcile_terminal_astra_runs_plan_work()?;
+        if repaired > 0 {
+            log::info!("[astra:recover:terminal-plan-work] changed={repaired}");
+        }
         Ok(())
     }
 
@@ -405,6 +409,17 @@ impl AstraService {
                     );
                 }
             }
+            let repaired = self
+                .inner
+                .store
+                .reconcile_terminal_astra_runs_plan_work_for_thread(&req.thread_id)?;
+            if repaired > 0 {
+                log::info!(
+                    "[astra:run:terminal-plan-work-repair] threadId={} changed={}",
+                    req.thread_id,
+                    repaired
+                );
+            }
 
             let now = now_ms();
             let run = AstraRun {
@@ -417,7 +432,7 @@ impl AstraService {
                 mode: "rust_native".to_string(),
                 planner_backend: None,
                 round_index: None,
-                round_limit: RUST_NATIVE_ROUND_LIMIT,
+                round_limit: LEGACY_ASTRA_RUN_ROUND_LIMIT_METADATA,
                 terminal_reason: None,
                 last_error_code: None,
                 last_error_message: None,
@@ -473,6 +488,7 @@ impl AstraService {
         for session_id in &delegated_sessions {
             self.abort_delegated_session(session_id, "Astra run was cancelled");
         }
+        self.reconcile_terminal_plan_work_best_effort(&run);
         log::info!(
             "[astra:run:cancel] runId={} threadId={} delegatedSessions={}",
             run.run_id,
@@ -1893,6 +1909,29 @@ impl AstraService {
             }),
         );
     }
+
+    fn reconcile_terminal_plan_work_best_effort(&self, run: &AstraRun) {
+        match self
+            .inner
+            .store
+            .reconcile_terminal_astra_run_plan_work(&run.run_id)
+        {
+            Ok(changed) if changed > 0 => {
+                log::info!(
+                    "[astra:run:terminal-plan-work-repair] runId={} changed={changed}",
+                    run.run_id
+                );
+                self.emit_threads_updated(run);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!(
+                    "[astra:run:terminal-plan-work-repair-failed] runId={} error={error}",
+                    run.run_id
+                );
+            }
+        }
+    }
 }
 
 impl AstraService {
@@ -1914,6 +1953,7 @@ impl AstraService {
                             message,
                         ) {
                             if changed {
+                                self.reconcile_terminal_plan_work_best_effort(&interrupted);
                                 self.emit(
                                     &interrupted,
                                     "interrupted",
@@ -2934,7 +2974,7 @@ mod tests {
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
             round_index: None,
-            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            round_limit: LEGACY_ASTRA_RUN_ROUND_LIMIT_METADATA,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
@@ -3169,7 +3209,7 @@ mod tests {
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
             round_index: None,
-            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            round_limit: LEGACY_ASTRA_RUN_ROUND_LIMIT_METADATA,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
@@ -3322,7 +3362,7 @@ mod tests {
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
             round_index: None,
-            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            round_limit: LEGACY_ASTRA_RUN_ROUND_LIMIT_METADATA,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
@@ -3413,7 +3453,7 @@ mod tests {
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
             round_index: None,
-            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            round_limit: LEGACY_ASTRA_RUN_ROUND_LIMIT_METADATA,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
@@ -3531,7 +3571,7 @@ mod tests {
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
             round_index: None,
-            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            round_limit: LEGACY_ASTRA_RUN_ROUND_LIMIT_METADATA,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
@@ -3750,7 +3790,7 @@ mod tests {
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
             round_index: None,
-            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            round_limit: LEGACY_ASTRA_RUN_ROUND_LIMIT_METADATA,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
@@ -4407,7 +4447,7 @@ mod tests {
             mode: "auto".to_string(),
             planner_backend: Some("deterministic".to_string()),
             round_index: None,
-            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            round_limit: LEGACY_ASTRA_RUN_ROUND_LIMIT_METADATA,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,

@@ -308,7 +308,6 @@ fn build_debate_judge_prompt(
         lines.push(format!("User debate instruction: {prompt}"));
     }
     lines.push(format!("Cross-check round: {source_round_index}"));
-    lines.push(format!("Round limit: {}", run.round_limit));
     lines.push(String::new());
     lines.push("## Lane cross-check artifacts".to_string());
     for artifact in artifacts {

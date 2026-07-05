@@ -15,9 +15,6 @@ use crate::models::{PlanRoundMode, ThreadAgentInfo, ThreadInfo, ThreadKind};
 
 const BRAINSTORM_BACKEND_TYPE: &str = "brainstorm_backend";
 const BOARD_INJECTION_MARKER: &str = "## Shared board from previous round";
-/// Hard cap on critique rounds even when the facilitator keeps asking for
-/// more; the round budget check below bounds it further.
-const MAX_BRAINSTORM_CRITIQUE_ROUNDS: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrainstormRole {
@@ -280,13 +277,7 @@ fn brainstorm_orchestration(
         Some(&meta),
     );
 
-    // A critique round needs budget for itself, the synthesis round, and the
-    // terminal synthesis planning that follows it.
-    let critique_rounds_so_far = round_index.saturating_sub(1);
-    let next_role = if !facilitator_board.ready_to_synthesize
-        && critique_rounds_so_far < MAX_BRAINSTORM_CRITIQUE_ROUNDS
-        && round_index.saturating_add(2) < run.round_limit
-    {
+    let next_role = if !facilitator_board.ready_to_synthesize {
         BrainstormRole::Critique
     } else {
         BrainstormRole::Synthesis
@@ -1314,8 +1305,8 @@ mod tests {
             .map(|task| completion(task, "仍有分歧。"))
             .collect::<Vec<_>>();
 
-        // Round 2 may still critique (1 critique round so far); round 3 hits
-        // the MAX_BRAINSTORM_CRITIQUE_ROUNDS cap and must synthesize.
+        // Critique continues while the facilitator reports the shared board is
+        // not ready to synthesize; legacy round limit metadata is ignored.
         let second = brainstorm_orchestration(&run, &thread(), None, 2, &completions, &unready).0;
         assert_eq!(second.reason, "brainstorm_critique_round");
         completions = second
@@ -1325,15 +1316,15 @@ mod tests {
             .collect();
 
         let third = brainstorm_orchestration(&run, &thread(), None, 3, &completions, &unready).0;
-        assert_eq!(third.reason, "brainstorm_shared_board_ready");
+        assert_eq!(third.reason, "brainstorm_critique_round");
         assert!(third
             .tasks
             .iter()
-            .all(|task| task.prompt.contains("round_role=\"synthesis\"")));
+            .all(|task| task.prompt.contains("round_role=\"critique\"")));
     }
 
     #[test]
-    fn critique_is_skipped_when_round_budget_is_tight() {
+    fn critique_ignores_legacy_round_limit_metadata() {
         let run = AstraRun {
             round_limit: 3,
             ..run()
@@ -1352,9 +1343,11 @@ mod tests {
             &unready,
         );
 
-        // round_index 1 + critique + synthesis + terminal planning would
-        // exceed round_limit 3, so the flow goes straight to synthesis.
-        assert_eq!(next.reason, "brainstorm_shared_board_ready");
+        assert_eq!(next.reason, "brainstorm_critique_round");
+        assert!(next
+            .tasks
+            .iter()
+            .all(|task| task.prompt.contains("round_role=\"critique\"")));
     }
 
     #[test]

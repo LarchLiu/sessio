@@ -752,6 +752,9 @@ pub trait SessionStore: Send + Sync {
         &self,
         thread_id: &str,
     ) -> Result<Vec<AstraRunRecord>>;
+    fn reconcile_terminal_astra_run_plan_work(&self, run_id: &str) -> Result<usize>;
+    fn reconcile_terminal_astra_runs_plan_work(&self) -> Result<usize>;
+    fn reconcile_terminal_astra_runs_plan_work_for_thread(&self, thread_id: &str) -> Result<usize>;
     fn cleanup_partial_astra_sessions(&self, session_ids: &[String]) -> Result<usize>;
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
     /// Attach a scheduled task lineage to every existing row of an
