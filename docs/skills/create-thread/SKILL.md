@@ -1,6 +1,13 @@
 ---
 name: create-thread
-description: Create Sessio teamwork, workflow/process, brainstorm, or debate threads from a natural-language description. Use this skill whenever the user asks to set up, design, create, scaffold, or coordinate a Sessio thread/workflow. The skill must use the Sessio CLI for thread creation, assistant creation, and process-stage creation, while respecting each thread kind's structure: process uses stages, teamwork uses thread-level assistants without stages, brainstorm/debate use participant-style lanes without stages.
+description: >-
+  Create Sessio teamwork, workflow/process, brainstorm, or debate threads from a
+  natural-language description. Use this skill whenever the user asks to set up,
+  design, create, scaffold, or coordinate a Sessio thread/workflow. The skill
+  must use the Sessio CLI for thread creation, assistant creation, and
+  process-stage creation, while respecting each thread kind's structure: process
+  uses stages, teamwork uses thread-level assistants without stages, and
+  brainstorm/debate use participant-style lanes without stages.
 ---
 
 # Sessio Create Thread

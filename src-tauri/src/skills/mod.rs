@@ -881,6 +881,32 @@ description: Recursive skill
     }
 
     #[test]
+    fn builtin_skill_scan_includes_create_thread() {
+        let skills = scan_builtin_skills();
+        let ids = skills
+            .iter()
+            .map(|skill| skill.id.as_str())
+            .collect::<Vec<_>>();
+
+        let create_thread = skills
+            .iter()
+            .find(|skill| skill.id == BUILTIN_CREATE_THREAD_SKILL_ID)
+            .unwrap_or_else(|| panic!("missing create-thread skill; found ids: {ids:?}"));
+        assert_eq!(
+            create_thread.builtin_kind,
+            Some(BuiltinSkillKind::CreateThread)
+        );
+        assert_eq!(create_thread.name, "create-thread");
+        assert!(create_thread.skill_md_path.ends_with("SKILL.md"));
+        assert!(skills
+            .iter()
+            .any(|skill| skill.id == BUILTIN_COMPUTER_USE_SKILL_ID));
+        assert!(skills
+            .iter()
+            .any(|skill| skill.id == BUILTIN_WORK_STATE_SKILL_ID));
+    }
+
+    #[test]
     fn hydrates_selected_skills_from_ids() {
         let skills = vec![SkillMetadata {
             id: "user:demo".to_string(),
