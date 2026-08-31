@@ -290,3 +290,7 @@ Tags with a prerelease suffix such as `v0.5.0-beta.1` are published as GitHub pr
 ## License
 
 No license file is currently declared in the repository. Add a `LICENSE` file before open-source distribution.
+
+## Related Community
+
+[linux.do](https://linux.do): an active Chinese tech community focused on AI, software development, resource sharing, and frontier technology discussions. Its vision is "a new ideal community", and its community culture emphasizes sincerity, friendliness, unity, and professionalism.
