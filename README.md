@@ -187,7 +187,7 @@ pnpm bundle
 
 GitHub Actions currently builds release installers and updater artifacts for:
 
-- macOS universal `.dmg` plus signed `.app.tar.gz` updater package
+- macOS `arm64` and `x86_64` `.dmg` installers plus signed updater packages
 - Linux `x86_64` `.deb` / `.rpm` plus updater signatures
 - Linux `arm64` `.deb` / `.rpm` plus updater signatures
 - Windows `x86_64` NSIS installer plus updater signature

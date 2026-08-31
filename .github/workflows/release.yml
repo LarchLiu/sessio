@@ -29,6 +29,14 @@ env:
 jobs:
   build-macos:
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v6
         with:
@@ -42,16 +50,15 @@ jobs:
         run: corepack prepare pnpm@11.1.0 --activate
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ matrix.target }}
       - name: Install macOS Rust targets
         run: |
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustup target add "${{ matrix.target }}"
           rustup target list --installed
       - name: Verify macOS build tools
         run: |
           xcode-select -p
           xcodebuild -version
-          xcrun -find lipo
           xcrun -find codesign
           command -v hdiutil
       - uses: Swatinem/rust-cache@v2
@@ -59,8 +66,8 @@ jobs:
           workspaces: src-tauri
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build universal app and DMG
-        run: pnpm tauri build --target universal-apple-darwin --bundles app,dmg --ci
+      - name: Build macOS app and DMG
+        run: pnpm tauri build --target "${{ matrix.target }}" --bundles app,dmg --ci
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -68,13 +75,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p staged
-          cp src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz staged/sessio-macos-universal.app.tar.gz
-          cp src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig staged/sessio-macos-universal.app.tar.gz.sig
-          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg staged/sessio-macos-universal.dmg
+          bundle_dir="src-tauri/target/${{ matrix.target }}/release/bundle"
+          cp "$bundle_dir/macos"/*.app.tar.gz "staged/sessio-macos-${{ matrix.arch }}.app.tar.gz"
+          cp "$bundle_dir/macos"/*.app.tar.gz.sig "staged/sessio-macos-${{ matrix.arch }}.app.tar.gz.sig"
+          cp "$bundle_dir/dmg"/*.dmg "staged/sessio-macos-${{ matrix.arch }}.dmg"
           ls -la staged
       - uses: actions/upload-artifact@v7
         with:
-          name: sessio-macos-universal
+          name: sessio-macos-${{ matrix.arch }}
           path: staged/*
           if-no-files-found: error
 

@@ -25,10 +25,15 @@ const notesPath = args.get("notes") ?? join(dir, "CHANGELOG.md");
 
 const packages = [
   {
-    file: "sessio-macos-universal.app.tar.gz",
+    file: "sessio-macos-aarch64.app.tar.gz",
     targets: [
       "darwin-aarch64",
       "darwin-aarch64-app",
+    ],
+  },
+  {
+    file: "sessio-macos-x86_64.app.tar.gz",
+    targets: [
       "darwin-x86_64",
       "darwin-x86_64-app",
     ],
