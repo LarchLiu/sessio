@@ -368,7 +368,7 @@ async fn run_session(
                     ));
                 };
                 note_turn_activity(&permission_turn_activity, &turn_id);
-                let request_id = json_id_to_string(responder.id());
+                let request_id = responder.id().to_string();
                 permission_manager
                     .emit(
                         acp_protocol_event(

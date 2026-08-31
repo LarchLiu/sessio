@@ -27,7 +27,7 @@ thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
 croner = "2"
 dirs = "5.0"
-agent-client-protocol = { version = "1.0.0", features = ["unstable_session_fork", "unstable_mcp_over_acp"] }
+agent-client-protocol = { version = "2.0.0", features = ["unstable_session_fork", "unstable_mcp_over_acp"] }
 futures = "0.3"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 shell-words = "1.1"
