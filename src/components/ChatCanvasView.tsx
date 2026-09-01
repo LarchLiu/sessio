@@ -12,7 +12,7 @@ const BlockSuiteCanvasHost = lazy(() => import("./blocksuite/BlockSuiteCanvasHos
 
 export interface ChatCanvasViewProps {
   canvasKey: CanvasKey;
-  sessionAgent: "pi" | "codex" | "claude" | "opencode";
+  sessionAgent: "pi" | "omp" | "codex" | "claude" | "opencode";
   sessionTitle: string;
   workspacePath: string | null;
   sessionThreadId?: string | null;

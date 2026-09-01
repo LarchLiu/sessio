@@ -1842,6 +1842,7 @@ fn json_id_to_string(value: serde_json::Value) -> String {
 pub(crate) fn default_acp_command(agent: Agent) -> String {
     match agent {
         Agent::Pi => "pi".to_string(),
+        Agent::Omp => "omp".to_string(),
         Agent::Codex => "npx -y @agentclientprotocol/codex-acp@latest".to_string(),
         Agent::Claude => "npx -y @zed-industries/claude-code-acp@latest".to_string(),
         Agent::Opencode => "opencode acp".to_string(),

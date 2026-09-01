@@ -123,17 +123,20 @@ pub struct PiRpcState {
     pub raw: Value,
 }
 
-pub fn default_pi_rpc_command() -> String {
-    "pi --mode rpc".to_string()
+pub fn default_pi_rpc_command(agent: Agent) -> String {
+    match agent {
+        Agent::Omp => "omp --mode rpc".to_string(),
+        _ => "pi --mode rpc".to_string(),
+    }
 }
 
-pub fn command_from_options(options: &RuntimeMetadata) -> String {
+pub fn command_from_options(agent: Agent, options: &RuntimeMetadata) -> String {
     options
         .get("piRpcCommand")
         .or_else(|| options.get("command"))
         .and_then(Value::as_str)
         .map(ensure_rpc_mode)
-        .unwrap_or_else(default_pi_rpc_command)
+        .unwrap_or_else(|| default_pi_rpc_command(agent))
 }
 
 pub fn runtime_capabilities() -> RuntimeCapabilitySet {
@@ -317,7 +320,7 @@ async fn initialize_pi_session(
         }
         PiRpcSessionStart::Load { agent_session_id }
         | PiRpcSessionStart::Resume { agent_session_id } => {
-            switch_to_session(client, &agent_session_id).await?;
+            switch_to_session(client, agent, &agent_session_id).await?;
         }
         PiRpcSessionStart::Fork { source_session_id } => {
             log::info!(
@@ -342,8 +345,12 @@ async fn initialize_pi_session(
     Ok(state)
 }
 
-async fn switch_to_session(client: &PiRpcClient, agent_session_id: &str) -> Result<()> {
-    let session_file = find_pi_session_file(agent_session_id).ok().flatten();
+async fn switch_to_session(
+    client: &PiRpcClient,
+    agent: Agent,
+    agent_session_id: &str,
+) -> Result<()> {
+    let session_file = find_pi_session_file(agent, agent_session_id).ok().flatten();
     let mut params = serde_json::Map::new();
     if let Some(path) = session_file {
         params.insert(
@@ -1487,8 +1494,12 @@ fn extension_lower(path: &Path) -> Option<String> {
         .map(|extension| extension.to_ascii_lowercase())
 }
 
-fn find_pi_session_file(agent_session_id: &str) -> Result<Option<PathBuf>> {
-    let root = app_paths::pi_agent_sessions_dir()?;
+fn find_pi_session_file(agent: Agent, agent_session_id: &str) -> Result<Option<PathBuf>> {
+    let root = if agent.is_pi_like() {
+        app_paths::agent_sessions_dir(agent)?
+    } else {
+        app_paths::pi_agent_sessions_dir()?
+    };
     if !root.exists() {
         return Ok(None);
     }

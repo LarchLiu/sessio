@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod codex;
+pub mod omp;
 pub mod opencode;
 pub mod pi;
 pub mod registry;
@@ -18,6 +19,7 @@ pub fn list_all() -> Vec<SessionInfo> {
         codex::parser::list_sessions as fn() -> Result<Vec<SessionInfo>>,
         claude::parser::list_sessions,
         pi::parser::list_sessions,
+        omp::parser::list_sessions,
         opencode::parser::list_sessions,
     ] {
         match f() {
@@ -46,6 +48,9 @@ where
     let mut registry = registry::AgentSourceRegistry::new();
     if enabled.contains(&Agent::Pi) {
         registry.register(pi::PiSource);
+    }
+    if enabled.contains(&Agent::Omp) {
+        registry.register(omp::OmpSource);
     }
     if enabled.contains(&Agent::Codex) {
         registry.register(codex::CodexSource);

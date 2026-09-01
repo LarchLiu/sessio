@@ -28,6 +28,7 @@ pub enum IndexTask {
     ReindexClaudeProject(PathBuf),
     ReindexClaudeSubagentFile(PathBuf),
     ReindexPiFile(PathBuf),
+    ReindexOmpFile(PathBuf),
     ReindexOpencodeAll,
     DeleteFile(PathBuf),
     DeleteSubagentFile(PathBuf),
@@ -377,6 +378,7 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
     let mut seen_claude: HashSet<PathBuf> = HashSet::new();
     let mut seen_claude_subagent: HashSet<PathBuf> = HashSet::new();
     let mut seen_pi: HashSet<PathBuf> = HashSet::new();
+    let mut seen_omp: HashSet<PathBuf> = HashSet::new();
     let mut seen_opencode = false;
     let mut seen_delete: HashSet<PathBuf> = HashSet::new();
     let mut seen_delete_subagent: HashSet<PathBuf> = HashSet::new();
@@ -409,6 +411,11 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
             IndexTask::ReindexPiFile(p) => {
                 if seen_pi.insert(p.clone()) {
                     out.push(IndexTask::ReindexPiFile(p));
+                }
+            }
+            IndexTask::ReindexOmpFile(p) => {
+                if seen_omp.insert(p.clone()) {
+                    out.push(IndexTask::ReindexOmpFile(p));
                 }
             }
             IndexTask::ReindexOpencodeAll => {
@@ -476,6 +483,9 @@ fn execute(
         IndexTask::ReindexPiFile(path) if enabled_agents.contains(&Agent::Pi) => {
             reindex_pi_file(path, store)
         }
+        IndexTask::ReindexOmpFile(path) if enabled_agents.contains(&Agent::Omp) => {
+            reindex_omp_file(path, store)
+        }
         IndexTask::ReindexOpencodeAll if enabled_agents.contains(&Agent::Opencode) => {
             reindex_opencode_all(store)
         }
@@ -484,6 +494,7 @@ fn execute(
         | IndexTask::ReindexClaudeProject(_)
         | IndexTask::ReindexClaudeSubagentFile(_)
         | IndexTask::ReindexPiFile(_)
+        | IndexTask::ReindexOmpFile(_)
         | IndexTask::ReindexOpencodeAll => Ok(TaskOutcome::default()),
         IndexTask::DeleteFile(path) => {
             let path_str = path.to_string_lossy();
@@ -560,39 +571,13 @@ fn full_rebuild(store: &dyn SessionStore, enabled_agents: &HashSet<Agent>) -> Re
     }
 
     if enabled_agents.contains(&Agent::Pi) {
-        let mut pi_scopes: HashSet<String> = HashSet::new();
-        if let Some(root) = crate::agents::sources::pi::parser::root_dir()? {
-            for entry in std::fs::read_dir(&root)? {
-                let entry = entry?;
-                if !entry.file_type()?.is_dir() {
-                    continue;
-                }
-                let dir = entry.path();
-                let scope = dir.to_string_lossy().into_owned();
-                let mut sessions = Vec::new();
-                for child in std::fs::read_dir(&dir)? {
-                    let child = child?;
-                    if !child.file_type()?.is_file() {
-                        continue;
-                    }
-                    let path = child.path();
-                    if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
-                        continue;
-                    }
-                    match crate::agents::sources::pi::parser::parse_session_file(&path) {
-                        Ok(Some(info)) => {
-                            insert_session_project(&mut affected_projects, &info);
-                            sessions.push(info);
-                        }
-                        Ok(None) => {}
-                        Err(e) => log::warn!("pi parse {} failed: {e}", path.display()),
-                    }
-                }
-                store.replace_by_scope(&scope, Agent::Pi, &sessions)?;
-                pi_scopes.insert(scope);
-            }
-        }
+        let pi_scopes = rebuild_pi_like_agent(Agent::Pi, store, &mut affected_projects)?;
         store.mark_missing_scopes_unavailable(Agent::Pi, &pi_scopes)?;
+    }
+
+    if enabled_agents.contains(&Agent::Omp) {
+        let omp_scopes = rebuild_pi_like_agent(Agent::Omp, store, &mut affected_projects)?;
+        store.mark_missing_scopes_unavailable(Agent::Omp, &omp_scopes)?;
     }
 
     if enabled_agents.contains(&Agent::Opencode) {
@@ -603,6 +588,57 @@ fn full_rebuild(store: &dyn SessionStore, enabled_agents: &HashSet<Agent>) -> Re
         affected_projects: affected_projects.into_values().collect(),
         affected_sources: Vec::new(),
     })
+}
+
+fn rebuild_pi_like_agent(
+    agent: Agent,
+    store: &dyn SessionStore,
+    affected_projects: &mut HashMap<String, ProjectRef>,
+) -> Result<HashSet<String>> {
+    let mut scopes: HashSet<String> = HashSet::new();
+    let root = match agent {
+        Agent::Pi => crate::agents::sources::pi::parser::root_dir()?,
+        Agent::Omp => crate::agents::sources::omp::parser::root_dir()?,
+        _ => None,
+    };
+    let Some(root) = root else {
+        return Ok(scopes);
+    };
+    for entry in std::fs::read_dir(&root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir = entry.path();
+        let scope = dir.to_string_lossy().into_owned();
+        let mut sessions = Vec::new();
+        for child in std::fs::read_dir(&dir)? {
+            let child = child?;
+            if !child.file_type()?.is_file() {
+                continue;
+            }
+            let path = child.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let parsed = match agent {
+                Agent::Pi => crate::agents::sources::pi::parser::parse_session_file(&path),
+                Agent::Omp => crate::agents::sources::omp::parser::parse_session_file(&path),
+                _ => Ok(None),
+            };
+            match parsed {
+                Ok(Some(info)) => {
+                    insert_session_project(affected_projects, &info);
+                    sessions.push(info);
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!("{} parse {} failed: {e}", agent.as_str(), path.display()),
+            }
+        }
+        store.replace_by_scope(&scope, agent, &sessions)?;
+        scopes.insert(scope);
+    }
+    Ok(scopes)
 }
 
 /// OpenCode merges SQLite + legacy JSON into a single virtual scope. The
@@ -772,6 +808,18 @@ fn reindex_claude_subagent_file(path: &Path, store: &dyn SessionStore) -> Result
 }
 
 fn reindex_pi_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutcome> {
+    reindex_pi_like_file(Agent::Pi, path, store)
+}
+
+fn reindex_omp_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutcome> {
+    reindex_pi_like_file(Agent::Omp, path, store)
+}
+
+fn reindex_pi_like_file(
+    agent: Agent,
+    path: &Path,
+    store: &dyn SessionStore,
+) -> Result<TaskOutcome> {
     if !path.exists() {
         store.mark_file_path_unavailable(&path.to_string_lossy())?;
         return Ok(TaskOutcome::default());
@@ -780,7 +828,12 @@ fn reindex_pi_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutcome>
         return Ok(TaskOutcome::default());
     };
     let mut outcome = TaskOutcome::default();
-    match crate::agents::sources::pi::parser::parse_session_file(path)? {
+    let parsed = match agent {
+        Agent::Pi => crate::agents::sources::pi::parser::parse_session_file(path)?,
+        Agent::Omp => crate::agents::sources::omp::parser::parse_session_file(path)?,
+        _ => None,
+    };
+    match parsed {
         Some(info) => {
             push_session_project(&mut outcome, &info);
             push_session_source(&mut outcome, &info);
@@ -788,7 +841,7 @@ fn reindex_pi_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutcome>
             store.upsert_session(&scope, &info)?;
         }
         None => {
-            store.mark_file_path_unindexable(Agent::Pi, &path.to_string_lossy())?;
+            store.mark_file_path_unindexable(agent, &path.to_string_lossy())?;
         }
     }
     Ok(outcome)
@@ -909,6 +962,7 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
                     _ => Some(IndexTask::ReindexClaudeFile(path)),
                 },
                 "pi" => Some(IndexTask::ReindexPiFile(path)),
+                "omp" => Some(IndexTask::ReindexOmpFile(path)),
                 "opencode" => Some(IndexTask::ReindexOpencodeAll),
                 _ => None,
             };
@@ -1142,5 +1196,11 @@ mod tests {
             scope: "/tmp/pi/project".to_string(),
         });
         assert!(pi.is_none());
+
+        let omp = source_task_to_index_task(SourceIndexTask::ReindexScope {
+            agent: AgentKind::new("omp"),
+            scope: "/tmp/omp/project".to_string(),
+        });
+        assert!(omp.is_none());
     }
 }

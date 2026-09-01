@@ -516,7 +516,7 @@ pub(super) fn switch_agent(
 ) -> Result<String> {
     let arg = agent_arg.trim();
     let agent = Agent::from_db_str(arg.trim())
-        .with_context(|| format!("unknown agent: {arg} (expected pi/claude/codex/opencode)"))?;
+        .with_context(|| format!("unknown agent: {arg} (expected pi/omp/claude/codex/opencode)"))?;
 
     let config = state.config_snapshot();
     let current_session = state.chat_session(key);
@@ -974,7 +974,7 @@ pub(super) fn session_status_text(state: &Arc<ImBridgeState>, key: &ChatKey) -> 
 fn help_text() -> String {
     "Sessio 命令:\n\
      /new [workspace] — 开启新会话\n\
-     /agent [agent] — 选择或切换 agent (pi/claude/codex/opencode)\n\
+     /agent [agent] — 选择或切换 agent (pi/omp/claude/codex/opencode)\n\
      /model — 切换当前会话的 model\n\
      /effort — 切换当前会话的 effort\n\
      /workspace — 切换当前会话的 workspace\n\

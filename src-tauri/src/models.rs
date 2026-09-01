@@ -10,6 +10,7 @@ use crate::prompt_markers::sessio_prompt_markers;
 #[ts(export, export_to = "../../src/bindings/")]
 pub enum Agent {
     Pi,
+    Omp,
     Codex,
     Claude,
     Opencode,
@@ -18,11 +19,18 @@ pub enum Agent {
 impl Agent {
     /// All known runtime agents. Adding a new variant lights up exhaustiveness
     /// errors at compile time everywhere this list drives a match.
-    pub const ALL: &'static [Agent] = &[Agent::Pi, Agent::Codex, Agent::Claude, Agent::Opencode];
+    pub const ALL: &'static [Agent] = &[
+        Agent::Pi,
+        Agent::Omp,
+        Agent::Codex,
+        Agent::Claude,
+        Agent::Opencode,
+    ];
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Agent::Pi => "pi",
+            Agent::Omp => "omp",
             Agent::Codex => "codex",
             Agent::Claude => "claude",
             Agent::Opencode => "opencode",
@@ -32,6 +40,7 @@ impl Agent {
     pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
             "pi" => Some(Agent::Pi),
+            "omp" => Some(Agent::Omp),
             "codex" => Some(Agent::Codex),
             "claude" => Some(Agent::Claude),
             "opencode" => Some(Agent::Opencode),
@@ -45,8 +54,12 @@ impl Agent {
     pub fn effort_config_id(self) -> &'static str {
         match self {
             Agent::Codex => "reasoning_effort",
-            Agent::Pi | Agent::Claude | Agent::Opencode => "effort",
+            Agent::Pi | Agent::Omp | Agent::Claude | Agent::Opencode => "effort",
         }
+    }
+
+    pub fn is_pi_like(self) -> bool {
+        matches!(self, Agent::Pi | Agent::Omp)
     }
 }
 

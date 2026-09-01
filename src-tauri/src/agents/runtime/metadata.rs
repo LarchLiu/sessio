@@ -77,7 +77,7 @@ pub fn derive_computer_use_eligible(
     };
     match agent {
         Agent::Codex | Agent::Claude | Agent::Opencode => capabilities.mcp_injection.http,
-        Agent::Pi => capabilities.mcp_injection.native_extension,
+        Agent::Pi | Agent::Omp => capabilities.mcp_injection.native_extension,
     }
 }
 
@@ -173,7 +173,13 @@ pub fn startup_probe_runtime_agents(
             .session
             .first()
             .cloned()
-            .unwrap_or_else(|| acp_transport::default_acp_command(runtime_agent));
+            .unwrap_or_else(|| {
+                if agent.transport == RuntimeTransportKind::PiRpc {
+                    pi_rpc_transport::default_pi_rpc_command(runtime_agent)
+                } else {
+                    acp_transport::default_acp_command(runtime_agent)
+                }
+            });
         let probe_command = startup_probe_command(runtime_agent, &agent);
         let version_command = agent.commands.version.first().cloned();
         let cached = store.get_runtime_agent_capability(runtime_agent)?;
@@ -267,7 +273,13 @@ fn startup_probe_command(runtime_agent: Agent, agent: &AgentInfo) -> String {
         .session
         .first()
         .cloned()
-        .unwrap_or_else(|| acp_transport::default_acp_command(runtime_agent))
+        .unwrap_or_else(|| {
+            if agent.transport == RuntimeTransportKind::PiRpc {
+                pi_rpc_transport::default_pi_rpc_command(runtime_agent)
+            } else {
+                acp_transport::default_acp_command(runtime_agent)
+            }
+        })
 }
 
 fn detect_capabilities_with_initialize_only(
@@ -346,7 +358,7 @@ fn derive_runtime_capabilities_for_agent(
     transport: RuntimeTransportKind,
     raw_capabilities_json: &str,
 ) -> Result<RuntimeCapabilitySet> {
-    if agent == Agent::Pi && transport == RuntimeTransportKind::PiRpc {
+    if agent.is_pi_like() && transport == RuntimeTransportKind::PiRpc {
         return Ok(pi_rpc_transport::runtime_capabilities());
     }
     derive_runtime_capabilities(raw_capabilities_json)

@@ -289,6 +289,7 @@ fn transport_kind_from_db(value: &str) -> RuntimeTransportKind {
 fn runtime_agent_name(agent: Agent) -> &'static str {
     match agent {
         Agent::Pi => "Pi",
+        Agent::Omp => "OMP",
         Agent::Codex => "Codex",
         Agent::Claude => "Claude",
         Agent::Opencode => "OpenCode",
@@ -298,6 +299,7 @@ fn runtime_agent_name(agent: Agent) -> &'static str {
 fn runtime_agent_display_name(agent: Agent) -> &'static str {
     match agent {
         Agent::Pi => "Pi",
+        Agent::Omp => "OMP",
         Agent::Codex => "Codex CLI",
         Agent::Claude => "Claude Code",
         Agent::Opencode => "OpenCode",
@@ -310,6 +312,7 @@ fn runtime_agent_order(agent: Agent) -> i64 {
         Agent::Claude => 1,
         Agent::Opencode => 2,
         Agent::Pi => 3,
+        Agent::Omp => 4,
     }
 }
 
@@ -8234,12 +8237,16 @@ mod schema_tests {
                 .iter()
                 .map(|agent| agent.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["codex", "claude", "opencode", "pi"]
+            vec!["codex", "claude", "opencode", "pi", "omp"]
         );
         let pi_agent = agents.iter().find(|agent| agent.id == "pi").unwrap();
         assert!(!pi_agent.enabled);
         assert_eq!(pi_agent.transport, RuntimeTransportKind::PiRpc);
         assert_eq!(pi_agent.commands.session, vec!["pi --mode rpc".to_string()]);
+        let omp_agent = agents.iter().find(|agent| agent.id == "omp").unwrap();
+        assert!(!omp_agent.enabled);
+        assert_eq!(omp_agent.transport, RuntimeTransportKind::PiRpc);
+        assert_eq!(omp_agent.commands.session, vec!["omp --mode rpc".to_string()]);
         let codex_agent = agents.iter().find(|agent| agent.id == "codex").unwrap();
         assert_eq!(codex_agent.icon.as_deref(), Some("codex"));
         assert_eq!(codex_agent.model.as_deref(), Some("gpt-5.5"));

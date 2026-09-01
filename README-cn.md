@@ -74,6 +74,8 @@ Sessio 直接读取本机已有的会话文件，不依赖云端服务。
   - `~/.claude/projects`
 - Pi
   - `~/.pi/agent/sessions`
+- OMP
+  - `~/.omp/agent/sessions`
 
 应用数据存放目录：
 
@@ -89,14 +91,50 @@ Sessio 直接读取本机已有的会话文件，不依赖云端服务。
 
 ## Agent 运行时
 
-实时对话会以本地子进程方式启动 agent。ACP agent 使用 ACP adapter，Pi 使用 RPC 模式。默认命令：
+实时对话会以本地子进程方式启动 agent。ACP agent 使用 ACP adapter，Pi 和 OMP 使用 RPC 模式。默认命令：
 
 - Codex：`npx -y @agentclientprotocol/codex-acp@latest`
 - Claude Code：`npx -y @zed-industries/claude-code-acp@latest`
 - OpenCode：`opencode acp`
 - Pi（默认关闭）：`pi --mode rpc`
+- OMP（默认关闭）：`omp --mode rpc`
 
 在设置 → Agents 中可以启用 / 禁用各 agent，并编辑模型目录、默认模型、推理强度和权限模式。Astra 编排器使用的 agent 也在同一设置区域单独配置。
+
+Sessio 在启动时会导入一次登录 shell 的环境变量。这意味着 `PATH` 和少量白名单变量会从登录 shell 里读取，但 shell function 本身不会被导入。这些说明主要是给 OMP 的，因为它通常依赖 `PATH` 被正确带上。
+
+- macOS / Linux `zsh`：写到 `~/.zprofile`
+- `bash`：写到 `~/.bash_profile`，或者 `~/.profile`
+- Windows：写到用户环境变量
+- 如果你在用 `nvm`，请在登录 shell 中初始化它，必要时再执行 `nvm use --silent default`
+- 如果 `bun` 是单独安装的，通常只要把它的 bin 目录加入 `PATH` 就够了，例如 `export PATH="$HOME/.bun/bin:$PATH"`
+
+示例：
+
+```sh
+# macOS / Linux zsh: ~/.zprofile
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+nvm use --silent default >/dev/null
+
+export PATH="$HOME/.bun/bin:$PATH"
+```
+
+```sh
+# bash: ~/.bash_profile 或 ~/.profile
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+nvm use --silent default >/dev/null
+
+export PATH="$HOME/.bun/bin:$PATH"
+```
+
+```powershell
+# Windows 用户环境变量
+NVM_HOME=%LOCALAPPDATA%\nvm
+NVM_SYMLINK=%LOCALAPPDATA%\nodejs
+PATH=%PATH%;%NVM_SYMLINK%;%USERPROFILE%\.bun\bin
+```
 
 Channels 可在设置 → Workflows → Channels 中配置。Sessio 会把各平台默认值和 workspace allowlist 写入当前应用目录下的 `im-bridge.yaml`，活跃 chat 绑定则保存在本地 SQLite 索引中。由于 channel 可以驱动能运行本机工具的 agent，启用前请限制允许的用户 / 聊天和工作区。
 

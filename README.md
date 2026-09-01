@@ -74,6 +74,8 @@ By default it scans:
   - `~/.claude/projects`
 - Pi
   - `~/.pi/agent/sessions`
+- OMP
+  - `~/.omp/agent/sessions`
 
 App data lives under:
 
@@ -89,14 +91,50 @@ Examples:
 
 ## Agent Runtime
 
-Live chats spawn agents as local subprocesses. ACP agents use ACP adapters; Pi uses its RPC mode. Default commands:
+Live chats spawn agents as local subprocesses. ACP agents use ACP adapters; Pi and OMP use RPC mode. Default commands:
 
 - Codex: `npx -y @agentclientprotocol/codex-acp@latest`
 - Claude Code: `npx -y @zed-industries/claude-code-acp@latest`
 - OpenCode: `opencode acp`
 - Pi (disabled by default): `pi --mode rpc`
+- OMP (disabled by default): `omp --mode rpc`
 
 Agents can be enabled / disabled in Settings → Agents, where you can also edit each agent's model catalog, default model, reasoning effort, and permission mode. The orchestrator agent used by Astra is configured separately in the same settings section.
+
+Sessio imports your login shell environment once at startup. That means `PATH` and a small allowlist of variables are picked up from the shell you use to log in, but shell functions themselves are not. These notes matter most for OMP, which is commonly resolved through `PATH`.
+
+- macOS / Linux `zsh`: put it in `~/.zprofile`
+- `bash`: put it in `~/.bash_profile` or `~/.profile`
+- Windows: use user environment variables
+- If you use `nvm`, initialize it in the login shell and, if needed, run `nvm use --silent default`
+- If `bun` is installed separately, adding its bin directory to `PATH` is usually enough, for example `export PATH="$HOME/.bun/bin:$PATH"`
+
+Examples:
+
+```sh
+# macOS / Linux zsh: ~/.zprofile
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+nvm use --silent default >/dev/null
+
+export PATH="$HOME/.bun/bin:$PATH"
+```
+
+```sh
+# bash: ~/.bash_profile or ~/.profile
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+nvm use --silent default >/dev/null
+
+export PATH="$HOME/.bun/bin:$PATH"
+```
+
+```powershell
+# Windows user environment variables
+NVM_HOME=%LOCALAPPDATA%\nvm
+NVM_SYMLINK=%LOCALAPPDATA%\nodejs
+PATH=%PATH%;%NVM_SYMLINK%;%USERPROFILE%\.bun\bin
+```
 
 Channels can be configured in Settings → Workflows → Channels. Sessio stores per-platform defaults and workspace allowlists in the active app-home `im-bridge.yaml`, while active chat bindings live in the local SQLite index. Because a channel can drive agents that run local tools, restrict allowed users / chats and workspaces before enabling it.
 

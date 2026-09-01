@@ -27,7 +27,7 @@ export type Agent = GeneratedAgent;
 /// `Agent` enum on the Rust side. Adding a new agent here is the only TS
 /// place callers should touch — `isAgent`, `Record<Agent, …>` literals,
 /// and AGENTS-driven loops pick up the rest at compile time.
-export const AGENTS = ["pi", "codex", "claude", "opencode"] as const;
+export const AGENTS = ["pi", "omp", "codex", "claude", "opencode"] as const;
 
 // Compile-time guard: AGENTS must cover every Agent variant and only contain
 // Agent variants. If either side drifts, TypeScript fails here.
@@ -2904,6 +2904,7 @@ export async function respondAgentPermission(
 
 export const AGENT_LABEL: Record<Agent, string> = {
   pi: "Pi",
+  omp: "OMP",
   codex: "Codex",
   claude: "Claude Code",
   opencode: "OpenCode",
@@ -2914,6 +2915,7 @@ export const AGENT_LABEL: Record<Agent, string> = {
 /// when no override is set.
 export const AGENT_SHORT_LABEL: Record<Agent, string> = {
   pi: "Pi",
+  omp: "OMP",
   codex: "Codex",
   claude: "Claude",
   opencode: "OpenCode",
@@ -2921,6 +2923,7 @@ export const AGENT_SHORT_LABEL: Record<Agent, string> = {
 
 const AGENT_COLOR_VAR: Record<Agent, string> = {
   pi: "--color-purple",
+  omp: "--color-brand",
   codex: "--color-fg",
   claude: "--color-orange",
   opencode: "--color-fg",
@@ -2928,6 +2931,7 @@ const AGENT_COLOR_VAR: Record<Agent, string> = {
 
 export const AGENT_ACCENT: Record<Agent, string> = {
   pi: `rgb(var(${AGENT_COLOR_VAR.pi}))`,
+  omp: `rgb(var(${AGENT_COLOR_VAR.omp}))`,
   codex: `rgb(var(${AGENT_COLOR_VAR.codex}))`,
   claude: `rgb(var(${AGENT_COLOR_VAR.claude}))`,
   opencode: `rgb(var(${AGENT_COLOR_VAR.opencode}))`,

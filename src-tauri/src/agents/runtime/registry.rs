@@ -44,7 +44,7 @@ pub fn builtin_runtime_registry() -> RuntimeRegistry {
     for agent in Agent::ALL.iter().copied() {
         registry.register(RuntimeRegistration {
             agent,
-            transport: if agent == Agent::Pi {
+            transport: if agent.is_pi_like() {
                 RuntimeTransportKind::PiRpc
             } else {
                 RuntimeTransportKind::Acp

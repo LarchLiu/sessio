@@ -47,7 +47,7 @@ tasks:
   - id: short unique id within this response (t1, t2, ...)
     title: string
     assistantId: thread-assistant-id
-    targetAgent: pi|codex|claude|opencode
+    targetAgent: pi|omp|codex|claude|opencode
     prompt: string
     expectedOutput: string
     risk: low|medium|high

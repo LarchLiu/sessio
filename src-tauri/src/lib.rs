@@ -2762,6 +2762,7 @@ fn read_session_history_result_from_source(
             "Session file no longer exists (likely cleaned by {}): {}",
             match agent {
                 Agent::Pi => "Pi",
+                Agent::Omp => "OMP",
                 Agent::Codex => "Codex",
                 Agent::Claude => "Claude Code",
                 Agent::Opencode => "OpenCode",
@@ -2788,6 +2789,25 @@ fn read_session_history_result_from_source(
                 metadata: Default::default(),
             };
             let events = crate::agents::sources::pi::parser::read_message_events(&path, &source)?;
+            let count = events.len();
+            let rows =
+                crate::agents::sources::pi::parser::message_events_to_history_acp_messages(events);
+            (rows, count)
+        }
+        Agent::Omp => {
+            let source = crate::agents::sources::types::SessionSource {
+                agent: crate::agents::sources::types::AgentKind::new(Agent::Omp.as_str()),
+                session_id: session_id.unwrap_or_default().to_string(),
+                scope: path
+                    .parent()
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                file_path: file_path.to_string(),
+                project: None,
+                source_kind: crate::agents::sources::types::SourceKind::MainSession,
+                metadata: Default::default(),
+            };
+            let events = crate::agents::sources::omp::parser::read_message_events(&path, &source)?;
             let count = events.len();
             let rows =
                 crate::agents::sources::pi::parser::message_events_to_history_acp_messages(events);

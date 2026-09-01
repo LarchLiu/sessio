@@ -398,6 +398,33 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
         },
         now,
     )?;
+    seed_builtin_agent(
+        conn,
+        Agent::Omp,
+        BuiltinAgentSeed {
+            model: None,
+            models: Vec::new(),
+            effort: Some("medium"),
+            efforts: vec![
+                runtime_option("off", "Off"),
+                runtime_option("minimal", "Minimal"),
+                runtime_option("low", "Low"),
+                runtime_option("medium", "Medium"),
+                runtime_option("high", "High"),
+                runtime_option("xhigh", "Extra High"),
+            ],
+            permission_mode: None,
+            permission_modes: Vec::new(),
+            enabled: false,
+            transport: RuntimeTransportKind::PiRpc,
+            commands: AgentCommandsInfo {
+                session: vec!["omp --mode rpc".to_string()],
+                version: vec!["omp --version".to_string()],
+            },
+            ai_providers: vec![],
+        },
+        now,
+    )?;
     sync_pi_builtin_agent_defaults(conn, now)?;
     seed_builtin_agent(
         conn,

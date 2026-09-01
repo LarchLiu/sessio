@@ -1,4 +1,4 @@
-import { type CSSProperties, type HTMLAttributes } from "react";
+import { type CSSProperties, type HTMLAttributes, useId } from "react";
 
 export type IconifyIconClassName = string;
 
@@ -93,6 +93,30 @@ export function CodeXmlIcon({ className, style }: IconifyIconComponentProps) {
 
 export function PiIcon({ className, style }: IconifyIconComponentProps) {
   return <IconifyIcon iconClassName="icon-[simple-icons--pi]" className={["scale-90", className ?? ""].filter(Boolean).join(" ")} style={style} />;
+}
+
+export function OmpIcon({ className, style }: IconifyIconComponentProps) {
+  const gradientId = useId().replace(/:/g, "");
+  return (
+    <svg
+      viewBox="6 10 52 50"
+      width="22"
+      height="22"
+      aria-hidden="true"
+      className={["scale-110 origin-center", className ?? ""].filter(Boolean).join(" ")}
+      style={style}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <defs>
+        <linearGradient id={`omp-mark-grad-${gradientId}`} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#d84d8b"></stop>
+          <stop offset=".5" stopColor="#8a5cf6"></stop>
+          <stop offset="1" stopColor="#4ec7d8"></stop>
+        </linearGradient>
+      </defs>
+      <path fill={`url(#omp-mark-grad-${gradientId})`} d="M10 14h44v9H43v33h-9V23h-9v22h-9V23H10z"></path>
+    </svg>
+  );
 }
 
 export function OpencodeIcon({ className, style }: IconifyIconComponentProps) {

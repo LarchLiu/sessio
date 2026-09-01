@@ -68,7 +68,10 @@ fn poll_once(
         poll_claude(&indexed, claude_index_mtimes, store.as_ref(), indexer)?;
     }
     if enabled_agents.contains(&Agent::Pi) {
-        poll_pi(&indexed, store.as_ref(), indexer)?;
+        poll_pi_like(Agent::Pi, &indexed, store.as_ref(), indexer)?;
+    }
+    if enabled_agents.contains(&Agent::Omp) {
+        poll_pi_like(Agent::Omp, &indexed, store.as_ref(), indexer)?;
     }
     if enabled_agents.contains(&Agent::Opencode) {
         poll_opencode(&indexed, store.as_ref(), indexer)?;
@@ -356,19 +359,25 @@ fn poll_opencode(
     Ok(())
 }
 
-fn poll_pi(
+fn poll_pi_like(
+    agent: Agent,
     indexed: &[IndexedSessionRecord],
     store: &dyn SessionStore,
     indexer: &IndexerHandle,
 ) -> Result<()> {
-    let Some(root) = crate::agents::sources::pi::parser::root_dir()? else {
-        store.mark_missing_scopes_unavailable(Agent::Pi, &HashSet::new())?;
+    let root = match agent {
+        Agent::Pi => crate::agents::sources::pi::parser::root_dir()?,
+        Agent::Omp => crate::agents::sources::omp::parser::root_dir()?,
+        _ => None,
+    };
+    let Some(root) = root else {
+        store.mark_missing_scopes_unavailable(agent, &HashSet::new())?;
         return Ok(());
     };
 
     let mut known_main: HashMap<String, &IndexedSessionRecord> = indexed
         .iter()
-        .filter(|row| row.agent == Agent::Pi && !row.file_path.is_empty())
+        .filter(|row| row.agent == agent && !row.file_path.is_empty())
         .map(|row| (row.file_path.clone(), row))
         .collect();
     let mut seen_main: HashSet<String> = HashSet::new();
@@ -399,7 +408,11 @@ fn poll_pi(
                 None => true,
             };
             if needs_reindex {
-                indexer.submit(IndexTask::ReindexPiFile(path))?;
+                indexer.submit(match agent {
+                    Agent::Pi => IndexTask::ReindexPiFile(path),
+                    Agent::Omp => IndexTask::ReindexOmpFile(path),
+                    _ => IndexTask::ReindexPiFile(path),
+                })?;
             }
         }
     }
@@ -410,7 +423,7 @@ fn poll_pi(
         }
     }
 
-    store.mark_missing_scopes_unavailable(Agent::Pi, &seen_scopes)?;
+    store.mark_missing_scopes_unavailable(agent, &seen_scopes)?;
     Ok(())
 }
 

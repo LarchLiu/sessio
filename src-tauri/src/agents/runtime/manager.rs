@@ -212,7 +212,7 @@ impl RuntimeManager {
     }
 
     pub fn configured_transport(&self, agent: Agent) -> RuntimeTransportKind {
-        if agent == Agent::Pi {
+        if agent.is_pi_like() {
             RuntimeTransportKind::PiRpc
         } else {
             RuntimeTransportKind::Acp
@@ -221,14 +221,14 @@ impl RuntimeManager {
 
     pub fn configured_session_command(&self, agent: Agent) -> String {
         if self.configured_transport(agent) == RuntimeTransportKind::PiRpc {
-            pi_rpc_transport::command_from_options(&Default::default())
+            pi_rpc_transport::command_from_options(agent, &Default::default())
         } else {
             acp_transport::command_from_options(agent, &Default::default())
         }
     }
 
     fn requested_transport(&self, agent: Agent, options: &RuntimeMetadata) -> RuntimeTransportKind {
-        if agent == Agent::Pi {
+        if agent.is_pi_like() {
             return RuntimeTransportKind::PiRpc;
         }
         if options.contains_key("transport") {
@@ -668,7 +668,7 @@ impl RuntimeManager {
                     pi_rpc_transport::PiRpcSessionSpec {
                         agent: req.agent,
                         workspace_path: req.workspace_path.clone(),
-                        command: pi_rpc_transport::command_from_options(&req.options),
+                        command: pi_rpc_transport::command_from_options(req.agent, &req.options),
                         runtime_config: Some(runtime_config),
                         computer_use,
                         start,
@@ -845,7 +845,7 @@ impl RuntimeManager {
                     pi_rpc_transport::PiRpcSessionSpec {
                         agent: req.agent,
                         workspace_path: req.workspace_path.clone(),
-                        command: pi_rpc_transport::command_from_options(&req.options),
+                        command: pi_rpc_transport::command_from_options(req.agent, &req.options),
                         runtime_config: Some(runtime_config),
                         computer_use,
                         start,

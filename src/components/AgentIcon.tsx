@@ -1,10 +1,11 @@
 import { type CSSProperties, type ReactNode } from "react";
 import { Claude, OpenAI } from "@lobehub/icons";
 import { type Agent } from "../api";
-import { OpencodeIcon, PiIcon } from "./IconifyIcon";
+import { OmpIcon, OpencodeIcon, PiIcon } from "./IconifyIcon";
 
 const AGENT_ICON: Record<Agent, (props: { className?: string; style?: CSSProperties }) => ReactNode> = {
   pi: PiIcon,
+  omp: OmpIcon,
   codex: OpenAI,
   claude: Claude.Color,
   opencode: OpencodeIcon,

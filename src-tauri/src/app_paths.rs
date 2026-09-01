@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
+use crate::models::Agent;
+
 const PROD_APP_DIR: &str = ".sessio";
 const DEV_APP_DIR: &str = ".sessio-dev";
 
@@ -93,10 +95,33 @@ pub fn agent_probe_workspace_dir(agent: &str) -> Result<PathBuf> {
 }
 
 pub fn pi_agent_home_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("no home dir")?;
-    Ok(home.join(".pi").join("agent"))
+    agent_home_dir(Agent::Pi)
 }
 
 pub fn pi_agent_sessions_dir() -> Result<PathBuf> {
-    Ok(pi_agent_home_dir()?.join("sessions"))
+    agent_sessions_dir(Agent::Pi)
+}
+
+pub fn omp_agent_home_dir() -> Result<PathBuf> {
+    agent_home_dir(Agent::Omp)
+}
+
+pub fn omp_agent_sessions_dir() -> Result<PathBuf> {
+    agent_sessions_dir(Agent::Omp)
+}
+
+pub fn agent_home_dir(agent: Agent) -> Result<PathBuf> {
+    let home = dirs::home_dir().context("no home dir")?;
+    let dir = match agent {
+        Agent::Pi => ".pi",
+        Agent::Omp => ".omp",
+        other => {
+            anyhow::bail!("agent {other:?} does not have a dedicated home dir");
+        }
+    };
+    Ok(home.join(dir).join("agent"))
+}
+
+pub fn agent_sessions_dir(agent: Agent) -> Result<PathBuf> {
+    Ok(agent_home_dir(agent)?.join("sessions"))
 }
