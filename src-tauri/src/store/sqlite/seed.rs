@@ -469,21 +469,15 @@ pub(crate) fn seed_opencode_builtin_agent(conn: &Connection, now: i64) -> Result
 }
 
 fn sync_pi_builtin_agent_defaults(conn: &Connection, now: i64) -> Result<()> {
-    let commands_json = serde_json::to_string(&AgentCommandsInfo {
-        session: vec!["pi --mode rpc".to_string()],
-        version: vec!["pi --version".to_string()],
-    })?;
     conn.execute(
         "UPDATE agents
-         SET transport = ?, commands_json = ?, updated_at = ?
-         WHERE id = ? AND (transport <> ? OR commands_json <> ?)",
+         SET transport = ?, updated_at = ?
+         WHERE id = ? AND transport <> ?",
         params![
             transport_kind_to_db(RuntimeTransportKind::PiRpc),
-            commands_json,
             now,
             Agent::Pi.as_str(),
             transport_kind_to_db(RuntimeTransportKind::PiRpc),
-            commands_json,
         ],
     )?;
     Ok(())

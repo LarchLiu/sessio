@@ -9191,11 +9191,15 @@ mod schema_tests {
 
         store
             .update_builtin_agent_preferences(
-                Agent::Codex,
+                Agent::Pi,
                 AgentPreferencesPatch {
-                    display_name: Some("Custom Codex"),
+                    display_name: Some("Custom Pi"),
                     enabled: Some(false),
                     order: Some(99),
+                    commands: Some(&AgentCommandsInfo {
+                        session: vec!["omp --mode rpc".to_string()],
+                        version: vec!["omp --version".to_string()],
+                    }),
                     model: Some("custom-model"),
                     effort: Some("medium"),
                     permission_mode: Some("auto"),
@@ -9206,18 +9210,20 @@ mod schema_tests {
 
         store.init().unwrap();
 
-        let codex = store
+        let pi = store
             .list_agents()
             .unwrap()
             .into_iter()
-            .find(|agent| agent.id == "codex")
+            .find(|agent| agent.id == "pi")
             .unwrap();
-        assert_eq!(codex.display_name, "Custom Codex");
-        assert_eq!(codex.model.as_deref(), Some("custom-model"));
-        assert_eq!(codex.effort.as_deref(), Some("medium"));
-        assert_eq!(codex.permission_mode.as_deref(), Some("auto"));
-        assert!(!codex.enabled);
-        assert_eq!(codex.order, 99);
+        assert_eq!(pi.display_name, "Custom Pi");
+        assert_eq!(pi.model.as_deref(), Some("custom-model"));
+        assert_eq!(pi.effort.as_deref(), Some("medium"));
+        assert_eq!(pi.permission_mode.as_deref(), Some("auto"));
+        assert_eq!(pi.commands.session, vec!["omp --mode rpc".to_string()]);
+        assert_eq!(pi.commands.version, vec!["omp --version".to_string()]);
+        assert!(!pi.enabled);
+        assert_eq!(pi.order, 99);
 
         let _ = std::fs::remove_file(&path);
     }
