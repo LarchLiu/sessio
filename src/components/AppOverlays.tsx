@@ -1,4 +1,6 @@
-import type { SessionInfo, SessionScope } from "../api";
+import { useState } from "react";
+import { createPortal } from "react-dom";
+import type { SessionInfo, SessionScope, SessioAppInfo } from "../api";
 import { useI18n } from "../i18n";
 import { SessionMetaList } from "../pages/ProjectPage";
 import ConfirmPopover from "./ConfirmPopover";
@@ -25,6 +27,8 @@ type AppOverlaysProps = {
   memorySearchProjects: Array<{ key: string; label: string }>;
   activeMemorySearchProjectKey: string | null;
   deleteTarget: DeleteTarget | null;
+  appRenameTarget: SessioAppInfo | null;
+  appRenameCurrentName: string | null;
   updateConfirmMounted: boolean;
   updateConfirmOpen: boolean;
   updateCurrentVersion: string;
@@ -41,6 +45,8 @@ type AppOverlaysProps = {
   onMemorySearchExited: () => void;
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
+  onCancelAppRename: () => void;
+  onConfirmAppRename: (name: string) => void;
   onCancelUpdateConfirm: () => void;
   onConfirmUpdate: () => void;
   onUpdateConfirmExited: () => void;
@@ -56,6 +62,8 @@ export default function AppOverlays({
   memorySearchProjects,
   activeMemorySearchProjectKey,
   deleteTarget,
+  appRenameTarget,
+  appRenameCurrentName,
   updateConfirmMounted,
   updateConfirmOpen,
   updateCurrentVersion,
@@ -72,6 +80,8 @@ export default function AppOverlays({
   onMemorySearchExited,
   onCancelDelete,
   onConfirmDelete,
+  onCancelAppRename,
+  onConfirmAppRename,
   onCancelUpdateConfirm,
   onConfirmUpdate,
   onUpdateConfirmExited,
@@ -136,6 +146,15 @@ export default function AppOverlays({
         />
       )}
 
+      {appRenameTarget && (
+        <AppRenameDialog
+          key={`${appRenameTarget.id}:${appRenameCurrentName ?? appRenameTarget.slug}`}
+          initialName={appRenameCurrentName ?? appRenameTarget.slug}
+          onCancel={onCancelAppRename}
+          onConfirm={onConfirmAppRename}
+        />
+      )}
+
       {updateConfirmMounted && updateLatestVersion && (
         <UpdateConfirmDialog
           open={updateConfirmOpen}
@@ -153,5 +172,62 @@ export default function AppOverlays({
         />
       )}
     </>
+  );
+}
+
+function AppRenameDialog({
+  initialName,
+  onCancel,
+  onConfirm,
+}: {
+  initialName: string;
+  onCancel: () => void;
+  onConfirm: (name: string) => void;
+}) {
+  const { t } = useI18n();
+  const [name, setName] = useState(initialName);
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[90] flex items-center justify-center bg-black/35 px-4"
+      onMouseDown={onCancel}
+    >
+      <form
+        className="w-full max-w-[360px] rounded-xl border border-ink/10 bg-surface-panel p-4 shadow-2xl"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onConfirm(name);
+        }}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="text-body font-medium text-ink">{t("apps.rename")}</div>
+        <label className="mt-3 block text-caption text-ink/55" htmlFor="app-display-name">
+          {t("apps.rename_title")}
+        </label>
+        <input
+          id="app-display-name"
+          autoFocus
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          className="mt-1.5 h-9 w-full rounded-md border border-ink/15 bg-surface px-2.5 text-body-sm text-ink outline-none focus:border-ink/35 focus:ring-2 focus:ring-ink/10"
+        />
+        <div className="mt-4 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-md px-2.5 py-1.5 text-body-sm text-ink/65 transition hover:bg-ink/5 hover:text-ink"
+          >
+            {t("apps.rename_cancel")}
+          </button>
+          <button
+            type="submit"
+            className="rounded-md bg-ink px-2.5 py-1.5 text-body-sm font-medium text-surface-panel transition hover:bg-ink/85"
+          >
+            {t("apps.rename_submit")}
+          </button>
+        </div>
+      </form>
+    </div>,
+    document.body,
   );
 }

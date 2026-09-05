@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch } from "react";
-import { FileWarning, LoaderCircle } from "lucide-react";
+import { ArrowLeft, FileWarning, LoaderCircle } from "lucide-react";
 import {
   cancelAgentTurn,
   ensureAgentRuntimeSession,
@@ -20,11 +20,23 @@ import { useAppshotComposerRegistration } from "../appshot";
 import { mergeAppHistoryTurns } from "../appChatDrawer";
 import AppChatTranscriptDrawer from "../components/AppChatTranscriptDrawer";
 import {
+  FileDisplayModeToggle,
+  type ChatFilesDisplayMode,
+} from "../components/ChatFilesView";
+import {
   ComposerTopAttachments,
   MinimalMessageStrip,
 } from "../components/ChatBottomStrips";
 import ChatComposer from "../components/ChatComposer";
+import FileViewer from "../components/FileViewer";
 import PlainHtmlPreview from "../components/PlainHtmlPreview";
+import PlainMarkdownPreview from "../components/PlainMarkdownPreview";
+import {
+  isPlainEditorEditableDocumentPath,
+  isPlainEditorMarkdownDocumentPath,
+  isPlainEditorPreviewableDocumentPath,
+} from "../hooks/plainEditorFileTypes";
+import { languageFromPath, useFileContent } from "../hooks/useFileContent";
 import { runtimeSessionOptions, useChatComposer } from "../hooks/useChatComposer";
 import { useI18n } from "../i18n";
 import {
@@ -48,6 +60,8 @@ export default function AppsPage({
   liveState,
   dispatchLiveEvent,
   onError,
+  selectedFilePath,
+  onClearFileSelection,
 }: {
   app: SessioAppInfo;
   runtimeSessionId: string | null;
@@ -58,6 +72,8 @@ export default function AppsPage({
   liveState: LiveRuntimeState;
   dispatchLiveEvent: Dispatch<LiveRuntimeAction>;
   onError: (error: string | null) => void;
+  selectedFilePath: string | null;
+  onClearFileSelection: () => void;
 }) {
   const { t } = useI18n();
   const [html, setHtml] = useState<string | null>(null);
@@ -341,7 +357,13 @@ export default function AppsPage({
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-surface-panel">
       <div className="flex min-h-0 flex-1 flex-col">
-        {loadingHtml ? (
+        {selectedFilePath ? (
+          <AppFilePreview
+            path={selectedFilePath}
+            appDirectoryPath={app.directoryPath}
+            onBack={onClearFileSelection}
+          />
+        ) : loadingHtml ? (
           <div className="flex min-h-0 flex-1 items-center justify-center text-ink/40">
             <LoaderCircle className="h-5 w-5 animate-spin" />
           </div>
@@ -423,6 +445,99 @@ export default function AppsPage({
           onCancel={() => void cancelTurn()}
           onSend={() => void sendMessage()}
         />
+      </div>
+    </div>
+  );
+}
+
+function AppFilePreview({
+  path,
+  appDirectoryPath,
+  onBack,
+}: {
+  path: string;
+  appDirectoryPath: string;
+  onBack: () => void;
+}) {
+  const { t } = useI18n();
+  const fileContent = useFileContent({ path, displayPath: path }, appDirectoryPath);
+  const [displayMode, setDisplayMode] = useState<ChatFilesDisplayMode>("code");
+  const selectedPath = fileContent.path ?? path;
+  const documentFile = isPlainEditorEditableDocumentPath(selectedPath);
+  const previewDocument = isPlainEditorPreviewableDocumentPath(selectedPath);
+  const isMarkdown = isPlainEditorMarkdownDocumentPath(selectedPath);
+  const fileName = path.split(/[\\/]/).pop() || path;
+
+  useEffect(() => {
+    setDisplayMode("code");
+  }, [path]);
+
+  return (
+    <div className="sessio-plain-editor-view flex h-full min-h-0 min-w-0 flex-col">
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-ink/10 px-4">
+        <button
+          type="button"
+          aria-label={t("apps.file_preview_back")}
+          title={t("apps.file_preview_back")}
+          onClick={onBack}
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink/55 transition hover:bg-ink/5 hover:text-ink"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" />
+        </button>
+        <span className="min-w-0 flex-1 truncate font-mono text-caption text-ink/72" title={path}>
+          {fileName}
+        </span>
+        {documentFile && (
+          <FileDisplayModeToggle
+            value={displayMode}
+            previewAvailable={previewDocument}
+            onChange={setDisplayMode}
+          />
+        )}
+      </div>
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+        {fileContent.loading && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center text-ink/40">
+            <LoaderCircle className="h-5 w-5 animate-spin" />
+          </div>
+        )}
+        {!fileContent.loading && fileContent.error && (
+          <div className="flex h-full items-center justify-center px-6 text-center text-body-sm text-status-warn">
+            {t("chat.files.unavailable")}
+            <span className="ml-1 font-mono text-caption opacity-70">{fileContent.error}</span>
+          </div>
+        )}
+        {!fileContent.loading && !fileContent.error && fileContent.imageDataUrl && (
+          <div className="flex h-full items-center justify-center overflow-auto p-8">
+            <img src={fileContent.imageDataUrl} alt={fileName} className="max-h-full max-w-full object-contain" />
+          </div>
+        )}
+        {!fileContent.loading && !fileContent.error && fileContent.text !== null && (
+          displayMode === "preview" && previewDocument ? (
+            isMarkdown ? (
+              <PlainMarkdownPreview text={fileContent.text} filePath={selectedPath} />
+            ) : (
+              <PlainHtmlPreview
+                html={fileContent.text}
+                filePath={selectedPath}
+                scriptsInitiallyEnabled
+              />
+            )
+          ) : (
+            <FileViewer
+              fileKey={`${selectedPath}:${fileContent.contentVersion}`}
+              text={fileContent.text}
+              language={languageFromPath(selectedPath)}
+              mode={displayMode === "edit" ? "plain" : "code"}
+              workspacePath={appDirectoryPath}
+              path={selectedPath}
+              mtimeMs={fileContent.mtimeMs}
+              contentVersion={fileContent.contentVersion}
+              plainEditorMode="edit"
+              onSaved={fileContent.applyLocalSave}
+            />
+          )
+        )}
       </div>
     </div>
   );

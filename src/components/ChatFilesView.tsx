@@ -17,7 +17,7 @@ import Tooltip from "./Tooltip";
 import "./plain-editor-theme.css";
 
 export type ChatFilesSubview = "code" | "plain";
-type ChatFilesDisplayMode = "code" | PlainEditorMode;
+export type ChatFilesDisplayMode = "code" | PlainEditorMode;
 
 export interface ChatFilesViewProps {
   edits: FileEditItem[];
@@ -221,6 +221,15 @@ export default function ChatFilesView({
             }}
           />
         )}
+        {!fileContent.loading && !fileContent.error && fileContent.imageDataUrl && selected && (
+          <div className="flex h-full min-h-0 items-center justify-center overflow-auto p-8">
+            <img
+              src={fileContent.imageDataUrl}
+              alt={selectedLabel}
+              className="max-h-full max-w-full object-contain"
+            />
+          </div>
+        )}
       </div>
       {pickerOpen && pickerAnchorRef.current && (
         <FilePickerPopover
@@ -240,7 +249,7 @@ export default function ChatFilesView({
   );
 }
 
-function FileDisplayModeToggle({
+export function FileDisplayModeToggle({
   value,
   previewAvailable,
   disabled = false,

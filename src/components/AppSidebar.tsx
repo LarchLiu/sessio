@@ -1,4 +1,4 @@
-import { type MouseEvent, type ReactNode, useMemo, useRef, useState } from "react";
+import { type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { createPortal } from "react-dom";
 import {
@@ -31,6 +31,7 @@ import {
   createDefaultProject,
   listProcessTemplateStages,
   listProcessTemplates,
+  readLocalImageDataUrl,
   type ProjectStageInfo,
   type SessioAppInfo,
   type ThreadIndexItemInfo,
@@ -127,10 +128,12 @@ type AppSidebarProps = {
   autoTasksActive: boolean;
   appsSectionExpanded: boolean;
   apps: SessioAppInfo[];
+  appDisplayNames: Record<string, string>;
   selectedAppPath: string | null;
   appsActive: boolean;
   onToggleAppsSection: () => void;
   onSelectApp: (app: SessioAppInfo) => void;
+  onAppContextMenu: (app: SessioAppInfo, e: MouseEvent) => void;
   onInstallUpdate: () => void;
   onError: (error: string | null) => void;
 };
@@ -168,10 +171,12 @@ export default function AppSidebar({
   autoTasksActive,
   appsSectionExpanded,
   apps,
+  appDisplayNames,
   selectedAppPath,
   appsActive,
   onToggleAppsSection,
   onSelectApp,
+  onAppContextMenu,
   onInstallUpdate,
   onError,
 }: AppSidebarProps) {
@@ -252,6 +257,7 @@ export default function AppSidebar({
                       key={app.directoryPath}
                       type="button"
                       onClick={() => onSelectApp(app)}
+                      onContextMenu={(event) => onAppContextMenu(app, event)}
                       title={app.directoryPath}
                       className={
                         "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition " +
@@ -260,8 +266,8 @@ export default function AppSidebar({
                           : "text-ink/70 hover:bg-ink/5 hover:text-ink")
                       }
                     >
-                      <AppWindow className="h-3.5 w-3.5 shrink-0 text-ink/55" />
-                      <span className="min-w-0 flex-1 truncate text-body">{app.slug}</span>
+                      <AppLogo app={app} />
+                      <span className="min-w-0 flex-1 truncate text-body">{appDisplayNames[app.id] ?? app.slug}</span>
                       {!app.htmlPath && <CircleAlert className="h-3.5 w-3.5 shrink-0 text-amber-600" />}
                     </button>
                   );
@@ -327,6 +333,44 @@ export default function AppSidebar({
         onInstallUpdate={onInstallUpdate}
       />
     </aside>
+  );
+}
+
+function AppLogo({ app }: { app: SessioAppInfo }) {
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDataUrl(null);
+    if (!app.logoPath) return () => {
+      cancelled = true;
+    };
+
+    void readLocalImageDataUrl(app.logoPath)
+      .then((url) => {
+        if (!cancelled) setDataUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setDataUrl(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [app.logoPath]);
+
+  if (!dataUrl) {
+    return <AppWindow className="h-3.5 w-3.5 shrink-0 text-ink/55" />;
+  }
+
+  return (
+    <img
+      src={dataUrl}
+      alt=""
+      aria-hidden="true"
+      className="h-4 w-4 shrink-0 rounded-sm object-contain"
+      onError={() => setDataUrl(null)}
+    />
   );
 }
 

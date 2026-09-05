@@ -38,6 +38,7 @@ interface AppRightSidebarProps {
   onSelectThreadChatSession: (session: SessionInfo) => void;
   onOpenThreadMultiSessionChat: () => void;
   onOpenProjectFile: (path: string) => void;
+  onOpenAppFile: (path: string) => void;
   onAddProjectFileToCanvas: (paths: string[] | string) => void;
   onClose: () => void;
   onError: (message: string | null) => void;
@@ -65,6 +66,7 @@ export default function AppRightSidebar({
   onSelectThreadChatSession,
   onOpenThreadMultiSessionChat,
   onOpenProjectFile,
+  onOpenAppFile,
   onAddProjectFileToCanvas,
   onClose,
   onError,
@@ -288,6 +290,7 @@ export default function AppRightSidebar({
               reloadKey={filesReloadKey + liveFilesReloadKey}
               projectHasGit={workspaceHasGit}
               onProjectGitRepoDetected={onProjectGitRepoDetected}
+              onOpenFile={onOpenAppFile}
             />
           ) : (
             <ProjectSourceControlPanel

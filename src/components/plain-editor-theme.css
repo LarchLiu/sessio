@@ -116,6 +116,7 @@
 
 .sessio-plain-html-preview {
   display: flex;
+  height: 100%;
   min-width: 0;
   flex-direction: column;
   overflow: hidden;

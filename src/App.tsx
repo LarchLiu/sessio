@@ -62,7 +62,7 @@ import {
   emptyLiveRuntimeState,
 } from "./runtimeChat";
 import { useRuntimeAgents } from "./runtimeAgents";
-import { CalendarClock, Folder, Goal, Hash, Kanban, MessagesSquare, MessageSquare, MessageSquareText } from "lucide-react";
+import { AppWindow, CalendarClock, Folder, Goal, Hash, Kanban, MessagesSquare, MessageSquare, MessageSquareText } from "lucide-react";
 import type { ChatFilesSubview } from "./components/ChatFilesView";
 import type { ChatView, DetailMode, PendingNewChatSession, ViewMode } from "./navigation";
 import {
@@ -82,6 +82,7 @@ import { appendAppshotToActiveComposer } from "./appshot";
 
 const VIEW_MODE_STORAGE_KEY = "sessio.viewMode";
 const RIGHT_SIDEBAR_OPEN_STORAGE_KEY = "sessio.rightSidebarOpen";
+const APP_DISPLAY_NAMES_STORAGE_KEY = "sessio.appDisplayNames";
 
 type ThreadSelection = { projectId: string; threadId: string; goal: string } | null;
 type ProjectFileSelectionRequest = {
@@ -100,6 +101,21 @@ function readViewMode(): ViewMode {
 function readRightSidebarOpen(): boolean {
   if (typeof localStorage === "undefined") return false;
   return localStorage.getItem(RIGHT_SIDEBAR_OPEN_STORAGE_KEY) === "1";
+}
+
+function readAppDisplayNames(): Record<string, string> {
+  if (typeof localStorage === "undefined") return {};
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(APP_DISPLAY_NAMES_STORAGE_KEY) ?? "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        ([key, value]) => key.trim().length > 0 && typeof value === "string" && value.trim().length > 0,
+      ),
+    );
+  } catch {
+    return {};
+  }
 }
 
 const IS_MAC =
@@ -140,6 +156,9 @@ export default function App() {
   const [expandProject, setExpandProject] = useState(true);
   const [expandApps, setExpandApps] = useState(true);
   const [sessioApps, setSessioApps] = useState<SessioAppInfo[]>([]);
+  const [appDisplayNames, setAppDisplayNames] = useState<Record<string, string>>(
+    readAppDisplayNames,
+  );
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightSidebarOpen, setRightSidebarOpen] = useState<boolean>(() =>
     readRightSidebarOpen(),
@@ -151,6 +170,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [utilityView, setUtilityView] = useState<UtilityView>(null);
   const [selectedApp, setSelectedApp] = useState<SessioAppInfo | null>(null);
+  const [selectedAppFilePath, setSelectedAppFilePath] = useState<string | null>(null);
   const [appRuntimeSessions, setAppRuntimeSessions] = useState<Record<string, string>>({});
   const [updateConfirmOpen, setUpdateConfirmOpen] = useState(false);
   const [updateConfirmMounted, setUpdateConfirmMounted] = useState(false);
@@ -163,6 +183,7 @@ export default function App() {
   const [chatView, setChatView] = useState<ChatView>("chat");
   const [filesSubview, setFilesSubview] = useState<ChatFilesSubview>("code");
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [appRenameTarget, setAppRenameTarget] = useState<SessioAppInfo | null>(null);
   const [projectGitRepos, setProjectGitRepos] = useState<Record<string, boolean>>({});
   const projectGitReposRef = useRef<Record<string, boolean>>({});
   const projectGitRepoProbeRef = useRef<Set<string>>(new Set());
@@ -915,6 +936,35 @@ export default function App() {
     );
   };
 
+  const renameApp = (app: SessioAppInfo, nextName: string) => {
+    const trimmed = nextName.trim();
+    setAppDisplayNames((current) => {
+      const next = { ...current };
+      if (trimmed) next[app.id] = trimmed;
+      else delete next[app.id];
+      localStorage.setItem(APP_DISPLAY_NAMES_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+    setAppRenameTarget(null);
+  };
+
+  const openAppMenu = async (app: SessioAppInfo, pos: { x: number; y: number }) => {
+    try {
+      const renameItem = await MenuItem.new({
+        id: "rename-app",
+        text: t("apps.rename"),
+        action: () => setAppRenameTarget(app),
+      });
+      const menu = await Menu.new({ items: [renameItem] });
+      await menu.popup(
+        new LogicalPosition(pos.x + 1, pos.y),
+        getCurrentWindow(),
+      );
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   const detailTitle =
     (selected ? sessionDisplayTitle(selected) : null) ??
     t("list.no_user_message");
@@ -1061,6 +1111,7 @@ export default function App() {
       autoTasksActive={utilityView === "autoTasks"}
       appsSectionExpanded={expandApps}
       apps={sessioApps}
+      appDisplayNames={appDisplayNames}
       selectedAppPath={selectedApp?.directoryPath ?? null}
       onToggleAppsSection={() => {
         const next = !expandApps;
@@ -1069,6 +1120,7 @@ export default function App() {
       }}
       onSelectApp={(app) => {
         setSelectedApp(app);
+        setSelectedAppFilePath(null);
         setSelected(null);
         setSelectedProject(null);
         setSelectedThread(null);
@@ -1077,6 +1129,10 @@ export default function App() {
         setFilter({ kind: "all" });
         setDetailMode("chat");
         setUtilityView("apps");
+      }}
+      onAppContextMenu={(app, event) => {
+        event.preventDefault();
+        void openAppMenu(app, { x: event.clientX, y: event.clientY });
       }}
       appsActive={utilityView === "apps"}
       onInstallUpdate={openUpdateConfirm}
@@ -1211,9 +1267,9 @@ export default function App() {
       sidebarOpen={sidebarOpen}
       selected={null}
       detailTitle=""
-      contextTitle={null}
+      contextTitle={{ label: t("header.app"), icon: AppWindow }}
       entityTitle={null}
-      projectContext={null}
+      projectContext={selectedApp ? { name: appDisplayNames[selectedApp.id] ?? selectedApp.slug } : null}
       activeMessageMeta={null}
       metaPopoverOpen={false}
       rightSidebarOpen={rightSidebarOpen}
@@ -1240,6 +1296,10 @@ export default function App() {
       }))}
       activeMemorySearchProjectKey={filter.kind === "project" ? filter.key : null}
       deleteTarget={deleteTarget}
+      appRenameTarget={appRenameTarget}
+      appRenameCurrentName={
+        appRenameTarget ? appDisplayNames[appRenameTarget.id] ?? appRenameTarget.slug : null
+      }
       updateConfirmMounted={updateConfirmMounted}
       updateConfirmOpen={updateConfirmOpen}
       updateCurrentVersion={__APP_VERSION__}
@@ -1257,6 +1317,10 @@ export default function App() {
       onCancelDelete={() => setDeleteTarget(null)}
       onConfirmDelete={() => {
         void confirmDelete();
+      }}
+      onCancelAppRename={() => setAppRenameTarget(null)}
+      onConfirmAppRename={(name) => {
+        if (appRenameTarget) renameApp(appRenameTarget, name);
       }}
       onCancelUpdateConfirm={() => {
         if (!update.installing) setUpdateConfirmOpen(false);
@@ -1347,6 +1411,7 @@ export default function App() {
             }}
             onOpenThreadMultiSessionChat={() => setDetailMode("threadMultiSessionChat")}
             onOpenProjectFile={handleOpenProjectFile}
+            onOpenAppFile={setSelectedAppFilePath}
             onAddProjectFileToCanvas={handleAddProjectFileToCanvas}
             onClose={() => setRightSidebarOpen(false)}
             onError={setError}
@@ -1375,6 +1440,8 @@ export default function App() {
               liveState={liveRuntimeState}
               dispatchLiveEvent={dispatchLiveRuntimeEvent}
               onError={setError}
+              selectedFilePath={selectedAppFilePath}
+              onClearFileSelection={() => setSelectedAppFilePath(null)}
             />
             <TerminalDock
               open={terminalDockOpen}

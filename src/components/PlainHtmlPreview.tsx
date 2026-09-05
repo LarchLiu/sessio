@@ -137,7 +137,7 @@ export default function PlainHtmlPreview({
   const scriptsLabel = t("chat.files.html_preview_scripts");
 
   return (
-    <div className="sessio-plain-html-preview min-h-0 flex-1">
+    <div className="sessio-plain-html-preview h-full min-h-0 flex-1">
       {showScriptsControl && (
         <div className="sessio-plain-html-preview-toolbar">
           <span>{scriptsLabel}</span>

@@ -18,6 +18,7 @@ pub(crate) struct SessioAppInfo {
     pub directory_path: String,
     pub html_path: Option<String>,
     pub html_file_name: Option<String>,
+    pub logo_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -140,6 +141,7 @@ fn app_info(directory: &Path) -> Result<SessioAppInfo, String> {
         .and_then(|path| path.file_name())
         .and_then(|name| name.to_str())
         .map(str::to_string);
+    let logo_path = find_logo_path(directory).map(|path| canonical_or_original(&path));
 
     Ok(SessioAppInfo {
         id: stable_app_id(&directory_path),
@@ -147,6 +149,27 @@ fn app_info(directory: &Path) -> Result<SessioAppInfo, String> {
         directory_path,
         html_path: html_path.map(|path| canonical_or_original(&path)),
         html_file_name,
+        logo_path,
+    })
+}
+
+fn find_logo_path(directory: &Path) -> Option<std::path::PathBuf> {
+    const LOGO_NAMES: [&str; 5] = [
+        "logo.svg",
+        "logo.png",
+        "logo.webp",
+        "logo.jpg",
+        "logo.jpeg",
+    ];
+
+    let entries = fs::read_dir(directory).ok()?.filter_map(Result::ok).collect::<Vec<_>>();
+    LOGO_NAMES.iter().find_map(|expected_name| {
+        entries.iter().find_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            let file_name = entry.file_name();
+            (file_type.is_file() && file_name.to_str()?.eq_ignore_ascii_case(expected_name))
+                .then(|| entry.path())
+        })
     })
 }
 
@@ -167,15 +190,19 @@ fn stable_app_id(path: &str) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn test_root() -> PathBuf {
         std::env::temp_dir().join(format!(
-            "sessio-app-list-{}-{}",
+            "sessio-app-list-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock should be after epoch")
-                .as_nanos()
+                .as_nanos(),
+            TEST_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
         ))
     }
 
@@ -204,8 +231,26 @@ mod tests {
         assert_eq!(apps[1].html_file_name.as_deref(), Some("index.HTML"));
         assert_eq!(apps[2].slug, "sales-report");
         assert_eq!(apps[2].html_file_name.as_deref(), Some("sales-report.html"));
+        assert_eq!(apps[0].logo_path, None);
 
         fs::remove_dir_all(&root).expect("remove test apps");
+    }
+
+    #[test]
+    fn resolves_logo_files_in_priority_order() {
+        let root = test_root();
+        let app = root.join("brand");
+        fs::create_dir_all(&app).expect("create app");
+        fs::write(app.join("logo.jpeg"), []).expect("write jpeg logo");
+        fs::write(app.join("LOGO.PNG"), []).expect("write png logo");
+
+        let info = app_info(&app).expect("read app info");
+        assert_eq!(
+            info.logo_path.as_deref().and_then(|path| Path::new(path).file_name()),
+            Some(std::ffi::OsStr::new("LOGO.PNG"))
+        );
+
+        fs::remove_dir_all(&root).expect("remove test app");
     }
 
     #[test]

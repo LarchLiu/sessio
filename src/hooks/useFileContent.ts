@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
+  readLocalImageDataUrl,
   readWorkspaceTextFile,
   unwatchPreviewFile,
   watchPreviewFile,
@@ -11,6 +12,7 @@ import type { FileEditItem } from "../acpRenderItems";
 export interface FileContentResult {
   loading: boolean;
   text: string | null;
+  imageDataUrl: string | null;
   mtimeMs: number | null;
   path: string | null;
   contentVersion: string;
@@ -21,6 +23,7 @@ export interface FileContentResult {
 const EMPTY_RESULT: FileContentResult = {
   loading: false,
   text: null,
+  imageDataUrl: null,
   mtimeMs: null,
   path: null,
   contentVersion: "",
@@ -97,6 +100,7 @@ export function useFileContent(
       setResult({
         loading: false,
         text: null,
+        imageDataUrl: null,
         mtimeMs: null,
         path: null,
         contentVersion: "",
@@ -110,9 +114,11 @@ export function useFileContent(
     let removeListener: (() => void) | null = null;
     let unwatchRequested = false;
     const cachedText = getCachedFileContent(absolute);
+    const imageFile = isImageFilePath(absolute);
     setResult({
-      loading: cachedText === null,
-      text: cachedText?.content ?? null,
+      loading: imageFile ? true : cachedText === null,
+      text: imageFile ? null : cachedText?.content ?? null,
+      imageDataUrl: null,
       mtimeMs: cachedText?.mtimeMs ?? null,
       path: absolute,
       contentVersion: cachedText ? fileContentVersion(absolute, cachedText.mtimeMs) : "",
@@ -128,20 +134,34 @@ export function useFileContent(
           error: null,
         }));
       }
-      readWorkspaceTextFile(workspacePath, absolute)
+      (imageFile
+        ? readLocalImageDataUrl(absolute).then((imageDataUrl) => ({ imageDataUrl }))
+        : readWorkspaceTextFile(workspacePath, absolute).then((file) => ({ file })))
         .then((file) => {
           if (cancelled) return;
-          setCachedFileContent(absolute, file);
+          if ("imageDataUrl" in file) {
+            setResult((prev) => ({
+              ...prev,
+              loading: false,
+              text: null,
+              imageDataUrl: file.imageDataUrl,
+              error: null,
+            }));
+            return;
+          }
+          const workspaceFile = file.file;
+          setCachedFileContent(absolute, workspaceFile);
           setResult((prev) => {
-            const unchangedContent = prev.path === absolute && prev.text === file.content;
+            const unchangedContent = prev.path === absolute && prev.text === workspaceFile.content;
             return {
               loading: false,
-              text: file.content,
-              mtimeMs: file.mtimeMs,
+              text: workspaceFile.content,
+              imageDataUrl: null,
+              mtimeMs: workspaceFile.mtimeMs,
               path: absolute,
               contentVersion: unchangedContent
                 ? prev.contentVersion
-                : fileContentVersion(absolute, file.mtimeMs),
+                : fileContentVersion(absolute, workspaceFile.mtimeMs),
               error: null,
               applyLocalSave,
             };
@@ -152,6 +172,7 @@ export function useFileContent(
           setResult({
             loading: false,
             text: null,
+            imageDataUrl: null,
             mtimeMs: null,
             path: absolute,
             contentVersion: "",
@@ -197,6 +218,10 @@ export function useFileContent(
   }, [applyLocalSave, invalidation, path, reloadKey, workspacePath]);
 
   return result;
+}
+
+export function isImageFilePath(path: string | null | undefined): boolean {
+  return Boolean(path && /\.(?:png|jpe?g|webp|gif|svg|bmp)$/i.test(path));
 }
 
 function resolveAbsolutePath(path: string, workspacePath: string | null): string | null {
