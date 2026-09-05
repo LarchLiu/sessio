@@ -26,6 +26,7 @@ export function ChatTranscriptDrawer({
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
+  onOpenProjectFile,
 }: {
   appId: string;
   storageKey?: string;
@@ -38,6 +39,7 @@ export function ChatTranscriptDrawer({
   onPreviewImage?: (image: import("../pages/ChatPage").MarkdownImage) => void;
   onPreviewFile?: (file: import("../pages/ChatPage").FilePreview) => void;
   onFilePreviewError?: (message: string) => void;
+  onOpenProjectFile?: (path: string) => void;
 }) {
   const { t } = useI18n();
   const heightKey = storageKey ?? appId;
@@ -199,6 +201,7 @@ export function ChatTranscriptDrawer({
               onPreviewImage={onPreviewImage ?? (() => {})}
               onPreviewFile={onPreviewFile ?? (() => {})}
               onFilePreviewError={onFilePreviewError ?? onError}
+              onOpenProjectFile={onOpenProjectFile}
               onPermissionResponse={handlePermissionResponse}
             />
           </div>

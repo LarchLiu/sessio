@@ -2020,6 +2020,7 @@ export function AcpTranscriptPanel({
               onPreviewImage={onPreviewImage}
               onPreviewFile={onPreviewFile}
               onFilePreviewError={onFilePreviewError}
+              onOpenProjectFile={onOpenProjectFile}
             />
           ) : (
             <MinimalMessageStrip

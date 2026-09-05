@@ -1468,6 +1468,7 @@ export default function App() {
               onError={setError}
               selectedFilePath={selectedAppFilePath}
               onClearFileSelection={() => setSelectedAppFilePath(null)}
+              onOpenFile={setSelectedAppFilePath}
             />
             <TerminalDock
               open={terminalDockOpen}

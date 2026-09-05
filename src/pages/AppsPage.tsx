@@ -31,6 +31,7 @@ import {
 } from "../components/ChatFilesView";
 import {
   ComposerTopAttachments,
+  EditedFilesBar,
   MinimalMessageStrip,
 } from "../components/ChatBottomStrips";
 import ChatComposer from "../components/ChatComposer";
@@ -55,6 +56,7 @@ import {
   type LiveTurn,
 } from "../runtimeChat";
 import { mergeHistoryAndLiveViewModels } from "../components/AcpTranscriptPanel";
+import { liveOrLatestTurnFileEdits } from "../acpRenderItems";
 
 export default function AppsPage({
   app,
@@ -69,6 +71,7 @@ export default function AppsPage({
   onError,
   selectedFilePath,
   onClearFileSelection,
+  onOpenFile,
 }: {
   app: SessioAppInfo;
   appDisplayName: string;
@@ -82,6 +85,7 @@ export default function AppsPage({
   onError: (error: string | null) => void;
   selectedFilePath: string | null;
   onClearFileSelection: () => void;
+  onOpenFile: (path: string) => void;
 }) {
   const { t } = useI18n();
   const [html, setHtml] = useState<string | null>(null);
@@ -193,6 +197,13 @@ export default function AppsPage({
     }
     return historyTurns.length > 0 ? historyViewModel : null;
   }, [historyTurns.length, historyViewModel, liveViewModel]);
+  const currentTurnFileEdits = useMemo(
+    () => liveOrLatestTurnFileEdits(
+      viewModel ?? historyViewModel,
+      new Set(liveSession?.turns.map((turn) => turn.turnId) ?? []),
+    ),
+    [historyViewModel, liveSession, viewModel],
+  );
   const latestLinkedSession = useMemo(
     () => linkedSessions.find((session) => session.available && session.filePath) ?? null,
     [linkedSessions],
@@ -428,6 +439,7 @@ export default function AppsPage({
               onPreviewImage={setPreviewImage}
               onPreviewFile={setPreviewFile}
               onFilePreviewError={setFilePreviewNotice}
+              onOpenProjectFile={onOpenFile}
             />
           ) : (
             <MinimalMessageStrip
@@ -442,6 +454,13 @@ export default function AppsPage({
               }
             />
           )}
+          <EditedFilesBar
+            fileCount={currentTurnFileEdits.edits.length}
+            additions={currentTurnFileEdits.additions}
+            deletions={currentTurnFileEdits.deletions}
+            edits={currentTurnFileEdits.edits}
+            onOpenFile={onOpenFile}
+          />
         </ComposerTopAttachments>
         <ChatComposer
           composer={composer}
