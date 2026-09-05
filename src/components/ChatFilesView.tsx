@@ -5,7 +5,7 @@ import type { FileEditItem } from "../acpRenderItems";
 import { fileEditKey, fileEditMatchesPath } from "../acpRenderItems";
 import {
   isPlainEditorEditableDocumentPath,
-  isPlainEditorMarkdownDocumentPath,
+  isPlainEditorPreviewableDocumentPath,
 } from "../hooks/plainEditorFileTypes";
 import { useFileContent, languageFromPath } from "../hooks/useFileContent";
 import { useFileGitDiff } from "../hooks/useFileGitDiff";
@@ -101,7 +101,7 @@ export default function ChatFilesView({
     : "";
   const selectedPath = fileContent.path ?? selected?.displayPath ?? selected?.path ?? null;
   const documentFile = isPlainEditorEditableDocumentPath(selectedPath);
-  const previewDocument = isPlainEditorMarkdownDocumentPath(selectedPath);
+  const previewDocument = isPlainEditorPreviewableDocumentPath(selectedPath);
   const effectiveSubview: ChatFilesSubview = documentFile ? subview : "code";
   const effectivePlainEditorMode: PlainEditorMode =
     previewDocument ? plainEditorMode : "edit";

@@ -17,12 +17,15 @@ import {
   type TagStyle,
 } from "@codemirror/language";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import { html } from "@codemirror/lang-html";
 import { writeWorkspaceTextFile } from "../api";
 import {
   isPlainEditorEditableDocumentPath,
+  isPlainEditorHtmlDocumentPath,
 } from "../hooks/plainEditorFileTypes";
 import { useI18n } from "../i18n";
 import PlainMarkdownPreview from "./PlainMarkdownPreview";
+import PlainHtmlPreview from "./PlainHtmlPreview";
 import { useEffectiveThemeType } from "./shikiHighlight";
 import Tooltip from "./Tooltip";
 import "./plain-editor-theme.css";
@@ -224,6 +227,9 @@ function highlightTagName(tag: TagStyle["tag"]): string {
 
 function plainLanguageExtension(path: string | null): Extension {
   const lower = (path ?? "").toLowerCase();
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) {
+    return html();
+  }
   if (
     lower.endsWith(".md") ||
     lower.endsWith(".markdown") ||
@@ -272,6 +278,7 @@ export default function PlainEditorView({
     () => isPlainEditorEditableDocumentPath(path),
     [path],
   );
+  const htmlDocument = useMemo(() => isPlainEditorHtmlDocumentPath(path), [path]);
   const [dirty, setDirtyState] = useState(false);
   const [status, setStatusState] = useState<PlainEditorSaveStatus>("clean");
   const [messageKey, setMessageKey] = useState<string | null>(null);
@@ -598,7 +605,12 @@ export default function PlainEditorView({
           (editorMode === "preview" ? "hidden" : "")
         }
       />
-      {editorMode === "preview" && <PlainMarkdownPreview text={previewText} filePath={path} />}
+      {editorMode === "preview" &&
+        (htmlDocument ? (
+          <PlainHtmlPreview html={previewText} filePath={path} />
+        ) : (
+          <PlainMarkdownPreview text={previewText} filePath={path} />
+        ))}
     </div>
   );
 }

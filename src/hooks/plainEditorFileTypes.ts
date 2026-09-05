@@ -1,6 +1,8 @@
 const EDITABLE_DOCUMENT_EXTENSIONS = new Set([
   "adoc",
   "asciidoc",
+  "htm",
+  "html",
   "markdown",
   "md",
   "mdown",
@@ -33,6 +35,8 @@ const MARKDOWN_DOCUMENT_EXTENSIONS = new Set([
   "qmd",
 ]);
 
+const HTML_DOCUMENT_EXTENSIONS = new Set(["htm", "html"]);
+
 function plainEditorFileParts(path: string | null | undefined): {
   fileName: string;
   extension: string | null;
@@ -58,4 +62,15 @@ export function isPlainEditorEditableDocumentPath(path: string | null | undefine
 export function isPlainEditorMarkdownDocumentPath(path: string | null | undefined): boolean {
   const { extension } = plainEditorFileParts(path);
   return extension ? MARKDOWN_DOCUMENT_EXTENSIONS.has(extension) : false;
+}
+
+export function isPlainEditorHtmlDocumentPath(path: string | null | undefined): boolean {
+  const { extension } = plainEditorFileParts(path);
+  return extension ? HTML_DOCUMENT_EXTENSIONS.has(extension) : false;
+}
+
+export function isPlainEditorPreviewableDocumentPath(
+  path: string | null | undefined,
+): boolean {
+  return isPlainEditorMarkdownDocumentPath(path) || isPlainEditorHtmlDocumentPath(path);
 }

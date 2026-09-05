@@ -3,12 +3,14 @@ import Tooltip from "./Tooltip";
 export default function SwitchControl({
   checked,
   tooltip,
+  ariaLabel,
   onToggle,
   disabled = false,
   className = "",
 }: {
   checked: boolean;
   tooltip?: string;
+  ariaLabel?: string;
   onToggle: () => void;
   disabled?: boolean;
   className?: string;
@@ -18,6 +20,7 @@ export default function SwitchControl({
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={ariaLabel}
       disabled={disabled}
       onClick={onToggle}
       className={

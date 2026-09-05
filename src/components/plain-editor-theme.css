@@ -114,6 +114,37 @@
   min-height: calc(var(--plain-editor-font-size) * var(--plain-editor-line-height));
 }
 
+.sessio-plain-html-preview {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background: #fff;
+}
+
+.sessio-plain-html-preview-toolbar {
+  display: flex;
+  height: 36px;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  border-bottom: 1px solid rgb(var(--color-fg) / 0.08);
+  padding: 0 12px;
+  background: rgb(var(--color-bg));
+  color: var(--plain-editor-muted);
+  font-size: 12px;
+}
+
+.sessio-plain-html-preview-frame {
+  display: block;
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+  border: 0;
+  background: #fff;
+}
+
 .sessio-plain-editor-preview-viewport {
   padding:
     var(--plain-editor-padding-y) var(--plain-editor-padding-x) calc(var(--plain-editor-padding-y) + 40px);
