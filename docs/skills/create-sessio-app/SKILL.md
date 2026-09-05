@@ -83,7 +83,8 @@ existing files without explicit permission.
    the data JS parses, the HTML contains no record literals, and AGENTS.md
    documents every top-level and record field. Exercise the initial render and
    at least one requested interaction. Check a desktop width and a narrow width
-   when the app has a visual layout. Do not start a persistent development
+   when the app has a visual layout. Use the browser test method below for
+   visual and interaction verification. Do not start a persistent development
    server; if temporary serving is essential for verification, stop it before
    finishing.
 10. **Publish the tested app to Sessio's app directory.** Only after all checks
@@ -209,6 +210,37 @@ empty state. Keep tables readable at narrow widths and allow horizontal scroll
 only when columns cannot fit. Avoid invented KPI cards, decorative filler, and
 server-only features.
 
+## Browser effect testing
+
+When visual layout or pointer interaction matters, test the app in a real
+browser after static checks. Browser automation may reject `file://` URLs, so
+serve the repository temporarily from loopback and stop the server after the
+test:
+
+```bash
+python3 -m http.server 8765 --bind 127.0.0.1
+```
+
+Open the app in Chrome or another available browser automation surface at
+`http://127.0.0.1:8765/<relative-app-path>/<app-slug>.html`. Read the
+accessibility tree to confirm the page loaded, expected controls and content
+exist, and controls have useful accessible names. Exercise the primary workflow
+by clicking controls through their accessibility ids or semantic roles, then
+read the tree again to verify state changes, rendered records, empty states,
+and status text. Capture a screenshot after the initial render and after the
+key interaction to inspect clipping, overlap, asset loading, and responsive
+layout.
+
+For positioned visuals such as grids, charts, or markers, use Playwright in the
+browser context to compare actual element bounding boxes with their intended
+coordinates. Measure the center of each rendered marker against the calculated
+plot or grid point and report the maximum pixel deviation. Also perform at
+least one click using calculated screen coordinates rather than an element id,
+then verify the resulting record or state in the accessibility tree. Treat
+small subpixel differences as rounding; investigate visible misalignment or
+larger systematic offsets. Record the browser, URL, viewport sizes, actions,
+observed results, and any limitations in the handoff notes.
+
 When the user asks for a dashboard or report but does not provide data, create a
 small representative dataset in the data JS and mark it clearly in AGENTS.md
 as sample data. Never infer sensitive conclusions from fabricated values.
@@ -229,6 +261,9 @@ Before reporting completion, verify:
       before extracting values into the data JS.
 - [ ] Missing/invalid data produces a visible, actionable empty/error state.
 - [ ] The page works offline and does not require a server.
+- [ ] A real-browser test covers initial render, the primary interaction, a
+      screenshot review, and responsive viewport checks; positioned visuals
+      have bounding-box alignment measured when applicable.
 - [ ] After validation, the complete app directory is copied to
       `$SESSIO_APP_HOME/apps/<app-slug>/` using the bundled platform publisher,
       with child directories preserved and overwrite protection enabled; when
