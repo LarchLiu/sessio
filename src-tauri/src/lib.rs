@@ -8760,6 +8760,10 @@ pub fn run() {
             shell_env::import_login_shell_env();
 
             let sessio_home = app_home()?;
+            // Make the resolved profile available to agent child processes so
+            // skills can publish artifacts without guessing the app variant.
+            std::env::set_var(app_paths::APP_HOME_ENV, &sessio_home);
+            std::env::set_var(app_paths::APP_VARIANT_ENV, app_paths::app_variant_name());
             let data_dir = sessio_home.join("db-data");
             std::fs::create_dir_all(&data_dir).ok();
             link_cli_binary(&sessio_home);

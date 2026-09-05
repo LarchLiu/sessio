@@ -6,13 +6,19 @@ use crate::models::Agent;
 
 const PROD_APP_DIR: &str = ".sessio";
 const DEV_APP_DIR: &str = ".sessio-dev";
+pub const APP_HOME_ENV: &str = "SESSIO_APP_HOME";
+pub const APP_VARIANT_ENV: &str = "SESSIO_APP_VARIANT";
 
 pub fn is_dev_variant() -> bool {
-    cfg!(debug_assertions)
-        || matches!(
-            std::env::var("SESSIO_APP_VARIANT").ok().as_deref(),
-            Some("dev")
-        )
+    cfg!(debug_assertions) || matches!(std::env::var(APP_VARIANT_ENV).ok().as_deref(), Some("dev"))
+}
+
+pub fn app_variant_name() -> &'static str {
+    if is_dev_variant() {
+        "dev"
+    } else {
+        "prod"
+    }
 }
 
 pub fn app_dir_name() -> &'static str {

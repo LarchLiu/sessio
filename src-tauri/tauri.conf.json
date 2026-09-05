@@ -43,6 +43,9 @@
     "resources": {
       "../docs/skills/computer-use/SKILL.md": "skills/computer-use/SKILL.md",
       "../docs/skills/computer-use/playbooks": "skills/computer-use/playbooks",
+      "../docs/skills/create-sessio-app/SKILL.md": "skills/create-sessio-app/SKILL.md",
+      "../docs/skills/create-sessio-app/evals": "skills/create-sessio-app/evals",
+      "../docs/skills/create-sessio-app/scripts": "skills/create-sessio-app/scripts",
       "../docs/skills/create-thread/SKILL.md": "skills/create-thread/SKILL.md",
       "../docs/skills/sessio-work-state/SKILL.md": "skills/sessio-work-state/SKILL.md",
       "resources/skills/computer-use/pi/sessio-computer-use.ts": "skills/computer-use/pi/sessio-computer-use.ts"

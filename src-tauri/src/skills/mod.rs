@@ -12,6 +12,7 @@ use walkdir::WalkDir;
 use crate::prompt_markers::sessio_prompt_markers;
 
 pub mod computer_use;
+pub mod create_sessio_app;
 pub mod create_thread;
 pub mod work_state;
 
@@ -21,6 +22,7 @@ pub const SELECTED_SKILL_IDS_OPTION: &str = "selectedSkillIds";
 pub const SELECTED_SKILLS_OPTION: &str = "selectedSkills";
 
 const BUILTIN_COMPUTER_USE_SKILL_ID: &str = "builtin:computer-use";
+const BUILTIN_CREATE_SESSIO_APP_SKILL_ID: &str = "builtin:create-sessio-app";
 const BUILTIN_CREATE_THREAD_SKILL_ID: &str = "builtin:create-thread";
 const BUILTIN_WORK_STATE_SKILL_ID: &str = "builtin:sessio-work-state";
 
@@ -35,6 +37,7 @@ pub enum SkillSource {
 #[serde(rename_all = "camelCase")]
 pub enum BuiltinSkillKind {
     ComputerUse,
+    CreateSessioApp,
     CreateThread,
     WorkState,
 }
@@ -353,6 +356,11 @@ fn scan_builtin_skills() -> Vec<SkillMetadata> {
             computer_use::computer_use_skill_path(),
         ),
         (
+            BUILTIN_CREATE_SESSIO_APP_SKILL_ID,
+            Some(BuiltinSkillKind::CreateSessioApp),
+            create_sessio_app::create_sessio_app_skill_path(),
+        ),
+        (
             BUILTIN_CREATE_THREAD_SKILL_ID,
             Some(BuiltinSkillKind::CreateThread),
             create_thread::create_thread_skill_path(),
@@ -599,6 +607,7 @@ fn builtin_skill_kind_label(kind: BuiltinSkillKind) -> &'static str {
     let markers = sessio_prompt_markers();
     match kind {
         BuiltinSkillKind::ComputerUse => markers.builtin_skill_kind_computer_use,
+        BuiltinSkillKind::CreateSessioApp => markers.builtin_skill_kind_create_sessio_app,
         BuiltinSkillKind::CreateThread => markers.builtin_skill_kind_create_thread,
         BuiltinSkillKind::WorkState => markers.builtin_skill_kind_work_state,
     }
@@ -771,6 +780,7 @@ fn builtin_skill_files() -> Vec<PathBuf> {
     let mut out = Vec::new();
     for path in [
         computer_use::computer_use_skill_path(),
+        create_sessio_app::create_sessio_app_skill_path(),
         create_thread::create_thread_skill_path(),
         work_state::work_state_skill_path(),
     ]
@@ -904,6 +914,15 @@ description: Recursive skill
         assert!(skills
             .iter()
             .any(|skill| skill.id == BUILTIN_WORK_STATE_SKILL_ID));
+        let create_sessio_app = skills
+            .iter()
+            .find(|skill| skill.id == BUILTIN_CREATE_SESSIO_APP_SKILL_ID)
+            .expect("missing create-sessio-app skill");
+        assert_eq!(
+            create_sessio_app.builtin_kind,
+            Some(BuiltinSkillKind::CreateSessioApp)
+        );
+        assert_eq!(create_sessio_app.name, "create-sessio-app");
     }
 
     #[test]

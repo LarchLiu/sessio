@@ -1,0 +1,23 @@
+{
+  "skill_name": "create-sessio-app",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "在当前 Sessio 项目里创建一个离线销售趋势小应用，要求生成 HTML、独立数据 JS 和 README。数据以后会经常替换，请保证 HTML 不包含任何销售记录，并在 README 里完整说明数据结构和更新方法。",
+      "expected_output": "A tested three-file app copied to $SESSIO_APP_HOME/apps/<slug>/, with all sales records in the data JS, a working trend view, and a README documenting every field and the installed path.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "帮我生成一个健康检查报告 HTML，可以展示多条指标曲线和明细表。数据由另一个 agent 每天重新生成，所以请把数据完全放到单独的 JS 文件，HTML 只负责展示，并写 README 说明所有字段、单位、异常值规则和 Sessio 预览方式。",
+      "expected_output": "A tested portable HTML report installed under $SESSIO_APP_HOME/apps/<slug>/, with a separate generated-data JS contract and README covering the complete schema and preview limitations.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "把一个库存监控页面做成 Sessio app，页面在 apps/inventory-monitor 下，数据脚本放在 data/inventory.js。要求支持空数据状态、搜索和按库存量排序，不能启动 server，并且 README 要让后续 agent 只改 JS 就能更新数据。",
+      "expected_output": "The requested directory layout copied under $SESSIO_APP_HOME/apps/inventory-monitor with the child-directory data script preserved, offline interactions, and a schema-driven README.",
+      "files": []
+    }
+  ]
+}
