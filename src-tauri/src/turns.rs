@@ -1756,10 +1756,18 @@ fn tool_diff_file_edits(turn: &SessionHistoryTurn) -> Vec<Value> {
 /// the patch is embedded in the JavaScript source of `rawInput`, so there is
 /// no ACP `diff` content block to consume.
 fn apply_patch_file_edits(tool: &SessionHistoryToolCall) -> Vec<Value> {
-    if !tool.title.eq_ignore_ascii_case("exec") {
-        return Vec::new();
-    }
-    extract_apply_patch_literals(&tool.raw_input)
+    let patches = if tool.title.eq_ignore_ascii_case("apply_patch") {
+        tool.raw_input
+            .as_str()
+            .filter(|patch| patch.contains("*** Begin Patch"))
+            .map(|patch| vec![patch.to_string()])
+            .unwrap_or_default()
+    } else if tool.title.eq_ignore_ascii_case("exec") {
+        extract_apply_patch_literals(&tool.raw_input)
+    } else {
+        Vec::new()
+    };
+    patches
         .into_iter()
         .flat_map(|patch| parse_apply_patch_file_edits(&patch))
         .collect()
@@ -1858,7 +1866,7 @@ fn parse_apply_patch_file_edits(patch: &str) -> Vec<Value> {
                 (
                     "create",
                     format!(
-                        "--- /dev/null\n+++ b/{patch_path}\n@@ -0,0 +{count} @@\n{}",
+                        "--- /dev/null\n+++ b/{patch_path}\n@@ -0,0 +1,{count} @@\n{}",
                         body_text
                     ),
                 )
@@ -4757,6 +4765,10 @@ mod tests {
         assert_eq!(data["edits"][1]["path"], "notes.txt");
         assert_eq!(data["edits"][1]["kind"], "create");
         assert_eq!(data["edits"][1]["additions"], 1);
+        assert_eq!(
+            data["edits"][1]["patch"].as_str().unwrap(),
+            "--- /dev/null\n+++ b/notes.txt\n@@ -0,0 +1,1 @@\n+hello"
+        );
     }
 
     #[test]
@@ -4767,6 +4779,30 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0]["patch"], Value::Null);
         assert_eq!(edits[0]["detail"], "-old line");
+    }
+
+    #[test]
+    fn direct_apply_patch_tool_call_emits_file_edit() {
+        let tool = SessionHistoryToolCall {
+            tool_id: "apply-patch-1".to_string(),
+            title: "apply_patch".to_string(),
+            kind: "edit".to_string(),
+            status: "completed".to_string(),
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Value::String(
+                "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n+new\n*** End Patch"
+                    .to_string(),
+            ),
+            raw_output: Value::Null,
+            meta: Value::Null,
+            raw: Value::Null,
+            updated_at: 1,
+        };
+        let edits = apply_patch_file_edits(&tool);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0]["path"], "src/main.rs");
+        assert!(edits[0]["patch"].as_str().unwrap().contains("-old\n+new"));
     }
 
     #[test]
