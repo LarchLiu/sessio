@@ -171,6 +171,7 @@ import {
   EditedFilesBar,
   MinimalMessageStrip,
 } from "../components/ChatBottomStrips";
+import ChatTranscriptDrawer from "../components/ChatTranscriptDrawer";
 import SessionFileEditsCard from "../components/SessionFileEditsCard";
 import { useAppshotComposerRegistration } from "../appshot";
 import ComputerUseTakeoverOverlay from "../components/ComputerUseTakeoverOverlay";
@@ -699,6 +700,7 @@ export function AcpTranscriptPanel({
     readableAncestorSessions.length > 0 && !allAncestorCacheFresh,
   );
   const [error, setError] = useState<string | null>(null);
+  const [chatExpanded, setChatExpanded] = useState(false);
   const runtimeSessionId = runtimeSessionAliases[`${agent}:${sessionId}`] ?? sessionId;
   const [composerText, setComposerText] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
@@ -1998,17 +2000,36 @@ export function AcpTranscriptPanel({
       </div>
       {showSharedStrips && (
         <ComposerTopAttachments>
-          {pendingPermissions.map((permission) => (
+          {!chatExpanded && pendingPermissions.map((permission) => (
             <FilesPermissionRow
               key={permission.requestId}
               sessioRuntimeSessionId={runtimeSessionId}
               permission={permission}
             />
           ))}
-          <MinimalMessageStrip
-            viewModel={acpViewModel}
-            workingTurnId={liveWorkingIndicatorTurnId || null}
-          />
+          {chatExpanded ? (
+            <ChatTranscriptDrawer
+              appId={sessionId}
+              storageKey={`project:${sourceKey}`}
+              viewModel={acpViewModel}
+              runtimeSessionId={runtimeSessionId}
+              liveTurnIds={Array.from(liveTurnIds)}
+              workingTurnId={liveWorkingIndicatorTurnId || null}
+              onCollapse={() => setChatExpanded(false)}
+              onError={setError}
+              onPreviewImage={onPreviewImage}
+              onPreviewFile={onPreviewFile}
+              onFilePreviewError={onFilePreviewError}
+            />
+          ) : (
+            <MinimalMessageStrip
+              viewModel={acpViewModel}
+              workingTurnId={liveWorkingIndicatorTurnId || null}
+              emptyText={t("detail.no_messages")}
+              ariaLabel={t("apps.chat_expand")}
+              onClick={() => setChatExpanded(true)}
+            />
+          )}
           <EditedFilesBar
             fileCount={currentTurnFileEdits.edits.length}
             additions={currentTurnFileEdits.additions}
@@ -5880,7 +5901,7 @@ export function ImagePreviewOverlay({
   );
 }
 
-function FilePreviewOverlay({
+export function FilePreviewOverlay({
   file,
   onClose,
 }: {
@@ -5929,7 +5950,7 @@ function FilePreviewOverlay({
   );
 }
 
-function FilePreviewNotice({
+export function FilePreviewNotice({
   message,
   onClose,
 }: {

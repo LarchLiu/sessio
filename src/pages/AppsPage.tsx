@@ -18,7 +18,13 @@ import {
 } from "../api";
 import { useAppshotComposerRegistration } from "../appshot";
 import { mergeAppHistoryTurns } from "../appChatDrawer";
-import AppChatTranscriptDrawer from "../components/AppChatTranscriptDrawer";
+import ChatTranscriptDrawer from "../components/ChatTranscriptDrawer";
+import {
+  FilePreviewNotice,
+  FilePreviewOverlay,
+  ImagePreviewOverlay,
+} from "../components/AcpTranscriptPanel";
+import type { FilePreview, MarkdownImage } from "../components/AcpTranscriptPanel";
 import {
   FileDisplayModeToggle,
   type ChatFilesDisplayMode,
@@ -87,6 +93,9 @@ export default function AppsPage({
   const [historyTurns, setHistoryTurns] = useState<LiveTurn[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [previewRevision, setPreviewRevision] = useState(0);
+  const [previewImage, setPreviewImage] = useState<MarkdownImage | null>(null);
+  const [previewFile, setPreviewFile] = useState<FilePreview | null>(null);
+  const [filePreviewNotice, setFilePreviewNotice] = useState<string | null>(null);
   const linkedSessionKeysRef = useRef(new Set<string>());
   const reloadedTurnKeysRef = useRef(new Set<string>());
   const fallbackRuntimeSequenceRef = useRef(0);
@@ -101,6 +110,7 @@ export default function AppsPage({
     onPendingSession: (pending) => {
       onRuntimeSessionIdChange(pending.sessioRuntimeSessionId);
     },
+    onPreviewImageAttachment: setPreviewImage,
   });
   useAppshotComposerRegistration(composer, true);
 
@@ -407,7 +417,7 @@ export default function AppsPage({
               </div>
             ))}
           {chatExpanded && viewModel && drawerRuntimeSessionId ? (
-            <AppChatTranscriptDrawer
+            <ChatTranscriptDrawer
               appId={app.id}
               viewModel={viewModel}
               runtimeSessionId={drawerRuntimeSessionId}
@@ -415,6 +425,9 @@ export default function AppsPage({
               workingTurnId={activeTurn?.turnId ?? null}
               onCollapse={() => setChatExpanded(false)}
               onError={onError}
+              onPreviewImage={setPreviewImage}
+              onPreviewFile={setPreviewFile}
+              onFilePreviewError={setFilePreviewNotice}
             />
           ) : (
             <MinimalMessageStrip
@@ -448,6 +461,18 @@ export default function AppsPage({
           onSend={() => void sendMessage()}
         />
       </div>
+      {previewImage && (
+        <ImagePreviewOverlay image={previewImage} onClose={() => setPreviewImage(null)} />
+      )}
+      {previewFile && (
+        <FilePreviewOverlay file={previewFile} onClose={() => setPreviewFile(null)} />
+      )}
+      {filePreviewNotice && (
+        <FilePreviewNotice
+          message={filePreviewNotice}
+          onClose={() => setFilePreviewNotice(null)}
+        />
+      )}
     </div>
   );
 }

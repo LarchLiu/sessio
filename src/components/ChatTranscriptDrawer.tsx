@@ -14,25 +14,34 @@ import { AcpRenderItems } from "./AcpTranscriptPanel";
 import ScrollArea from "./ScrollArea";
 import Tooltip from "./Tooltip";
 
-export default function AppChatTranscriptDrawer({
+export function ChatTranscriptDrawer({
   appId,
+  storageKey,
   viewModel,
   runtimeSessionId,
   liveTurnIds,
   workingTurnId,
   onCollapse,
   onError,
+  onPreviewImage,
+  onPreviewFile,
+  onFilePreviewError,
 }: {
   appId: string;
+  storageKey?: string;
   viewModel: AcpViewModel;
   runtimeSessionId: string;
   liveTurnIds: string[];
   workingTurnId: string | null;
   onCollapse: () => void;
   onError: (error: string | null) => void;
+  onPreviewImage?: (image: import("../pages/ChatPage").MarkdownImage) => void;
+  onPreviewFile?: (file: import("../pages/ChatPage").FilePreview) => void;
+  onFilePreviewError?: (message: string) => void;
 }) {
   const { t } = useI18n();
-  const [height, setHeight] = useState(() => readAppChatDrawerHeight(appId));
+  const heightKey = storageKey ?? appId;
+  const [height, setHeight] = useState(() => readAppChatDrawerHeight(heightKey));
   const [dragging, setDragging] = useState(false);
   const dragStartRef = useRef<{ y: number; height: number } | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -47,6 +56,10 @@ export default function AppChatTranscriptDrawer({
     [liveTurnIdSet, viewModel, workingTurnId],
   );
   const itemKeys = useMemo(() => renderItemKeys(items), [items]);
+
+  useEffect(() => {
+    setHeight(readAppChatDrawerHeight(heightKey));
+  }, [heightKey]);
   const activityKey = useMemo(
     () =>
       viewModel.turns
@@ -71,9 +84,9 @@ export default function AppChatTranscriptDrawer({
 
   const setStoredHeight = useCallback(
     (nextHeight: number) => {
-      setHeight(storeAppChatDrawerHeight(appId, nextHeight));
+      setHeight(storeAppChatDrawerHeight(heightKey, nextHeight));
     },
-    [appId],
+    [heightKey],
   );
 
   const startResize = useCallback(
@@ -183,9 +196,9 @@ export default function AppChatTranscriptDrawer({
               bubbleRefs={bubbleRefs}
               sessioRuntimeSessionId={runtimeSessionId}
               defaultMessageExpanded
-              onPreviewImage={() => {}}
-              onPreviewFile={() => {}}
-              onFilePreviewError={onError}
+              onPreviewImage={onPreviewImage ?? (() => {})}
+              onPreviewFile={onPreviewFile ?? (() => {})}
+              onFilePreviewError={onFilePreviewError ?? onError}
               onPermissionResponse={handlePermissionResponse}
             />
           </div>
@@ -198,3 +211,5 @@ export default function AppChatTranscriptDrawer({
     </div>
   );
 }
+
+export default ChatTranscriptDrawer;
