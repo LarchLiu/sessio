@@ -44,6 +44,11 @@ try {
   New-Item -ItemType Directory -Path $staging -Force | Out-Null
   Get-ChildItem -LiteralPath $source -Force | Copy-Item -Destination $staging -Recurse -Force
 
+  $agentsFile = Join-Path $staging 'AGENTS.md'
+  if (Test-Path -LiteralPath $agentsFile -PathType Leaf) {
+    Copy-Item -LiteralPath $agentsFile -Destination (Join-Path $staging 'CLAUDE.md') -Force
+  }
+
   if (Test-Path -LiteralPath $destination) {
     Remove-Item -LiteralPath $destination -Recurse -Force
   }

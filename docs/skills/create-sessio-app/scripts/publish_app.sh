@@ -53,6 +53,10 @@ trap cleanup EXIT
 
 cp -R "$source_dir"/. "$staging"/
 
+if [[ -f "$staging/AGENTS.md" ]]; then
+  cp "$staging/AGENTS.md" "$staging/CLAUDE.md"
+fi
+
 if [[ "$force" == "--force" && -e "$destination" ]]; then
   rm -rf "$destination"
 fi

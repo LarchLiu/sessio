@@ -19,7 +19,8 @@ preview safely in Sessio. The central contract is data separation:
 <app-dir>/
   <app-slug>.html       # UI, styles, rendering, and interaction logic
   <app-slug>-data.js    # the only runtime data source
-  README.md             # purpose, usage, and the complete data contract
+  AGENTS.md             # purpose, usage, data usage, and the complete contract
+  logo.<ext>              # optional app logo or brand asset
 ```
 
 Use an existing directory when the user names one. Otherwise create
@@ -36,11 +37,16 @@ existing files without explicit permission.
 2. **Inspect the repository.** Look for existing Sessio HTML preview behavior,
    local style conventions, and related files. Reuse existing project patterns
    rather than introducing a framework or build step for a small app.
-3. **Define the data schema before writing the view.** Decide the exact top-level
+3. **Plan optional branding.** If the request calls for a logo, generate or
+   create a suitable local logo asset and reference it with a relative path from
+   the HTML. Keep the asset inside the app directory. If logo generation is not
+   available or fails, omit the logo and continue; do not block app delivery or
+   invent a broken placeholder reference.
+4. **Define the data schema before writing the view.** Decide the exact top-level
    data envelope and every record field. Keep presentation metadata separate
    from records. Record units, requiredness, null behavior, allowed values, and
    an example for every field.
-4. **Create the data file first.** Put all sample or supplied data in
+5. **Create the data file first.** Put all sample or supplied data in
    `<app-slug>-data.js`. It must assign one global value and contain no rendering
    code:
 
@@ -52,47 +58,52 @@ existing files without explicit permission.
    };
    ```
 
-   The global name may be app-specific when needed, but the HTML and README
+   The global name may be app-specific when needed, but the HTML and AGENTS.md
    must state it exactly. Never duplicate records, labels derived from records,
    or default sample rows inside the HTML.
-5. **Create the HTML view.** Reference the data file with a relative script tag
+6. **Create the HTML view.** Reference the data file with a relative script tag
    such as `<script src="./<app-slug>-data.js"></script>`. Read the global data
    object after that script and render the empty state when it is missing or
    invalid. Keep the page useful when opened as `file://`; do not require Vite,
    a local server, `fetch`, XHR, WebSocket, CDN assets, npm imports, or a
    backend. Inline CSS and JavaScript are preferred for portability.
-6. **Build for Sessio preview.** The view must work after the user enables
+7. **Build for Sessio preview.** The view must work after the user enables
    “Allow inline JavaScript”. Local scripts in the same directory and child
    directories are supported by Sessio's preview; use paths such as
    `./data.js` or `scripts/data.js`. Do not depend on `document.currentScript`
    or the original external script URL after it is inlined.
-7. **Write README.md from the implemented contract.** Explain what the app is
+8. **Write AGENTS.md from the implemented contract.** Explain what the app is
    for, how to open it in a browser and Sessio, the three-file layout, the exact
    data global, the complete schema, a valid data example, how to replace or
-   regenerate data, and known preview/security limitations. The README must be
-   updated whenever the schema changes.
-8. **Validate before handing off.** Check that the HTML references the data JS,
-   the data JS parses, the HTML contains no record literals, and the README
+   regenerate data, how the app uses and transforms the data, whether data is
+   sample, user-supplied, or derived, whether it leaves the local app, and
+   known preview/security limitations. AGENTS.md must be updated whenever the
+   schema or data usage changes.
+9. **Validate before handing off.** Check that the HTML references the data JS,
+   the data JS parses, the HTML contains no record literals, and AGENTS.md
    documents every top-level and record field. Exercise the initial render and
    at least one requested interaction. Check a desktop width and a narrow width
    when the app has a visual layout. Do not start a persistent development
    server; if temporary serving is essential for verification, stop it before
    finishing.
-9. **Publish the tested app to Sessio's app directory.** Only after all checks
+10. **Publish the tested app to Sessio's app directory.** Only after all checks
    pass, read the absolute `SESSIO_APP_HOME` environment variable supplied by
    running Sessio process. Invoke the bundled publisher for the current shell:
    use `scripts/publish_app.sh <source-dir> <app-slug>` on macOS/Linux (or Git
    Bash/WSL), and `scripts/publish_app.ps1 <source-dir> <app-slug>` on native
    Windows PowerShell. Both scripts copy the complete app directory to
-   `$SESSIO_APP_HOME/apps/<app-slug>/`, preserving the HTML, data JS, README,
+   `$SESSIO_APP_HOME/apps/<app-slug>/`, preserving the HTML, data JS, AGENTS.md,
    and any child directories exactly. They refuse to replace an existing
    destination unless the user explicitly authorizes `--force`/`-Force`.
    The publisher is an execution step, not a completion message: run it after
    validation and then verify that the destination contains the expected HTML,
-   data JS, README, and child directories. Resolve `scripts/` relative to the
+   data JS, AGENTS.md, CLAUDE.md, and child directories. The publisher creates
+   `CLAUDE.md` as an independent copy of `AGENTS.md` when the source contains
+   AGENTS.md, so Claude can discover the same instructions without symlinks.
+   Resolve `scripts/` relative to the
    directory containing the loaded `SKILL.md` when invoking the bundled file.
    If `SESSIO_APP_HOME` is missing, do not guess a profile or write to a
-   hard-coded home directory; report that publishing is blocked. The README
+   hard-coded home directory; report that publishing is blocked. AGENTS.md
    should record the installed path and the source/development path.
 
 ## Data separation rules
@@ -106,7 +117,7 @@ existing files without explicit permission.
   data. If a derived value is expensive or intentionally curated, put it in the
   data file and document it in the schema.
 - Keep schema versioning explicit. A breaking field change increments
-  `schemaVersion` and updates the README migration note.
+  `schemaVersion` and updates the AGENTS.md migration note.
 - Treat data as untrusted input: validate types, escape text through DOM APIs,
   and avoid evaluating strings as code. Do not put secrets or personal data in
   sample files.
@@ -114,7 +125,7 @@ existing files without explicit permission.
   do not make the HTML fetch or parse a second copy at runtime unless the user
   explicitly requests an importer.
 
-## README data contract
+## AGENTS.md data contract
 
 Use this structure unless the user requests another documentation language:
 
@@ -127,7 +138,10 @@ What the app shows and who uses it.
 ## Files
 - `<app-slug>.html`: view and interaction logic.
 - `<app-slug>-data.js`: only runtime data, exported as `window.<GLOBAL>`.
-- `README.md`: this contract and maintenance notes.
+- `AGENTS.md`: this contract, data-usage explanation, and maintenance notes.
+- `logo.<ext>`: optional local logo asset named `logo` with a supported image
+  extension such as `.png`, `.jpg`, `.webp`, or `.svg`; omit it when no logo was
+  requested or generation was unavailable.
 
 ## Run and preview
 Browser steps, Sessio preview steps, and whether inline JavaScript must be enabled.
@@ -148,6 +162,26 @@ Browser steps, Sessio preview steps, and whether inline JavaScript must be enabl
 
 ## Updating data
 Edit or regenerate only `<app-slug>-data.js`; preserve the documented schema.
+When the user supplies an image, document, or plain text, compare its content
+with the schema in this `AGENTS.md` before changing data. Decide whether it
+contains values that map to required or optional fields, and extract only the
+matching values needed to update the data JS. Do not copy unrelated prose,
+layout text, captions, or decorative content into runtime data. For images and
+documents, use appropriate local extraction or OCR when available; if the
+content cannot be reliably mapped, leave the data JS unchanged and explain what
+could not be extracted. Validate types, units, dates, enum values, required
+fields, and null handling after every update, then update the data-usage notes
+or schema example when the source or interpretation changes.
+
+## Data usage
+Describe the data source and whether it is sample, user-supplied, imported, or
+derived. Explain which fields the view reads, how values are transformed or
+aggregated, where the data is displayed, and whether any data is persisted or
+sent outside the local app. State that offline use performs no network transfer.
+Identify sensitive or personal data and keep secrets and real personal data out
+of sample files. Document how user-provided images, documents, and text are
+evaluated against the schema, which extraction or OCR method is used when
+needed, and what happens when content does not map reliably to a field.
 
 ## Installed location
 The validated copy is installed at `$SESSIO_APP_HOME/apps/<app-slug>/`, where
@@ -159,7 +193,6 @@ resolved absolute app-home path.
 
 ## Limitations and validation
 Offline/CSP behavior, empty-state behavior, and the checks run before delivery.
-```
 
 The tables must cover every field the HTML reads, including optional metadata,
 enum values, units, date formats, reference ranges, and nullable fields. Do not
@@ -177,21 +210,28 @@ only when columns cannot fit. Avoid invented KPI cards, decorative filler, and
 server-only features.
 
 When the user asks for a dashboard or report but does not provide data, create a
-small representative dataset in the data JS and mark it clearly in the README
+small representative dataset in the data JS and mark it clearly in AGENTS.md
 as sample data. Never infer sensitive conclusions from fabricated values.
 
 ## Handoff checklist
 
 Before reporting completion, verify:
 
-- [ ] Exactly one HTML view, one data JS file, and one README exist for the app.
+- [ ] Exactly one HTML view, one data JS file, and one AGENTS.md exist for the app;
+      include a logo asset when requested and successfully generated, otherwise
+      omit it cleanly.
 - [ ] The HTML references the data JS by a same-directory or child-directory
       relative path.
 - [ ] All runtime data is in the data JS; no duplicated rows are in the HTML.
-- [ ] README schema tables match the fields and types consumed by the HTML.
+- [ ] AGENTS.md schema tables match the fields and types consumed by the HTML,
+      and its data-usage/update rules match the implementation.
+- [ ] User-provided images, documents, and text are checked against the schema
+      before extracting values into the data JS.
 - [ ] Missing/invalid data produces a visible, actionable empty/error state.
 - [ ] The page works offline and does not require a server.
 - [ ] After validation, the complete app directory is copied to
       `$SESSIO_APP_HOME/apps/<app-slug>/` using the bundled platform publisher,
-      with child directories preserved and overwrite protection enabled.
-- [ ] HTML, JS, and README paths are reported using absolute paths.
+      with child directories preserved and overwrite protection enabled; when
+      AGENTS.md exists, the destination also contains an independent CLAUDE.md
+      copy.
+- [ ] HTML, JS, and AGENTS.md paths are reported using absolute paths.
