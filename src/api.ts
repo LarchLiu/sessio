@@ -89,6 +89,19 @@ export interface TerminalEventEnvelope {
   event: TerminalEvent;
 }
 
+export interface SessioAppInfo {
+  id: string;
+  slug: string;
+  directoryPath: string;
+  htmlPath: string | null;
+  htmlFileName: string | null;
+}
+
+export interface SessioAppsCatalog {
+  rootPath: string;
+  apps: SessioAppInfo[];
+}
+
 export type AgentType = GeneratedAgentType;
 
 export interface AgentInfo {
@@ -1453,6 +1466,22 @@ export type SessionScope =
 
 export async function listSessions(): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessions");
+}
+
+export async function listSessioApps(): Promise<SessioAppsCatalog> {
+  return invoke<SessioAppsCatalog>("list_sessio_apps");
+}
+
+export async function listSessioAppSessions(appId: string): Promise<SessionInfo[]> {
+  return invoke<SessionInfo[]>("list_sessio_app_sessions", { appId });
+}
+
+export async function linkSessioAppSession(
+  appId: string,
+  agent: Agent,
+  sessionId: string,
+): Promise<void> {
+  return invoke<void>("link_sessio_app_session", { appId, agent, sessionId });
 }
 
 export async function listTerminals(): Promise<TerminalSessionInfo[]> {

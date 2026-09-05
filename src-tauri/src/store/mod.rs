@@ -140,6 +140,15 @@ pub struct SessionRef<'a> {
     pub session_id: &'a str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessioAppRecord {
+    pub id: String,
+    pub root_path: String,
+    pub directory_path: String,
+    pub slug: String,
+    pub html_path: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AstraRunRecord {
     pub run_id: String,
@@ -420,6 +429,9 @@ pub trait SessionStore: Send + Sync {
         description: Option<Option<&str>>,
     ) -> Result<ProcessTemplateInfo>;
     fn delete_process_template(&self, process_template_id: &str) -> Result<()>;
+    fn sync_sessio_apps(&self, root_path: &str, apps: &[SessioAppRecord]) -> Result<()>;
+    fn link_sessio_app_session(&self, app_id: &str, agent: Agent, session_id: &str) -> Result<()>;
+    fn list_sessio_app_sessions(&self, app_id: &str) -> Result<Vec<SessionInfo>>;
     fn list_projects(&self) -> Result<Vec<ProjectInfo>>;
     fn add_project(
         &self,

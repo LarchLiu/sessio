@@ -17,8 +17,8 @@ use crate::store::{
     ChannelSessionRecord, IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound,
     NewPlanTaskSession, NewThreadAstraArtifact, PlanTaskStatusPatch, ProjectStagePatch,
     RuntimeAgentCapabilityRecord, RuntimeAgentSelection, RuntimeAgentSessionConfigRecord,
-    ScheduledTaskRecord, ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef,
-    SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
+    ScheduledTaskRecord, ScheduledTaskRunRecord, SessioAppRecord, SessionHistorySnapshotRecord,
+    SessionRef, SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
 };
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
@@ -320,6 +320,19 @@ impl SessionStore for CachedStore {
 
     fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
         self.inner.list_projects()
+    }
+
+    fn sync_sessio_apps(&self, root_path: &str, apps: &[SessioAppRecord]) -> Result<()> {
+        self.inner.sync_sessio_apps(root_path, apps)
+    }
+
+    fn link_sessio_app_session(&self, app_id: &str, agent: Agent, session_id: &str) -> Result<()> {
+        self.inner
+            .link_sessio_app_session(app_id, agent, session_id)
+    }
+
+    fn list_sessio_app_sessions(&self, app_id: &str) -> Result<Vec<SessionInfo>> {
+        self.inner.list_sessio_app_sessions(app_id)
     }
 
     fn add_project(

@@ -225,6 +225,33 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE INDEX IF NOT EXISTS idx_projects_archived_updated ON projects(archived, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
 
+CREATE TABLE IF NOT EXISTS apps (
+    id         TEXT PRIMARY KEY,
+    root_path  TEXT NOT NULL,
+    path       TEXT NOT NULL UNIQUE,
+    slug       TEXT NOT NULL,
+    html_path  TEXT,
+    available  INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_apps_root_available_slug
+    ON apps(root_path, available, slug COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS app_sessions (
+    app_id       TEXT NOT NULL,
+    agent        TEXT NOT NULL,
+    session_id   TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY(app_id, agent, session_id),
+    FOREIGN KEY(app_id) REFERENCES apps(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_app_sessions_session
+    ON app_sessions(agent, session_id);
+
 CREATE TABLE IF NOT EXISTS kanban_items (
     id          TEXT PRIMARY KEY,
     project_id  TEXT NOT NULL,

@@ -35,10 +35,11 @@ use crate::store::{
     ChannelSessionRecord, IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound,
     NewPlanTaskSession, NewThreadAstraArtifact, PlanTaskStatusPatch, ProjectStagePatch,
     RuntimeAgentCapabilityRecord, RuntimeAgentSelection, RuntimeAgentSessionConfigRecord,
-    ScheduledTaskRecord, ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef,
-    SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
+    ScheduledTaskRecord, ScheduledTaskRunRecord, SessioAppRecord, SessionHistorySnapshotRecord,
+    SessionRef, SessionStore, ThreadWorkSnapshotRecord, UpsertCanvasBlockRecord,
 };
 
+mod apps;
 mod assistants;
 mod astra;
 mod bootstrap;
@@ -1685,6 +1686,37 @@ impl SessionStore for SqliteStore {
     fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
         let conn = self.conn.lock().unwrap();
         projects::list_projects(&conn)
+    }
+
+    fn sync_sessio_apps(&self, root_path: &str, apps: &[SessioAppRecord]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        apps::sync_apps(&mut conn, root_path, apps)
+    }
+
+    fn link_sessio_app_session(&self, app_id: &str, agent: Agent, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        apps::link_app_session(&conn, app_id, agent, session_id)
+    }
+
+    fn list_sessio_app_sessions(&self, app_id: &str) -> Result<Vec<SessionInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let linked = apps::list_app_session_refs(&conn, app_id)?;
+        let refs = linked
+            .iter()
+            .map(|(agent, session_id)| SessionRef {
+                agent: *agent,
+                session_id,
+            })
+            .collect::<Vec<_>>();
+        let mut sessions = load_sessions_by_refs(&conn, &refs)?;
+        sessions.sort_by(|left, right| {
+            right
+                .updated_at
+                .or(right.started_at)
+                .unwrap_or_default()
+                .cmp(&left.updated_at.or(left.started_at).unwrap_or_default())
+        });
+        Ok(sessions)
     }
 
     fn add_project(
@@ -5894,6 +5926,99 @@ mod schema_tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn apps_are_stored_separately_and_can_be_explicit_projects() {
+        let path = unique_db("sessio-app-storage");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let root = temp_child_path(&std::env::temp_dir(), "sessio-app-root");
+        let app_dir = root.join("sample-app");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let app_path = std::fs::canonicalize(&app_dir)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let root_path = std::fs::canonicalize(&root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let app = SessioAppRecord {
+            id: "app-sample".to_string(),
+            root_path: root_path.clone(),
+            directory_path: app_path.clone(),
+            slug: "sample-app".to_string(),
+            html_path: Some(
+                app_dir
+                    .join("sample-app.html")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        };
+
+        store
+            .sync_sessio_apps(&root_path, std::slice::from_ref(&app))
+            .unwrap();
+        assert!(store.list_projects().unwrap().is_empty());
+
+        let session_path = app_dir.join("session-1.jsonl");
+        std::fs::write(&session_path, "{}").unwrap();
+        let app_session = SessionInfo {
+            id: "session-1".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some(app_path.clone()),
+            project_name: Some("sample-app".to_string()),
+            started_at: Some(10),
+            updated_at: Some(20),
+            message_count: 2,
+            rename_title: None,
+            title: Some("App chat".to_string()),
+            first_user_message: Some("Update this app".to_string()),
+            file_path: session_path.to_string_lossy().into_owned(),
+            file_size: 2,
+            partial: false,
+            available: true,
+            archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
+            subagents: Vec::new(),
+        };
+        store
+            .upsert_session(&app_session.file_path, &app_session)
+            .unwrap();
+
+        store
+            .link_sessio_app_session(&app.id, Agent::Codex, "session-1")
+            .unwrap();
+        let conn = store.conn.lock().unwrap();
+        assert_eq!(
+            apps::app_session_count(&conn, &app.id, Agent::Codex, "session-1").unwrap(),
+            1,
+        );
+        drop(conn);
+        let linked_sessions = store.list_sessio_app_sessions(&app.id).unwrap();
+        assert_eq!(linked_sessions.len(), 1);
+        assert_eq!(linked_sessions[0].id, "session-1");
+        assert_eq!(linked_sessions[0].file_path, app_session.file_path);
+
+        let project = store
+            .add_project(
+                &app_path,
+                Some("Explicit App Project"),
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let projects = store.list_projects().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, project.id);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

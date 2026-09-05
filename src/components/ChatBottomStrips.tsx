@@ -6,6 +6,7 @@ import {
   Brain,
   ClipboardList,
   Code2,
+  ChevronUp,
   FilePlus2,
   FileDiff,
   FileSearch,
@@ -280,12 +281,18 @@ export function ComposerTopAttachments({ children }: { children: React.ReactNode
 export function MinimalMessageStrip({
   viewModel,
   workingTurnId,
+  onClick,
+  ariaLabel,
+  emptyText,
 }: {
-  viewModel: AcpViewModel;
+  viewModel: AcpViewModel | null;
   workingTurnId: string | null;
+  onClick?: () => void;
+  ariaLabel?: string;
+  emptyText?: string;
 }) {
   const item = useMemo(
-    () => pickLatestStripItem(viewModel, workingTurnId),
+    () => (viewModel ? pickLatestStripItem(viewModel, workingTurnId) : null),
     [viewModel, workingTurnId],
   );
   const lines = item?.lines?.length ? item.lines : item ? [item.text] : [];
@@ -315,15 +322,22 @@ export function MinimalMessageStrip({
     return () => window.clearTimeout(timer);
   }, [activeLineIndex, item?.scrollOnce, lines, lines.length]);
 
-  if (!item) return null;
+  if (!item) {
+    if (!emptyText) return null;
+    return (
+      <div className="flex h-7 w-full items-center px-3 text-caption text-ink/35">
+        <span className="min-w-0 truncate">{emptyText}</span>
+      </div>
+    );
+  }
   const activeText = lines[activeLineIndex] ?? item.text;
   const textNode = item.tool ? (
     <ToolStripContent tool={item.tool} />
   ) : (
     <span className="min-w-0 truncate">{activeText}</span>
   );
-  return (
-    <div className="flex h-7 w-full items-center gap-2 px-3 text-caption text-ink/60">
+  const content = (
+    <>
       {item.busy && <LoaderCircle className="h-3 w-3 shrink-0 animate-spin text-ink/45" />}
       {item.fullText ? (
         <Tooltip
@@ -342,6 +356,25 @@ export function MinimalMessageStrip({
       ) : (
         <div className="min-w-0 flex-1 overflow-hidden">{textNode}</div>
       )}
+      {onClick && <ChevronUp className="h-3.5 w-3.5 shrink-0 text-ink/35" />}
+    </>
+  );
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        aria-label={ariaLabel}
+        aria-expanded={false}
+        onClick={onClick}
+        className="flex h-7 w-full items-center gap-2 px-3 text-left text-caption text-ink/60 transition hover:bg-ink/[0.035] hover:text-ink/75"
+      >
+        {content}
+      </button>
+    );
+  }
+  return (
+    <div className="flex h-7 w-full items-center gap-2 px-3 text-caption text-ink/60">
+      {content}
     </div>
   );
 }

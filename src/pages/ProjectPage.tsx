@@ -641,7 +641,7 @@ export function ProjectWorkbenchPage({
   );
 }
 
-function ProjectFilesPanel({
+export function ProjectFilesPanel({
   project,
   reloadKey = 0,
   activeCanvasKey = null,
@@ -650,7 +650,7 @@ function ProjectFilesPanel({
   projectHasGit,
   onProjectGitRepoDetected,
 }: {
-  project: ProjectInfo;
+  project: Pick<ProjectInfo, "path">;
   reloadKey?: number;
   activeCanvasKey?: CanvasKey | null;
   onOpenFile?: (path: string) => void;
@@ -1002,14 +1002,14 @@ function ProjectFileTreeContextMenu({
   );
 }
 
-function ProjectSourceControlPanel({
+export function ProjectSourceControlPanel({
   project,
   reloadKey = 0,
   onOpenFile,
   onError,
   onProjectGitRepoDetected,
 }: {
-  project: ProjectInfo;
+  project: Pick<ProjectInfo, "path">;
   reloadKey?: number;
   onOpenFile?: (path: string) => void;
   onError: (error: string | null) => void;

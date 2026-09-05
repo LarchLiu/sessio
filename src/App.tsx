@@ -14,8 +14,10 @@ import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import {
   Agent,
+  archiveProject,
   getDebugConfig,
   getProjectGitSummary,
+  listSessioApps,
   listThreadIndex,
   openAppshotPermissionsPanel,
   SessionInfo,
@@ -24,6 +26,7 @@ import {
   takeConfigRecoveryNotice,
   updateSessionRenameTitle,
   type SessionScope,
+  type SessioAppInfo,
   type ThreadIndexItemInfo,
 } from "./api";
 import { syncTrayMenu, type TrayRecentEntry } from "./tray";
@@ -39,6 +42,7 @@ import ToastStack from "./components/ToastStack";
 import UpdateConfirmDialog from "./components/UpdateConfirmDialog";
 import SettingsPage from "./pages/SettingsPage";
 import AutoTasksPage from "./pages/AutoTasksPage";
+import AppsPage from "./pages/AppsPage";
 import type { ToastStackMessage } from "./components/ToastStack";
 import type { CanvasKey } from "./canvasTypes";
 import { useAppData } from "./hooks/useAppData";
@@ -66,7 +70,6 @@ import {
   matchesScope,
   mergeRuntimeSessionAliases,
   projectFilterKey,
-  scopeForFilter,
   sessionDisplayTitle,
   sessionIdentityKey,
   sessionKey,
@@ -81,8 +84,12 @@ const VIEW_MODE_STORAGE_KEY = "sessio.viewMode";
 const RIGHT_SIDEBAR_OPEN_STORAGE_KEY = "sessio.rightSidebarOpen";
 
 type ThreadSelection = { projectId: string; threadId: string; goal: string } | null;
-type ProjectFileSelectionRequest = { path: string; requestId: number };
+type ProjectFileSelectionRequest = {
+  path: string;
+  requestId: number;
+};
 type CanvasFileSelectionRequest = { paths: string[]; requestId: number };
+type UtilityView = "autoTasks" | "apps" | null;
 
 function readViewMode(): ViewMode {
   if (typeof localStorage === "undefined") return "native";
@@ -131,6 +138,8 @@ export default function App() {
   const [newChatProjectKey, setNewChatProjectKey] = useState<string | null>(null);
   const [lastSelectedProjectKey, setLastSelectedProjectKey] = useState<string | null>(null);
   const [expandProject, setExpandProject] = useState(true);
+  const [expandApps, setExpandApps] = useState(true);
+  const [sessioApps, setSessioApps] = useState<SessioAppInfo[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightSidebarOpen, setRightSidebarOpen] = useState<boolean>(() =>
     readRightSidebarOpen(),
@@ -140,7 +149,9 @@ export default function App() {
   const [memorySearchOpen, setMemorySearchOpen] = useState(false);
   const [memorySearchMounted, setMemorySearchMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [autoTasksOpen, setAutoTasksOpen] = useState(false);
+  const [utilityView, setUtilityView] = useState<UtilityView>(null);
+  const [selectedApp, setSelectedApp] = useState<SessioAppInfo | null>(null);
+  const [appRuntimeSessions, setAppRuntimeSessions] = useState<Record<string, string>>({});
   const [updateConfirmOpen, setUpdateConfirmOpen] = useState(false);
   const [updateConfirmMounted, setUpdateConfirmMounted] = useState(false);
   const [viewMode] = useState<ViewMode>(() => readViewMode());
@@ -182,6 +193,19 @@ export default function App() {
   const update = useUpdateCheck(__APP_VERSION__, debugUpdatePreview);
   const indexing = indexPhase !== "idle";
   const rebuilding = indexPhase === "rebuilding";
+  const refreshSessioApps = useCallback(async () => {
+    try {
+      const catalog = await listSessioApps();
+      setSessioApps(catalog.apps);
+      setSelectedApp((current) =>
+        current
+          ? catalog.apps.find((app) => app.directoryPath === current.directoryPath) ?? current
+          : null,
+      );
+    } catch (error) {
+      setError(String(error));
+    }
+  }, []);
   const openUpdateConfirm = useCallback(() => {
     if (!update.hasUpdate || !update.latestVersion || update.installing) return;
     void revealMainWindow();
@@ -220,6 +244,10 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    void refreshSessioApps();
+  }, [refreshSessioApps]);
 
   useEffect(() => {
     let cancelled = false;
@@ -304,8 +332,18 @@ export default function App() {
   }, []);
 
   const projectGitProbePathsKey = useMemo(
-    () => Array.from(new Set(projects.map((project) => project.path).filter(Boolean))).sort().join("\n"),
-    [projects],
+    () =>
+      Array.from(
+        new Set([
+          ...projects.map((project) => project.path).filter(Boolean),
+          ...(utilityView === "apps" && selectedApp?.directoryPath
+            ? [selectedApp.directoryPath]
+            : []),
+        ]),
+      )
+        .sort()
+        .join("\n"),
+    [projects, selectedApp?.directoryPath, utilityView],
   );
 
   useEffect(() => {
@@ -648,7 +686,7 @@ export default function App() {
         label: options?.projectLabel ?? project.name,
       });
     }
-    setAutoTasksOpen(false);
+    setUtilityView(null);
     setSelectedProject(null);
     setSelectedThread(null);
     setNewChatProjectKey(null);
@@ -676,7 +714,7 @@ export default function App() {
       });
     }
     if (options?.clearUnread !== false) clearThreadUnread(thread);
-    setAutoTasksOpen(false);
+    setUtilityView(null);
     setSelected(null);
     setSelectedProject(null);
     setSelectedThread({ projectId: thread.projectId, threadId: thread.threadId, goal: thread.goal });
@@ -766,6 +804,27 @@ export default function App() {
           setSelected(null);
           setSelectedThread(null);
         }
+      } else if (target.kind === "project") {
+        await removeSessionsInScope(target.scope);
+        await archiveProject(target.projectId);
+        setProjects((prev) => prev.filter((project) => project.id !== target.projectId));
+        setSelectedProject((current) =>
+          current?.projectId === target.projectId ? null : current,
+        );
+        setSelectedThread((current) =>
+          current?.projectId === target.projectId ? null : current,
+        );
+        setNewChatProjectKey((current) =>
+          current === target.projectId ? null : current,
+        );
+        setLastSelectedProjectKey((current) =>
+          current === target.projectId ? null : current,
+        );
+        setFilter((current) =>
+          current.kind === "project" && current.key === target.scope.key
+            ? { kind: "all" }
+            : current,
+        );
       } else {
         await removeSessionsInScope(target.scope);
       }
@@ -833,8 +892,19 @@ export default function App() {
     }
   };
 
-  const openScopeMenu = async (scope: SessionScope, pos: { x: number; y: number }) => {
-    await openDeleteMenu(pos, (clickPos) => setDeleteTarget({ kind: "scope", scope, pos: clickPos }));
+  const openProjectMenu = async (
+    projectId: string,
+    projectPath: string,
+    pos: { x: number; y: number },
+  ) => {
+    await openDeleteMenu(pos, (clickPos) =>
+      setDeleteTarget({
+        kind: "project",
+        projectId,
+        scope: { kind: "project", key: projectPath },
+        pos: clickPos,
+      }),
+    );
   };
 
   const openSessionMenu = async (session: SessionInfo, pos: { x: number; y: number }) => {
@@ -901,7 +971,7 @@ export default function App() {
       update={update}
       onCloseSidebar={() => setSidebarOpen(false)}
       onNewChat={() => {
-        setAutoTasksOpen(false);
+        setUtilityView(null);
         setSelectedProject(null);
         setSelectedThread(null);
         setNewChatProjectKey(lastSelectedProjectKey);
@@ -910,7 +980,7 @@ export default function App() {
       }}
       onToggleProjectSection={() => setExpandProject((value) => !value)}
       onProjectAdded={(project) => {
-        setAutoTasksOpen(false);
+        setUtilityView(null);
         setProjects((prev) => [project, ...prev.filter((p) => p.id !== project.id)]);
         setSelectedProject({ kind: "project", projectId: project.id });
         setSelectedThread(null);
@@ -928,7 +998,7 @@ export default function App() {
         });
       }}
       onOpenKanban={(projectGroup) => {
-        setAutoTasksOpen(false);
+        setUtilityView(null);
         setSelected(null);
         setSelectedThread(null);
         setSelectedProject({ kind: "project", projectId: projectGroup.project.id });
@@ -937,7 +1007,7 @@ export default function App() {
         setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
       }}
       onNewProjectChat={(projectGroup) => {
-        setAutoTasksOpen(false);
+        setUtilityView(null);
         setSelectedProject(null);
         setSelectedThread(null);
         setNewChatProjectKey(projectGroup.key);
@@ -946,7 +1016,7 @@ export default function App() {
         setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
       }}
       onSelectSession={(projectGroup, session) => {
-        setAutoTasksOpen(false);
+        setUtilityView(null);
         rememberSidebarProject(projectGroup);
         setSelectedProject(null);
         setSelectedThread(null);
@@ -958,7 +1028,7 @@ export default function App() {
       onSelectThread={(projectGroup, thread, source) => {
         const indexItem = threadIndexItems.find((item) => item.threadId === thread.id);
         if (indexItem) clearThreadUnread(indexItem);
-        setAutoTasksOpen(false);
+        setUtilityView(null);
         rememberSidebarProject(projectGroup);
         setSelected(null);
         setSelectedProject(null);
@@ -977,8 +1047,9 @@ export default function App() {
       }}
       onProjectContextMenu={(projectGroup, event) => {
         event.preventDefault();
-        void openScopeMenu(
-          scopeForFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label }),
+        void openProjectMenu(
+          projectGroup.project.id,
+          projectFilterKey(projectGroup.project),
           { x: event.clientX, y: event.clientY },
         );
       }}
@@ -986,8 +1057,28 @@ export default function App() {
         void openSessionMenu(session, pos);
       }}
       onOpenSettings={() => setSettingsOpen(true)}
-      onOpenAutoTasks={() => setAutoTasksOpen(true)}
-      autoTasksActive={autoTasksOpen}
+      onOpenAutoTasks={() => setUtilityView("autoTasks")}
+      autoTasksActive={utilityView === "autoTasks"}
+      appsSectionExpanded={expandApps}
+      apps={sessioApps}
+      selectedAppPath={selectedApp?.directoryPath ?? null}
+      onToggleAppsSection={() => {
+        const next = !expandApps;
+        setExpandApps(next);
+        if (next) void refreshSessioApps();
+      }}
+      onSelectApp={(app) => {
+        setSelectedApp(app);
+        setSelected(null);
+        setSelectedProject(null);
+        setSelectedThread(null);
+        setNewChatProjectKey(null);
+        setPendingSelectSession(null);
+        setFilter({ kind: "all" });
+        setDetailMode("chat");
+        setUtilityView("apps");
+      }}
+      appsActive={utilityView === "apps"}
       onInstallUpdate={openUpdateConfirm}
       onError={setError}
     />
@@ -997,7 +1088,7 @@ export default function App() {
   const chatViewToggleVisible =
     (Boolean(selected) && detailMode === "chat") ||
     (Boolean(selectedThreadId) && detailMode === "threadMultiSessionChat");
-  const terminalDockVisible = !autoTasksOpen;
+  const terminalDockVisible = utilityView !== "autoTasks";
   const handleChatViewChange = useCallback(
     (next: ChatView) => {
       setChatView(next);
@@ -1114,6 +1205,27 @@ export default function App() {
     />
   );
 
+  const appsHeader = (
+    <AppHeader
+      isMac={IS_MAC}
+      sidebarOpen={sidebarOpen}
+      selected={null}
+      detailTitle=""
+      contextTitle={null}
+      entityTitle={null}
+      projectContext={null}
+      activeMessageMeta={null}
+      metaPopoverOpen={false}
+      rightSidebarOpen={rightSidebarOpen}
+      terminalDockOpen={terminalDockOpen}
+      terminalDockVisible={Boolean(selectedApp)}
+      onOpenSidebar={() => setSidebarOpen(true)}
+      onToggleMetaPopover={() => {}}
+      onToggleTerminalDock={() => setTerminalDockOpen((open) => !open)}
+      onToggleRightSidebar={() => setRightSidebarOpen((open) => !open)}
+    />
+  );
+
   const overlays = (
     <AppOverlays
       selected={selected}
@@ -1206,13 +1318,20 @@ export default function App() {
     <div className="relative h-screen">
       <AppLayout
         sidebar={sidebar}
-        header={autoTasksOpen ? autoTasksHeader : header}
+        header={
+          utilityView === "autoTasks"
+            ? autoTasksHeader
+            : utilityView === "apps"
+              ? appsHeader
+              : header
+        }
         sidebarOpen={sidebarOpen}
         rightSidebar={
           <AppRightSidebar
             selectedThread={selectedThread}
             selectedSessionProject={selectedSessionProject}
             selectedThreadProject={activeThreadProject}
+            activeApp={utilityView === "apps" ? selectedApp : null}
             open={rightSidebarOpen}
             isCanvasViewActive={currentChatView === "canvas"}
             activeCanvasKey={activeCanvasKey}
@@ -1236,8 +1355,33 @@ export default function App() {
         rightSidebarOpen={rightSidebarOpen}
         overlays={overlays}
       >
-        {autoTasksOpen ? (
+        {utilityView === "autoTasks" ? (
           <AutoTasksPage onError={setError} />
+        ) : utilityView === "apps" && selectedApp ? (
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <AppsPage
+              key={selectedApp.directoryPath}
+              app={selectedApp}
+              runtimeSessionId={appRuntimeSessions[selectedApp.id] ?? null}
+              onRuntimeSessionIdChange={(runtimeSessionId) => {
+                setAppRuntimeSessions((current) => ({
+                  ...current,
+                  [selectedApp.id]: runtimeSessionId,
+                }));
+              }}
+              runtimeAgents={runtimeAgents}
+              lastRuntimeAgentSelection={lastRuntimeAgentSelection}
+              rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
+              liveState={liveRuntimeState}
+              dispatchLiveEvent={dispatchLiveRuntimeEvent}
+              onError={setError}
+            />
+            <TerminalDock
+              open={terminalDockOpen}
+              defaultCwd={selectedApp?.directoryPath ?? "~"}
+              onOpenChange={setTerminalDockOpen}
+            />
+          </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <AppMain

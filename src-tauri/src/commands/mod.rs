@@ -1,3 +1,4 @@
+pub mod apps;
 pub mod assistants;
 pub mod kanban;
 pub mod process_templates;

@@ -7,6 +7,12 @@ import UpdateConfirmDialog from "./UpdateConfirmDialog";
 
 export type DeleteTarget =
   | { kind: "session"; session: SessionInfo; pos: { x: number; y: number } }
+  | {
+      kind: "project";
+      projectId: string;
+      scope: Extract<SessionScope, { kind: "project" }>;
+      pos: { x: number; y: number };
+    }
   | { kind: "scope"; scope: SessionScope; pos: { x: number; y: number } };
 
 type AppOverlaysProps = {
@@ -120,7 +126,9 @@ export default function AppOverlays({
           body={
             deleteTarget.kind === "session"
               ? t("delete.session_body")
-              : t("delete.scope_body")
+              : deleteTarget.kind === "project"
+                ? t("delete.project_body")
+                : t("delete.scope_body")
           }
           pos={deleteTarget.pos}
           onCancel={onCancelDelete}

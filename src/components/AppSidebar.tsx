@@ -2,6 +2,7 @@ import { type MouseEvent, type ReactNode, useMemo, useRef, useState } from "reac
 import { open } from "@tauri-apps/plugin-dialog";
 import { createPortal } from "react-dom";
 import {
+  AppWindow,
   Brain,
   CalendarClock,
   ChevronDown,
@@ -31,6 +32,7 @@ import {
   listProcessTemplateStages,
   listProcessTemplates,
   type ProjectStageInfo,
+  type SessioAppInfo,
   type ThreadIndexItemInfo,
   type ThreadKind,
   type ThreadOrigin,
@@ -123,6 +125,12 @@ type AppSidebarProps = {
   onOpenSettings: () => void;
   onOpenAutoTasks: () => void;
   autoTasksActive: boolean;
+  appsSectionExpanded: boolean;
+  apps: SessioAppInfo[];
+  selectedAppPath: string | null;
+  appsActive: boolean;
+  onToggleAppsSection: () => void;
+  onSelectApp: (app: SessioAppInfo) => void;
   onInstallUpdate: () => void;
   onError: (error: string | null) => void;
 };
@@ -158,6 +166,12 @@ export default function AppSidebar({
   onOpenSettings,
   onOpenAutoTasks,
   autoTasksActive,
+  appsSectionExpanded,
+  apps,
+  selectedAppPath,
+  appsActive,
+  onToggleAppsSection,
+  onSelectApp,
   onInstallUpdate,
   onError,
 }: AppSidebarProps) {
@@ -201,7 +215,7 @@ export default function AppSidebar({
           onClick={onNewChat}
           className={
             "mb-2 flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-body-sm font-medium transition " +
-            (!hasActiveSelection && !autoTasksActive
+            (!hasActiveSelection && !autoTasksActive && !appsActive
               ? "bg-ink/10 text-ink"
               : "text-ink/72 hover:bg-ink/5 hover:text-ink")
           }
@@ -222,6 +236,42 @@ export default function AppSidebar({
           <CalendarClock className="h-4 w-4 shrink-0" />
           <span className="flex min-w-0 items-center truncate leading-none">{t("sidebar.auto_tasks")}</span>
         </button>
+        <div className="shrink-0">
+          <SectionHeader
+            label={t("sidebar.apps")}
+            collapsed={!appsSectionExpanded}
+            onToggle={onToggleAppsSection}
+          />
+          {appsSectionExpanded && (
+            <div className="max-h-44 overflow-y-auto pr-1">
+              {apps.length > 0 ? (
+                apps.map((app) => {
+                  const active = appsActive && selectedAppPath === app.directoryPath;
+                  return (
+                    <button
+                      key={app.directoryPath}
+                      type="button"
+                      onClick={() => onSelectApp(app)}
+                      title={app.directoryPath}
+                      className={
+                        "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition " +
+                        (active
+                          ? "bg-ink/10 text-ink"
+                          : "text-ink/70 hover:bg-ink/5 hover:text-ink")
+                      }
+                    >
+                      <AppWindow className="h-3.5 w-3.5 shrink-0 text-ink/55" />
+                      <span className="min-w-0 flex-1 truncate text-body">{app.slug}</span>
+                      {!app.htmlPath && <CircleAlert className="h-3.5 w-3.5 shrink-0 text-amber-600" />}
+                    </button>
+                  );
+                })
+              ) : (
+                <div className="px-2.5 py-1.5 text-caption text-ink/40">{t("apps.empty")}</div>
+              )}
+            </div>
+          )}
+        </div>
         <div className="shrink-0 flex flex-col gap-0.5">
           <div className="flex items-center gap-1">
             <SectionHeader

@@ -97,20 +97,28 @@ async function inlineLocalScripts(html: string, htmlPath: string): Promise<strin
 export default function PlainHtmlPreview({
   html,
   filePath,
+  scriptsInitiallyEnabled = false,
+  showScriptsControl = true,
 }: {
   html: string;
   filePath: string | null;
+  scriptsInitiallyEnabled?: boolean;
+  showScriptsControl?: boolean;
 }) {
   const { t } = useI18n();
   const [scriptPermission, setScriptPermission] = useState<{
     filePath: string | null;
     enabled: boolean;
-  }>({ filePath, enabled: false });
+  }>({ filePath, enabled: scriptsInitiallyEnabled });
   const scriptsEnabled =
     scriptPermission.filePath === filePath && scriptPermission.enabled;
   const [previewDocument, setPreviewDocument] = useState(() =>
     buildPlainHtmlPreviewDocument(html, scriptsEnabled),
   );
+
+  useEffect(() => {
+    setScriptPermission({ filePath, enabled: scriptsInitiallyEnabled });
+  }, [filePath, scriptsInitiallyEnabled]);
 
   useEffect(() => {
     let active = true;
@@ -130,17 +138,19 @@ export default function PlainHtmlPreview({
 
   return (
     <div className="sessio-plain-html-preview min-h-0 flex-1">
-      <div className="sessio-plain-html-preview-toolbar">
-        <span>{scriptsLabel}</span>
-        <SwitchControl
-          checked={scriptsEnabled}
-          tooltip={scriptsLabel}
-          ariaLabel={scriptsLabel}
-          onToggle={() =>
-            setScriptPermission({ filePath, enabled: !scriptsEnabled })
-          }
-        />
-      </div>
+      {showScriptsControl && (
+        <div className="sessio-plain-html-preview-toolbar">
+          <span>{scriptsLabel}</span>
+          <SwitchControl
+            checked={scriptsEnabled}
+            tooltip={scriptsLabel}
+            ariaLabel={scriptsLabel}
+            onToggle={() =>
+              setScriptPermission({ filePath, enabled: !scriptsEnabled })
+            }
+          />
+        </div>
+      )}
       <iframe
         key={scriptsEnabled ? "scripts-enabled" : "scripts-disabled"}
         title={t("chat.files.html_preview_title")}

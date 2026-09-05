@@ -1,25 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType } from "react";
 import { FolderTree, GitBranch, Info, PanelRightOpen, Workflow, type LucideIcon } from "lucide-react";
-import type { ProjectInfo, SessionInfo } from "../api";
+import type { ProjectInfo, SessionInfo, SessioAppInfo } from "../api";
 import type { CanvasKey } from "../canvasTypes";
 import { useI18n } from "../i18n";
 import type { LiveRuntimeState } from "../runtimeChat";
 import ThreadPage from "../pages/ThreadPage";
-import { ProjectWorkbenchPage, type ProjectView } from "../pages/ProjectPage";
+import {
+  ProjectFilesPanel,
+  ProjectSourceControlPanel,
+  ProjectWorkbenchPage,
+  type ProjectView,
+} from "../pages/ProjectPage";
 import { BitcoinHashesOutlineIcon, HashIcon, Robot3LineIcon } from "./IconifyIcon";
 import Tooltip from "./Tooltip";
 
 type IconComponent = LucideIcon | ComponentType<{ className?: string }>;
 type RightTab =
   | { kind: "thread" }
-  | { kind: "project"; view: ProjectView };
+  | { kind: "project"; view: ProjectView }
+  | { kind: "app"; view: "files" | "sourceControl" };
 
 interface AppRightSidebarProps {
   // Context that decides what fills the panel.
   selectedThread: { projectId: string; threadId: string; goal: string } | null;
   selectedSessionProject: ProjectInfo | null;
   selectedThreadProject: ProjectInfo | null;
+  activeApp: SessioAppInfo | null;
   open: boolean;
   isCanvasViewActive: boolean;
   activeCanvasKey: CanvasKey | null;
@@ -39,6 +46,7 @@ interface AppRightSidebarProps {
 function sameTab(a: RightTab, b: RightTab) {
   if (a.kind !== b.kind) return false;
   if (a.kind === "project" && b.kind === "project") return a.view === b.view;
+  if (a.kind === "app" && b.kind === "app") return a.view === b.view;
   return true;
 }
 
@@ -46,6 +54,7 @@ export default function AppRightSidebar({
   selectedThread,
   selectedSessionProject,
   selectedThreadProject,
+  activeApp,
   open,
   isCanvasViewActive,
   activeCanvasKey,
@@ -62,25 +71,45 @@ export default function AppRightSidebar({
 }: AppRightSidebarProps) {
   const { t } = useI18n();
 
-  const threadProject = selectedThreadProject;
+  const threadProject = activeApp ? null : selectedThreadProject;
   const threadId = selectedThread?.threadId ?? null;
   const hasThread = Boolean(threadProject && threadId);
   // Prefer the thread's project (when a thread is selected) so the project
   // tabs operate on the same context. Fall back to the session's project.
-  const project = threadProject ?? selectedSessionProject ?? null;
+  const project = activeApp ? null : threadProject ?? selectedSessionProject ?? null;
   const hasProject = Boolean(project);
-  const projectHasGit = project?.path ? projectGitRepos[project.path] === true : false;
+  const workspacePath = activeApp?.directoryPath ?? project?.path ?? null;
+  const workspaceHasGit = workspacePath ? projectGitRepos[workspacePath] === true : false;
+  const appWorkspace = useMemo(
+    () => (activeApp ? { path: activeApp.directoryPath } : null),
+    [activeApp],
+  );
 
   const tabs = useMemo(() => {
     const items: { id: string; label: string; icon: IconComponent; tab: RightTab }[] = [];
-    if (hasProject) {
+    if (activeApp) {
+      items.push({
+        id: "app-files",
+        label: t("project.files"),
+        icon: FolderTree,
+        tab: { kind: "app", view: "files" },
+      });
+      if (workspaceHasGit) {
+        items.push({
+          id: "app-source-control",
+          label: t("project.source_control"),
+          icon: GitBranch,
+          tab: { kind: "app", view: "sourceControl" },
+        });
+      }
+    } else if (hasProject) {
       items.push({
         id: "files",
         label: t("project.files"),
         icon: FolderTree,
         tab: { kind: "project", view: "files" },
       });
-      if (projectHasGit) {
+      if (workspaceHasGit) {
         items.push({
           id: "source-control",
           label: t("project.source_control"),
@@ -118,13 +147,14 @@ export default function AppRightSidebar({
       });
     }
     return items;
-  }, [hasProject, hasThread, projectHasGit, t]);
+  }, [activeApp, hasProject, hasThread, t, workspaceHasGit]);
 
   const defaultTab: RightTab | null = useMemo(() => {
+    if (activeApp) return { kind: "app", view: "files" };
     if (hasProject) return { kind: "project", view: "files" };
     if (hasThread) return { kind: "thread" };
     return null;
-  }, [hasProject, hasThread]);
+  }, [activeApp, hasProject, hasThread]);
 
   const [activeTab, setActiveTab] = useState<RightTab | null>(defaultTab);
   const [liveFilesReloadKey, setLiveFilesReloadKey] = useState(0);
@@ -148,18 +178,18 @@ export default function AppRightSidebar({
     }
   }, [activeTab, defaultTab, tabs]);
 
-  const projectFileActivityVisible =
+  const workspaceFileActivityVisible =
     open &&
-    Boolean(project) &&
-    activeTab?.kind === "project" &&
+    Boolean(workspacePath) &&
+    (activeTab?.kind === "project" || activeTab?.kind === "app") &&
     (activeTab.view === "files" || activeTab.view === "sourceControl");
-  const projectLiveFileEditMarker = useMemo(() => {
-    if (!projectFileActivityVisible || !project?.path) return "";
+  const workspaceLiveFileEditMarker = useMemo(() => {
+    if (!workspaceFileActivityVisible || !workspacePath) return "";
     let fileEditCount = 0;
     let latestTimestamp = 0;
     let latestKey = "";
     for (const session of Object.values(liveState.sessions)) {
-      if (session.workspacePath !== project.path) continue;
+      if (session.workspacePath !== workspacePath) continue;
       for (const turn of session.turns) {
         for (let blockIndex = 0; blockIndex < turn.blocks.length; blockIndex += 1) {
           const block = turn.blocks[blockIndex];
@@ -176,10 +206,10 @@ export default function AppRightSidebar({
     }
     if (fileEditCount === 0) return "";
     return `${fileEditCount}:${latestTimestamp}:${latestKey}`;
-  }, [projectFileActivityVisible, liveState.sessions, project?.path]);
+  }, [liveState.sessions, workspaceFileActivityVisible, workspacePath]);
 
   useEffect(() => {
-    if (!projectFileActivityVisible || !project?.path) {
+    if (!workspaceFileActivityVisible || !workspacePath) {
       projectLiveFileEditRef.current = {
         projectPath: null,
         marker: null,
@@ -188,25 +218,25 @@ export default function AppRightSidebar({
     }
 
     const current = projectLiveFileEditRef.current;
-    if (current.projectPath !== project.path) {
+    if (current.projectPath !== workspacePath) {
       projectLiveFileEditRef.current = {
-        projectPath: project.path,
-        marker: projectLiveFileEditMarker,
+        projectPath: workspacePath,
+        marker: workspaceLiveFileEditMarker,
       };
-      if (projectLiveFileEditMarker) {
+      if (workspaceLiveFileEditMarker) {
         setLiveFilesReloadKey((value) => value + 1);
       }
       return;
     }
 
-    if (current.marker === projectLiveFileEditMarker) return;
+    if (current.marker === workspaceLiveFileEditMarker) return;
     projectLiveFileEditRef.current = {
-      projectPath: project.path,
-      marker: projectLiveFileEditMarker,
+      projectPath: workspacePath,
+      marker: workspaceLiveFileEditMarker,
     };
-    if (!projectLiveFileEditMarker) return;
+    if (!workspaceLiveFileEditMarker) return;
     setLiveFilesReloadKey((value) => value + 1);
-  }, [projectFileActivityVisible, project?.path, projectLiveFileEditMarker]);
+  }, [workspaceFileActivityVisible, workspaceLiveFileEditMarker, workspacePath]);
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
@@ -251,7 +281,23 @@ export default function AppRightSidebar({
         </Tooltip>
       </div>
       <div className="flex flex-1 min-h-0 flex-col overflow-hidden">
-        {activeTab?.kind === "thread" && threadProject && threadId ? (
+        {activeTab?.kind === "app" && appWorkspace ? (
+          activeTab.view === "files" ? (
+            <ProjectFilesPanel
+              project={appWorkspace}
+              reloadKey={filesReloadKey + liveFilesReloadKey}
+              projectHasGit={workspaceHasGit}
+              onProjectGitRepoDetected={onProjectGitRepoDetected}
+            />
+          ) : (
+            <ProjectSourceControlPanel
+              project={appWorkspace}
+              reloadKey={filesReloadKey + liveFilesReloadKey}
+              onError={onError}
+              onProjectGitRepoDetected={onProjectGitRepoDetected}
+            />
+          )
+        ) : activeTab?.kind === "thread" && threadProject && threadId ? (
           <ThreadPage
             project={threadProject}
             threadId={threadId}
@@ -269,7 +315,7 @@ export default function AppRightSidebar({
             activeCanvasKey={activeCanvasKey}
             onOpenFile={onOpenProjectFile}
             onAddFileToCanvas={isCanvasViewActive ? onAddProjectFileToCanvas : undefined}
-            projectHasGit={project.path ? projectGitRepos[project.path] === true : false}
+            projectHasGit={workspaceHasGit}
             onProjectGitRepoDetected={onProjectGitRepoDetected}
             onSelectThreadChatSession={onSelectThreadChatSession}
             onError={onError}

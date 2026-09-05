@@ -62,6 +62,10 @@ pub fn projects_dir() -> Result<PathBuf> {
     Ok(app_home()?.join("projects"))
 }
 
+pub fn apps_dir() -> Result<PathBuf> {
+    Ok(app_home()?.join("apps"))
+}
+
 pub fn cross_context_dir() -> Result<PathBuf> {
     Ok(projects_dir()?.join(".cross-context"))
 }
