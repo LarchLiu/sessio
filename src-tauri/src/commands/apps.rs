@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::State;
 
@@ -19,6 +19,15 @@ pub(crate) struct SessioAppInfo {
     pub html_path: Option<String>,
     pub html_file_name: Option<String>,
     pub logo_path: Option<String>,
+    pub name_zh: Option<String>,
+    pub name_en: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppConfig {
+    name_zh: Option<String>,
+    name_en: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -106,9 +115,17 @@ fn app_info(directory: &Path) -> Result<SessioAppInfo, String> {
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("Invalid app directory name: {}", directory.display()))?
         .to_string();
+    let web_directory = directory.join("web");
+    let content_directory = if web_directory.is_dir() {
+        web_directory.as_path()
+    } else {
+        directory
+    };
     let expected_name = format!("{slug}.html");
-    let mut html_files = fs::read_dir(directory)
-        .map_err(|error| error.to_string())?
+    let mut html_files = fs::read_dir(content_directory)
+        .ok()
+        .into_iter()
+        .flatten()
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let file_type = entry.file_type().ok()?;
@@ -141,7 +158,8 @@ fn app_info(directory: &Path) -> Result<SessioAppInfo, String> {
         .and_then(|path| path.file_name())
         .and_then(|name| name.to_str())
         .map(str::to_string);
-    let logo_path = find_logo_path(directory).map(|path| canonical_or_original(&path));
+    let logo_path = find_logo_path(content_directory).map(|path| canonical_or_original(&path));
+    let config = read_app_config(&web_directory);
 
     Ok(SessioAppInfo {
         id: stable_app_id(&directory_path),
@@ -150,19 +168,33 @@ fn app_info(directory: &Path) -> Result<SessioAppInfo, String> {
         html_path: html_path.map(|path| canonical_or_original(&path)),
         html_file_name,
         logo_path,
+        name_zh: normalize_name(config.name_zh),
+        name_en: normalize_name(config.name_en),
+    })
+}
+
+fn read_app_config(web_directory: &Path) -> AppConfig {
+    let path = web_directory.join("config.json");
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_default()
+}
+
+fn normalize_name(value: Option<String>) -> Option<String> {
+    value.and_then(|name| {
+        let trimmed = name.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
     })
 }
 
 fn find_logo_path(directory: &Path) -> Option<std::path::PathBuf> {
-    const LOGO_NAMES: [&str; 5] = [
-        "logo.svg",
-        "logo.png",
-        "logo.webp",
-        "logo.jpg",
-        "logo.jpeg",
-    ];
+    const LOGO_NAMES: [&str; 5] = ["logo.svg", "logo.png", "logo.webp", "logo.jpg", "logo.jpeg"];
 
-    let entries = fs::read_dir(directory).ok()?.filter_map(Result::ok).collect::<Vec<_>>();
+    let entries = fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
     LOGO_NAMES.iter().find_map(|expected_name| {
         entries.iter().find_map(|entry| {
             let file_type = entry.file_type().ok()?;
@@ -212,14 +244,19 @@ mod tests {
         let exact = root.join("sales-report");
         let fallback = root.join("inventory");
         let ambiguous = root.join("ambiguous");
-        fs::create_dir_all(&exact).expect("create exact app");
-        fs::create_dir_all(&fallback).expect("create fallback app");
-        fs::create_dir_all(&ambiguous).expect("create ambiguous app");
-        fs::write(exact.join("sales-report.html"), "<html></html>").expect("write exact html");
-        fs::write(exact.join("other.html"), "<html></html>").expect("write secondary html");
-        fs::write(fallback.join("index.HTML"), "<html></html>").expect("write fallback html");
-        fs::write(ambiguous.join("one.html"), "<html></html>").expect("write first html");
-        fs::write(ambiguous.join("two.html"), "<html></html>").expect("write second html");
+        fs::create_dir_all(exact.join("web")).expect("create exact app");
+        fs::create_dir_all(fallback.join("web")).expect("create fallback app");
+        fs::create_dir_all(ambiguous.join("web")).expect("create ambiguous app");
+        fs::write(exact.join("web/sales-report.html"), "<html></html>").expect("write exact html");
+        fs::write(exact.join("web/other.html"), "<html></html>").expect("write secondary html");
+        fs::write(fallback.join("web/index.HTML"), "<html></html>").expect("write fallback html");
+        fs::write(ambiguous.join("web/one.html"), "<html></html>").expect("write first html");
+        fs::write(ambiguous.join("web/two.html"), "<html></html>").expect("write second html");
+        fs::write(
+            exact.join("web/config.json"),
+            r#"{"nameZh":"销售报告","nameEn":"Sales Report"}"#,
+        )
+        .expect("write app config");
 
         let apps = list_apps_in(&root).expect("list apps");
 
@@ -232,6 +269,8 @@ mod tests {
         assert_eq!(apps[2].slug, "sales-report");
         assert_eq!(apps[2].html_file_name.as_deref(), Some("sales-report.html"));
         assert_eq!(apps[0].logo_path, None);
+        assert_eq!(apps[2].name_zh.as_deref(), Some("销售报告"));
+        assert_eq!(apps[2].name_en.as_deref(), Some("Sales Report"));
 
         fs::remove_dir_all(&root).expect("remove test apps");
     }
@@ -240,13 +279,15 @@ mod tests {
     fn resolves_logo_files_in_priority_order() {
         let root = test_root();
         let app = root.join("brand");
-        fs::create_dir_all(&app).expect("create app");
-        fs::write(app.join("logo.jpeg"), []).expect("write jpeg logo");
-        fs::write(app.join("LOGO.PNG"), []).expect("write png logo");
+        fs::create_dir_all(app.join("web")).expect("create app");
+        fs::write(app.join("web/logo.jpeg"), []).expect("write jpeg logo");
+        fs::write(app.join("web/LOGO.PNG"), []).expect("write png logo");
 
         let info = app_info(&app).expect("read app info");
         assert_eq!(
-            info.logo_path.as_deref().and_then(|path| Path::new(path).file_name()),
+            info.logo_path
+                .as_deref()
+                .and_then(|path| Path::new(path).file_name()),
             Some(std::ffi::OsStr::new("LOGO.PNG"))
         );
 

@@ -52,6 +52,7 @@ import { mergeHistoryAndLiveViewModels } from "../components/AcpTranscriptPanel"
 
 export default function AppsPage({
   app,
+  appDisplayName,
   runtimeSessionId,
   onRuntimeSessionIdChange,
   runtimeAgents,
@@ -64,6 +65,7 @@ export default function AppsPage({
   onClearFileSelection,
 }: {
   app: SessioAppInfo;
+  appDisplayName: string;
   runtimeSessionId: string | null;
   onRuntimeSessionIdChange: (runtimeSessionId: string) => void;
   runtimeAgents: RuntimeAgentMetadata[];
@@ -328,7 +330,7 @@ export default function AppsPage({
     }
     await composer.runStartSession(composer.text, {
       workspacePath: app.directoryPath,
-      projectName: app.slug,
+      projectName: appDisplayName,
     });
   };
 

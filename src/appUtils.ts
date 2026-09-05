@@ -4,8 +4,10 @@ import type {
   ProjectInfo,
   SessionInfo,
   SessionScope,
+  SessioAppInfo,
   ThreadIndexItemInfo,
 } from "./api";
+import type { Lang } from "./i18n";
 import type { LiveRuntimeSession } from "./runtimeChat";
 import { isThreadPlannerLiveSession } from "./runtimeChat";
 
@@ -48,6 +50,17 @@ export function sessionIdentity(agent: Agent, sessionId: string): string {
 
 export function sessionDisplayTitle(session: SessionInfo): string | null {
   return session.renameTitle ?? session.title ?? session.firstUserMessage ?? null;
+}
+
+export function sessioAppDisplayName(
+  app: Pick<SessioAppInfo, "slug" | "nameZh" | "nameEn">,
+  lang: Lang,
+  renameTitle?: string | null,
+): string {
+  const renamed = renameTitle?.trim();
+  if (renamed) return renamed;
+  const localized = lang === "zh" ? app.nameZh ?? app.nameEn : app.nameEn ?? app.nameZh;
+  return localized?.trim() || app.slug;
 }
 
 export function isRealSessionFilePath(filePath: string | null | undefined): boolean {

@@ -168,12 +168,8 @@ pub fn startup_probe_runtime_agents(
         let Some(runtime_agent) = Agent::from_db_str(&agent.id) else {
             continue;
         };
-        let configured_session_command = agent
-            .commands
-            .session
-            .first()
-            .cloned()
-            .unwrap_or_else(|| {
+        let configured_session_command =
+            agent.commands.session.first().cloned().unwrap_or_else(|| {
                 if agent.transport == RuntimeTransportKind::PiRpc {
                     pi_rpc_transport::default_pi_rpc_command(runtime_agent)
                 } else {
@@ -268,18 +264,13 @@ pub fn startup_probe_runtime_agents(
 }
 
 fn startup_probe_command(runtime_agent: Agent, agent: &AgentInfo) -> String {
-    agent
-        .commands
-        .session
-        .first()
-        .cloned()
-        .unwrap_or_else(|| {
-            if agent.transport == RuntimeTransportKind::PiRpc {
-                pi_rpc_transport::default_pi_rpc_command(runtime_agent)
-            } else {
-                acp_transport::default_acp_command(runtime_agent)
-            }
-        })
+    agent.commands.session.first().cloned().unwrap_or_else(|| {
+        if agent.transport == RuntimeTransportKind::PiRpc {
+            pi_rpc_transport::default_pi_rpc_command(runtime_agent)
+        } else {
+            acp_transport::default_acp_command(runtime_agent)
+        }
+    })
 }
 
 fn detect_capabilities_with_initialize_only(

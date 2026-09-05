@@ -31,7 +31,7 @@ impl AppsWatcher {
         })
         .context("create apps watcher")?;
         watcher
-            .watch(&watched_dir, RecursiveMode::NonRecursive)
+            .watch(&watched_dir, RecursiveMode::Recursive)
             .with_context(|| format!("watch apps directory {}", watched_dir.display()))?;
 
         Ok(Self {
@@ -48,9 +48,10 @@ fn emit_apps_updated(app: &AppHandle, apps_dir: &Path, event: Event) {
     ) {
         return;
     }
-    let changed = event.paths.iter().any(|path| {
-        path == apps_dir || path.parent().is_some_and(|parent| parent == apps_dir)
-    });
+    let changed = event
+        .paths
+        .iter()
+        .any(|path| path == apps_dir || path.starts_with(apps_dir));
     if changed {
         let _ = app.emit(APPS_UPDATED_EVENT, ());
     }

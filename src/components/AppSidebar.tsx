@@ -50,6 +50,7 @@ import {
   sessionDisplayTitle,
   sessionIdentityKey,
   sessionUnreadKeys,
+  sessioAppDisplayName,
   threadUnreadKeys,
 } from "../appUtils";
 import { useUpdateCheck } from "../updater";
@@ -180,7 +181,7 @@ export default function AppSidebar({
   onInstallUpdate,
   onError,
 }: AppSidebarProps) {
-  const { t } = useI18n();
+  const { lang, t } = useI18n();
   const threadIndexByProject = useMemo(() => {
     const grouped = new Map<string, ThreadIndexItemInfo[]>();
     for (const item of threadIndexItems) {
@@ -267,7 +268,9 @@ export default function AppSidebar({
                       }
                     >
                       <AppLogo app={app} />
-                      <span className="min-w-0 flex-1 truncate text-body">{appDisplayNames[app.id] ?? app.slug}</span>
+                      <span className="min-w-0 flex-1 truncate text-body">
+                        {sessioAppDisplayName(app, lang, appDisplayNames[app.id])}
+                      </span>
                       {!app.htmlPath && <CircleAlert className="h-3.5 w-3.5 shrink-0 text-amber-600" />}
                     </button>
                   );

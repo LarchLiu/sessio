@@ -8371,7 +8371,10 @@ mod schema_tests {
         let omp_agent = agents.iter().find(|agent| agent.id == "omp").unwrap();
         assert!(!omp_agent.enabled);
         assert_eq!(omp_agent.transport, RuntimeTransportKind::PiRpc);
-        assert_eq!(omp_agent.commands.session, vec!["omp --mode rpc".to_string()]);
+        assert_eq!(
+            omp_agent.commands.session,
+            vec!["omp --mode rpc".to_string()]
+        );
         let codex_agent = agents.iter().find(|agent| agent.id == "codex").unwrap();
         assert_eq!(codex_agent.icon.as_deref(), Some("codex"));
         assert_eq!(codex_agent.model.as_deref(), Some("gpt-5.5"));

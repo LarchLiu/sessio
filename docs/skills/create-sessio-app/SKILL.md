@@ -17,10 +17,13 @@ preview safely in Sessio. The central contract is data separation:
 
 ```text
 <app-dir>/
-  <app-slug>.html       # UI, styles, rendering, and interaction logic
-  <app-slug>-data.js    # the only runtime data source
+  web/
+    <app-slug>.html     # UI, styles, rendering, and interaction logic
+    <app-slug>-data.js  # the only runtime data source
+    logo.<ext>          # optional app logo or brand asset
+    screenshot.<ext>   # optional app screenshot
+    config.json         # app metadata for Sessio and other agents
   AGENTS.md             # purpose, usage, data usage, and the complete contract
-  logo.<ext>              # optional app logo or brand asset
 ```
 
 Use an existing directory when the user names one. Otherwise create
@@ -37,17 +40,25 @@ existing files without explicit permission.
 2. **Inspect the repository.** Look for existing Sessio HTML preview behavior,
    local style conventions, and related files. Reuse existing project patterns
    rather than introducing a framework or build step for a small app.
-3. **Plan optional branding.** If the request calls for a logo, generate or
-   create a suitable local logo asset and reference it with a relative path from
-   the HTML. Keep the asset inside the app directory. If logo generation is not
-   available or fails, omit the logo and continue; do not block app delivery or
+3. **Plan optional visual assets.** If the request calls for a logo, generate
+   or create a suitable local logo asset at `web/logo.<ext>` and reference it
+   with a relative path from the HTML. If a screenshot is requested, capture a
+   representative app view as `web/screenshot.<ext>` after browser validation.
+   Keep both assets inside `web/`. If generation or capture is unavailable or
+   fails, omit the optional asset and continue; do not block app delivery or
    invent a broken placeholder reference.
-4. **Define the data schema before writing the view.** Decide the exact top-level
+4. **Define app metadata.** Create `web/config.json` with exactly these required
+   string fields: `nameZh` (Chinese name), `nameEn` (English name), `description`
+   (app introduction), `author`, `email`, and `version`. Use a semantic version
+   such as `1.0.0` for `version`.
+   Keep this metadata separate from runtime data; the HTML must not fetch or
+   parse `config.json` unless the user explicitly requests that behavior.
+5. **Define the data schema before writing the view.** Decide the exact top-level
    data envelope and every record field. Keep presentation metadata separate
    from records. Record units, requiredness, null behavior, allowed values, and
    an example for every field.
-5. **Create the data file first.** Put all sample or supplied data in
-   `<app-slug>-data.js`. It must assign one global value and contain no rendering
+6. **Create the data file first.** Put all sample or supplied data in
+   `web/<app-slug>-data.js`. It must assign one global value and contain no rendering
    code:
 
    ```js
@@ -61,44 +72,47 @@ existing files without explicit permission.
    The global name may be app-specific when needed, but the HTML and AGENTS.md
    must state it exactly. Never duplicate records, labels derived from records,
    or default sample rows inside the HTML.
-6. **Create the HTML view.** Reference the data file with a relative script tag
-   such as `<script src="./<app-slug>-data.js"></script>`. Read the global data
+7. **Create the HTML view.** Put it at `web/<app-slug>.html` and reference the
+   data file with a same-directory relative script tag such as
+   `<script src="./<app-slug>-data.js"></script>`. Read the global data
    object after that script and render the empty state when it is missing or
    invalid. Keep the page useful when opened as `file://`; do not require Vite,
    a local server, `fetch`, XHR, WebSocket, CDN assets, npm imports, or a
    backend. Inline CSS and JavaScript are preferred for portability.
-7. **Build for Sessio preview.** The view must work after the user enables
+8. **Build for Sessio preview.** The view must work after the user enables
    “Allow inline JavaScript”. Local scripts in the same directory and child
-   directories are supported by Sessio's preview; use paths such as
-   `./data.js` or `scripts/data.js`. Do not depend on `document.currentScript`
+   directories are supported by Sessio's preview; resolve them relative to
+   `web/`, using paths such as `./<app-slug>-data.js` or `scripts/data.js`. Do not depend on `document.currentScript`
    or the original external script URL after it is inlined.
-8. **Write AGENTS.md from the implemented contract.** Explain what the app is
-   for, how to open it in a browser and Sessio, the three-file layout, the exact
+9. **Write AGENTS.md from the implemented contract.** Explain what the app is
+   for, how to open it in a browser and Sessio, the `web/` layout, config metadata, the exact
    data global, the complete schema, a valid data example, how to replace or
    regenerate data, how the app uses and transforms the data, whether data is
    sample, user-supplied, or derived, whether it leaves the local app, and
    known preview/security limitations. AGENTS.md must be updated whenever the
    schema or data usage changes.
-9. **Validate before handing off.** Check that the HTML references the data JS,
+10. **Validate before handing off.** Check that the HTML references the data JS,
    the data JS parses, the HTML contains no record literals, and AGENTS.md
-   documents every top-level and record field. Exercise the initial render and
+   documents every top-level and record field, and that `web/config.json`
+   contains all required metadata fields. Exercise the initial render and
    at least one requested interaction. Check a desktop width and a narrow width
    when the app has a visual layout. Use the browser test method below for
    visual and interaction verification. Do not start a persistent development
    server; if temporary serving is essential for verification, stop it before
    finishing.
-10. **Publish the tested app to Sessio's app directory.** Only after all checks
+11. **Publish the tested app to Sessio's app directory.** Only after all checks
    pass, read the absolute `SESSIO_APP_HOME` environment variable supplied by
    running Sessio process. Invoke the bundled publisher for the current shell:
    use `scripts/publish_app.sh <source-dir> <app-slug>` on macOS/Linux (or Git
    Bash/WSL), and `scripts/publish_app.ps1 <source-dir> <app-slug>` on native
    Windows PowerShell. Both scripts copy the complete app directory to
-   `$SESSIO_APP_HOME/apps/<app-slug>/`, preserving the HTML, data JS, AGENTS.md,
-   and any child directories exactly. They refuse to replace an existing
+   `$SESSIO_APP_HOME/apps/<app-slug>/`, preserving `web/`, AGENTS.md, and all
+   files and child directories exactly. They refuse to replace an existing
    destination unless the user explicitly authorizes `--force`/`-Force`.
    The publisher is an execution step, not a completion message: run it after
-   validation and then verify that the destination contains the expected HTML,
-   data JS, AGENTS.md, CLAUDE.md, and child directories. The publisher creates
+   validation and then verify that the destination contains `web/<app-slug>.html`,
+   `web/<app-slug>-data.js`, `web/config.json`, AGENTS.md, CLAUDE.md, and any
+   optional assets or child directories. The publisher creates
    `CLAUDE.md` as an independent copy of `AGENTS.md` when the source contains
    AGENTS.md, so Claude can discover the same instructions without symlinks.
    Resolve `scripts/` relative to the
@@ -137,12 +151,33 @@ Use this structure unless the user requests another documentation language:
 What the app shows and who uses it.
 
 ## Files
-- `<app-slug>.html`: view and interaction logic.
-- `<app-slug>-data.js`: only runtime data, exported as `window.<GLOBAL>`.
+- `web/<app-slug>.html`: view and interaction logic.
+- `web/<app-slug>-data.js`: only runtime data, exported as `window.<GLOBAL>`.
+- `web/config.json`: required app metadata with `nameZh`, `nameEn`,
+  `description`, `author`, `email`, and `version`.
+- `web/screenshot.<ext>`: optional screenshot for the app listing or documentation.
 - `AGENTS.md`: this contract, data-usage explanation, and maintenance notes.
-- `logo.<ext>`: optional local logo asset named `logo` with a supported image
+- `web/logo.<ext>`: optional local logo asset named `logo` with a supported image
   extension such as `.png`, `.jpg`, `.webp`, or `.svg`; omit it when no logo was
   requested or generation was unavailable.
+
+## App metadata
+`web/config.json` must be valid JSON with this shape:
+
+```json
+{
+  "nameZh": "示例应用",
+  "nameEn": "Example App",
+  "description": "应用介绍。",
+  "author": "作者姓名",
+  "email": "author@example.com",
+  "version": "1.0.0"
+}
+```
+
+All six fields are required strings. Keep `description` concise and factual.
+This file describes the app for Sessio and agents; it is metadata, not runtime
+data, and should not be duplicated in `<app-slug>-data.js`.
 
 ## Run and preview
 Browser steps, Sessio preview steps, and whether inline JavaScript must be enabled.
@@ -162,7 +197,7 @@ Browser steps, Sessio preview steps, and whether inline JavaScript must be enabl
 ```
 
 ## Updating data
-Edit or regenerate only `<app-slug>-data.js`; preserve the documented schema.
+Edit or regenerate only `web/<app-slug>-data.js`; preserve the documented schema.
 When the user supplies an image, document, or plain text, compare its content
 with the schema in this `AGENTS.md` before changing data. Decide whether it
 contains values that map to required or optional fields, and extract only the
@@ -249,11 +284,12 @@ as sample data. Never infer sensitive conclusions from fabricated values.
 
 Before reporting completion, verify:
 
-- [ ] Exactly one HTML view, one data JS file, and one AGENTS.md exist for the app;
-      include a logo asset when requested and successfully generated, otherwise
-      omit it cleanly.
-- [ ] The HTML references the data JS by a same-directory or child-directory
-      relative path.
+- [ ] Exactly one HTML view, one data JS file, one `config.json`, and one
+      `AGENTS.md` exist for the app; include `web/logo.<ext>` or
+      `web/screenshot.<ext>` when requested and successfully generated, and
+      omit each optional asset cleanly when unavailable.
+- [ ] The HTML references `web/<app-slug>-data.js` by a same-directory relative
+      path.
 - [ ] All runtime data is in the data JS; no duplicated rows are in the HTML.
 - [ ] AGENTS.md schema tables match the fields and types consumed by the HTML,
       and its data-usage/update rules match the implementation.
@@ -269,4 +305,7 @@ Before reporting completion, verify:
       with child directories preserved and overwrite protection enabled; when
       AGENTS.md exists, the destination also contains an independent CLAUDE.md
       copy.
-- [ ] HTML, JS, and AGENTS.md paths are reported using absolute paths.
+- [ ] `web/config.json` is valid JSON and contains exactly the required string
+      fields: `nameZh`, `nameEn`, `description`, `author`, `email`, and `version`.
+- [ ] HTML, JS, config, assets, and AGENTS.md paths are reported using absolute
+      paths.

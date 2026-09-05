@@ -96,6 +96,8 @@ export interface SessioAppInfo {
   htmlPath: string | null;
   htmlFileName: string | null;
   logoPath: string | null;
+  nameZh: string | null;
+  nameEn: string | null;
 }
 
 export interface SessioAppsCatalog {

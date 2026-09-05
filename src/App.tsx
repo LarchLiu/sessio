@@ -73,6 +73,7 @@ import {
   sessionDisplayTitle,
   sessionIdentityKey,
   sessionKey,
+  sessioAppDisplayName,
   deleteUnreadKeys,
   threadUnreadKeys,
   type Filter,
@@ -1283,7 +1284,11 @@ export default function App() {
       detailTitle=""
       contextTitle={{ label: t("header.app"), icon: AppWindow }}
       entityTitle={null}
-      projectContext={selectedApp ? { name: appDisplayNames[selectedApp.id] ?? selectedApp.slug } : null}
+      projectContext={
+        selectedApp
+          ? { name: sessioAppDisplayName(selectedApp, lang, appDisplayNames[selectedApp.id]) }
+          : null
+      }
       activeMessageMeta={null}
       metaPopoverOpen={false}
       rightSidebarOpen={rightSidebarOpen}
@@ -1312,7 +1317,9 @@ export default function App() {
       deleteTarget={deleteTarget}
       appRenameTarget={appRenameTarget}
       appRenameCurrentName={
-        appRenameTarget ? appDisplayNames[appRenameTarget.id] ?? appRenameTarget.slug : null
+        appRenameTarget
+          ? sessioAppDisplayName(appRenameTarget, lang, appDisplayNames[appRenameTarget.id])
+          : null
       }
       updateConfirmMounted={updateConfirmMounted}
       updateConfirmOpen={updateConfirmOpen}
@@ -1441,6 +1448,11 @@ export default function App() {
             <AppsPage
               key={selectedApp.directoryPath}
               app={selectedApp}
+              appDisplayName={sessioAppDisplayName(
+                selectedApp,
+                lang,
+                appDisplayNames[selectedApp.id],
+              )}
               runtimeSessionId={appRuntimeSessions[selectedApp.id] ?? null}
               onRuntimeSessionIdChange={(runtimeSessionId) => {
                 setAppRuntimeSessions((current) => ({
