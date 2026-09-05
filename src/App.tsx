@@ -214,7 +214,10 @@ export default function App() {
   const update = useUpdateCheck(__APP_VERSION__, debugUpdatePreview);
   const indexing = indexPhase !== "idle";
   const rebuilding = indexPhase === "rebuilding";
+  const sessioAppsRefreshInFlightRef = useRef(false);
   const refreshSessioApps = useCallback(async () => {
+    if (sessioAppsRefreshInFlightRef.current) return;
+    sessioAppsRefreshInFlightRef.current = true;
     try {
       const catalog = await listSessioApps();
       setSessioApps(catalog.apps);
@@ -225,6 +228,8 @@ export default function App() {
       );
     } catch (error) {
       setError(String(error));
+    } finally {
+      sessioAppsRefreshInFlightRef.current = false;
     }
   }, []);
   const openUpdateConfirm = useCallback(() => {
@@ -268,6 +273,15 @@ export default function App() {
 
   useEffect(() => {
     void refreshSessioApps();
+  }, [refreshSessioApps]);
+
+  useEffect(() => {
+    const unlisten = listen("sessio_apps_updated", () => {
+      void refreshSessioApps();
+    });
+    return () => {
+      unlisten.then((cleanup) => cleanup()).catch(() => {});
+    };
   }, [refreshSessioApps]);
 
   useEffect(() => {

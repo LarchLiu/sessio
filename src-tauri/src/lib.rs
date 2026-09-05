@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod app_paths;
+pub mod apps_watch;
 pub mod astra;
 pub mod cli;
 pub mod commands;
@@ -8801,6 +8802,13 @@ pub fn run() {
             app.manage(config_watcher);
             let skills_watcher = skills::SkillsWatcher::new(app.handle().clone())?;
             app.manage(skills_watcher);
+            match apps_watch::AppsWatcher::new(app.handle().clone()) {
+                Ok(watcher) => {
+                    log::info!("apps watcher spawned successfully");
+                    app.manage(watcher);
+                }
+                Err(error) => log::warn!("apps watcher failed to start: {error}"),
+            }
             app.manage(TerminalService::new(app.handle().clone()));
             let preview_file_watcher =
                 file_preview_watch::PreviewFileWatcher::new(app.handle().clone())?;
