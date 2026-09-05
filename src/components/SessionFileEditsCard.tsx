@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Component, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
 import { ArrowUpRight, ChevronDown, FileDiff } from "lucide-react";
 import type { FileEditContentDiff, FileEditItem } from "../acpRenderItems";
@@ -304,8 +304,9 @@ function DiffPreview({
   const themeType = useEffectiveThemeType();
   const options = useMemo(() => diffPreviewOptions(themeType), [themeType]);
   const contentDiffs = normalizeContentDiffs(edit);
-  const patch = typeof edit.patch === "string" ? edit.patch : "";
-  const patches = normalizeEditPatches(edit);
+  const patches = combineUnifiedPatches(
+    normalizeEditPatches(edit).flatMap((patch) => patchesForEdit(patch, edit)),
+  );
   return (
     <ScrollArea
       className="mx-2.5 mb-2 max-h-72 rounded bg-bg-panel-alt"
@@ -314,14 +315,13 @@ function DiffPreview({
       persistScrollbars
     >
       <div className="min-w-max text-caption sessio-diff-preview">
-        {patches.length > 0 || patch.trim() ? (
+        {patches.length > 0 ? (
           <>
-            {(patches.length > 0 ? patches : [patch]).map((patchItem, index) => (
-              <PatchDiff
+            {patches.map((patchItem, index) => (
+              <PatchDiffBoundary
                 key={index}
                 patch={patchItem}
                 options={options}
-                disableWorkerPool
               />
             ))}
           </>
@@ -338,13 +338,183 @@ function DiffPreview({
             ))}
           </>
         ) : (
-          <pre className="px-2.5 py-2 font-mono text-caption leading-relaxed text-ink/75">
-            <code>{fallback}</code>
-          </pre>
+          <RawPatchFallback text={fallback} />
         )}
       </div>
     </ScrollArea>
   );
+}
+
+type DiffOptions = ReturnType<typeof diffPreviewOptions>;
+
+interface PatchDiffBoundaryProps {
+  patch: string;
+  options: DiffOptions;
+}
+
+interface PatchDiffBoundaryState {
+  failed: boolean;
+}
+
+/** Keep malformed or unsupported agent patches from taking down the whole chat view. */
+class PatchDiffBoundary extends Component<
+  PatchDiffBoundaryProps,
+  PatchDiffBoundaryState
+> {
+  state: PatchDiffBoundaryState = { failed: false };
+
+  static getDerivedStateFromError(): PatchDiffBoundaryState {
+    return { failed: true };
+  }
+
+  render() {
+    if (this.state.failed) {
+      return <RawPatchFallback text={this.props.patch} />;
+    }
+    return (
+      <PatchDiff
+        patch={this.props.patch}
+        options={this.props.options}
+        disableWorkerPool
+      />
+    );
+  }
+}
+
+function RawPatchFallback({ text }: { text: string }) {
+  return (
+    <pre className="whitespace-pre-wrap break-words py-1 font-mono text-caption leading-relaxed text-ink/75">
+      {text.split("\n").map((line, index) => {
+        const className = line.startsWith("+")
+          ? "bg-[rgb(var(--color-emerald)/0.14)]"
+          : line.startsWith("-")
+            ? "bg-[rgb(var(--color-status-error)/0.14)]"
+            : "";
+        return (
+          <span key={`${index}:${line}`} className={`block px-2.5 ${className}`}>
+            {line}
+          </span>
+        );
+      })}
+    </pre>
+  );
+}
+
+function patchesForEdit(patch: string, edit: FileEditItem): string[] {
+  const chunks = splitPatchFiles(patch);
+  if (chunks.length <= 1) return chunks;
+  const target = normalizePatchPath(edit.path || edit.displayPath || "");
+  if (!target) return [];
+  return chunks.filter((chunk) => patchPaths(chunk).some((path) => path === target));
+}
+
+interface UnifiedPatchHunk {
+  oldStart: number;
+  oldCount: number;
+  text: string;
+  order: number;
+}
+
+function combineUnifiedPatches(patches: string[]): string[] {
+  if (patches.length <= 1) return patches;
+  const parsed = patches.map(parseUnifiedPatch);
+  if (parsed.some((patch) => patch === null)) return patches;
+  const valid = parsed.filter((patch): patch is NonNullable<typeof patch> => patch !== null);
+  if (valid.every((patch) => patch.hunks.length === 0)) return patches;
+
+  const hunks: UnifiedPatchHunk[] = [];
+  let order = 0;
+  for (const patch of valid) {
+    for (const hunk of patch.hunks) {
+      const overlaps = (candidate: UnifiedPatchHunk) => {
+        const candidateEnd = candidate.oldStart + Math.max(candidate.oldCount, 1) - 1;
+        const hunkEnd = hunk.oldStart + Math.max(hunk.oldCount, 1) - 1;
+        return candidate.oldStart <= hunkEnd && hunk.oldStart <= candidateEnd;
+      };
+      for (let index = hunks.length - 1; index >= 0; index -= 1) {
+        if (overlaps(hunks[index])) hunks.splice(index, 1);
+      }
+      hunks.push({ ...hunk, order: order++ });
+    }
+  }
+  if (hunks.length === 0) return patches;
+  hunks.sort((left, right) => left.oldStart - right.oldStart || left.order - right.order);
+  const header = valid.find((patch) => patch.header.trim())?.header ?? "";
+  return [`${header}${hunks.map((hunk) => hunk.text).join("\n")}`];
+}
+
+function parseUnifiedPatch(patch: string): {
+  header: string;
+  hunks: UnifiedPatchHunk[];
+} | null {
+  const lines = patch.split("\n");
+  const starts: number[] = [];
+  const hunkPattern = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+  lines.forEach((line, index) => {
+    if (hunkPattern.test(line)) starts.push(index);
+  });
+  if (starts.length === 0) return { header: patch, hunks: [] };
+  const header = lines.slice(0, starts[0]).join("\n") + "\n";
+  const hunks = starts.map((start, index) => {
+    const match = lines[start].match(hunkPattern);
+    if (!match) throw new Error("invalid unified diff hunk");
+    return {
+      oldStart: Number(match[1]),
+      oldCount: Number(match[2] ?? "1"),
+      text: lines.slice(start, starts[index + 1] ?? lines.length).join("\n"),
+      order: index,
+    };
+  });
+  return { header, hunks };
+}
+
+function splitPatchFiles(patch: string): string[] {
+  const lines = patch.split("\n");
+  const gitStarts = lines.reduce<number[]>((starts, line, index) => {
+    if (line.startsWith("diff --git ")) starts.push(index);
+    return starts;
+  }, []);
+  if (gitStarts.length > 1) return splitAtLineIndexes(lines, gitStarts);
+
+  const unifiedStarts = lines.reduce<number[]>((starts, line, index) => {
+    if (line.startsWith("--- ") && lines[index + 1]?.startsWith("+++ ")) {
+      starts.push(index);
+    }
+    return starts;
+  }, []);
+  return unifiedStarts.length > 1 ? splitAtLineIndexes(lines, unifiedStarts) : [patch];
+}
+
+function splitAtLineIndexes(lines: string[], starts: number[]): string[] {
+  return starts.map((start, index) =>
+    lines.slice(start, starts[index + 1] ?? lines.length).join("\n"),
+  );
+}
+
+function patchPaths(patch: string): string[] {
+  const paths: string[] = [];
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      const match = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+      if (match) paths.push(normalizePatchPath(match[2]));
+      continue;
+    }
+    if (line.startsWith("+++ ") || line.startsWith("--- ")) {
+      const value = line.slice(4).trim();
+      if (value === "/dev/null") continue;
+      paths.push(normalizePatchPath(value));
+    }
+  }
+  return Array.from(new Set(paths.filter(Boolean)));
+}
+
+function normalizePatchPath(value: string): string {
+  return value
+    .trim()
+    .replace(/^['"]|['"]$/g, "")
+    .replace(/^[ab]\//, "")
+    .replace(/^\/+/, "")
+    .replace(/\\/g, "/");
 }
 
 function normalizeEditPatches(edit: FileEditItem): string[] {

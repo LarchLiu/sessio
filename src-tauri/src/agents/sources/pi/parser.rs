@@ -588,13 +588,14 @@ fn pi_tool_result_content_from_details(
         "type".to_string(),
         serde_json::Value::String("diff".to_string()),
     );
-    if let Some(path) = details
+    let path = details
         .get("path")
         .or_else(|| details.get("filePath"))
         .or_else(|| details.get("file_path"))
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
-    {
+        .map(ToString::to_string);
+    if let Some(path) = path.as_deref() {
         out.insert(
             "path".to_string(),
             serde_json::Value::String(path.to_string()),
@@ -605,24 +606,21 @@ fn pi_tool_result_content_from_details(
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
     {
-        out.insert(
-            "patch".to_string(),
-            serde_json::Value::String(patch.to_string()),
-        );
+        let patch =
+            normalize_pi_line_diff(path.as_deref(), patch).unwrap_or_else(|| patch.to_string());
+        out.insert("patch".to_string(), serde_json::Value::String(patch));
     }
     if let Some(diff) = details
         .get("diff")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
     {
-        out.insert(
-            "diff".to_string(),
-            serde_json::Value::String(diff.to_string()),
-        );
-        out.insert(
-            "detail".to_string(),
-            serde_json::Value::String(diff.to_string()),
-        );
+        let diff =
+            normalize_pi_line_diff(path.as_deref(), diff).unwrap_or_else(|| diff.to_string());
+        out.insert("diff".to_string(), serde_json::Value::String(diff));
+        if let Some(diff) = out.get("diff").cloned() {
+            out.insert("detail".to_string(), diff);
+        }
     }
     if let Some(first_changed_line) = details
         .get("firstChangedLine")
@@ -639,6 +637,82 @@ fn pi_tool_result_content_from_details(
         );
     }
     Some(serde_json::Value::Object(out))
+}
+
+/// Pi/OMP edit tools often return a compact line-numbered diff instead of a
+/// unified diff (`+12|new line`, ` 12|context`). Convert it before the shared
+/// ACP renderer sees the tool result so all agents get the same diff UI.
+fn normalize_pi_line_diff(path: Option<&str>, value: &str) -> Option<String> {
+    #[derive(Clone)]
+    struct Line {
+        marker: char,
+        number: usize,
+        text: String,
+    }
+
+    let mut lines = Vec::new();
+    for raw in value.lines().filter(|line| !line.trim().is_empty()) {
+        let mut chars = raw.chars();
+        let marker = chars.next()?;
+        if !matches!(marker, ' ' | '+' | '-') {
+            return None;
+        }
+        let numbered = chars.as_str();
+        let (number, text) = numbered.split_once('|')?;
+        let number = number.trim().parse::<usize>().ok()?;
+        lines.push(Line {
+            marker,
+            number,
+            text: text.to_string(),
+        });
+    }
+    if lines.is_empty() {
+        return None;
+    }
+
+    let mut groups: Vec<Vec<Line>> = Vec::new();
+    for line in lines {
+        let starts_new_group = groups.is_empty()
+            || groups.last().is_some_and(|group| {
+                let previous = group.last().expect("group is non-empty");
+                line.number > previous.number.saturating_add(8)
+            });
+        if starts_new_group {
+            groups.push(Vec::new());
+        }
+        groups.last_mut().expect("group created").push(line);
+    }
+
+    let display_path = path
+        .unwrap_or("file")
+        .replace('\\', "/")
+        .trim_start_matches('/')
+        .to_string();
+    let mut output = format!("--- a/{display_path}\n+++ b/{display_path}\n");
+    for (index, group) in groups.iter().enumerate() {
+        let old_start = group.first().map(|line| line.number).unwrap_or(1);
+        let new_start = old_start;
+        let old_count = group.iter().filter(|line| line.marker != '+').count();
+        let new_count = group.iter().filter(|line| line.marker != '-').count();
+        if index > 0 {
+            output.push('\n');
+        }
+        output.push_str(&format!(
+            "@@ -{old_start},{old_count} +{new_start},{new_count} @@\n"
+        ));
+        for (line_index, line) in group.iter().enumerate() {
+            if line_index > 0 {
+                output.push('\n');
+            }
+            if line.marker == ' ' {
+                output.push(' ');
+            } else {
+                output.push(line.marker);
+            }
+            output.push_str(&line.text);
+        }
+    }
+    Some(output)
 }
 
 fn pi_tool_to_acp_kind(tool_name: &str) -> &'static str {
@@ -874,6 +948,19 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pi_line_numbered_diff_is_normalized_to_unified_patch() {
+        let patch = normalize_pi_line_diff(
+            Some("apps/report.html"),
+            " 10|before\n-11|old\n+11|new\n 12|after\n\n 30|later\n+31|added",
+        )
+        .expect("line-numbered patch");
+        assert!(patch
+            .starts_with("--- a/apps/report.html\n+++ b/apps/report.html\n@@ -10,3 +10,3 @@\n"));
+        assert!(patch.contains("\n before\n-old\n+new\n after\n"));
+        assert!(patch.contains("@@ -30,1 +30,2 @@\n later\n+added"));
     }
 
     fn unique_temp_jsonl_path(prefix: &str) -> PathBuf {

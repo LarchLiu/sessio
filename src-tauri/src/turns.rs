@@ -1743,11 +1743,263 @@ fn tool_diff_file_edits(turn: &SessionHistoryTurn) -> Vec<Value> {
         .iter()
         .filter(|tool| tool_diff_file_edit_succeeded(tool))
         .flat_map(|tool| {
-            tool.content
+            let structured_edits = tool
+                .content
                 .iter()
-                .filter_map(move |content| tool_content_to_file_edit(tool, content))
+                .filter_map(move |content| tool_content_to_file_edit(tool, content));
+            structured_edits.chain(apply_patch_file_edits(tool))
         })
         .collect()
+}
+
+/// Codex records `apply_patch` through the outer `exec` tool. In that format
+/// the patch is embedded in the JavaScript source of `rawInput`, so there is
+/// no ACP `diff` content block to consume.
+fn apply_patch_file_edits(tool: &SessionHistoryToolCall) -> Vec<Value> {
+    if !tool.title.eq_ignore_ascii_case("exec") {
+        return Vec::new();
+    }
+    extract_apply_patch_literals(&tool.raw_input)
+        .into_iter()
+        .flat_map(|patch| parse_apply_patch_file_edits(&patch))
+        .collect()
+}
+
+fn extract_apply_patch_literals(raw_input: &Value) -> Vec<String> {
+    let Some(source) = raw_input.as_str() else {
+        return Vec::new();
+    };
+    if !source.contains("apply_patch") {
+        return Vec::new();
+    }
+
+    let bytes = source.as_bytes();
+    let mut literals = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'"' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        let mut escaped = false;
+        while index < bytes.len() {
+            match (bytes[index], escaped) {
+                (b'"', false) => {
+                    let literal = &source[start..=index];
+                    if let Ok(decoded) = serde_json::from_str::<String>(literal) {
+                        if decoded.contains("*** Begin Patch") {
+                            literals.push(decoded);
+                        }
+                    }
+                    index += 1;
+                    break;
+                }
+                (b'\\', false) => escaped = true,
+                (_, true) => escaped = false,
+                _ => {}
+            }
+            index += 1;
+        }
+    }
+    literals
+}
+
+fn parse_apply_patch_file_edits(patch: &str) -> Vec<Value> {
+    #[derive(Clone, Copy)]
+    enum Operation {
+        Update,
+        Add,
+        Delete,
+    }
+
+    let mut edits = Vec::new();
+    let mut operation = None;
+    let mut path = String::new();
+    let mut body = Vec::new();
+    let mut finish = |operation: Option<Operation>, path: &str, body: &[String]| {
+        let Some(operation) = operation else {
+            return;
+        };
+        if path.is_empty() {
+            return;
+        }
+        let display_path = path.replace('\\', "/").trim().to_string();
+        let patch_path = patch_display_path(&display_path);
+        let body = body
+            .iter()
+            .filter(|line| !line.starts_with("*** End of File"))
+            .cloned()
+            .collect::<Vec<_>>();
+        let body_text = body.join("\n");
+        let detail_text = body
+            .iter()
+            .filter(|line| !line.starts_with("@@"))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let update_has_location_hint = body.iter().any(|line| {
+            !line.starts_with('+')
+                && !line.starts_with('-')
+                && !line.starts_with("@@")
+                && !line.starts_with("*** End of File")
+        }) || body.iter().any(|line| line.starts_with('+'));
+        let (kind, patch_text) = match operation {
+            Operation::Update => (
+                "modify",
+                format!(
+                    "--- a/{patch_path}\n+++ b/{patch_path}\n{}",
+                    normalize_apply_patch_update_body(&display_path, &body)
+                ),
+            ),
+            Operation::Add => {
+                let count = body.iter().filter(|line| line.starts_with('+')).count();
+                (
+                    "create",
+                    format!(
+                        "--- /dev/null\n+++ b/{patch_path}\n@@ -0,0 +{count} @@\n{}",
+                        body_text
+                    ),
+                )
+            }
+            Operation::Delete => (
+                "delete",
+                format!(
+                    "--- a/{patch_path}\n+++ /dev/null\n@@ -1 +0,0 @@\n{}",
+                    body_text
+                ),
+            ),
+        };
+        let (additions, deletions) = patch_change_counts(&patch_text);
+        edits.push(json!({
+            "path": display_path.clone(),
+            "displayPath": display_path,
+            "kind": kind,
+            "additions": additions,
+            "deletions": deletions,
+            "patch": if matches!(operation, Operation::Update) && !update_has_location_hint {
+                Value::Null
+            } else {
+                Value::String(patch_text)
+            },
+            "detail": if matches!(operation, Operation::Update) && !update_has_location_hint {
+                Value::String(detail_text)
+            } else {
+                Value::Null
+            },
+        }));
+    };
+
+    for line in patch.lines() {
+        let marker = if let Some(path) = line.strip_prefix("*** Update File: ") {
+            Some((Operation::Update, path))
+        } else if let Some(path) = line.strip_prefix("*** Add File: ") {
+            Some((Operation::Add, path))
+        } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            Some((Operation::Delete, path))
+        } else {
+            None
+        };
+        if let Some((next_operation, next_path)) = marker {
+            finish(operation, &path, &body);
+            operation = Some(next_operation);
+            path = next_path.trim().to_string();
+            body.clear();
+            continue;
+        }
+        if operation.is_some()
+            && !line.starts_with("*** Begin Patch")
+            && !line.starts_with("*** End Patch")
+        {
+            body.push(line.to_string());
+        }
+    }
+    finish(operation, &path, &body);
+    edits
+}
+
+fn normalize_apply_patch_update_body(path: &str, body: &[String]) -> String {
+    let mut hunks: Vec<Vec<&str>> = Vec::new();
+    for line in body {
+        if line.starts_with("@@") {
+            hunks.push(Vec::new());
+        } else if let Some(hunk) = hunks.last_mut() {
+            hunk.push(line);
+        } else {
+            hunks.push(vec![line]);
+        }
+    }
+
+    let source_lines = std::fs::read_to_string(path)
+        .ok()
+        .map(|source| source.lines().map(ToOwned::to_owned).collect::<Vec<_>>());
+    let mut old_cursor = 1usize;
+    let mut new_cursor = 1usize;
+    let mut normalized_hunks = Vec::new();
+    for hunk in hunks {
+        let old_count = hunk
+            .iter()
+            .filter(|line| !line.starts_with('+') && !line.starts_with("*** End of File"))
+            .count();
+        let new_count = hunk
+            .iter()
+            .filter(|line| !line.starts_with('-') && !line.starts_with("*** End of File"))
+            .count();
+        let inferred_start = source_lines
+            .as_deref()
+            .and_then(|source| find_apply_patch_hunk_start(source, &hunk, old_cursor));
+        let old_start = inferred_start.unwrap_or(old_cursor);
+        let new_start = inferred_start.unwrap_or(new_cursor);
+        let lines = hunk
+            .iter()
+            .filter(|line| !line.starts_with("*** End of File"))
+            .map(|line| {
+                if line.starts_with('+') || line.starts_with('-') {
+                    (*line).to_string()
+                } else {
+                    format!(" {}", apply_patch_context_text(line))
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut normalized = format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@");
+        if !lines.is_empty() {
+            normalized.push('\n');
+            normalized.push_str(&lines.join("\n"));
+        }
+        normalized_hunks.push(normalized);
+        old_cursor = old_start.saturating_add(old_count);
+        new_cursor = new_start.saturating_add(new_count);
+    }
+    normalized_hunks.join("\n")
+}
+
+fn find_apply_patch_hunk_start(
+    source_lines: &[String],
+    hunk: &[&str],
+    search_from: usize,
+) -> Option<usize> {
+    let find_line = |expected: &str| {
+        source_lines
+            .iter()
+            .enumerate()
+            .skip(search_from.saturating_sub(1))
+            .find_map(|(index, line)| (line == expected).then_some(index + 1))
+    };
+    if let Some(context) = hunk
+        .iter()
+        .find(|line| !line.starts_with('+') && !line.starts_with('-'))
+    {
+        if let Some(start) = find_line(apply_patch_context_text(context)) {
+            return Some(start);
+        }
+    }
+    hunk.iter()
+        .find_map(|line| line.strip_prefix('+').and_then(find_line))
+}
+
+fn apply_patch_context_text(line: &str) -> &str {
+    line.strip_prefix(' ').unwrap_or(line)
 }
 
 fn tool_diff_file_edit_succeeded(tool: &SessionHistoryToolCall) -> bool {
@@ -4446,6 +4698,75 @@ mod tests {
         assert_eq!(data["edits"][0]["deletions"], 1);
         assert_eq!(data["additions"], 2);
         assert_eq!(data["deletions"], 1);
+    }
+
+    #[test]
+    fn runtime_builder_emits_file_edit_block_from_codex_exec_apply_patch() {
+        let mut state = RuntimeTurnState::new(
+            "runtime-1",
+            Agent::Codex,
+            "agent-1",
+            RuntimeTransportKind::Acp,
+            "/tmp/project",
+            RuntimeCapabilitySet::fake(),
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::TurnStarted {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            },
+            10,
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::AcpProtocolMessage {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                message: history_session_update_message(
+                    "tool_call",
+                    json!({
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tool-1",
+                        "title": "exec",
+                        "kind": "execute",
+                        "status": "completed",
+                        "rawInput": "const patch = \"*** Begin Patch\\n*** Update File: src/main.rs\\n@@\\n-old\\n+new\\n*** Add File: notes.txt\\n+hello\\n*** End Patch\"; text(await tools.apply_patch(patch));"
+                    }),
+                    Some(20),
+                ),
+            },
+            20,
+        );
+
+        let file_edit = state.turns[0]
+            .blocks
+            .iter()
+            .find(|block| block.update_type.as_deref() == Some("file_edit"))
+            .expect("file_edit block");
+        let data = file_edit.data.as_ref().unwrap();
+        assert_eq!(data["files"], 2);
+        assert_eq!(data["edits"].as_array().unwrap().len(), 2);
+        assert_eq!(data["edits"][0]["path"], "src/main.rs");
+        assert_eq!(data["edits"][0]["additions"], 1);
+        assert_eq!(data["edits"][0]["deletions"], 1);
+        assert_eq!(
+            data["edits"][0]["patch"].as_str().unwrap(),
+            "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new"
+        );
+        assert_eq!(data["edits"][1]["path"], "notes.txt");
+        assert_eq!(data["edits"][1]["kind"], "create");
+        assert_eq!(data["edits"][1]["additions"], 1);
+    }
+
+    #[test]
+    fn apply_patch_deletion_only_uses_text_fallback_without_fake_line_numbers() {
+        let edits = parse_apply_patch_file_edits(
+            "*** Begin Patch\n*** Update File: /tmp/example.rs\n@@\n-old line\n*** End Patch",
+        );
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0]["patch"], Value::Null);
+        assert_eq!(edits[0]["detail"], "-old line");
     }
 
     #[test]
