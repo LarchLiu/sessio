@@ -98,7 +98,18 @@ export interface SessioAppInfo {
   logoPath: string | null;
   nameZh: string | null;
   nameEn: string | null;
+  permissions: SessioAppPermission[];
 }
+
+export type SessioAppPermission =
+  | "autoplay"
+  | "clipboardWrite"
+  | "downloads"
+  | "fullscreen"
+  | "gamepad"
+  | "modals"
+  | "pointerLock"
+  | "popups";
 
 export interface SessioAppsCatalog {
   rootPath: string;
@@ -1473,6 +1484,25 @@ export async function listSessions(): Promise<SessionInfo[]> {
 
 export async function listSessioApps(): Promise<SessioAppsCatalog> {
   return invoke<SessioAppsCatalog>("list_sessio_apps");
+}
+
+export interface SessioAppFileWriteRequest {
+  appDirectoryPath: string;
+  relativePath: string;
+  data: string;
+  encoding?: "utf8" | "base64";
+  overwrite?: boolean;
+}
+
+export interface SessioAppFileWriteResult {
+  relativePath: string;
+  bytesWritten: number;
+}
+
+export async function writeSessioAppFile(
+  request: SessioAppFileWriteRequest,
+): Promise<SessioAppFileWriteResult> {
+  return invoke<SessioAppFileWriteResult>("write_sessio_app_file", { request });
 }
 
 export async function listSessioAppSessions(appId: string): Promise<SessionInfo[]> {

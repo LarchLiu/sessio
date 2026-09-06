@@ -8943,6 +8943,7 @@ pub fn run() {
             commands::apps::list_sessio_apps,
             commands::apps::list_sessio_app_sessions,
             commands::apps::link_sessio_app_session,
+            commands::apps::write_sessio_app_file,
             commands::process_templates::list_process_templates,
             commands::process_templates::create_process_template,
             commands::process_templates::update_process_template,

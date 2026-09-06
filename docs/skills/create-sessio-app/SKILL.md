@@ -7,13 +7,15 @@ description: >-
   Sessio, especially when the data should be easy to replace or regenerate.
   Always keep application markup/behavior, runtime data, and documentation in
   separate files so later agents can update data without rewriting the view.
-compatibility: Sessio HTML preview with optional inline JavaScript enabled; no server or network access required.
 ---
 
 # Create Sessio App
 
 Create small, inspectable HTML applications that open directly in a browser and
 preview safely in Sessio. The central contract is data separation:
+
+Compatibility: Sessio HTML preview with optional inline JavaScript enabled; no
+server or network access required.
 
 ```text
 <app-dir>/
@@ -46,11 +48,15 @@ existing files without explicit permission.
    representative app view as `web/screenshot.<ext>` after browser validation.
    Keep both assets inside `web/`. If generation or capture is unavailable or
    fails, omit the optional asset and continue; do not block app delivery or
-   invent a broken placeholder reference.
-4. **Define app metadata.** Create `web/config.json` with exactly these required
+   invent a broken placeholder reference. If the App itself must let users
+   export a screenshot at runtime, treat that as a separate feature and read
+   [references/screenshot-export.md](references/screenshot-export.md).
+4. **Define app metadata.** Create `web/config.json` with these required
    string fields: `nameZh` (Chinese name), `nameEn` (English name), `description`
    (app introduction), `author`, `email`, and `version`. Use a semantic version
-   such as `1.0.0` for `version`.
+   such as `1.0.0` for `version`. Add the optional `permissions` array only when
+   the app needs a Sessio-supported browser capability. Currently the supported
+   values are listed in the App permissions section below.
    Keep this metadata separate from runtime data; the HTML must not fetch or
    parse `config.json` unless the user explicitly requests that behavior.
 5. **Define the data schema before writing the view.** Decide the exact top-level
@@ -83,14 +89,16 @@ existing files without explicit permission.
    “Allow inline JavaScript”. Local scripts in the same directory and child
    directories are supported by Sessio's preview; resolve them relative to
    `web/`, using paths such as `./<app-slug>-data.js` or `scripts/data.js`. Do not depend on `document.currentScript`
-   or the original external script URL after it is inlined.
+   or the original external script URL after it is inlined. Follow the Sessio
+   theme contract below so the app uses the current light or dark chat
+   background and updates without reloading when the Sessio theme changes.
 9. **Write AGENTS.md from the implemented contract.** Explain what the app is
    for, how to open it in a browser and Sessio, the `web/` layout, config metadata, the exact
    data global, the complete schema, a valid data example, how to replace or
    regenerate data, how the app uses and transforms the data, whether data is
    sample, user-supplied, or derived, whether it leaves the local app, and
-   known preview/security limitations. AGENTS.md must be updated whenever the
-   schema or data usage changes.
+   theme behavior, and known preview/security limitations. AGENTS.md must be
+   updated whenever the schema, data usage, or theme behavior changes.
 10. **Validate before handing off.** Check that the HTML references the data JS,
    the data JS parses, the HTML contains no record literals, and AGENTS.md
    documents every top-level and record field, and that `web/config.json`
@@ -154,7 +162,7 @@ What the app shows and who uses it.
 - `web/<app-slug>.html`: view and interaction logic.
 - `web/<app-slug>-data.js`: only runtime data, exported as `window.<GLOBAL>`.
 - `web/config.json`: required app metadata with `nameZh`, `nameEn`,
-  `description`, `author`, `email`, and `version`.
+  `description`, `author`, `email`, and `version`, plus optional permissions.
 - `web/screenshot.<ext>`: optional screenshot for the app listing or documentation.
 - `AGENTS.md`: this contract, data-usage explanation, and maintenance notes.
 - `web/logo.<ext>`: optional local logo asset named `logo` with a supported image
@@ -171,13 +179,133 @@ What the app shows and who uses it.
   "description": "应用介绍。",
   "author": "作者姓名",
   "email": "author@example.com",
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "permissions": ["pointerLock"]
 }
 ```
 
-All six fields are required strings. Keep `description` concise and factual.
+All six metadata fields are required strings. `permissions` is optional and
+must contain only capability names supported by Sessio. Omit it or use an empty
+array when the app needs no extra browser capability. Keep `description`
+concise and factual.
 This file describes the app for Sessio and agents; it is metadata, not runtime
 data, and should not be duplicated in `<app-slug>-data.js`.
+
+## App permissions
+
+Treat `permissions` as a least-privilege capability request. Never place raw
+iframe `allow` values, sandbox tokens, HTML, or browser policy strings in
+`config.json`. Sessio maps each recognized name to its reviewed iframe policy
+and ignores unknown names.
+
+| Config value | Use when | iframe `allow` | Sandbox token |
+|---|---|---|---|
+| `autoplay` | Audio or video must start without a fresh user gesture | `autoplay` | None |
+| `clipboardWrite` | A user action copies generated content | `clipboard-write` | None |
+| `downloads` | A user action downloads content or saves generated data into the App's `web/` directory through the Sessio file-write bridge | None | `allow-downloads` |
+| `fullscreen` | A user action opens the app or canvas fullscreen | `fullscreen` | None |
+| `gamepad` | The app reads a connected game controller | `gamepad` | None |
+| `modals` | The app uses `alert()`, `confirm()`, `prompt()`, or `beforeunload` | None | `allow-modals` |
+| `pointerLock` | The primary interaction captures pointer movement, such as a first-person or 3D canvas | Not used | `allow-pointer-lock` |
+| `popups` | A user action opens a separate browser page | None | `allow-popups` |
+
+These capabilities only remove the corresponding iframe restriction. Browser
+support, user-activation requirements, operating-system policy, and Tauri/Wry
+backend limitations still apply. `popups` keeps new pages sandboxed; do not use
+`allow-popups-to-escape-sandbox`.
+
+For pointer lock, request the capability only when the app actually calls
+`Element.requestPointerLock()`. Provide an explicit user action to enter pointer
+lock, a visible way to exit, and a useful fallback when the browser denies the
+request. Document requested capabilities, why they are needed, and fallback
+behavior in AGENTS.md. Test the capability inside Sessio because direct-browser
+behavior does not verify Sessio's iframe sandbox or embedding engine.
+
+Pointer Lock is governed by transient user activation and the iframe sandboxed
+pointer-lock flag; it is not a Permissions Policy-controlled feature. Do not add
+`allow="pointer-lock"` or rely on a parent `Permissions-Policy` header for it.
+The `allow-pointer-lock` sandbox token removes the iframe restriction but cannot
+add support to an embedding engine. In particular, Pointer Lock remains broken
+in Tauri/Wry's macOS WKWebView backend. Apps that request `pointerLock` must also
+support a usable unlocked interaction such as click-and-drag camera movement.
+
+Do not request camera, microphone, geolocation, display capture, clipboard read,
+same-origin access, or arbitrary network access through this array. Those
+capabilities expose sensitive data, weaken the isolation boundary, or require
+CSP and native host changes. They need a dedicated Sessio bridge before they
+can be added to the allowlist.
+
+### Saving files through Sessio
+
+For an App feature that captures a chart, board, canvas, diagram, or other
+rendered view as an image, read
+[references/screenshot-export.md](references/screenshot-export.md). It explains
+the Sessio sandbox constraint, export rendering choices, PNG generation,
+browser fallback, and an equivalent sandbox test.
+
+The `downloads` permission also authorizes the App to ask Sessio to write a file
+inside that App's `web/` directory. Add `"downloads"` explicitly to
+`web/config.json` before using this bridge. Sessio ignores file-write messages
+when the permission is absent, and its native backend reads `config.json` again
+before every write. The page cannot choose another App or write outside its own
+`web/` directory.
+
+Send this request from the App iframe:
+
+```js
+window.parent.postMessage({
+  source: "sessio-app",
+  type: "sessio-app-write-file",
+  requestId: "save-1",
+  path: "exports/state.json",
+  data: JSON.stringify(window.SESSIO_APP_DATA, null, 2),
+  encoding: "utf8",
+  overwrite: false
+}, "*");
+```
+
+`requestId` must be a non-empty string of at most 128 characters and should be
+unique among outstanding requests. `path` is relative to `web/`. Use only
+ordinary, visible path segments; absolute paths, `.`/`..`, hidden segments,
+backslashes, colons, empty segments, symbolic-link traversal, `config.json`, and
+platform-reserved file names are rejected. Child directories are created as
+needed. Existing files are preserved unless `overwrite` is exactly `true`.
+
+`encoding` may be `"utf8"` (the default) or `"base64"`. For binary content,
+send only the Base64 payload without a `data:` URL prefix. The decoded file may
+not exceed 25 MiB. Sessio responds to the same iframe with one of these message
+shapes:
+
+```js
+// Success
+{
+  source: "sessio",
+  type: "sessio-app-write-file-result",
+  requestId: "save-1",
+  ok: true,
+  relativePath: "exports/state.json",
+  bytesWritten: 123
+}
+
+// Failure
+{
+  source: "sessio",
+  type: "sessio-app-write-file-result",
+  requestId: "save-1",
+  ok: false,
+  error: "App file already exists; set overwrite to true to replace it"
+}
+```
+
+Listen for `message` events, require `event.source === window.parent`, and match
+both the result `type` and `requestId` before updating the UI. Show a visible
+success or failure state. A page opened directly in a browser has no Sessio
+parent bridge, so keep ordinary browser downloads as a fallback when the app's
+workflow requires export outside Sessio.
+
+Document every file the App can generate in AGENTS.md, including its relative
+path or naming rule, format, data source, maximum expected size, whether a later
+save may set `overwrite: true`, and the user action that starts the write.
 
 ## Run and preview
 Browser steps, Sessio preview steps, and whether inline JavaScript must be enabled.
@@ -217,7 +345,9 @@ sent outside the local app. State that offline use performs no network transfer.
 Identify sensitive or personal data and keep secrets and real personal data out
 of sample files. Document how user-provided images, documents, and text are
 evaluated against the schema, which extraction or OCR method is used when
-needed, and what happens when content does not map reliably to a field.
+needed, and what happens when content does not map reliably to a field. If the
+App uses the Sessio file-write bridge, describe the generated files and make it
+clear that they remain within the local App's `web/` directory.
 
 ## Installed location
 The validated copy is installed at `$SESSIO_APP_HOME/apps/<app-slug>/`, where
@@ -244,6 +374,76 @@ legends only when needed, keyboard-accessible controls, and an informative
 empty state. Keep tables readable at narrow widths and allow horizontal scroll
 only when columns cannot fit. Avoid invented KPI cards, decorative filler, and
 server-only features.
+
+## Sessio theme contract
+
+Sessio sets `data-sessio-theme="light"` or `data-sessio-theme="dark"` on the
+HTML root and injects `--sessio-chat-background` with the matching chat canvas
+color:
+
+| Theme | Chat background |
+|---|---|
+| Light | `#f6f6f4` (`rgb(246 246 244)`) |
+| Dark | `#232831` (`rgb(35 40 49)`) |
+
+Use `--sessio-chat-background` as the page canvas color and derive surfaces,
+borders, text, muted text, and data colors with sufficient contrast for that
+base. Do not place an unrelated fixed page background over it. Define a direct
+browser fallback because the injected variable and attribute exist only in
+Sessio:
+
+```css
+:root {
+  color-scheme: light;
+  --app-bg: var(--sessio-chat-background, #f6f6f4);
+  --app-fg: #1f232b;
+  --app-muted: #64748b;
+  --app-surface: #fcfcfa;
+  --app-border: rgba(31, 35, 43, 0.12);
+}
+
+:root[data-sessio-theme="dark"] {
+  color-scheme: dark;
+  --app-fg: #dae0ea;
+  --app-muted: #94a3b8;
+  --app-surface: #2b313b;
+  --app-border: rgba(218, 224, 234, 0.12);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-sessio-theme]) {
+    color-scheme: dark;
+    --app-bg: #232831;
+    --app-fg: #dae0ea;
+    --app-muted: #94a3b8;
+    --app-surface: #2b313b;
+    --app-border: rgba(218, 224, 234, 0.12);
+  }
+}
+
+html,
+body {
+  background: var(--app-bg);
+  color: var(--app-fg);
+}
+```
+
+Sessio updates the root attribute, `color-scheme`, and background variable when
+its theme changes. CSS-based views update automatically. A Canvas or a chart
+library that stores colors in JavaScript must redraw on this event:
+
+```js
+window.addEventListener("sessio:themechange", (event) => {
+  const { theme, chatBackground } = event.detail;
+  renderChart({ theme, background: chatBackground });
+});
+```
+
+Do not use `prefers-color-scheme` as the primary signal inside Sessio because
+the user may choose a Sessio theme that differs from the operating system.
+Document the theme variables and any JavaScript redraw behavior in AGENTS.md.
+During browser validation, test both root attribute values and the standalone
+browser fallback.
 
 ## Browser effect testing
 
@@ -297,6 +497,17 @@ Before reporting completion, verify:
       before extracting values into the data JS.
 - [ ] Missing/invalid data produces a visible, actionable empty/error state.
 - [ ] The page works offline and does not require a server.
+- [ ] `permissions` is omitted unless the app needs a supported capability;
+      each requested capability is documented in AGENTS.md and tested in Sessio.
+- [ ] Any Sessio file-write workflow declares `downloads`, handles success and
+      failure responses, stays below 25 MiB, and documents generated files and
+      overwrite behavior in AGENTS.md.
+- [ ] Any runtime screenshot export follows
+      `references/screenshot-export.md` and is tested without
+      `allow-same-origin`.
+- [ ] The page background uses `--sessio-chat-background`; light mode uses
+      `#f6f6f4`, dark mode uses `#232831`, and theme-dependent charts redraw
+      after `sessio:themechange` when needed.
 - [ ] A real-browser test covers initial render, the primary interaction, a
       screenshot review, and responsive viewport checks; positioned visuals
       have bounding-box alignment measured when applicable.
@@ -305,7 +516,8 @@ Before reporting completion, verify:
       with child directories preserved and overwrite protection enabled; when
       AGENTS.md exists, the destination also contains an independent CLAUDE.md
       copy.
-- [ ] `web/config.json` is valid JSON and contains exactly the required string
-      fields: `nameZh`, `nameEn`, `description`, `author`, `email`, and `version`.
+- [ ] `web/config.json` is valid JSON and contains the required string fields:
+      `nameZh`, `nameEn`, `description`, `author`, `email`, and `version`; its
+      optional `permissions` array contains only supported capability names.
 - [ ] HTML, JS, config, assets, and AGENTS.md paths are reported using absolute
       paths.

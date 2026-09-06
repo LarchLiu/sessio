@@ -397,6 +397,8 @@ export default function AppsPage({
             filePath={app.htmlPath}
             scriptsInitiallyEnabled
             showScriptsControl={false}
+            permissions={app.permissions}
+            appDirectoryPath={app.directoryPath}
           />
         ) : (
           <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-ink/45">
