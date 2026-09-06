@@ -8,9 +8,20 @@ asset captured by the developer for an App listing or handoff.
 ## Required contract
 
 Add `"downloads"` to `web/config.json`. This permission authorizes both an
-ordinary browser download and Sessio's file-write bridge. It does not create a
-screenshot automatically; the HTML must provide a user-triggered control,
-render the image, encode it, send the write request, and display the result.
+ordinary browser download and Sessio's file-write bridge. A runtime screenshot
+export must implement both capabilities with an explicit fallback order. For a
+single user-triggered export, render one image and try Sessio's `postMessage`
+file-write bridge first when embedded. If Sessio confirms success, report the
+saved path and do not trigger a second browser download. If the bridge is
+unavailable, times out, or returns failure, fall back to the ordinary browser
+download and report whether the bridge was unavailable or failed. The HTML must provide a
+user-triggered control, render the image, encode it as needed, and display the
+result of the path that was used.
+The permission is mandatory for every runtime screenshot export. A direct
+browser may allow the download without App metadata, but Sessio's sandbox can
+block it. When opened directly, `window.parent === window` means the bridge has
+no Sessio recipient; retain the bridge implementation, detect that it is
+unavailable, and use the browser download fallback.
 
 Choose and document the capture scope before implementing it:
 
@@ -133,10 +144,10 @@ Base64 expands data by about one third and creates additional in-memory copies.
 Keep the pixel budget conservative and avoid retaining old canvases, data URLs,
 or Base64 strings after the operation completes.
 
-## Save in Sessio
+## Preferred path: Sessio file write
 
 Follow the complete request and response contract in
-[Saving files through Sessio](../SKILL.md#saving-files-through-sessio). Convert
+[Exporting and saving files](../SKILL.md#exporting-and-saving-files). Convert
 only the PNG Blob payload to Base64; do not include the `data:image/png;base64,`
 prefix.
 
@@ -156,12 +167,15 @@ Correlate the response with a unique `requestId`. Require
 `event.source === window.parent`, `source === "sessio"`, the expected result
 type, and the matching request ID. Remove the listener and timeout after either
 success or failure. Report the returned `relativePath`, output dimensions, and
-human-readable file size to the user.
+human-readable file size to the user. A successful bridge result ends the export
+operation; do not call `downloadBlob` for the same snapshot.
 
-## Direct-browser fallback
+## Fallback path: ordinary browser download
 
-When the page is opened directly and `window.parent === window`, download the
-same Blob without Base64 conversion:
+If the bridge is unavailable, times out, or returns failure, download the same
+PNG Blob from the explicit user action and report that it was saved locally,
+along with whether Sessio `web/` saving was unavailable or failed. Revoke the
+object URL after the click:
 
 ```js
 function downloadBlob(blob, fileName) {
@@ -177,9 +191,18 @@ function downloadBlob(blob, fileName) {
 }
 ```
 
-An App embedded by a non-Sessio parent may not provide the bridge. If that use
-case matters, define a bounded response timeout and an explicit fallback or
-error instead of waiting indefinitely.
+Do not trigger this fallback after a successful bridge response. Keep browser
+download behavior a direct consequence of the user's export action; delayed
+work can lose transient user activation in some engines.
+
+## Direct-browser behavior
+
+When the page is opened directly and `window.parent === window`, there is no
+Sessio recipient, so use the fallback browser download path without Base64
+conversion. The same implementation must retain the bridge-first path for
+embedded use. An App embedded by a non-Sessio parent may also lack the bridge;
+define a bounded response timeout and treat that case as a fallback, never as
+bridge success.
 
 ## AGENTS.md requirements
 
@@ -191,8 +214,10 @@ Document:
   limits, and overwrite behavior.
 - The fact that the image can contain the same personal or sensitive data shown
   by the App.
-- The user action that triggers rendering and writing.
-- Sessio local-save behavior and the direct-browser download fallback.
+- The single user action, bridge-first order, and the conditions that trigger
+  the browser download fallback.
+- Sessio local-save behavior, including that a successful bridge prevents a
+  duplicate browser download, and the direct-browser fallback.
 - Any intentional differences between the interactive HTML view and the export
   renderer.
 
@@ -218,8 +243,12 @@ decode the Base64 payload, and send a matching success response. Verify:
   logical bounds and scale.
 - The image visibly includes the expected background, labels, links, markers,
   and edge content without clipping.
-- The status region reports success and the button returns to its enabled
-  state; a simulated failure produces a clear error.
+- With a successful bridge response, the status region reports the Sessio path,
+  the button returns to its enabled state, and the browser download fallback is
+  not called.
+- With a simulated bridge absence, timeout, or failure, the browser fallback
+  runs once, reports a local download plus the Sessio error, and restores the
+  button.
 - The browser console contains no sandbox, cross-origin, CSP, or canvas errors.
 
 Also test a narrow viewport. The controls must remain usable and status text

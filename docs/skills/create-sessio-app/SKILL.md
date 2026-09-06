@@ -50,7 +50,11 @@ existing files without explicit permission.
    fails, omit the optional asset and continue; do not block app delivery or
    invent a broken placeholder reference. If the App itself must let users
    export a screenshot at runtime, treat that as a separate feature and read
-   [references/screenshot-export.md](references/screenshot-export.md).
+   [references/screenshot-export.md](references/screenshot-export.md). If it
+   exports JSON, CSV, text, SVG, a save file, or any other data/file at runtime,
+   read [references/data-export.md](references/data-export.md). Every runtime
+   screenshot or file export must declare `"downloads"` in `web/config.json`,
+   including exports that only use an ordinary browser download.
 4. **Define app metadata.** Create `web/config.json` with these required
    string fields: `nameZh` (Chinese name), `nameEn` (English name), `description`
    (app introduction), `author`, `email`, and `version`. Use a semantic version
@@ -203,6 +207,17 @@ iframe `allow` values, sandbox tokens, HTML, or browser policy strings in
 `config.json`. Sessio maps each recognized name to its reviewed iframe policy
 and ignores unknown names.
 
+Runtime screenshots and exported data/files always require the `downloads`
+permission and must implement both export capabilities: `<a download>`/Blob
+download and the Sessio `postMessage` file-write bridge. They use a defined
+fallback order, so one user action does not create two copies. From an App
+embedded in Sessio, generate one immutable snapshot, try the bridge first, and
+start the browser download only when the bridge is unavailable, times out, or
+returns failure. If the bridge succeeds, do not trigger a second download. A
+direct-browser page has no Sessio bridge recipient, so it uses the browser
+download path. Importing a local file with a user-triggered `<input
+type="file">` and `FileReader` does not by itself require `downloads`.
+
 | Config value | Use when | iframe `allow` | Sandbox token |
 |---|---|---|---|
 | `autoplay` | Audio or video must start without a fresh user gesture | `autoplay` | None |
@@ -240,13 +255,20 @@ capabilities expose sensitive data, weaken the isolation boundary, or require
 CSP and native host changes. They need a dedicated Sessio bridge before they
 can be added to the allowlist.
 
-### Saving files through Sessio
+### Exporting and saving files
 
 For an App feature that captures a chart, board, canvas, diagram, or other
 rendered view as an image, read
 [references/screenshot-export.md](references/screenshot-export.md). It explains
 the Sessio sandbox constraint, export rendering choices, PNG generation,
 browser fallback, and an equivalent sandbox test.
+
+For JSON, CSV, text, SVG, game saves, or other generated files, read
+[references/data-export.md](references/data-export.md). It covers format and
+schema choices, Blob downloads, the Sessio file-write bridge, importing files,
+AGENTS.md requirements, and validation. Both references require `"downloads"`
+in `web/config.json` and require both export capabilities with the bridge-first
+fallback order for every runtime export.
 
 The `downloads` permission also authorizes the App to ask Sessio to write a file
 inside that App's `web/` directory. Add `"downloads"` explicitly to
@@ -504,12 +526,18 @@ Before reporting completion, verify:
 - [ ] The page works offline and does not require a server.
 - [ ] `permissions` is omitted unless the app needs a supported capability;
       each requested capability is documented in AGENTS.md and tested in Sessio.
-- [ ] Any Sessio file-write workflow declares `downloads`, handles success and
-      failure responses, stays below 25 MiB, and documents generated files and
-      overwrite behavior in AGENTS.md.
+- [ ] Every runtime screenshot or data/file export declares `downloads` and
+      implements both ordinary Blob/`<a download>` download and Sessio
+      file-write bridge capabilities from the same user action and snapshot;
+      Sessio tries the bridge first and falls back to the browser download only
+      on bridge failure, timeout, or absence. Bridge payloads stay below 25 MiB,
+      and generated files and overwrite behavior are documented in AGENTS.md.
 - [ ] Any runtime screenshot export follows
       `references/screenshot-export.md` and is tested without
       `allow-same-origin`.
+- [ ] Any runtime JSON, CSV, text, SVG, save-file, or other data export follows
+      `references/data-export.md`; exported content and imported files are
+      validated against a documented, versioned format.
 - [ ] The page background uses `--sessio-chat-background`; light mode uses
       `#f6f6f4`, dark mode uses `#232831`, and theme-dependent charts redraw
       after `sessio:themechange` when needed.
