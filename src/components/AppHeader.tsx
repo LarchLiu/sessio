@@ -24,6 +24,8 @@ interface AppHeaderProps {
   terminalDockVisible?: boolean;
   chatView?: ChatView;
   chatViewVisible?: boolean;
+  appChatVisible?: boolean;
+  onToggleAppChat?: () => void;
   onOpenSidebar: () => void;
   onToggleMetaPopover: () => void;
   onToggleTerminalDock?: () => void;
@@ -46,6 +48,8 @@ export default function AppHeader({
   terminalDockVisible = false,
   chatView = "chat",
   chatViewVisible = false,
+  appChatVisible = true,
+  onToggleAppChat,
   onOpenSidebar,
   onToggleMetaPopover,
   onToggleTerminalDock,
@@ -140,6 +144,24 @@ export default function AppHeader({
         ) : null}
       </div>
       <div className="flex h-full items-center justify-self-end gap-2" data-tauri-drag-region="false">
+        {onToggleAppChat && (
+          <Tooltip content={t(appChatVisible ? "apps.chat_hide" : "apps.chat_show")} placement="bottom">
+            <button
+              type="button"
+              aria-label={t(appChatVisible ? "apps.chat_hide" : "apps.chat_show")}
+              aria-pressed={appChatVisible}
+              aria-controls="app-chat"
+              data-tauri-drag-region="false"
+              onClick={onToggleAppChat}
+              className={
+                "rounded-md p-1 transition-colors hover:bg-ink/5 hover:text-ink " +
+                (appChatVisible ? "bg-ink/5 text-ink" : "text-ink/55")
+              }
+            >
+              <MessageSquare className="h-4 w-4" />
+            </button>
+          </Tooltip>
+        )}
         {chatViewVisible && onChatViewChange && (
           <ChatViewToggle value={chatView} onChange={onChatViewChange} />
         )}

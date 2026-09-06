@@ -61,6 +61,7 @@ import { liveOrLatestTurnFileEdits } from "../acpRenderItems";
 export default function AppsPage({
   app,
   appDisplayName,
+  chatVisible,
   runtimeSessionId,
   onRuntimeSessionIdChange,
   runtimeAgents,
@@ -75,6 +76,7 @@ export default function AppsPage({
 }: {
   app: SessioAppInfo;
   appDisplayName: string;
+  chatVisible: boolean;
   runtimeSessionId: string | null;
   onRuntimeSessionIdChange: (runtimeSessionId: string) => void;
   runtimeAgents: RuntimeAgentMetadata[];
@@ -116,7 +118,7 @@ export default function AppsPage({
     },
     onPreviewImageAttachment: setPreviewImage,
   });
-  useAppshotComposerRegistration(composer, true);
+  useAppshotComposerRegistration(composer, chatVisible);
 
   const loadHtml = useCallback(async () => {
     if (!app.htmlPath) {
@@ -406,81 +408,83 @@ export default function AppsPage({
             <p className="text-body-sm">{t("apps.no_html")}</p>
           </div>
         )}
-        <ComposerTopAttachments>
-          {!chatExpanded &&
-            pendingPermissions.map((permission) => (
-              <div
-                key={permission.requestId}
-                className="flex min-h-8 items-center gap-2 px-3 py-1 text-caption text-ink/65"
-              >
-                <span className="min-w-0 flex-1 truncate">{permission.toolName}</span>
-                <div className="flex shrink-0 items-center gap-1">
-                  {permission.options.map((option) => (
-                    <button
-                      key={option.optionId}
-                      type="button"
-                      disabled={Boolean(resolvingPermissionId)}
-                      onClick={() => void resolvePermission(permission, option.optionId)}
-                      className="rounded px-2 py-0.5 font-medium text-ink/70 transition hover:bg-ink/8 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
-                    >
-                      {option.name}
-                    </button>
-                  ))}
+        <div id="app-chat" className={chatVisible ? "flex shrink-0 flex-col" : "hidden"}>
+          <ComposerTopAttachments>
+            {!chatExpanded &&
+              pendingPermissions.map((permission) => (
+                <div
+                  key={permission.requestId}
+                  className="flex min-h-8 items-center gap-2 px-3 py-1 text-caption text-ink/65"
+                >
+                  <span className="min-w-0 flex-1 truncate">{permission.toolName}</span>
+                  <div className="flex shrink-0 items-center gap-1">
+                    {permission.options.map((option) => (
+                      <button
+                        key={option.optionId}
+                        type="button"
+                        disabled={Boolean(resolvingPermissionId)}
+                        onClick={() => void resolvePermission(permission, option.optionId)}
+                        className="rounded px-2 py-0.5 font-medium text-ink/70 transition hover:bg-ink/8 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
+                      >
+                        {option.name}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            ))}
-          {chatExpanded && viewModel && drawerRuntimeSessionId ? (
-            <ChatTranscriptDrawer
-              appId={app.id}
-              viewModel={viewModel}
-              runtimeSessionId={drawerRuntimeSessionId}
-              liveTurnIds={liveSession?.turns.map((turn) => turn.turnId) ?? []}
-              workingTurnId={activeTurn?.turnId ?? null}
-              onCollapse={() => setChatExpanded(false)}
-              onError={onError}
-              onPreviewImage={setPreviewImage}
-              onPreviewFile={setPreviewFile}
-              onFilePreviewError={setFilePreviewNotice}
-              onOpenProjectFile={onOpenFile}
+              ))}
+            {chatExpanded && viewModel && drawerRuntimeSessionId ? (
+              <ChatTranscriptDrawer
+                appId={app.id}
+                viewModel={viewModel}
+                runtimeSessionId={drawerRuntimeSessionId}
+                liveTurnIds={liveSession?.turns.map((turn) => turn.turnId) ?? []}
+                workingTurnId={activeTurn?.turnId ?? null}
+                onCollapse={() => setChatExpanded(false)}
+                onError={onError}
+                onPreviewImage={setPreviewImage}
+                onPreviewFile={setPreviewFile}
+                onFilePreviewError={setFilePreviewNotice}
+                onOpenProjectFile={onOpenFile}
+              />
+            ) : (
+              <MinimalMessageStrip
+                viewModel={viewModel}
+                workingTurnId={activeTurn?.turnId ?? null}
+                emptyText={loadingHistory ? t("apps.chat_loading") : t("apps.chat_empty")}
+                ariaLabel={t("apps.chat_expand")}
+                onClick={
+                  viewModel && drawerRuntimeSessionId
+                    ? () => setChatExpanded(true)
+                    : undefined
+                }
+              />
+            )}
+            <EditedFilesBar
+              fileCount={currentTurnFileEdits.edits.length}
+              additions={currentTurnFileEdits.additions}
+              deletions={currentTurnFileEdits.deletions}
+              edits={currentTurnFileEdits.edits}
+              onOpenFile={onOpenFile}
             />
-          ) : (
-            <MinimalMessageStrip
-              viewModel={viewModel}
-              workingTurnId={activeTurn?.turnId ?? null}
-              emptyText={loadingHistory ? t("apps.chat_loading") : t("apps.chat_empty")}
-              ariaLabel={t("apps.chat_expand")}
-              onClick={
-                viewModel && drawerRuntimeSessionId
-                  ? () => setChatExpanded(true)
-                  : undefined
-              }
-            />
-          )}
-          <EditedFilesBar
-            fileCount={currentTurnFileEdits.edits.length}
-            additions={currentTurnFileEdits.additions}
-            deletions={currentTurnFileEdits.deletions}
-            edits={currentTurnFileEdits.edits}
-            onOpenFile={onOpenFile}
+          </ComposerTopAttachments>
+          <ChatComposer
+            composer={composer}
+            variant="chat"
+            className="shrink-0 bg-gradient-to-t from-surface-panel via-surface-panel to-surface-panel/80 px-10 pb-4"
+            placeholder={t("apps.chat_placeholder")}
+            runtimeControlsDisabled={Boolean(liveSession && !liveSession.ended)}
+            canSend={
+              composer.canSendWithWorkspace(app.directoryPath) &&
+              !activeTurn &&
+              !continuationSending &&
+              !loadingHistory
+            }
+            active={Boolean(activeTurn)}
+            sendButtonBusy={composer.sending || continuationSending}
+            onCancel={() => void cancelTurn()}
+            onSend={() => void sendMessage()}
           />
-        </ComposerTopAttachments>
-        <ChatComposer
-          composer={composer}
-          variant="chat"
-          className="shrink-0 bg-gradient-to-t from-surface-panel via-surface-panel to-surface-panel/80 px-10 pb-4"
-          placeholder={t("apps.chat_placeholder")}
-          runtimeControlsDisabled={Boolean(liveSession && !liveSession.ended)}
-          canSend={
-            composer.canSendWithWorkspace(app.directoryPath) &&
-            !activeTurn &&
-            !continuationSending &&
-            !loadingHistory
-          }
-          active={Boolean(activeTurn)}
-          sendButtonBusy={composer.sending || continuationSending}
-          onCancel={() => void cancelTurn()}
-          onSend={() => void sendMessage()}
-        />
+        </div>
       </div>
       {previewImage && (
         <ImagePreviewOverlay image={previewImage} onClose={() => setPreviewImage(null)} />

@@ -172,6 +172,7 @@ export default function App() {
   const [utilityView, setUtilityView] = useState<UtilityView>(null);
   const [selectedApp, setSelectedApp] = useState<SessioAppInfo | null>(null);
   const [selectedAppFilePath, setSelectedAppFilePath] = useState<string | null>(null);
+  const [appChatVisible, setAppChatVisible] = useState(true);
   const [appRuntimeSessions, setAppRuntimeSessions] = useState<Record<string, string>>({});
   const [updateConfirmOpen, setUpdateConfirmOpen] = useState(false);
   const [updateConfirmMounted, setUpdateConfirmMounted] = useState(false);
@@ -1294,6 +1295,8 @@ export default function App() {
       rightSidebarOpen={rightSidebarOpen}
       terminalDockOpen={terminalDockOpen}
       terminalDockVisible={Boolean(selectedApp)}
+      appChatVisible={appChatVisible}
+      onToggleAppChat={selectedApp ? () => setAppChatVisible((visible) => !visible) : undefined}
       onOpenSidebar={() => setSidebarOpen(true)}
       onToggleMetaPopover={() => {}}
       onToggleTerminalDock={() => setTerminalDockOpen((open) => !open)}
@@ -1448,6 +1451,7 @@ export default function App() {
             <AppsPage
               key={selectedApp.directoryPath}
               app={selectedApp}
+              chatVisible={appChatVisible}
               appDisplayName={sessioAppDisplayName(
                 selectedApp,
                 lang,
