@@ -113,10 +113,15 @@ existing files without explicit permission.
    running Sessio process. Invoke the bundled publisher for the current shell:
    use `scripts/publish_app.sh <source-dir> <app-slug>` on macOS/Linux (or Git
    Bash/WSL), and `scripts/publish_app.ps1 <source-dir> <app-slug>` on native
-   Windows PowerShell. Both scripts copy the complete app directory to
-   `$SESSIO_APP_HOME/apps/<app-slug>/`, preserving `web/`, AGENTS.md, and all
-   files and child directories exactly. They refuse to replace an existing
-   destination unless the user explicitly authorizes `--force`/`-Force`.
+   Windows PowerShell. Both scripts copy the complete source app directory to
+   `$SESSIO_APP_HOME/apps/<app-slug>/`. They refuse to update an existing
+   destination unless the user explicitly requests `--update`/`-Update`.
+   Update publishing merges recursively: source paths replace matching
+   destination paths, while destination-only files such as runtime screenshots
+   and saved data remain in place. If a matching path changes between a file and
+   a directory, the source type wins and that conflicting destination path is
+   replaced. Update publishing is not a clean reinstall and does not remove
+   stale destination-only package files.
    The publisher is an execution step, not a completion message: run it after
    validation and then verify that the destination contains `web/<app-slug>.html`,
    `web/<app-slug>-data.js`, `web/config.json`, AGENTS.md, CLAUDE.md, and any
@@ -512,10 +517,10 @@ Before reporting completion, verify:
       screenshot review, and responsive viewport checks; positioned visuals
       have bounding-box alignment measured when applicable.
 - [ ] After validation, the complete app directory is copied to
-      `$SESSIO_APP_HOME/apps/<app-slug>/` using the bundled platform publisher,
-      with child directories preserved and overwrite protection enabled; when
-      AGENTS.md exists, the destination also contains an independent CLAUDE.md
-      copy.
+      `$SESSIO_APP_HOME/apps/<app-slug>/` using the bundled platform publisher;
+      `--update`/`-Update` preserves destination-only runtime screenshots and saved
+      data, and when AGENTS.md exists, the destination also contains an
+      independent CLAUDE.md copy.
 - [ ] `web/config.json` is valid JSON and contains the required string fields:
       `nameZh`, `nameEn`, `description`, `author`, `email`, and `version`; its
       optional `permissions` array contains only supported capability names.

@@ -6,7 +6,7 @@ param(
   [Parameter(Position = 1, Mandatory = $true)]
   [string]$AppSlug,
 
-  [switch]$Force
+  [switch]$Update
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,6 +14,42 @@ $ErrorActionPreference = 'Stop'
 function Fail([int]$Code, [string]$Message) {
   [Console]::Error.WriteLine($Message)
   exit $Code
+}
+
+function Merge-AppTree([string]$Source, [string]$Destination) {
+  if (-not (Test-Path -LiteralPath $Destination)) {
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+  }
+
+  foreach ($item in Get-ChildItem -LiteralPath $Source -Force) {
+    $target = Join-Path $Destination $item.Name
+    $isRealDirectory = $item.PSIsContainer -and [string]::IsNullOrEmpty($item.LinkType)
+    if ($isRealDirectory) {
+      if (Test-Path -LiteralPath $target) {
+        $targetItem = Get-Item -LiteralPath $target -Force
+        $targetIsRealDirectory = $targetItem.PSIsContainer -and [string]::IsNullOrEmpty($targetItem.LinkType)
+        if (-not $targetIsRealDirectory) {
+          Remove-Item -LiteralPath $target -Recurse -Force
+          New-Item -ItemType Directory -Path $target -Force | Out-Null
+        }
+      } else {
+        New-Item -ItemType Directory -Path $target -Force | Out-Null
+      }
+      Merge-AppTree $item.FullName $target
+    } else {
+      if (Test-Path -LiteralPath $target) {
+        Remove-Item -LiteralPath $target -Recurse -Force
+      }
+      Copy-Item -LiteralPath $item.FullName -Destination $target -Force
+    }
+  }
+}
+
+function Write-ClaudeInstructions([string]$Destination) {
+  $agentsFile = Join-Path $Destination 'AGENTS.md'
+  if (Test-Path -LiteralPath $agentsFile -PathType Leaf) {
+    Copy-Item -LiteralPath $agentsFile -Destination (Join-Path $Destination 'CLAUDE.md') -Force
+  }
 }
 
 $appHome = [Environment]::GetEnvironmentVariable('SESSIO_APP_HOME')
@@ -33,25 +69,31 @@ if ($AppSlug -notmatch '^[a-z0-9]+([.-][a-z0-9]+)*$') {
 $source = (Resolve-Path -LiteralPath $SourceAppDir).Path
 $appsDir = Join-Path $appHome 'apps'
 $destination = Join-Path $appsDir $AppSlug
-if ((Test-Path -LiteralPath $destination) -and -not $Force) {
-  Fail 73 "Destination already exists; inspect it or rerun with -Force: $destination"
+if ((Test-Path -LiteralPath $destination) -and -not $Update) {
+  Fail 73 "Destination already exists; inspect it or rerun with -Update: $destination"
+}
+if ((Test-Path -LiteralPath $destination) -and $Update) {
+  $destinationItem = Get-Item -LiteralPath $destination -Force
+  $destinationIsRealDirectory = $destinationItem.PSIsContainer -and [string]::IsNullOrEmpty($destinationItem.LinkType)
+  if (-not $destinationIsRealDirectory) {
+    Fail 73 "Existing destination must be a real directory: $destination"
+  }
 }
 
 New-Item -ItemType Directory -Path $appsDir -Force | Out-Null
+if ((Test-Path -LiteralPath $destination) -and $Update) {
+  Merge-AppTree $source $destination
+  Write-ClaudeInstructions $destination
+  [Console]::Out.WriteLine($destination)
+  exit 0
+}
+
 $staging = Join-Path $appsDir ('.{0}.publish.{1}' -f $AppSlug, [Guid]::NewGuid().ToString('N'))
 
 try {
   New-Item -ItemType Directory -Path $staging -Force | Out-Null
-  Get-ChildItem -LiteralPath $source -Force | Copy-Item -Destination $staging -Recurse -Force
-
-  $agentsFile = Join-Path $staging 'AGENTS.md'
-  if (Test-Path -LiteralPath $agentsFile -PathType Leaf) {
-    Copy-Item -LiteralPath $agentsFile -Destination (Join-Path $staging 'CLAUDE.md') -Force
-  }
-
-  if (Test-Path -LiteralPath $destination) {
-    Remove-Item -LiteralPath $destination -Recurse -Force
-  }
+  Merge-AppTree $source $staging
+  Write-ClaudeInstructions $staging
   Move-Item -LiteralPath $staging -Destination $destination
   $staging = $null
   [Console]::Out.WriteLine($destination)
