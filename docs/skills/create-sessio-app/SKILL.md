@@ -56,8 +56,13 @@ existing files without explicit permission.
    screenshot or file export must declare `"downloads"` in `web/config.json`,
    including exports that only use an ordinary browser download.
 4. **Define app metadata.** Create `web/config.json` with these required
-   string fields: `nameZh` (Chinese name), `nameEn` (English name), `description`
-   (app introduction), `author`, `email`, and `version`. Use a semantic version
+   fields: `nameZh` (Chinese name), `nameEn` (English name), `description`
+   (app introduction), `category` (one fixed category), `topics` (zero or more
+   custom topic labels), `author`, `email`, and `version`. `category` must be
+   exactly one of `Life`, `Games`, `Finance`, `Medical`, `Office`, `Tools`,
+   `Sports`, `Entertainment`, `News`, or `Other`. `topics` must be an array of
+   unique non-empty strings chosen for the app and may be empty when the app has
+   no secondary topics. Use a semantic version
    such as `1.0.0` for `version`. Add the optional `permissions` array only when
    the app needs a Sessio-supported browser capability. Currently the supported
    values are listed in the App permissions section below.
@@ -198,7 +203,8 @@ What the app shows and who uses it.
 - `web/<app-slug>.html`: view and interaction logic.
 - `web/<app-slug>-data.js`: only runtime data, exported as `window.<GLOBAL>`.
 - `web/config.json`: required app metadata with `nameZh`, `nameEn`,
-  `description`, `author`, `email`, and `version`, plus optional permissions.
+  `description`, `category`, `topics`, `author`, `email`, and `version`, plus
+  optional permissions.
 - `web/screenshot.<ext>`: optional screenshot for the app listing or documentation.
 - `AGENTS.md`: this contract, data-usage explanation, and maintenance notes.
 - `web/logo.<ext>`: optional local logo asset named `logo` with a supported image
@@ -213,6 +219,8 @@ What the app shows and who uses it.
   "nameZh": "示例应用",
   "nameEn": "Example App",
   "description": "应用介绍。",
+  "category": "Tools",
+  "topics": ["planning", "notes"],
   "author": "作者姓名",
   "email": "author@example.com",
   "version": "1.0.0",
@@ -220,7 +228,16 @@ What the app shows and who uses it.
 }
 ```
 
-All six metadata fields are required strings. `permissions` is optional and
+The eight scalar/list metadata fields are required: `nameZh`, `nameEn`,
+`description`, `category`, `topics`, `author`, `email`, and `version`.
+`nameZh`, `nameEn`, `description`, `author`, `email`, and `version` must be
+non-empty strings. `category` accepts exactly one value from this fixed English
+list: `Life`, `Games`, `Finance`, `Medical`, `Office`, `Tools`, `Sports`,
+`Entertainment`, `News`, `Other`. Do not encode multiple categories as a
+comma-separated string or array. `topics` is a JSON array of unique non-empty
+custom strings; it may use Chinese, English, or other language labels, and
+should be `[]` when there are no topics.
+`permissions` is optional and
 must contain only capability names supported by Sessio. Omit it or use an empty
 array when the app needs no extra browser capability. Keep `description`
 concise and factual.
@@ -626,8 +643,11 @@ Before reporting completion, verify:
       reviewed, pre-merged data file after a documented schema migration; the
       publisher itself does not merge arbitrary JS data. When AGENTS.md exists,
       the destination also contains an independent CLAUDE.md copy.
-- [ ] `web/config.json` is valid JSON and contains the required string fields:
-      `nameZh`, `nameEn`, `description`, `author`, `email`, and `version`; its
-      optional `permissions` array contains only supported capability names.
+- [ ] `web/config.json` is valid JSON and contains non-empty `nameZh`, `nameEn`,
+      `description`, `author`, `email`, and `version` strings, plus a `topics`
+      array of unique non-empty strings; `category` contains exactly one value
+      from `Life`, `Games`, `Finance`, `Medical`, `Office`, `Tools`, `Sports`,
+      `Entertainment`, `News`, `Other`, and `topics` may be empty. Its optional
+      `permissions` array contains only supported capability names.
 - [ ] HTML, JS, config, assets, and AGENTS.md paths are reported using absolute
       paths.
