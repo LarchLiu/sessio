@@ -43,6 +43,8 @@ import UpdateConfirmDialog from "./components/UpdateConfirmDialog";
 import SettingsPage from "./pages/SettingsPage";
 import AutoTasksPage from "./pages/AutoTasksPage";
 import AppsPage from "./pages/AppsPage";
+import type { SessioAppStateSnapshot } from "./components/PlainHtmlPreview";
+import { createAppSuspendNavigationCoordinator } from "./appStateNavigation";
 import type { ToastStackMessage } from "./components/ToastStack";
 import type { CanvasKey } from "./canvasTypes";
 import { useAppData } from "./hooks/useAppData";
@@ -174,6 +176,14 @@ export default function App() {
   const [selectedAppFilePath, setSelectedAppFilePath] = useState<string | null>(null);
   const [appChatVisible, setAppChatVisible] = useState(true);
   const [appRuntimeSessions, setAppRuntimeSessions] = useState<Record<string, string>>({});
+  const [appStateSnapshots, setAppStateSnapshots] = useState<
+    Record<string, SessioAppStateSnapshot>
+  >({});
+  const appStateSaveHandlerRef = useRef<
+    (() => Promise<SessioAppStateSnapshot | null>) | null
+  >(null);
+  const appPreviewActiveRef = useRef(false);
+  const appSuspendNavigationRef = useRef(createAppSuspendNavigationCoordinator());
   const [updateConfirmOpen, setUpdateConfirmOpen] = useState(false);
   const [updateConfirmMounted, setUpdateConfirmMounted] = useState(false);
   const [viewMode] = useState<ViewMode>(() => readViewMode());
@@ -192,6 +202,24 @@ export default function App() {
   const [liveRuntimeState, dispatchLiveRuntimeEvent] = useReducer(
     applyRuntimeAction,
     emptyLiveRuntimeState,
+  );
+
+  appPreviewActiveRef.current = Boolean(
+    !settingsOpen && utilityView === "apps" && selectedApp && !selectedAppFilePath,
+  );
+
+  const runAfterAppSuspend = useCallback((navigate: () => void) => {
+    const saveState = appPreviewActiveRef.current
+      ? appStateSaveHandlerRef.current
+      : null;
+    appSuspendNavigationRef.current.run(saveState, navigate);
+  }, []);
+
+  const handleAppStateSaveHandlerChange = useCallback(
+    (handler: (() => Promise<SessioAppStateSnapshot | null>) | null) => {
+      appStateSaveHandlerRef.current = handler;
+    },
+    [],
   );
   const [pendingSelectSession, setPendingSelectSession] = useState<{
     agent: Agent;
@@ -712,25 +740,27 @@ export default function App() {
       projectLabel?: string;
     },
   ) => {
-    const project = session.projectPath
-      ? projects.find((item) => item.path === session.projectPath) ?? null
-      : null;
-    if (project) {
-      rememberSidebarProject({ key: project.id });
-      setFilter({
-        kind: "project",
-        key: projectFilterKey(project),
-        label: options?.projectLabel ?? project.name,
-      });
-    }
-    setUtilityView(null);
-    setSelectedProject(null);
-    setSelectedThread(null);
-    setNewChatProjectKey(null);
-    setSelected(session);
-    setDetailMode(options?.detailMode ?? "chat");
-    if (options?.revealWindow) void revealMainWindow();
-  }, [projects, rememberSidebarProject, setFilter]);
+    runAfterAppSuspend(() => {
+      const project = session.projectPath
+        ? projects.find((item) => item.path === session.projectPath) ?? null
+        : null;
+      if (project) {
+        rememberSidebarProject({ key: project.id });
+        setFilter({
+          kind: "project",
+          key: projectFilterKey(project),
+          label: options?.projectLabel ?? project.name,
+        });
+      }
+      setUtilityView(null);
+      setSelectedProject(null);
+      setSelectedThread(null);
+      setNewChatProjectKey(null);
+      setSelected(session);
+      setDetailMode(options?.detailMode ?? "chat");
+      if (options?.revealWindow) void revealMainWindow();
+    });
+  }, [projects, rememberSidebarProject, runAfterAppSuspend, setFilter]);
 
   const openThreadSelection = useCallback((
     thread: ThreadIndexItemInfo,
@@ -741,24 +771,26 @@ export default function App() {
       clearUnread?: boolean;
     },
   ) => {
-    const project = projects.find((item) => item.id === thread.projectId) ?? null;
-    if (project) {
-      rememberSidebarProject({ key: project.id });
-      setFilter({
-        kind: "project",
-        key: projectFilterKey(project),
-        label: options?.projectLabel ?? project.name,
-      });
-    }
-    if (options?.clearUnread !== false) clearThreadUnread(thread);
-    setUtilityView(null);
-    setSelected(null);
-    setSelectedProject(null);
-    setSelectedThread({ projectId: thread.projectId, threadId: thread.threadId, goal: thread.goal });
-    setNewChatProjectKey(null);
-    setDetailMode(options?.detailMode ?? "threadMultiSessionChat");
-    if (options?.revealWindow) void revealMainWindow();
-  }, [clearThreadUnread, projects, rememberSidebarProject, setFilter]);
+    runAfterAppSuspend(() => {
+      const project = projects.find((item) => item.id === thread.projectId) ?? null;
+      if (project) {
+        rememberSidebarProject({ key: project.id });
+        setFilter({
+          kind: "project",
+          key: projectFilterKey(project),
+          label: options?.projectLabel ?? project.name,
+        });
+      }
+      if (options?.clearUnread !== false) clearThreadUnread(thread);
+      setUtilityView(null);
+      setSelected(null);
+      setSelectedProject(null);
+      setSelectedThread({ projectId: thread.projectId, threadId: thread.threadId, goal: thread.goal });
+      setNewChatProjectKey(null);
+      setDetailMode(options?.detailMode ?? "threadMultiSessionChat");
+      if (options?.revealWindow) void revealMainWindow();
+    });
+  }, [clearThreadUnread, projects, rememberSidebarProject, runAfterAppSuspend, setFilter]);
 
   useSystemNotifications({
     t,
@@ -1037,23 +1069,27 @@ export default function App() {
       update={update}
       onCloseSidebar={() => setSidebarOpen(false)}
       onNewChat={() => {
-        setUtilityView(null);
-        setSelectedProject(null);
-        setSelectedThread(null);
-        setNewChatProjectKey(lastSelectedProjectKey);
-        setSelected(null);
-        setDetailMode("chat");
+        runAfterAppSuspend(() => {
+          setUtilityView(null);
+          setSelectedProject(null);
+          setSelectedThread(null);
+          setNewChatProjectKey(lastSelectedProjectKey);
+          setSelected(null);
+          setDetailMode("chat");
+        });
       }}
       onToggleProjectSection={() => setExpandProject((value) => !value)}
       onProjectAdded={(project) => {
-        setUtilityView(null);
-        setProjects((prev) => [project, ...prev.filter((p) => p.id !== project.id)]);
-        setSelectedProject({ kind: "project", projectId: project.id });
-        setSelectedThread(null);
-        setSelected(null);
-        setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
-        setExpandedProjects((prev) => new Set(prev).add(project.id));
-        void refreshSessions();
+        runAfterAppSuspend(() => {
+          setUtilityView(null);
+          setProjects((prev) => [project, ...prev.filter((p) => p.id !== project.id)]);
+          setSelectedProject({ kind: "project", projectId: project.id });
+          setSelectedThread(null);
+          setSelected(null);
+          setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
+          setExpandedProjects((prev) => new Set(prev).add(project.id));
+          void refreshSessions();
+        });
       }}
       onToggleProjectExpanded={(projectKeyValue) => {
         setExpandedProjects((prev) => {
@@ -1064,44 +1100,52 @@ export default function App() {
         });
       }}
       onOpenKanban={(projectGroup) => {
-        setUtilityView(null);
-        setSelected(null);
-        setSelectedThread(null);
-        setSelectedProject({ kind: "project", projectId: projectGroup.project.id });
-        setNewChatProjectKey(null);
-        setDetailMode("project");
-        setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
+        runAfterAppSuspend(() => {
+          setUtilityView(null);
+          setSelected(null);
+          setSelectedThread(null);
+          setSelectedProject({ kind: "project", projectId: projectGroup.project.id });
+          setNewChatProjectKey(null);
+          setDetailMode("project");
+          setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
+        });
       }}
       onNewProjectChat={(projectGroup) => {
-        setUtilityView(null);
-        setSelectedProject(null);
-        setSelectedThread(null);
-        setNewChatProjectKey(projectGroup.key);
-        setSelected(null);
-        setDetailMode("chat");
-        setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
+        runAfterAppSuspend(() => {
+          setUtilityView(null);
+          setSelectedProject(null);
+          setSelectedThread(null);
+          setNewChatProjectKey(projectGroup.key);
+          setSelected(null);
+          setDetailMode("chat");
+          setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
+        });
       }}
       onSelectSession={(projectGroup, session) => {
-        setUtilityView(null);
-        rememberSidebarProject(projectGroup);
-        setSelectedProject(null);
-        setSelectedThread(null);
-        setNewChatProjectKey(null);
-        setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
-        setSelected(session);
-        setDetailMode("chat");
+        runAfterAppSuspend(() => {
+          setUtilityView(null);
+          rememberSidebarProject(projectGroup);
+          setSelectedProject(null);
+          setSelectedThread(null);
+          setNewChatProjectKey(null);
+          setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
+          setSelected(session);
+          setDetailMode("chat");
+        });
       }}
       onSelectThread={(projectGroup, thread, source) => {
-        const indexItem = threadIndexItems.find((item) => item.threadId === thread.id);
-        if (indexItem) clearThreadUnread(indexItem);
-        setUtilityView(null);
-        rememberSidebarProject(projectGroup);
-        setSelected(null);
-        setSelectedProject(null);
-        setSelectedThread({ projectId: projectGroup.project.id, threadId: thread.id, goal: thread.goal });
-        setNewChatProjectKey(null);
-        setDetailMode(source === "threadChat" ? "threadMultiSessionChat" : "project");
-        setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
+        runAfterAppSuspend(() => {
+          const indexItem = threadIndexItems.find((item) => item.threadId === thread.id);
+          if (indexItem) clearThreadUnread(indexItem);
+          setUtilityView(null);
+          rememberSidebarProject(projectGroup);
+          setSelected(null);
+          setSelectedProject(null);
+          setSelectedThread({ projectId: projectGroup.project.id, threadId: thread.id, goal: thread.goal });
+          setNewChatProjectKey(null);
+          setDetailMode(source === "threadChat" ? "threadMultiSessionChat" : "project");
+          setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
+        });
       }}
       onToggleProjectSessions={(projectKeyValue) => {
         setExpandedProjectSessions((prev) => {
@@ -1122,8 +1166,8 @@ export default function App() {
       onSessionContextMenu={(session, pos) => {
         void openSessionMenu(session, pos);
       }}
-      onOpenSettings={() => setSettingsOpen(true)}
-      onOpenAutoTasks={() => setUtilityView("autoTasks")}
+      onOpenSettings={() => runAfterAppSuspend(() => setSettingsOpen(true))}
+      onOpenAutoTasks={() => runAfterAppSuspend(() => setUtilityView("autoTasks"))}
       autoTasksActive={utilityView === "autoTasks"}
       appsSectionExpanded={expandApps}
       apps={sessioApps}
@@ -1135,16 +1179,20 @@ export default function App() {
         if (next) void refreshSessioApps();
       }}
       onSelectApp={(app) => {
-        setSelectedApp(app);
-        setSelectedAppFilePath(null);
-        setSelected(null);
-        setSelectedProject(null);
-        setSelectedThread(null);
-        setNewChatProjectKey(null);
-        setPendingSelectSession(null);
-        setFilter({ kind: "all" });
-        setDetailMode("chat");
-        setUtilityView("apps");
+        const selectApp = () => {
+          setSelectedApp(app);
+          setSelectedAppFilePath(null);
+          setSelected(null);
+          setSelectedProject(null);
+          setSelectedThread(null);
+          setNewChatProjectKey(null);
+          setPendingSelectSession(null);
+          setFilter({ kind: "all" });
+          setDetailMode("chat");
+          setUtilityView("apps");
+        };
+        if (utilityView === "apps" && selectedApp?.id === app.id) selectApp();
+        else runAfterAppSuspend(selectApp);
       }}
       onAppContextMenu={(app, event) => {
         event.preventDefault();
@@ -1428,14 +1476,19 @@ export default function App() {
             projectGitRepos={projectGitRepos}
             onProjectGitRepoDetected={handleProjectGitRepoDetected}
             onSelectThreadChatSession={(session) => {
-              setSelectedProject(null);
-              setSelectedThread(null);
-              setSelected(session);
-              setDetailMode("threadChat");
+              runAfterAppSuspend(() => {
+                setUtilityView(null);
+                setSelectedProject(null);
+                setSelectedThread(null);
+                setSelected(session);
+                setDetailMode("threadChat");
+              });
             }}
             onOpenThreadMultiSessionChat={() => setDetailMode("threadMultiSessionChat")}
             onOpenProjectFile={handleOpenProjectFile}
-            onOpenAppFile={setSelectedAppFilePath}
+            onOpenAppFile={(path) => {
+              runAfterAppSuspend(() => setSelectedAppFilePath(path));
+            }}
             onAddProjectFileToCanvas={handleAddProjectFileToCanvas}
             onClose={() => setRightSidebarOpen(false)}
             onError={setError}
@@ -1472,7 +1525,17 @@ export default function App() {
               onError={setError}
               selectedFilePath={selectedAppFilePath}
               onClearFileSelection={() => setSelectedAppFilePath(null)}
-              onOpenFile={setSelectedAppFilePath}
+              onOpenFile={(path) => {
+                runAfterAppSuspend(() => setSelectedAppFilePath(path));
+              }}
+              cachedAppState={appStateSnapshots[selectedApp.id] ?? null}
+              onAppStateSnapshot={(snapshot) => {
+                setAppStateSnapshots((current) => ({
+                  ...current,
+                  [selectedApp.id]: snapshot,
+                }));
+              }}
+              onAppStateSaveHandlerChange={handleAppStateSaveHandlerChange}
             />
             <TerminalDock
               open={terminalDockOpen}

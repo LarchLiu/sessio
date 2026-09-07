@@ -6,8 +6,11 @@ import { describe, expect, it } from "vitest";
 import PlainHtmlPreview, {
   buildPlainHtmlPreviewDocument,
   parseSessioAppFileWriteMessage,
+  parseSessioAppStateReadyMessage,
+  parseSessioAppStateSaveResultMessage,
   resolveLocalScriptPath,
   resolveAppIframePermissions,
+  SESSIO_PREVIEW_BRIDGE_SCRIPT,
 } from "../src/components/PlainHtmlPreview";
 import { I18nProvider } from "../src/i18n";
 
@@ -48,6 +51,9 @@ describe("buildPlainHtmlPreviewDocument", () => {
     expect(enabled).toContain("data-sessio-theme-bridge");
     expect(enabled).toContain("sessio-theme-change");
     expect(enabled).toContain("sessio:themechange");
+    expect(enabled).toContain("SESSIO_APP_STATE");
+    expect(enabled).toContain("sessio-app-state-save-request");
+    expect(enabled).toContain("sessio-app-state-restore");
   });
 
   it("runs scripts without showing the JavaScript control for app previews", () => {
@@ -170,6 +176,141 @@ describe("buildPlainHtmlPreviewDocument", () => {
         encoding: "binary",
       }),
     ).toBeNull();
+  });
+
+  it("accepts only versioned and bounded App state bridge messages", () => {
+    expect(
+      parseSessioAppStateReadyMessage({
+        source: "sessio-app",
+        type: "sessio-app-state-ready",
+        schemaVersion: 2,
+      }),
+    ).toEqual({ schemaVersion: 2 });
+    expect(
+      parseSessioAppStateReadyMessage({
+        source: "sessio-app",
+        type: "sessio-app-state-ready",
+        schemaVersion: 0,
+      }),
+    ).toBeNull();
+
+    expect(
+      parseSessioAppStateSaveResultMessage({
+        source: "sessio-app",
+        type: "sessio-app-state-save-result",
+        requestId: "state-1",
+        ok: true,
+        schemaVersion: 1,
+        state: { moves: [{ row: 7, col: 7 }] },
+      }),
+    ).toEqual({
+      requestId: "state-1",
+      snapshot: {
+        schemaVersion: 1,
+        state: { moves: [{ row: 7, col: 7 }] },
+      },
+    });
+    expect(
+      parseSessioAppStateSaveResultMessage({
+        source: "sessio-app",
+        type: "sessio-app-state-save-result",
+        requestId: "state-2",
+        ok: false,
+        error: "capture failed",
+      }),
+    ).toEqual({ requestId: "state-2", snapshot: null });
+    expect(
+      parseSessioAppStateSaveResultMessage({
+        source: "sessio-app",
+        type: "sessio-app-state-save-result",
+        requestId: "state-3",
+        ok: true,
+        schemaVersion: 1,
+        state: "x".repeat(1024 * 1024 + 1),
+      }),
+    ).toBeNull();
+    expect(
+      parseSessioAppStateSaveResultMessage({
+        source: "sessio-app",
+        type: "sessio-app-state-save-result",
+        requestId: "state-4",
+        ok: true,
+        schemaVersion: 1,
+        state: { unsupported: new Map([["key", "value"]]) },
+      }),
+    ).toBeNull();
+  });
+
+  it("captures and restores through the injected App state adapter", async () => {
+    const sent: unknown[] = [];
+    type MessageHandler = (event: { source: unknown; data: unknown }) => void;
+    let handleMessage: MessageHandler = () => {
+      throw new Error("The preview bridge did not register its message handler");
+    };
+    let restored: unknown = null;
+    const parent = {
+      postMessage(message: unknown) {
+        sent.push(message);
+      },
+    };
+    const fakeWindow = {
+      parent,
+      SESSIO_APP_STATE: {
+        schemaVersion: 1,
+        capture: () => ({ count: 3 }),
+        restore: (state: unknown) => {
+          restored = state;
+        },
+      },
+      addEventListener(type: string, listener: MessageHandler) {
+        if (type === "message") handleMessage = listener;
+      },
+      dispatchEvent() {},
+    };
+
+    new Function("window", "document", SESSIO_PREVIEW_BRIDGE_SCRIPT)(
+      fakeWindow,
+      {},
+    );
+    handleMessage({
+      source: parent,
+      data: { source: "sessio", type: "sessio-app-state-probe" },
+    });
+    expect(sent).toContainEqual({
+      source: "sessio-app",
+      type: "sessio-app-state-ready",
+      schemaVersion: 1,
+    });
+
+    handleMessage({
+      source: parent,
+      data: {
+        source: "sessio",
+        type: "sessio-app-state-restore",
+        schemaVersion: 1,
+        state: { count: 2 },
+      },
+    });
+    expect(restored).toEqual({ count: 2 });
+
+    handleMessage({
+      source: parent,
+      data: {
+        source: "sessio",
+        type: "sessio-app-state-save-request",
+        requestId: "state-1",
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sent).toContainEqual({
+      source: "sessio-app",
+      type: "sessio-app-state-save-result",
+      requestId: "state-1",
+      ok: true,
+      schemaVersion: 1,
+      state: { count: 3 },
+    });
   });
 
   it("resolves same-directory and child-directory scripts only", () => {

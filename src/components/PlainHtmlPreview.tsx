@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import {
   readLocalTextFile,
   writeSessioAppFile,
@@ -14,12 +21,19 @@ export type SessioPreviewTheme = "light" | "dark";
 export const SESSIO_THEME_MESSAGE_TYPE = "sessio-theme-change";
 export const SESSIO_APP_FILE_WRITE_REQUEST_TYPE = "sessio-app-write-file";
 export const SESSIO_APP_FILE_WRITE_RESULT_TYPE = "sessio-app-write-file-result";
+export const SESSIO_APP_STATE_PROBE_TYPE = "sessio-app-state-probe";
+export const SESSIO_APP_STATE_READY_TYPE = "sessio-app-state-ready";
+export const SESSIO_APP_STATE_RESTORE_TYPE = "sessio-app-state-restore";
+export const SESSIO_APP_STATE_SAVE_REQUEST_TYPE = "sessio-app-state-save-request";
+export const SESSIO_APP_STATE_SAVE_RESULT_TYPE = "sessio-app-state-save-result";
+export const SESSIO_APP_STATE_MAX_BYTES = 1024 * 1024;
+const SESSIO_APP_STATE_SAVE_TIMEOUT_MS = 500;
 export const SESSIO_CHAT_BACKGROUND_BY_THEME: Record<SessioPreviewTheme, string> = {
   light: "#f6f6f4",
   dark: "#232831",
 };
 
-const SESSIO_THEME_BRIDGE_SCRIPT = `(() => {
+export const SESSIO_PREVIEW_BRIDGE_SCRIPT = `(() => {
   const applyTheme = (theme, chatBackground) => {
     if (theme !== "light" && theme !== "dark") return;
     document.documentElement.setAttribute("data-sessio-theme", theme);
@@ -34,8 +48,69 @@ const SESSIO_THEME_BRIDGE_SCRIPT = `(() => {
   window.addEventListener("message", (event) => {
     if (event.source !== window.parent) return;
     const message = event.data;
-    if (!message || message.source !== "sessio" || message.type !== "${SESSIO_THEME_MESSAGE_TYPE}") return;
-    applyTheme(message.theme, message.chatBackground);
+    if (!message || message.source !== "sessio") return;
+    if (message.type === "${SESSIO_THEME_MESSAGE_TYPE}") {
+      applyTheme(message.theme, message.chatBackground);
+      return;
+    }
+
+    const bridge = window.SESSIO_APP_STATE;
+    const schemaVersion = Number(bridge?.schemaVersion);
+    const bridgeReady =
+      Number.isSafeInteger(schemaVersion) &&
+      schemaVersion > 0 &&
+      typeof bridge?.capture === "function" &&
+      typeof bridge?.restore === "function";
+
+    if (message.type === "${SESSIO_APP_STATE_PROBE_TYPE}") {
+      if (bridgeReady) {
+        window.parent.postMessage({
+          source: "sessio-app",
+          type: "${SESSIO_APP_STATE_READY_TYPE}",
+          schemaVersion
+        }, "*");
+      }
+      return;
+    }
+
+    if (!bridgeReady) return;
+    if (message.type === "${SESSIO_APP_STATE_RESTORE_TYPE}") {
+      if (message.schemaVersion === schemaVersion) {
+        try {
+          bridge.restore(message.state);
+        } catch (error) {
+          console.error("Sessio App state restore failed", error);
+        }
+      }
+      return;
+    }
+
+    if (
+      message.type === "${SESSIO_APP_STATE_SAVE_REQUEST_TYPE}" &&
+      typeof message.requestId === "string"
+    ) {
+      Promise.resolve()
+        .then(() => bridge.capture())
+        .then((state) => {
+          window.parent.postMessage({
+            source: "sessio-app",
+            type: "${SESSIO_APP_STATE_SAVE_RESULT_TYPE}",
+            requestId: message.requestId,
+            ok: true,
+            schemaVersion,
+            state
+          }, "*");
+        })
+        .catch((error) => {
+          window.parent.postMessage({
+            source: "sessio-app",
+            type: "${SESSIO_APP_STATE_SAVE_RESULT_TYPE}",
+            requestId: message.requestId,
+            ok: false,
+            error: String(error)
+          }, "*");
+        });
+    }
   });
 })();`;
 
@@ -96,6 +171,108 @@ export interface SessioAppFileWriteMessage {
   data: string;
   encoding: "utf8" | "base64";
   overwrite: boolean;
+}
+
+export interface SessioAppStateSnapshot {
+  schemaVersion: number;
+  state: unknown;
+}
+
+export interface PlainHtmlPreviewHandle {
+  saveAppState: () => Promise<SessioAppStateSnapshot | null>;
+}
+
+interface SessioAppStateReadyMessage {
+  schemaVersion: number;
+}
+
+interface SessioAppStateSaveResultMessage {
+  requestId: string;
+  snapshot: SessioAppStateSnapshot | null;
+}
+
+function isJsonValue(value: unknown, ancestors = new Set<object>()): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return true;
+  }
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object") return false;
+  if (ancestors.has(value)) return false;
+
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
+    return false;
+  }
+
+  ancestors.add(value);
+  const valid = Array.isArray(value)
+    ? value.every((item) => isJsonValue(item, ancestors))
+    : Object.values(value).every((item) => isJsonValue(item, ancestors));
+  ancestors.delete(value);
+  return valid;
+}
+
+function normalizeAppStateSnapshot(
+  schemaVersion: unknown,
+  state: unknown,
+): SessioAppStateSnapshot | null {
+  if (
+    typeof schemaVersion !== "number" ||
+    !Number.isSafeInteger(schemaVersion) ||
+    schemaVersion <= 0
+  ) {
+    return null;
+  }
+  if (!isJsonValue(state)) return null;
+  try {
+    const serialized = JSON.stringify({ schemaVersion, state });
+    if (new TextEncoder().encode(serialized).byteLength > SESSIO_APP_STATE_MAX_BYTES) {
+      return null;
+    }
+    const snapshot = JSON.parse(serialized) as SessioAppStateSnapshot;
+    return snapshot;
+  } catch {
+    return null;
+  }
+}
+
+export function parseSessioAppStateReadyMessage(
+  value: unknown,
+): SessioAppStateReadyMessage | null {
+  if (!value || typeof value !== "object") return null;
+  const message = value as Record<string, unknown>;
+  if (
+    message.source !== "sessio-app" ||
+    message.type !== SESSIO_APP_STATE_READY_TYPE ||
+    typeof message.schemaVersion !== "number" ||
+    !Number.isSafeInteger(message.schemaVersion) ||
+    message.schemaVersion <= 0
+  ) {
+    return null;
+  }
+  return { schemaVersion: message.schemaVersion };
+}
+
+export function parseSessioAppStateSaveResultMessage(
+  value: unknown,
+): SessioAppStateSaveResultMessage | null {
+  if (!value || typeof value !== "object") return null;
+  const message = value as Record<string, unknown>;
+  if (
+    message.source !== "sessio-app" ||
+    message.type !== SESSIO_APP_STATE_SAVE_RESULT_TYPE ||
+    typeof message.requestId !== "string" ||
+    message.requestId.length === 0 ||
+    message.requestId.length > 128 ||
+    typeof message.ok !== "boolean"
+  ) {
+    return null;
+  }
+  if (!message.ok) return { requestId: message.requestId, snapshot: null };
+  if (!Object.prototype.hasOwnProperty.call(message, "state")) return null;
+  const snapshot = normalizeAppStateSnapshot(message.schemaVersion, message.state);
+  if (!snapshot) return null;
+  return { requestId: message.requestId, snapshot };
 }
 
 export function parseSessioAppFileWriteMessage(
@@ -177,7 +354,7 @@ export function buildPlainHtmlPreviewDocument(
   if (scriptsEnabled) {
     const themeBridge = document.createElement("script");
     themeBridge.setAttribute("data-sessio-theme-bridge", "");
-    themeBridge.textContent = SESSIO_THEME_BRIDGE_SCRIPT;
+    themeBridge.textContent = SESSIO_PREVIEW_BRIDGE_SCRIPT;
     securityPolicy.after(themeBridge);
   }
 
@@ -236,26 +413,47 @@ async function inlineLocalScripts(html: string, htmlPath: string): Promise<strin
   return `<!doctype html>\n${document.documentElement.outerHTML}`;
 }
 
-export default function PlainHtmlPreview({
-  html,
-  filePath,
-  scriptsInitiallyEnabled = false,
-  showScriptsControl = true,
-  permissions = [],
-  appDirectoryPath = null,
-}: {
+interface PlainHtmlPreviewProps {
   html: string;
   filePath: string | null;
   scriptsInitiallyEnabled?: boolean;
   showScriptsControl?: boolean;
   permissions?: readonly SessioAppPermission[];
   appDirectoryPath?: string | null;
-}) {
+  appStateBridgeEnabled?: boolean;
+  cachedAppState?: SessioAppStateSnapshot | null;
+  onAppStateSnapshot?: (snapshot: SessioAppStateSnapshot) => void;
+}
+
+const PlainHtmlPreview = forwardRef<PlainHtmlPreviewHandle, PlainHtmlPreviewProps>(
+function PlainHtmlPreview({
+  html,
+  filePath,
+  scriptsInitiallyEnabled = false,
+  showScriptsControl = true,
+  permissions = [],
+  appDirectoryPath = null,
+  appStateBridgeEnabled = false,
+  cachedAppState = null,
+  onAppStateSnapshot,
+}, ref) {
   const { t } = useI18n();
   const themeType = useEffectiveThemeType();
   const themeTypeRef = useRef(themeType);
   themeTypeRef.current = themeType;
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const stateBridgeSchemaVersionRef = useRef<number | null>(null);
+  const cachedAppStateRef = useRef(cachedAppState);
+  const onAppStateSnapshotRef = useRef(onAppStateSnapshot);
+  const stateSaveSequenceRef = useRef(0);
+  const pendingStateSaveRef = useRef<{
+    requestId: string;
+    promise: Promise<SessioAppStateSnapshot | null>;
+    resolve: (snapshot: SessioAppStateSnapshot | null) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  } | null>(null);
+  cachedAppStateRef.current = cachedAppState;
+  onAppStateSnapshotRef.current = onAppStateSnapshot;
   const [scriptPermission, setScriptPermission] = useState<{
     filePath: string | null;
     enabled: boolean;
@@ -265,6 +463,57 @@ export default function PlainHtmlPreview({
   const [previewDocument, setPreviewDocument] = useState(() =>
     buildPlainHtmlPreviewDocument(html, scriptsEnabled, themeType),
   );
+
+  const settlePendingStateSave = useCallback(
+    (snapshot: SessioAppStateSnapshot | null) => {
+      const pending = pendingStateSaveRef.current;
+      if (!pending) return;
+      clearTimeout(pending.timeout);
+      pendingStateSaveRef.current = null;
+      if (snapshot) onAppStateSnapshotRef.current?.(snapshot);
+      pending.resolve(snapshot);
+    },
+    [],
+  );
+
+  const saveAppState = useCallback((): Promise<SessioAppStateSnapshot | null> => {
+    if (
+      !appStateBridgeEnabled ||
+      !scriptsEnabled ||
+      stateBridgeSchemaVersionRef.current === null ||
+      !iframeRef.current?.contentWindow
+    ) {
+      return Promise.resolve(null);
+    }
+    if (pendingStateSaveRef.current) return pendingStateSaveRef.current.promise;
+
+    const requestId = `state-${Date.now()}-${++stateSaveSequenceRef.current}`;
+    let resolvePromise: (snapshot: SessioAppStateSnapshot | null) => void = () => {};
+    const promise = new Promise<SessioAppStateSnapshot | null>((resolve) => {
+      resolvePromise = resolve;
+    });
+    const timeout = setTimeout(
+      () => settlePendingStateSave(null),
+      SESSIO_APP_STATE_SAVE_TIMEOUT_MS,
+    );
+    pendingStateSaveRef.current = {
+      requestId,
+      promise,
+      resolve: resolvePromise,
+      timeout,
+    };
+    iframeRef.current.contentWindow.postMessage(
+      {
+        source: "sessio",
+        type: SESSIO_APP_STATE_SAVE_REQUEST_TYPE,
+        requestId,
+      },
+      "*",
+    );
+    return promise;
+  }, [appStateBridgeEnabled, scriptsEnabled, settlePendingStateSave]);
+
+  useImperativeHandle(ref, () => ({ saveAppState }), [saveAppState]);
 
   useEffect(() => {
     setScriptPermission({ filePath, enabled: scriptsInitiallyEnabled });
@@ -303,6 +552,50 @@ export default function PlainHtmlPreview({
       "*",
     );
   }, [html, scriptsEnabled, themeType]);
+
+  useEffect(() => {
+    if (!appStateBridgeEnabled || !scriptsEnabled) {
+      stateBridgeSchemaVersionRef.current = null;
+      settlePendingStateSave(null);
+      return;
+    }
+
+    const handleStateMessage = (event: MessageEvent) => {
+      if (event.source !== iframeRef.current?.contentWindow) return;
+
+      const ready = parseSessioAppStateReadyMessage(event.data);
+      if (ready) {
+        stateBridgeSchemaVersionRef.current = ready.schemaVersion;
+        const cached = cachedAppStateRef.current;
+        if (cached && cached.schemaVersion === ready.schemaVersion) {
+          iframeRef.current?.contentWindow?.postMessage(
+            {
+              source: "sessio",
+              type: SESSIO_APP_STATE_RESTORE_TYPE,
+              schemaVersion: cached.schemaVersion,
+              state: cached.state,
+            },
+            "*",
+          );
+        }
+        return;
+      }
+
+      const result = parseSessioAppStateSaveResultMessage(event.data);
+      if (!result || result.requestId !== pendingStateSaveRef.current?.requestId) return;
+      const snapshot = result.snapshot;
+      settlePendingStateSave(
+        snapshot?.schemaVersion === stateBridgeSchemaVersionRef.current ? snapshot : null,
+      );
+    };
+
+    window.addEventListener("message", handleStateMessage);
+    return () => {
+      window.removeEventListener("message", handleStateMessage);
+      stateBridgeSchemaVersionRef.current = null;
+      settlePendingStateSave(null);
+    };
+  }, [appStateBridgeEnabled, scriptsEnabled, settlePendingStateSave]);
 
   useEffect(() => {
     if (
@@ -376,6 +669,7 @@ export default function PlainHtmlPreview({
         srcDoc={previewDocument}
         onLoad={() => {
           if (!scriptsEnabled) return;
+          stateBridgeSchemaVersionRef.current = null;
           iframeRef.current?.contentWindow?.postMessage(
             {
               source: "sessio",
@@ -385,8 +679,19 @@ export default function PlainHtmlPreview({
             },
             "*",
           );
+          if (appStateBridgeEnabled) {
+            iframeRef.current?.contentWindow?.postMessage(
+              {
+                source: "sessio",
+                type: SESSIO_APP_STATE_PROBE_TYPE,
+              },
+              "*",
+            );
+          }
         }}
       />
     </div>
   );
-}
+});
+
+export default PlainHtmlPreview;

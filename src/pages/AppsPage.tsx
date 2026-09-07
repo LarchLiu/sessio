@@ -36,7 +36,10 @@ import {
 } from "../components/ChatBottomStrips";
 import ChatComposer from "../components/ChatComposer";
 import FileViewer from "../components/FileViewer";
-import PlainHtmlPreview from "../components/PlainHtmlPreview";
+import PlainHtmlPreview, {
+  type PlainHtmlPreviewHandle,
+  type SessioAppStateSnapshot,
+} from "../components/PlainHtmlPreview";
 import PlainMarkdownPreview from "../components/PlainMarkdownPreview";
 import {
   isPlainEditorEditableDocumentPath,
@@ -73,6 +76,9 @@ export default function AppsPage({
   selectedFilePath,
   onClearFileSelection,
   onOpenFile,
+  cachedAppState,
+  onAppStateSnapshot,
+  onAppStateSaveHandlerChange,
 }: {
   app: SessioAppInfo;
   appDisplayName: string;
@@ -88,6 +94,11 @@ export default function AppsPage({
   selectedFilePath: string | null;
   onClearFileSelection: () => void;
   onOpenFile: (path: string) => void;
+  cachedAppState: SessioAppStateSnapshot | null;
+  onAppStateSnapshot: (snapshot: SessioAppStateSnapshot) => void;
+  onAppStateSaveHandlerChange: (
+    handler: (() => Promise<SessioAppStateSnapshot | null>) | null,
+  ) => void;
 }) {
   const { t } = useI18n();
   const [html, setHtml] = useState<string | null>(null);
@@ -106,6 +117,7 @@ export default function AppsPage({
   const reloadedTurnKeysRef = useRef(new Set<string>());
   const fallbackRuntimeSequenceRef = useRef(0);
   const appliedLinkedSessionRef = useRef<string | null>(null);
+  const htmlPreviewRef = useRef<PlainHtmlPreviewHandle | null>(null);
   const composer = useChatComposer({
     runtimeAgents,
     lastRuntimeAgentSelection,
@@ -120,11 +132,21 @@ export default function AppsPage({
   });
   useAppshotComposerRegistration(composer, chatVisible);
 
-  const loadHtml = useCallback(async () => {
+  const saveAppState = useCallback(async () => {
+    return await htmlPreviewRef.current?.saveAppState() ?? null;
+  }, []);
+
+  useEffect(() => {
+    onAppStateSaveHandlerChange(saveAppState);
+    return () => onAppStateSaveHandlerChange(null);
+  }, [onAppStateSaveHandlerChange, saveAppState]);
+
+  const loadHtml = useCallback(async (preserveState = false) => {
     if (!app.htmlPath) {
       setHtml(null);
       return;
     }
+    if (preserveState) await saveAppState();
     setLoadingHtml(true);
     try {
       const source = await readLocalTextFile(app.htmlPath);
@@ -137,10 +159,10 @@ export default function AppsPage({
     } finally {
       setLoadingHtml(false);
     }
-  }, [app.htmlPath, onError]);
+  }, [app.htmlPath, onError, saveAppState]);
 
   useEffect(() => {
-    void loadHtml();
+    void loadHtml(false);
   }, [loadHtml]);
 
   useEffect(() => {
@@ -264,7 +286,7 @@ export default function AppsPage({
     const key = `${runtimeSessionId}:${latestTurn.turnId}:${latestTurn.status}`;
     if (reloadedTurnKeysRef.current.has(key)) return;
     reloadedTurnKeysRef.current.add(key);
-    void loadHtml();
+    void loadHtml(true);
   }, [liveSession, loadHtml, runtimeSessionId]);
 
   const sendMessage = async () => {
@@ -394,6 +416,7 @@ export default function AppsPage({
           </div>
         ) : app.htmlPath && html !== null ? (
           <PlainHtmlPreview
+            ref={htmlPreviewRef}
             key={`${app.htmlPath}:${previewRevision}`}
             html={html}
             filePath={app.htmlPath}
@@ -401,6 +424,9 @@ export default function AppsPage({
             showScriptsControl={false}
             permissions={app.permissions}
             appDirectoryPath={app.directoryPath}
+            appStateBridgeEnabled
+            cachedAppState={cachedAppState}
+            onAppStateSnapshot={onAppStateSnapshot}
           />
         ) : (
           <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-ink/45">

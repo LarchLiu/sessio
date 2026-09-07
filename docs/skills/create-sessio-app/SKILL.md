@@ -96,6 +96,10 @@ existing files without explicit permission.
    or the original external script URL after it is inlined. Follow the Sessio
    theme contract below so the app uses the current light or dark chat
    background and updates without reloading when the Sessio theme changes.
+   When the App has meaningful mutable state that should survive switching to
+   another App, Project Chat, Settings, or another Sessio view, read
+   [references/state-persistence.md](references/state-persistence.md) and expose
+   the state adapter described there.
 9. **Write AGENTS.md from the implemented contract.** Explain what the app is
    for, how to open it in a browser and Sessio, the `web/` layout, config metadata, the exact
    data global, the complete schema, a valid data example, how to replace or
@@ -150,6 +154,9 @@ existing files without explicit permission.
   data file and document it in the schema.
 - Keep schema versioning explicit. A breaking field change increments
   `schemaVersion` and updates the AGENTS.md migration note.
+- Keep restorable interaction state separate from the data JS. The data JS
+  remains the initial data source; a Sessio state snapshot contains only user
+  changes and the minimal UI state needed to reconstruct the current view.
 - Treat data as untrusted input: validate types, escape text through DOM APIs,
   and avoid evaluating strings as code. Do not put secrets or personal data in
   sample files.
@@ -524,6 +531,10 @@ Before reporting completion, verify:
       before extracting values into the data JS.
 - [ ] Missing/invalid data produces a visible, actionable empty/error state.
 - [ ] The page works offline and does not require a server.
+- [ ] An App with meaningful mutable state implements
+      `references/state-persistence.md`; switching between Apps, Project Chat,
+      Settings, and the App restores a validated snapshot without copying DOM,
+      Canvas pixels, or unchanged data JS records into the cache.
 - [ ] `permissions` is omitted unless the app needs a supported capability;
       each requested capability is documented in AGENTS.md and tested in Sessio.
 - [ ] Every runtime screenshot or data/file export declares `downloads` and
