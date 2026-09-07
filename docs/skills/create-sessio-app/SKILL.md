@@ -68,8 +68,9 @@ existing files without explicit permission.
    from records. Record units, requiredness, null behavior, allowed values, and
    an example for every field.
 6. **Create the data file first.** Put all sample or supplied data in
-   `web/<app-slug>-data.js`. It must assign one global value and contain no rendering
-   code:
+   `web/<app-slug>-data.js`. It must assign one global value containing a
+   JSON-compatible object and contain no rendering code, imports, network
+   access, or executable migration logic:
 
    ```js
    window.SESSIO_APP_DATA = {
@@ -79,9 +80,18 @@ existing files without explicit permission.
    };
    ```
 
-   The global name may be app-specific when needed, but the HTML and AGENTS.md
+   `schemaVersion` is part of the data contract. If the data structure changes
+   in any way, including adding, removing, renaming, nesting, or retyping a
+   field, changing units or enum values, or changing requiredness, increment it
+   and document the migration in AGENTS.md. The global name may be app-specific
+   when needed, but the HTML and AGENTS.md
    must state it exactly. Never duplicate records, labels derived from records,
-   or default sample rows inside the HTML.
+   or default sample rows inside the HTML. Keep this as `.js` rather than
+   `.json`: direct `file://` pages and Sessio's inline-script preview can load a
+   same-directory script without `fetch`. A separate `.json` file would require
+   an asynchronous fetch or a host bridge that is unavailable in the portable
+   offline contract. The assigned value should remain JSON-compatible so agents
+   can parse and migrate it as data.
 7. **Create the HTML view.** Put it at `web/<app-slug>.html` and reference the
    data file with a same-directory relative script tag such as
    `<script src="./<app-slug>-data.js"></script>`. Read the global data
@@ -124,12 +134,19 @@ existing files without explicit permission.
    Windows PowerShell. Both scripts copy the complete source app directory to
    `$SESSIO_APP_HOME/apps/<app-slug>/`. They refuse to update an existing
    destination unless the user explicitly requests `--update`/`-Update`.
-   Update publishing merges recursively: source paths replace matching
-   destination paths, while destination-only files such as runtime screenshots
-   and saved data remain in place. If a matching path changes between a file and
-   a directory, the source type wins and that conflicting destination path is
-   replaced. Update publishing is not a clean reinstall and does not remove
-   stale destination-only package files.
+   Update publishing merges recursively while protecting the installed
+   `web/<app-slug>-data.js` when it already exists: this file may contain data
+   written by Sessio chat or by the App at runtime, so an ordinary update must
+   never replace it with the source copy. Use `--update-data` (or
+   `-UpdateData` on PowerShell) only after you have deliberately migrated and
+   reviewed the installed data into the new source schema; the publisher does
+   not guess how arbitrary application data should be merged. Other source paths
+   replace matching destination paths, while destination-only files such as
+   runtime
+   screenshots, exports, and saved files remain in place. If a matching path
+   changes between a file and a directory, the source type wins and that
+   conflicting destination path is replaced. Update publishing is not a clean
+   reinstall and does not remove stale destination-only package files.
    The publisher is an execution step, not a completion message: run it after
    validation and then verify that the destination contains `web/<app-slug>.html`,
    `web/<app-slug>-data.js`, `web/config.json`, AGENTS.md, CLAUDE.md, and any
@@ -152,8 +169,11 @@ existing files without explicit permission.
 - Keep derived values in the view logic when they are deterministic from the
   data. If a derived value is expensive or intentionally curated, put it in the
   data file and document it in the schema.
-- Keep schema versioning explicit. A breaking field change increments
-  `schemaVersion` and updates the AGENTS.md migration note.
+- Keep schema versioning explicit. Any data-structure change increments
+  `schemaVersion` and updates the AGENTS.md migration note. This includes
+  field additions and removals, renames, nesting changes, type or unit changes,
+  enum changes, and required/optional changes. A data-only value correction
+  that keeps the documented structure may keep the same version.
 - Keep restorable interaction state separate from the data JS. The data JS
   remains the initial data source; a Sessio state snapshot contains only user
   changes and the minimal UI state needed to reconstruct the current view.
@@ -360,6 +380,49 @@ Browser steps, Sessio preview steps, and whether inline JavaScript must be enabl
 
 ## Updating data
 Edit or regenerate only `web/<app-slug>-data.js`; preserve the documented schema.
+The installed copy under `$SESSIO_APP_HOME/apps/<app-slug>/web/` is runtime
+state and is protected by the publisher during ordinary `--update` publishing.
+Do not assume that regenerating the source copy updates installed user data.
+Use `--update-data`/`-UpdateData` only for an intentional data reset or a
+reviewed source-data migration, after confirming that replacing user changes is
+acceptable. The flag publishes the already-merged source file; it is not an
+automatic deep merge.
+
+When a schema-compatible view update is needed, use plain `--update` and keep
+the installed data file. When the schema changes, merge the installed runtime
+data before publishing:
+
+1. Read and parse both the installed
+   `$SESSIO_APP_HOME/apps/<app-slug>/web/<app-slug>-data.js` and the new source
+   data file. Do not merge JavaScript as text.
+2. Apply the migration documented in AGENTS.md. Preserve user values by the
+   documented stable record identifier, map renamed fields explicitly, convert
+   units and types explicitly, add documented defaults for new fields, and drop
+   removed fields. Never merge records by array position or silently keep
+   unknown fields. If the schema change is ambiguous or lossy, stop and report
+   it for review.
+3. Validate the merged envelope and set the new `schemaVersion`. Write that
+   validated merged object into the source `web/<app-slug>-data.js`, then update
+   AGENTS.md with the migration and any intentional data loss.
+4. Run `publish_app.sh <source-dir> <app-slug> --update --update-data` or
+   `publish_app.ps1 <source-dir> <app-slug> -Update -UpdateData`. This replaces
+   the installed file with the reviewed merged result. Keep a copy of the
+   previous installed data until the new App has been validated.
+
+The publisher cannot safely infer field identity, deletion, conflict precedence,
+or unit conversion from arbitrary JavaScript. A plain `--update-data` therefore
+must never be presented as a data-preserving merge; the migration step is part
+of the App's AGENTS.md contract and the agent's update task.
+
+### Schema version and migration rules
+
+`schemaVersion` is a positive integer stored in the root data envelope. Every
+change to the documented data structure must increment it. Keep the same
+version only for changing values while field names, nesting, types, units,
+allowed values, and requiredness remain unchanged. AGENTS.md must describe the
+source version, target version, field mapping, defaults, conversions, rejected
+cases, and any intentional data loss for each migration. The App must reject an
+unsupported or invalid version instead of guessing.
 When the user supplies an image, document, or plain text, compare its content
 with the schema in this `AGENTS.md` before changing data. Decide whether it
 contains values that map to required or optional fields, and extract only the
@@ -557,9 +620,12 @@ Before reporting completion, verify:
       have bounding-box alignment measured when applicable.
 - [ ] After validation, the complete app directory is copied to
       `$SESSIO_APP_HOME/apps/<app-slug>/` using the bundled platform publisher;
-      `--update`/`-Update` preserves destination-only runtime screenshots and saved
-      data, and when AGENTS.md exists, the destination also contains an
-      independent CLAUDE.md copy.
+      `--update`/`-Update` preserves the existing installed
+      `web/<app-slug>-data.js` as well as destination-only runtime screenshots,
+      exports, and saved files. Use `--update-data`/`-UpdateData` only with a
+      reviewed, pre-merged data file after a documented schema migration; the
+      publisher itself does not merge arbitrary JS data. When AGENTS.md exists,
+      the destination also contains an independent CLAUDE.md copy.
 - [ ] `web/config.json` is valid JSON and contains the required string fields:
       `nameZh`, `nameEn`, `description`, `author`, `email`, and `version`; its
       optional `permissions` array contains only supported capability names.

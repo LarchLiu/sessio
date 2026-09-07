@@ -6,7 +6,9 @@ param(
   [Parameter(Position = 1, Mandatory = $true)]
   [string]$AppSlug,
 
-  [switch]$Update
+  [switch]$Update,
+
+  [switch]$UpdateData
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,13 +18,14 @@ function Fail([int]$Code, [string]$Message) {
   exit $Code
 }
 
-function Merge-AppTree([string]$Source, [string]$Destination) {
+function Merge-AppTree([string]$Source, [string]$Destination, [string]$RelativePath = '') {
   if (-not (Test-Path -LiteralPath $Destination)) {
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
   }
 
   foreach ($item in Get-ChildItem -LiteralPath $Source -Force) {
     $target = Join-Path $Destination $item.Name
+    $itemRelativePath = if ([string]::IsNullOrEmpty($RelativePath)) { $item.Name } else { Join-Path $RelativePath $item.Name }
     $isRealDirectory = $item.PSIsContainer -and [string]::IsNullOrEmpty($item.LinkType)
     if ($isRealDirectory) {
       if (Test-Path -LiteralPath $target) {
@@ -35,8 +38,11 @@ function Merge-AppTree([string]$Source, [string]$Destination) {
       } else {
         New-Item -ItemType Directory -Path $target -Force | Out-Null
       }
-      Merge-AppTree $item.FullName $target
+      Merge-AppTree $item.FullName $target $itemRelativePath
     } else {
+      if (-not $UpdateData -and $itemRelativePath -eq (Join-Path 'web' "${AppSlug}-data.js") -and (Test-Path -LiteralPath $target -PathType Leaf)) {
+        continue
+      }
       if (Test-Path -LiteralPath $target) {
         Remove-Item -LiteralPath $target -Recurse -Force
       }
@@ -69,6 +75,9 @@ if ($AppSlug -notmatch '^[a-z0-9]+([.-][a-z0-9]+)*$') {
 $source = (Resolve-Path -LiteralPath $SourceAppDir).Path
 $appsDir = Join-Path $appHome 'apps'
 $destination = Join-Path $appsDir $AppSlug
+if ($UpdateData) {
+  $Update = $true
+}
 if ((Test-Path -LiteralPath $destination) -and -not $Update) {
   Fail 73 "Destination already exists; inspect it or rerun with -Update: $destination"
 }

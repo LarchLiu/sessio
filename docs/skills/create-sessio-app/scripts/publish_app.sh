@@ -2,17 +2,25 @@
 set -euo pipefail
 
 usage() {
-  printf 'Usage: %s <source-app-dir> <app-slug> [--update]\n' "$0" >&2
+  printf 'Usage: %s <source-app-dir> <app-slug> [--update] [--update-data]\n' "$0" >&2
 }
 
-if [[ $# -lt 2 || $# -gt 3 ]]; then
+if [[ $# -lt 2 || $# -gt 4 ]]; then
   usage
   exit 64
 fi
 
 source_dir=$1
 app_slug=$2
-update=${3:-}
+update=false
+update_data=false
+for option in "${@:3}"; do
+  case "$option" in
+    --update) update=true ;;
+    --update-data) update_data=true ;;
+    *) usage; exit 64 ;;
+  esac
+done
 
 if [[ -z "${SESSIO_APP_HOME:-}" ]]; then
   printf 'SESSIO_APP_HOME is not set; refusing to guess a Sessio profile.\n' >&2
@@ -30,20 +38,19 @@ if [[ ! "$app_slug" =~ ^[a-z0-9]+([.-][a-z0-9]+)*$ ]]; then
   printf 'App slug must use lowercase ASCII segments: %s\n' "$app_slug" >&2
   exit 64
 fi
-if [[ "$update" != "" && "$update" != "--update" ]]; then
-  usage
-  exit 64
+if [[ "$update_data" == true ]]; then
+  update=true
 fi
 
 source_dir=$(cd "$source_dir" && pwd -P)
 apps_dir="$SESSIO_APP_HOME/apps"
 destination="$apps_dir/$app_slug"
 
-if [[ ( -e "$destination" || -L "$destination" ) && "$update" != "--update" ]]; then
+if [[ ( -e "$destination" || -L "$destination" ) && "$update" != true ]]; then
   printf 'Destination already exists; inspect it or rerun with --update: %s\n' "$destination" >&2
   exit 73
 fi
-if [[ "$update" == "--update" && ( -e "$destination" || -L "$destination" ) ]]; then
+if [[ "$update" == true && ( -e "$destination" || -L "$destination" ) ]]; then
   if [[ -L "$destination" || ! -d "$destination" ]]; then
     printf 'Existing destination must be a real directory: %s\n' "$destination" >&2
     exit 73
@@ -53,8 +60,10 @@ fi
 copy_tree_merge() {
   local source=$1
   local target=$2
+  local relative_path=${3:-}
   local entry
   local target_entry
+  local entry_relative
 
   mkdir -p "$target"
   while IFS= read -r -d '' entry; do
@@ -68,8 +77,13 @@ copy_tree_merge() {
       else
         mkdir -p "$target_entry"
       fi
-      copy_tree_merge "$entry" "$target_entry"
+      entry_relative="${relative_path:+$relative_path/}${entry##*/}"
+      copy_tree_merge "$entry" "$target_entry" "$entry_relative"
     else
+      entry_relative="${relative_path:+$relative_path/}${entry##*/}"
+      if [[ "$update_data" != true && "$entry_relative" == "web/$app_slug-data.js" && -f "$target_entry" ]]; then
+        continue
+      fi
       if [[ -e "$target_entry" || -L "$target_entry" ]]; then
         rm -rf "$target_entry"
       fi
@@ -86,7 +100,7 @@ write_claude_instructions() {
 }
 
 mkdir -p "$apps_dir"
-if [[ "$update" == "--update" && -d "$destination" ]]; then
+if [[ "$update" == true && -d "$destination" ]]; then
   copy_tree_merge "$source_dir" "$destination"
   write_claude_instructions "$destination"
   printf '%s\n' "$destination"
