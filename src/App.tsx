@@ -43,6 +43,7 @@ import UpdateConfirmDialog from "./components/UpdateConfirmDialog";
 import SettingsPage from "./pages/SettingsPage";
 import AutoTasksPage from "./pages/AutoTasksPage";
 import AppsPage from "./pages/AppsPage";
+import AppStorePage from "./pages/AppStorePage";
 import type { SessioAppStateSnapshot } from "./components/PlainHtmlPreview";
 import { createAppSuspendNavigationCoordinator } from "./appStateNavigation";
 import type { ToastStackMessage } from "./components/ToastStack";
@@ -64,7 +65,7 @@ import {
   emptyLiveRuntimeState,
 } from "./runtimeChat";
 import { useRuntimeAgents } from "./runtimeAgents";
-import { AppWindow, CalendarClock, Folder, Goal, Hash, Kanban, MessagesSquare, MessageSquare, MessageSquareText } from "lucide-react";
+import { AppWindow, CalendarClock, Folder, Goal, Hash, Kanban, MessagesSquare, MessageSquare, MessageSquareText, Store } from "lucide-react";
 import type { ChatFilesSubview } from "./components/ChatFilesView";
 import type { ChatView, DetailMode, PendingNewChatSession, ViewMode } from "./navigation";
 import {
@@ -93,7 +94,7 @@ type ProjectFileSelectionRequest = {
   requestId: number;
 };
 type CanvasFileSelectionRequest = { paths: string[]; requestId: number };
-type UtilityView = "autoTasks" | "apps" | null;
+type UtilityView = "autoTasks" | "apps" | "appStore" | null;
 
 function readViewMode(): ViewMode {
   if (typeof localStorage === "undefined") return "native";
@@ -1169,6 +1170,18 @@ export default function App() {
       onOpenSettings={() => runAfterAppSuspend(() => setSettingsOpen(true))}
       onOpenAutoTasks={() => runAfterAppSuspend(() => setUtilityView("autoTasks"))}
       autoTasksActive={utilityView === "autoTasks"}
+      onOpenAppStore={() => runAfterAppSuspend(() => {
+        setUtilityView("appStore");
+        setSelectedApp(null);
+        setSelectedAppFilePath(null);
+        setSelected(null);
+        setSelectedProject(null);
+        setSelectedThread(null);
+        setNewChatProjectKey(null);
+        setPendingSelectSession(null);
+        setFilter({ kind: "all" });
+        setDetailMode("chat");
+      })}
       appsSectionExpanded={expandApps}
       apps={sessioApps}
       appDisplayNames={appDisplayNames}
@@ -1198,7 +1211,8 @@ export default function App() {
         event.preventDefault();
         void openAppMenu(app, { x: event.clientX, y: event.clientY });
       }}
-      appsActive={utilityView === "apps"}
+      appsActive={utilityView === "apps" || utilityView === "appStore"}
+      appStoreActive={utilityView === "appStore"}
       onInstallUpdate={openUpdateConfirm}
       onError={setError}
     />
@@ -1310,18 +1324,22 @@ export default function App() {
       sidebarOpen={sidebarOpen}
       selected={null}
       detailTitle=""
-      contextTitle={{ label: t("autoTasks.title"), icon: CalendarClock }}
+      contextTitle={{ label: t(utilityView === "appStore" ? "appStore.title" : "autoTasks.title"), icon: utilityView === "appStore" ? Store : CalendarClock }}
       entityTitle={null}
       projectContext={null}
       activeMessageMeta={null}
       metaPopoverOpen={false}
-      rightSidebarOpen={rightSidebarOpen}
+      rightSidebarOpen={utilityView === "appStore" ? false : rightSidebarOpen}
       terminalDockOpen={false}
       terminalDockVisible={false}
       onOpenSidebar={() => setSidebarOpen(true)}
       onToggleMetaPopover={() => {}}
       onToggleTerminalDock={() => {}}
-      onToggleRightSidebar={() => setRightSidebarOpen((open) => !open)}
+      onToggleRightSidebar={
+        utilityView === "appStore"
+          ? undefined
+          : () => setRightSidebarOpen((open) => !open)
+      }
     />
   );
 
@@ -1455,7 +1473,7 @@ export default function App() {
       <AppLayout
         sidebar={sidebar}
         header={
-          utilityView === "autoTasks"
+          utilityView === "autoTasks" || utilityView === "appStore"
             ? autoTasksHeader
             : utilityView === "apps"
               ? appsHeader
@@ -1494,10 +1512,12 @@ export default function App() {
             onError={setError}
           />
         }
-        rightSidebarOpen={rightSidebarOpen}
+        rightSidebarOpen={rightSidebarOpen && utilityView !== "appStore"}
         overlays={overlays}
       >
-        {utilityView === "autoTasks" ? (
+        {utilityView === "appStore" ? (
+          <AppStorePage localApps={sessioApps} onAppInstalled={() => { void refreshSessioApps(); }} />
+        ) : utilityView === "autoTasks" ? (
           <AutoTasksPage onError={setError} />
         ) : utilityView === "apps" && selectedApp ? (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">

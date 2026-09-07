@@ -2913,6 +2913,28 @@ fn read_local_image_data_url(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn read_local_media_data_url(path: String) -> Result<String, String> {
+    use base64::Engine;
+
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.is_absolute() {
+        return Err("Only absolute media paths can be loaded".to_string());
+    }
+    let mime = local_media_mime(&path_buf).ok_or_else(|| "Unsupported media type".to_string())?;
+    let meta = std::fs::metadata(&path_buf).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("Path is not a file".to_string());
+    }
+    const MAX_MEDIA_BYTES: u64 = 24 * 1024 * 1024;
+    if meta.len() > MAX_MEDIA_BYTES {
+        return Err("Media is too large to preview".to_string());
+    }
+    let bytes = std::fs::read(&path_buf).map_err(|e| e.to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime};base64,{encoded}"))
+}
+
+#[tauri::command]
 fn save_pasted_attachment(
     req: SavePastedAttachmentRequest,
 ) -> Result<SavedPastedAttachment, String> {
@@ -7877,6 +7899,23 @@ fn local_image_mime(path: &Path) -> Option<&'static str> {
     }
 }
 
+fn local_media_mime(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("mp3") => Some("audio/mpeg"),
+        Some("wav") => Some("audio/wav"),
+        Some("ogg") => Some("audio/ogg"),
+        Some("m4a") => Some("audio/mp4"),
+        Some("aac") => Some("audio/aac"),
+        Some("webm") => Some("audio/webm"),
+        _ => None,
+    }
+}
+
 fn text_file_mime(path: &Path) -> Option<&'static str> {
     match path
         .extension()
@@ -8944,6 +8983,7 @@ pub fn run() {
             commands::apps::list_sessio_app_sessions,
             commands::apps::link_sessio_app_session,
             commands::apps::write_sessio_app_file,
+            commands::apps::install_sessio_app,
             commands::process_templates::list_process_templates,
             commands::process_templates::create_process_template,
             commands::process_templates::update_process_template,
@@ -9014,6 +9054,7 @@ pub fn run() {
             create_pending_session,
             commands::sessions::update_session_rename_title,
             read_local_image_data_url,
+            read_local_media_data_url,
             save_pasted_attachment,
             capture_window_area_png,
             capture_frontmost_app_window_png,

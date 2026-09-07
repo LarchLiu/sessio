@@ -24,6 +24,9 @@
       "allow": [
         {
           "url": "https://github.com/LarchLiu/sessio/releases/*"
+        },
+        {
+          "url": "https://github.com/LarchLiu/sessio-web/releases/*"
         }
       ]
     },

@@ -98,6 +98,7 @@ export interface SessioAppInfo {
   logoPath: string | null;
   nameZh: string | null;
   nameEn: string | null;
+  version: string | null;
   permissions: SessioAppPermission[];
 }
 
@@ -1505,6 +1506,14 @@ export async function writeSessioAppFile(
   return invoke<SessioAppFileWriteResult>("write_sessio_app_file", { request });
 }
 
+export async function installSessioApp(
+  slug: string,
+  downloadUrl: string,
+  update: boolean,
+): Promise<SessioAppInfo> {
+  return invoke<SessioAppInfo>("install_sessio_app", { slug, downloadUrl, update });
+}
+
 export async function listSessioAppSessions(appId: string): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessio_app_sessions", { appId });
 }
@@ -2534,6 +2543,10 @@ export async function updateSessionHistoryCount(
 
 export async function readLocalImageDataUrl(path: string): Promise<string> {
   return invoke<string>("read_local_image_data_url", { path });
+}
+
+export async function readLocalMediaDataUrl(path: string): Promise<string> {
+  return invoke<string>("read_local_media_data_url", { path });
 }
 
 export async function savePastedAttachment(

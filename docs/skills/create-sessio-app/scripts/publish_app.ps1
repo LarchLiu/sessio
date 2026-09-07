@@ -18,7 +18,7 @@ function Fail([int]$Code, [string]$Message) {
   exit $Code
 }
 
-function Merge-AppTree([string]$Source, [string]$Destination, [string]$RelativePath = '') {
+function Merge-AppTree([string]$Source, [string]$Destination, [string]$RelativePath = '', [bool]$StageDataUpdate = $false) {
   if (-not (Test-Path -LiteralPath $Destination)) {
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
   }
@@ -38,9 +38,16 @@ function Merge-AppTree([string]$Source, [string]$Destination, [string]$RelativeP
       } else {
         New-Item -ItemType Directory -Path $target -Force | Out-Null
       }
-      Merge-AppTree $item.FullName $target $itemRelativePath
+      Merge-AppTree $item.FullName $target $itemRelativePath $StageDataUpdate
     } else {
       if (-not $UpdateData -and $itemRelativePath -eq (Join-Path 'web' "${AppSlug}-data.js") -and (Test-Path -LiteralPath $target -PathType Leaf)) {
+        if ($StageDataUpdate) {
+          $pendingTarget = Join-Path ([System.IO.Path]::GetDirectoryName($target)) "${AppSlug}-data.pending.js"
+          if (Test-Path -LiteralPath $pendingTarget) {
+            Remove-Item -LiteralPath $pendingTarget -Recurse -Force
+          }
+          Copy-Item -LiteralPath $item.FullName -Destination $pendingTarget -Force
+        }
         continue
       }
       if (Test-Path -LiteralPath $target) {
@@ -88,10 +95,11 @@ if ((Test-Path -LiteralPath $destination) -and $Update) {
     Fail 73 "Existing destination must be a real directory: $destination"
   }
 }
+$stageDataUpdate = $Update -and -not $UpdateData -and (Test-Path -LiteralPath (Join-Path $source 'web' "${AppSlug}-migrations.js") -PathType Leaf)
 
 New-Item -ItemType Directory -Path $appsDir -Force | Out-Null
 if ((Test-Path -LiteralPath $destination) -and $Update) {
-  Merge-AppTree $source $destination
+  Merge-AppTree $source $destination '' $stageDataUpdate
   Write-ClaudeInstructions $destination
   [Console]::Out.WriteLine($destination)
   exit 0
@@ -101,7 +109,7 @@ $staging = Join-Path $appsDir ('.{0}.publish.{1}' -f $AppSlug, [Guid]::NewGuid()
 
 try {
   New-Item -ItemType Directory -Path $staging -Force | Out-Null
-  Merge-AppTree $source $staging
+  Merge-AppTree $source $staging '' $stageDataUpdate
   Write-ClaudeInstructions $staging
   Move-Item -LiteralPath $staging -Destination $destination
   $staging = $null

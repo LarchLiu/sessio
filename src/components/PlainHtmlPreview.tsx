@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import {
+  readLocalMediaDataUrl,
   readLocalTextFile,
   writeSessioAppFile,
   type SessioAppFileWriteRequest,
@@ -118,8 +119,8 @@ const STATIC_PREVIEW_CSP = [
   "default-src 'none'",
   "img-src data: blob:",
   "media-src data: blob:",
-  "style-src 'unsafe-inline'",
-  "font-src data:",
+  "style-src 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src data: https://fonts.gstatic.com",
   "script-src 'none'",
   "connect-src 'none'",
   "frame-src 'none'",
@@ -401,7 +402,22 @@ async function inlineLocalScripts(html: string, htmlPath: string): Promise<strin
       const scriptPath = resolveLocalScriptPath(script.getAttribute("src") ?? "", htmlPath);
       if (!scriptPath) return;
       try {
-        const source = await readLocalTextFile(scriptPath);
+        let source = await readLocalTextFile(scriptPath);
+        const mediaReferences = new Map<string, string>();
+        const mediaPattern = /(["'])(\.?\.?\/[^"']+\.(?:mp3|wav|ogg|m4a|aac|webm))(?:\?[^"']*)?\1/gi;
+        for (const match of source.matchAll(mediaPattern)) {
+          const reference = match[2];
+          const mediaPath = resolveLocalScriptPath(reference, scriptPath);
+          if (!mediaPath || mediaReferences.has(reference)) continue;
+          try {
+            mediaReferences.set(reference, await readLocalMediaDataUrl(mediaPath));
+          } catch {
+            // Leave unavailable media references unchanged so app code can handle the error.
+          }
+        }
+        for (const [reference, dataUrl] of mediaReferences) {
+          source = source.replaceAll(reference, dataUrl);
+        }
         script.removeAttribute("src");
         script.textContent = source;
       } catch {

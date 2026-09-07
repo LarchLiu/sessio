@@ -22,6 +22,7 @@ server or network access required.
   web/
     <app-slug>.html     # UI, styles, rendering, and interaction logic
     <app-slug>-data.js  # the only runtime data source
+    <app-slug>-migrations.js # optional schema migration and validation logic
     logo.<ext>          # optional app logo or brand asset
     screenshot.<ext>   # optional app screenshot
     config.json         # app metadata for Sessio and other agents
@@ -72,10 +73,16 @@ existing files without explicit permission.
    data envelope and every record field. Keep presentation metadata separate
    from records. Record units, requiredness, null behavior, allowed values, and
    an example for every field.
-6. **Create the data file first.** Put all sample or supplied data in
-   `web/<app-slug>-data.js`. It must assign one global value containing a
-   JSON-compatible object and contain no rendering code, imports, network
-   access, or executable migration logic:
+6. **Create the data file first.** Put only the intended initial runtime data in
+   `web/<app-slug>-data.js`. Do not add fabricated examples, demo records, or
+   personal-looking records merely to make the first screen look populated;
+   initialize record collections as empty unless the user explicitly supplied
+   and requested a real dataset to ship with the App. Non-personal defaults
+   such as settings, labels, and an empty schema envelope are allowed. Put
+   illustrative records in AGENTS.md, a fixture file, or test data instead.
+   The file must assign one global value containing a JSON-compatible object
+   and contain no rendering code, imports, network access, or executable
+   migration logic:
 
    ```js
    window.SESSIO_APP_DATA = {
@@ -142,19 +149,23 @@ existing files without explicit permission.
    Update publishing merges recursively while protecting the installed
    `web/<app-slug>-data.js` when it already exists: this file may contain data
    written by Sessio chat or by the App at runtime, so an ordinary update must
-   never replace it with the source copy. Use `--update-data` (or
-   `-UpdateData` on PowerShell) only after you have deliberately migrated and
-   reviewed the installed data into the new source schema; the publisher does
-   not guess how arbitrary application data should be merged. Other source paths
-   replace matching destination paths, while destination-only files such as
-   runtime
+   never replace it with the source copy. When the source contains
+   `web/<app-slug>-migrations.js`, an ordinary `--update` stages the source data
+   as `web/<app-slug>-data.pending.js` beside the protected data file so the App
+   can validate and migrate it at startup. `--update-data` (or `-UpdateData` on
+   PowerShell) bypasses staging and replaces the installed data only after you
+   have deliberately migrated and reviewed it into the new source schema; the
+   publisher does not guess how arbitrary application data should be merged.
+   Other source paths replace matching destination paths, while destination-only
+   files such as runtime
    screenshots, exports, and saved files remain in place. If a matching path
    changes between a file and a directory, the source type wins and that
    conflicting destination path is replaced. Update publishing is not a clean
    reinstall and does not remove stale destination-only package files.
    The publisher is an execution step, not a completion message: run it after
    validation and then verify that the destination contains `web/<app-slug>.html`,
-   `web/<app-slug>-data.js`, `web/config.json`, AGENTS.md, CLAUDE.md, and any
+   `web/<app-slug>-data.js`, `web/config.json`, AGENTS.md, CLAUDE.md, and, when
+   schema migration is required, `web/<app-slug>-migrations.js`, plus any
    optional assets or child directories. The publisher creates
    `CLAUDE.md` as an independent copy of `AGENTS.md` when the source contains
    AGENTS.md, so Claude can discover the same instructions without symlinks.
@@ -166,6 +177,19 @@ existing files without explicit permission.
 
 ## Data separation rules
 
+- Do not put example or personal records in `web/<app-slug>-data.js`. Initial
+  installation must not appear to contain a user's real data. This includes
+  people and family records such as those formerly shown in
+  `family-tree-data.js`, and medical or case records such as those formerly
+  shown in `case-report-trends-data.js`. Put examples in `AGENTS.md`, a separate
+  fixture file, or test data instead. Empty arrays, schema envelopes, and
+  non-personal default settings are allowed; for example, the board settings,
+  difficulty defaults, and player labels in `gomoku-bot-data.js` are valid
+  initial values.
+- If an App needs user records, initialize the record collection as empty and
+  create records only from explicit user input or a documented local import.
+  Keep any sample-data toggle separate from the production data file and make
+  it impossible for sample records to be mistaken for user-owned records.
 - The data JS is the single source of truth for all runtime rows, categories,
   series, labels, units, thresholds, and user-configurable values.
 - The HTML may contain structural labels such as “No data” or column headings,
@@ -202,6 +226,8 @@ What the app shows and who uses it.
 ## Files
 - `web/<app-slug>.html`: view and interaction logic.
 - `web/<app-slug>-data.js`: only runtime data, exported as `window.<GLOBAL>`.
+- `web/<app-slug>-migrations.js`: optional non-mutating schema migration and
+  validation functions used when `schemaVersion` changes.
 - `web/config.json`: required app metadata with `nameZh`, `nameEn`,
   `description`, `category`, `topics`, `author`, `email`, and `version`, plus
   optional permissions.
@@ -431,6 +457,40 @@ or unit conversion from arbitrary JavaScript. A plain `--update-data` therefore
 must never be presented as a data-preserving merge; the migration step is part
 of the App's AGENTS.md contract and the agent's update task.
 
+### Store upgrade migrations
+
+The Sessio App Store uses a two-phase data upgrade for installed Apps. An App
+that changes its data schema must ship both the new `web/<app-slug>-data.js`
+and an App-specific `web/<app-slug>-migrations.js` module. During an upgrade,
+Sessio keeps the installed data file and stages the new file as
+`web/<app-slug>-data.pending.js`. The pending file is a candidate, not runtime
+state; it is created only when the migration module is present.
+
+The App's startup code must capture the installed data object, load the pending
+candidate and migration module, then:
+
+1. Compare the old and pending `schemaVersion` values. If they are equal, keep
+   the installed object and do not migrate.
+2. Apply an explicit migration chain such as `1 -> 2 -> 3`. Match records by
+   documented stable identifiers, map renamed fields, convert units and types,
+   add documented defaults, and deliberately remove fields that no longer
+   exist. Do not merge by array position or copy unknown fields.
+3. Validate the complete result against the target schema before writing it.
+   If the version is unsupported, a required field is ambiguous, validation
+   fails, or the migration would lose data without a documented policy, leave
+   the installed data untouched and show the migration error.
+4. Write the validated envelope to `web/<app-slug>-data.js` through the Sessio
+   file-write bridge with `overwrite: true`, then use the merged object for the
+   current session. Keep the pending file until a later package update replaces
+   it; the startup check must be idempotent once both versions match.
+
+`<app-slug>-migrations.js` must export the migration and validation functions;
+it must not mutate the old object in place. Document every source and target
+version, stable key, field mapping, default, conversion, rejected case, and
+intentional data loss in `AGENTS.md`. The host only stages files and cannot run
+arbitrary migration JavaScript, so an App Store upgrade without this module
+must preserve the old data file and must not claim that data migration occurred.
+
 ### Schema version and migration rules
 
 `schemaVersion` is a positive integer stored in the root data envelope. Every
@@ -590,21 +650,35 @@ small subpixel differences as rounding; investigate visible misalignment or
 larger systematic offsets. Record the browser, URL, viewport sizes, actions,
 observed results, and any limitations in the handoff notes.
 
-When the user asks for a dashboard or report but does not provide data, create a
-small representative dataset in the data JS and mark it clearly in AGENTS.md
-as sample data. Never infer sensitive conclusions from fabricated values.
+When the user asks for a dashboard or report but does not provide data, keep the
+production data JS record collections empty and render a clear empty state.
+Document any illustrative records in AGENTS.md or a separate fixture instead;
+never make fabricated values look like user-owned data or infer sensitive
+conclusions from them.
 
 ## Handoff checklist
 
 Before reporting completion, verify:
 
 - [ ] Exactly one HTML view, one data JS file, one `config.json`, and one
-      `AGENTS.md` exist for the app; include `web/logo.<ext>` or
+      `AGENTS.md` exist for the app; include
+      `web/<app-slug>-migrations.js` when a schema migration is required, and
+      include `web/logo.<ext>` or
       `web/screenshot.<ext>` when requested and successfully generated, and
       omit each optional asset cleanly when unavailable.
 - [ ] The HTML references `web/<app-slug>-data.js` by a same-directory relative
       path.
 - [ ] All runtime data is in the data JS; no duplicated rows are in the HTML.
+- [ ] The initial data JS contains no fabricated, demo, or personal-looking
+      records; record collections are empty unless the user explicitly supplied
+      and requested the dataset, and non-personal default settings are clearly
+      distinguished from user records.
+- [ ] If `schemaVersion` changes, `web/<app-slug>-migrations.js` exports a
+      non-mutating migration chain and validation functions, and AGENTS.md
+      documents stable identifiers, field mappings, defaults, conversions,
+      rejected cases, and intentional data loss. The pending candidate file is
+      staged only for this migration flow and is never treated as runtime data
+      before validation succeeds.
 - [ ] AGENTS.md schema tables match the fields and types consumed by the HTML,
       and its data-usage/update rules match the implementation.
 - [ ] User-provided images, documents, and text are checked against the schema

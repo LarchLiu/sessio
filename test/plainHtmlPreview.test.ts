@@ -23,6 +23,8 @@ describe("buildPlainHtmlPreviewDocument", () => {
 
     expect(html).toContain("script-src 'none'");
     expect(html).toContain("connect-src 'none'");
+    expect(html).toContain("style-src 'unsafe-inline' https://fonts.googleapis.com");
+    expect(html).toContain("font-src data: https://fonts.gstatic.com");
     expect(html).not.toContain("<base");
     expect(html).not.toContain("http-equiv=\"refresh\"");
     expect(html).toContain('target="_blank"');

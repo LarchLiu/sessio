@@ -1,12 +1,14 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::State;
+use uuid::Uuid;
+use zip::ZipArchive;
 
 use crate::app_paths;
 use crate::models::{Agent, SessionInfo};
@@ -23,6 +25,7 @@ pub(crate) struct SessioAppInfo {
     pub logo_path: Option<String>,
     pub name_zh: Option<String>,
     pub name_en: Option<String>,
+    pub version: Option<String>,
     pub permissions: Vec<SessioAppPermission>,
 }
 
@@ -67,12 +70,15 @@ pub(crate) struct SessioAppFileWriteResult {
 }
 
 const MAX_APP_FILE_BYTES: usize = 25 * 1024 * 1024;
+const APP_STORE_RELEASE_PREFIX: &str = "https://github.com/LarchLiu/sessio-web/releases/";
+const MAX_APP_ARCHIVE_BYTES: u64 = 250 * 1024 * 1024;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AppConfig {
     name_zh: Option<String>,
     name_en: Option<String>,
+    version: Option<String>,
     #[serde(default)]
     permissions: Vec<String>,
 }
@@ -137,6 +143,257 @@ pub(crate) fn list_sessio_app_sessions(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub(crate) async fn install_sessio_app(
+    slug: String,
+    download_url: String,
+    update: bool,
+) -> Result<SessioAppInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        install_sessio_app_blocking(&slug, &download_url, update)
+    })
+    .await
+    .map_err(|error| format!("install app task failed: {error}"))?
+}
+
+fn install_sessio_app_blocking(
+    slug: &str,
+    download_url: &str,
+    update: bool,
+) -> Result<SessioAppInfo, String> {
+    validate_app_slug(slug)?;
+    if !download_url.starts_with(APP_STORE_RELEASE_PREFIX) {
+        return Err("App download URL is outside the Sessio app store".into());
+    }
+
+    let apps_dir = crate::app_paths::apps_dir().map_err(|error| error.to_string())?;
+    fs::create_dir_all(&apps_dir).map_err(|error| format!("create apps directory: {error}"))?;
+    let destination = apps_dir.join(slug);
+    let destination_metadata = fs::symlink_metadata(&destination).ok();
+    if destination_metadata.is_some() && !update {
+        return Err(format!(
+            "App is already installed: {}",
+            destination.display()
+        ));
+    }
+    if let Some(metadata) = destination_metadata {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "Existing app destination is not a directory: {}",
+                destination.display()
+            ));
+        }
+    }
+
+    let tmp_dir = apps_dir.join(".tmp");
+    fs::create_dir_all(&tmp_dir).map_err(|error| format!("create app temp directory: {error}"))?;
+    let work_dir = tmp_dir.join(format!("{slug}-{}", Uuid::new_v4().simple()));
+    fs::create_dir_all(&work_dir).map_err(|error| format!("create app temp directory: {error}"))?;
+    let result = install_sessio_app_from_archive(
+        slug,
+        download_url,
+        update,
+        &apps_dir,
+        &destination,
+        &work_dir,
+    );
+    let cleanup_result = fs::remove_dir_all(&work_dir);
+    let _ = fs::remove_dir(&tmp_dir);
+    if let Err(error) = cleanup_result {
+        if result.is_ok() {
+            return Err(format!("clean app temp directory: {error}"));
+        }
+    }
+    result
+}
+
+fn install_sessio_app_from_archive(
+    slug: &str,
+    download_url: &str,
+    update: bool,
+    apps_dir: &Path,
+    destination: &Path,
+    work_dir: &Path,
+) -> Result<SessioAppInfo, String> {
+    let archive_path = work_dir.join("app.zip");
+    let response = reqwest::blocking::Client::new()
+        .get(download_url)
+        .send()
+        .map_err(|error| format!("download app archive: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("download app archive: {error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_APP_ARCHIVE_BYTES)
+    {
+        return Err("App archive is too large".into());
+    }
+    let mut file =
+        fs::File::create(&archive_path).map_err(|error| format!("create app archive: {error}"))?;
+    let copied = std::io::copy(&mut response.take(MAX_APP_ARCHIVE_BYTES + 1), &mut file)
+        .map_err(|error| format!("write app archive: {error}"))?;
+    if copied > MAX_APP_ARCHIVE_BYTES {
+        return Err("App archive is too large".into());
+    }
+
+    let extracted = work_dir.join("extracted");
+    fs::create_dir_all(&extracted)
+        .map_err(|error| format!("create extraction directory: {error}"))?;
+    extract_archive(&archive_path, &extracted)?;
+    let source = archive_source_root(&extracted)?;
+
+    if update && destination.exists() {
+        let stage_data_update = source
+            .join("web")
+            .join(format!("{slug}-migrations.js"))
+            .is_file();
+        copy_tree_merge(&source, destination, "", slug, stage_data_update)?;
+        write_claude_instructions(destination)?;
+    } else {
+        let staging = apps_dir.join(format!(".{slug}.publish-{}", Uuid::new_v4().simple()));
+        let result = (|| {
+            copy_tree_merge(&source, &staging, "", slug, false)?;
+            write_claude_instructions(&staging)?;
+            fs::rename(&staging, destination).map_err(|error| format!("publish app: {error}"))
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result?;
+    }
+    app_info(destination)
+}
+
+fn validate_app_slug(slug: &str) -> Result<(), String> {
+    if slug.is_empty()
+        || !slug.split(['.', '-']).all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+    {
+        return Err(format!("Invalid app slug: {slug}"));
+    }
+    Ok(())
+}
+
+fn extract_archive(archive_path: &Path, target: &Path) -> Result<(), String> {
+    let file =
+        fs::File::open(archive_path).map_err(|error| format!("open app archive: {error}"))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|error| format!("read app archive: {error}"))?;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("read archive entry: {error}"))?;
+        let relative = entry
+            .enclosed_name()
+            .ok_or_else(|| "App archive contains an unsafe path".to_string())?
+            .to_path_buf();
+        let output = target.join(relative);
+        if entry.is_dir() {
+            fs::create_dir_all(&output)
+                .map_err(|error| format!("create archive directory: {error}"))?;
+        } else {
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("create archive parent: {error}"))?;
+            }
+            let mut output_file = fs::File::create(&output)
+                .map_err(|error| format!("create archive file: {error}"))?;
+            std::io::copy(&mut entry, &mut output_file)
+                .map_err(|error| format!("extract archive file: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn archive_source_root(extracted: &Path) -> Result<PathBuf, String> {
+    if extracted.join("web").is_dir() {
+        return Ok(extracted.to_path_buf());
+    }
+    let entries = fs::read_dir(extracted)
+        .map_err(|error| format!("read extracted app: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read extracted app entry: {error}"))?;
+    if entries.len() == 1 && entries[0].path().is_dir() {
+        return Ok(entries[0].path());
+    }
+    Ok(extracted.to_path_buf())
+}
+
+fn copy_tree_merge(
+    source: &Path,
+    target: &Path,
+    relative: &str,
+    slug: &str,
+    stage_data_update: bool,
+) -> Result<(), String> {
+    fs::create_dir_all(target).map_err(|error| format!("create app directory: {error}"))?;
+    for entry in fs::read_dir(source).map_err(|error| format!("read app source: {error}"))? {
+        let entry = entry.map_err(|error| format!("read app source entry: {error}"))?;
+        let source_entry = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let entry_relative = if relative.is_empty() {
+            name.to_string()
+        } else {
+            format!("{relative}/{name}")
+        };
+        let target_entry = target.join(&*name);
+        if source_entry.is_dir() {
+            if let Ok(metadata) = fs::symlink_metadata(&target_entry) {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    remove_path(&target_entry)?;
+                }
+            }
+            copy_tree_merge(
+                &source_entry,
+                &target_entry,
+                &entry_relative,
+                slug,
+                stage_data_update,
+            )?;
+        } else {
+            if !relative.is_empty() && entry_relative == format!("web/{slug}-data.js") {
+                if target_entry.is_file() {
+                    if stage_data_update {
+                        let pending = target.join(format!("{slug}-data.pending.js"));
+                        fs::copy(&source_entry, &pending)
+                            .map_err(|error| format!("stage app data migration: {error}"))?;
+                    }
+                    continue;
+                }
+            }
+            if fs::symlink_metadata(&target_entry).is_ok() {
+                remove_path(&target_entry)?;
+            }
+            fs::copy(&source_entry, &target_entry)
+                .map_err(|error| format!("copy app file: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn write_claude_instructions(target: &Path) -> Result<(), String> {
+    let agents = target.join("AGENTS.md");
+    if agents.is_file() {
+        fs::copy(agents, target.join("CLAUDE.md"))
+            .map_err(|error| format!("write CLAUDE.md: {error}"))?;
+    }
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+    .map_err(|error| format!("replace existing app file: {error}"))
+}
+
 fn list_apps_in(root: &Path) -> Result<Vec<SessioAppInfo>, String> {
     if !root.exists() {
         return Ok(Vec::new());
@@ -147,7 +404,9 @@ fn list_apps_in(root: &Path) -> Result<Vec<SessioAppInfo>, String> {
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let file_type = entry.file_type().ok()?;
-            file_type.is_dir().then_some(entry.path())
+            let name = entry.file_name();
+            (file_type.is_dir() && name != "tmp" && !name.to_string_lossy().starts_with('.'))
+                .then_some(entry.path())
         })
         .collect::<Vec<_>>();
     directories.sort_by_key(|path| {
@@ -225,6 +484,7 @@ fn app_info(directory: &Path) -> Result<SessioAppInfo, String> {
         logo_path,
         name_zh: normalize_name(config.name_zh),
         name_en: normalize_name(config.name_en),
+        version: normalize_name(config.version),
         permissions: normalize_permissions(config.permissions),
     })
 }
@@ -462,6 +722,8 @@ mod tests {
         fs::create_dir_all(exact.join("web")).expect("create exact app");
         fs::create_dir_all(fallback.join("web")).expect("create fallback app");
         fs::create_dir_all(ambiguous.join("web")).expect("create ambiguous app");
+        fs::create_dir_all(root.join(".tmp")).expect("create temp directory");
+        fs::create_dir_all(root.join("tmp")).expect("create legacy temp directory");
         fs::write(exact.join("web/sales-report.html"), "<html></html>").expect("write exact html");
         fs::write(exact.join("web/other.html"), "<html></html>").expect("write secondary html");
         fs::write(fallback.join("web/index.HTML"), "<html></html>").expect("write fallback html");
@@ -469,7 +731,7 @@ mod tests {
         fs::write(ambiguous.join("web/two.html"), "<html></html>").expect("write second html");
         fs::write(
             exact.join("web/config.json"),
-            r#"{"nameZh":"销售报告","nameEn":"Sales Report","permissions":["fullscreen","downloads","modals","popups","clipboardWrite","gamepad","autoplay","pointerLock","unknownPermission","pointerLock"]}"#,
+            r#"{"nameZh":"销售报告","nameEn":"Sales Report","version":"1.2.3","permissions":["fullscreen","downloads","modals","popups","clipboardWrite","gamepad","autoplay","pointerLock","unknownPermission","pointerLock"]}"#,
         )
         .expect("write app config");
 
@@ -486,6 +748,7 @@ mod tests {
         assert_eq!(apps[0].logo_path, None);
         assert_eq!(apps[2].name_zh.as_deref(), Some("销售报告"));
         assert_eq!(apps[2].name_en.as_deref(), Some("Sales Report"));
+        assert_eq!(apps[2].version.as_deref(), Some("1.2.3"));
         assert_eq!(
             apps[2].permissions,
             vec![
@@ -534,6 +797,60 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove test app");
+    }
+
+    #[test]
+    fn validates_publish_style_app_slugs() {
+        for slug in ["case-report-trends", "family-tree", "gomoku.bot", "a1"] {
+            assert!(
+                validate_app_slug(slug).is_ok(),
+                "expected valid slug: {slug}"
+            );
+        }
+        for slug in [
+            "",
+            "Case-Report",
+            "../outside",
+            "a--b",
+            "a/b",
+            "family_tree",
+        ] {
+            assert!(
+                validate_app_slug(slug).is_err(),
+                "expected invalid slug: {slug}"
+            );
+        }
+    }
+
+    #[test]
+    fn stages_new_data_for_an_explicit_migration_without_replacing_user_data() {
+        let root = test_root();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(source.join("web")).expect("create source web");
+        fs::create_dir_all(destination.join("web")).expect("create destination web");
+        fs::write(source.join("web/example-data.js"), "new data").expect("write source data");
+        fs::write(source.join("web/example-migrations.js"), "migration").expect("write migration");
+        fs::write(destination.join("web/example-data.js"), "user data").expect("write user data");
+
+        copy_tree_merge(&source, &destination, "", "example", true).expect("merge app");
+
+        assert_eq!(
+            fs::read_to_string(destination.join("web/example-data.js")).expect("read user data"),
+            "user data"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("web/example-data.pending.js"))
+                .expect("read pending data"),
+            "new data"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("web/example-migrations.js"))
+                .expect("read migration"),
+            "migration"
+        );
+
+        fs::remove_dir_all(&root).expect("remove test apps");
     }
 
     #[test]

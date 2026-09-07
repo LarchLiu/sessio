@@ -18,6 +18,7 @@ import {
   MessagesSquare,
   PanelLeftClose,
   Settings,
+  Store,
   SquarePen,
   Swords,
   Workflow,
@@ -132,7 +133,9 @@ type AppSidebarProps = {
   appDisplayNames: Record<string, string>;
   selectedAppPath: string | null;
   appsActive: boolean;
+  appStoreActive: boolean;
   onToggleAppsSection: () => void;
+  onOpenAppStore: () => void;
   onSelectApp: (app: SessioAppInfo) => void;
   onAppContextMenu: (app: SessioAppInfo, e: MouseEvent) => void;
   onInstallUpdate: () => void;
@@ -175,7 +178,9 @@ export default function AppSidebar({
   appDisplayNames,
   selectedAppPath,
   appsActive,
+  appStoreActive,
   onToggleAppsSection,
+  onOpenAppStore,
   onSelectApp,
   onAppContextMenu,
   onInstallUpdate,
@@ -246,7 +251,15 @@ export default function AppSidebar({
           <SectionHeader
             label={t("sidebar.apps")}
             collapsed={!appsSectionExpanded}
+            active={appStoreActive}
             onToggle={onToggleAppsSection}
+            action={
+              <Tooltip content={t("appStore.title")} placement="right">
+                <button type="button" aria-label={t("appStore.title")} onClick={onOpenAppStore} className="rounded p-0.5 text-ink/55 hover:text-ink">
+                  <Store className="h-3.5 w-3.5" />
+                </button>
+              </Tooltip>
+            }
           />
           {appsSectionExpanded && (
             <div className="max-h-44 overflow-y-auto pr-1">
@@ -464,16 +477,21 @@ function updateProgressLabel(
 function SectionHeader({
   label,
   collapsed,
+  active = false,
   onToggle,
   action,
 }: {
   label: string;
   collapsed: boolean;
+  active?: boolean;
   onToggle: () => void;
   action?: ReactNode;
 }) {
   return (
-    <div className="group flex w-full items-center px-2 mt-3 mb-1 text-caption text-ink/55 transition hover:text-ink/85">
+    <div className={
+      "group flex h-8 w-full items-center px-2.5 mt-3 mb-1 rounded-md text-caption transition hover:text-ink/85 " +
+      (active ? "bg-ink/10 text-ink" : "text-ink/55")
+    }>
       <button
         type="button"
         onClick={onToggle}
@@ -482,7 +500,7 @@ function SectionHeader({
         <span>{label}</span>
       </button>
       {action && (
-        <span className="mr-1 opacity-0 transition-opacity group-hover:opacity-100">
+        <span className="pointer-events-none mr-1 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
           {action}
         </span>
       )}

@@ -45,6 +45,7 @@ fi
 source_dir=$(cd "$source_dir" && pwd -P)
 apps_dir="$SESSIO_APP_HOME/apps"
 destination="$apps_dir/$app_slug"
+stage_data_update=false
 
 if [[ ( -e "$destination" || -L "$destination" ) && "$update" != true ]]; then
   printf 'Destination already exists; inspect it or rerun with --update: %s\n' "$destination" >&2
@@ -55,6 +56,9 @@ if [[ "$update" == true && ( -e "$destination" || -L "$destination" ) ]]; then
     printf 'Existing destination must be a real directory: %s\n' "$destination" >&2
     exit 73
   fi
+fi
+if [[ "$update" == true && "$update_data" != true && -f "$source_dir/web/$app_slug-migrations.js" ]]; then
+  stage_data_update=true
 fi
 
 copy_tree_merge() {
@@ -82,6 +86,14 @@ copy_tree_merge() {
     else
       entry_relative="${relative_path:+$relative_path/}${entry##*/}"
       if [[ "$update_data" != true && "$entry_relative" == "web/$app_slug-data.js" && -f "$target_entry" ]]; then
+        if [[ "$stage_data_update" == true ]]; then
+          local pending_target
+          pending_target="$(dirname "$target_entry")/$app_slug-data.pending.js"
+          if [[ -e "$pending_target" || -L "$pending_target" ]]; then
+            rm -rf "$pending_target"
+          fi
+          cp -P "$entry" "$pending_target"
+        fi
         continue
       fi
       if [[ -e "$target_entry" || -L "$target_entry" ]]; then
