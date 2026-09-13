@@ -458,6 +458,7 @@ function PlainHtmlPreview({
     resolve: (snapshot: SessioAppStateSnapshot | null) => void;
     timeout: ReturnType<typeof setTimeout>;
   } | null>(null);
+  const stateProbeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   cachedAppStateRef.current = cachedAppState;
   onAppStateSnapshotRef.current = onAppStateSnapshot;
   const [scriptPermission, setScriptPermission] = useState<{
@@ -528,7 +529,7 @@ function PlainHtmlPreview({
   useEffect(() => {
     let active = true;
     const prepare = async () => {
-      const source = scriptsEnabled && filePath
+      const source = scriptsEnabled && filePath && !appResourceBase
         ? await inlineLocalScripts(html, filePath)
         : html;
       if (active) {
@@ -576,6 +577,10 @@ function PlainHtmlPreview({
 
       const ready = parseSessioAppStateReadyMessage(event.data);
       if (ready) {
+        if (stateProbeTimerRef.current) {
+          clearInterval(stateProbeTimerRef.current);
+          stateProbeTimerRef.current = null;
+        }
         stateBridgeSchemaVersionRef.current = ready.schemaVersion;
         const cached = cachedAppStateRef.current;
         if (cached && cached.schemaVersion === ready.schemaVersion) {
@@ -603,6 +608,10 @@ function PlainHtmlPreview({
     window.addEventListener("message", handleStateMessage);
     return () => {
       window.removeEventListener("message", handleStateMessage);
+      if (stateProbeTimerRef.current) {
+        clearInterval(stateProbeTimerRef.current);
+        stateProbeTimerRef.current = null;
+      }
       stateBridgeSchemaVersionRef.current = null;
       settlePendingStateSave(null);
     };
@@ -691,13 +700,27 @@ function PlainHtmlPreview({
             "*",
           );
           if (appStateBridgeEnabled) {
-            iframeRef.current?.contentWindow?.postMessage(
-              {
-                source: "sessio",
-                type: SESSIO_APP_STATE_PROBE_TYPE,
-              },
-              "*",
-            );
+            const probe = () =>
+              iframeRef.current?.contentWindow?.postMessage(
+                {
+                  source: "sessio",
+                  type: SESSIO_APP_STATE_PROBE_TYPE,
+                },
+                "*",
+              );
+            if (stateProbeTimerRef.current) clearInterval(stateProbeTimerRef.current);
+            probe();
+            let attempts = 0;
+            stateProbeTimerRef.current = setInterval(() => {
+              if (stateBridgeSchemaVersionRef.current !== null || ++attempts >= 50) {
+                if (stateProbeTimerRef.current) {
+                  clearInterval(stateProbeTimerRef.current);
+                  stateProbeTimerRef.current = null;
+                }
+                return;
+              }
+              probe();
+            }, 100);
           }
         }}
       />

@@ -9022,6 +9022,7 @@ pub fn run() {
             read_local_image_data_url,
             app_resource_protocol::create_sessio_app_resource_grant,
             app_resource_protocol::revoke_sessio_app_resource_grant,
+            app_resource_protocol::read_sessio_app_html,
             save_pasted_attachment,
             capture_window_area_png,
             capture_frontmost_app_window_png,

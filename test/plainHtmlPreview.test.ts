@@ -55,6 +55,18 @@ describe("buildPlainHtmlPreviewDocument", () => {
     expect(document).not.toContain("https://untrusted.example");
   });
 
+  it("keeps App-local module URLs for resource-protocol loading", () => {
+    const document = buildPlainHtmlPreviewDocument(
+      '<script type="module" src="./assets/main.js"></script>',
+      true,
+      "dark",
+      "sessio-app://localhost/grant-1/",
+    );
+
+    expect(document).toContain('src="./assets/main.js"');
+    expect(document).toContain("script-src 'unsafe-inline' blob: data: sessio-app:");
+  });
+
   it("injects the Sessio theme contract and bridge", () => {
     const disabled = buildPlainHtmlPreviewDocument("<main>Static</main>", false, "light");
     const enabled = buildPlainHtmlPreviewDocument("<main>App</main>", true, "dark");

@@ -1497,6 +1497,13 @@ export async function revokeSessioAppResourceGrant(token: string): Promise<void>
   return invoke<void>("revoke_sessio_app_resource_grant", { token });
 }
 
+export async function readSessioAppHtml(
+  appDirectoryPath: string,
+  htmlPath: string,
+): Promise<string> {
+  return invoke<string>("read_sessio_app_html", { appDirectoryPath, htmlPath });
+}
+
 export interface SessioAppFileWriteRequest {
   appDirectoryPath: string;
   relativePath: string;

@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::app_paths;
 
 const MAX_APP_RESOURCE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_APP_HTML_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct AppResourceGrant {
@@ -56,6 +57,30 @@ pub(crate) fn revoke_sessio_app_resource_grant(
         .map_err(|_| "App resource grant registry is unavailable".to_string())?
         .remove(&token);
     Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn read_sessio_app_html(
+    app_directory_path: String,
+    html_path: String,
+) -> Result<String, String> {
+    let web_root = validate_app_web_root(Path::new(&app_directory_path))?;
+    let html_path =
+        fs::canonicalize(&html_path).map_err(|error| format!("Invalid App HTML path: {error}"))?;
+    if !html_path.starts_with(&web_root)
+        || !html_path.is_file()
+        || !html_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("html"))
+    {
+        return Err("App HTML path must be an HTML file inside the App web directory".into());
+    }
+    let metadata = fs::metadata(&html_path).map_err(|error| error.to_string())?;
+    if metadata.len() > MAX_APP_HTML_BYTES {
+        return Err("App HTML file exceeds the 64 MiB limit".into());
+    }
+    fs::read_to_string(&html_path).map_err(|error| format!("Could not read App HTML: {error}"))
 }
 
 pub(crate) fn serve(

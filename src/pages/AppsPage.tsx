@@ -7,7 +7,7 @@ import {
   getSessionHistory,
   linkSessioAppSession,
   listSessioAppSessions,
-  readLocalTextFile,
+  readSessioAppHtml,
   revokeSessioAppResourceGrant,
   respondAgentPermission,
   sendAgentInput,
@@ -116,6 +116,7 @@ export default function AppsPage({
   const [previewFile, setPreviewFile] = useState<FilePreview | null>(null);
   const [filePreviewNotice, setFilePreviewNotice] = useState<string | null>(null);
   const [appResourceGrant, setAppResourceGrant] = useState<string | null>(null);
+  const [appResourceError, setAppResourceError] = useState<string | null>(null);
   const linkedSessionKeysRef = useRef(new Set<string>());
   const reloadedTurnKeysRef = useRef(new Set<string>());
   const fallbackRuntimeSequenceRef = useRef(0);
@@ -143,6 +144,7 @@ export default function AppsPage({
     let active = true;
     let grant: string | null = null;
     setAppResourceGrant(null);
+    setAppResourceError(null);
     createSessioAppResourceGrant(app.directoryPath)
       .then((token) => {
         if (!active) {
@@ -153,7 +155,11 @@ export default function AppsPage({
         setAppResourceGrant(token);
       })
       .catch((error) => {
-        if (active) onError(String(error));
+        if (active) {
+          const message = String(error);
+          setAppResourceError(message);
+          onError(message);
+        }
       });
     return () => {
       active = false;
@@ -174,7 +180,7 @@ export default function AppsPage({
     if (preserveState) await saveAppState();
     setLoadingHtml(true);
     try {
-      const source = await readLocalTextFile(app.htmlPath);
+      const source = await readSessioAppHtml(app.directoryPath, app.htmlPath);
       setHtml(source);
       setPreviewRevision((current) => current + 1);
       onError(null);
@@ -436,6 +442,15 @@ export default function AppsPage({
             onBack={onClearFileSelection}
           />
         ) : loadingHtml ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center text-ink/40">
+            <LoaderCircle className="h-5 w-5 animate-spin" />
+          </div>
+        ) : appResourceError ? (
+          <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-ink/45">
+            <FileWarning className="h-6 w-6" />
+            <p className="text-body-sm">{appResourceError}</p>
+          </div>
+        ) : !appResourceGrant ? (
           <div className="flex min-h-0 flex-1 items-center justify-center text-ink/40">
             <LoaderCircle className="h-5 w-5 animate-spin" />
           </div>

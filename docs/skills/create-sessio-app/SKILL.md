@@ -1,26 +1,33 @@
 ---
 name: create-sessio-app
 description: >-
-  Create a self-contained Sessio HTML app from a natural-language product or
-  data-visualization request. Use this skill whenever the user asks to generate
-  an HTML dashboard, report, chart, table, data tool, or small offline app for
-  Sessio, especially when the data should be easy to replace or regenerate.
-  Always keep application markup/behavior, runtime data, and documentation in
-  separate files so later agents can update data without rewriting the view.
+  Create a self-contained Sessio web app from a natural-language product or
+  data-visualization request, using plain HTML or a static production build
+  from React, Vue, Svelte, Vite, or another frontend framework. Use this skill
+  whenever the user asks to generate an HTML dashboard, report, chart, table,
+  data tool, or small offline app for Sessio, especially when the data should be
+  easy to replace or regenerate. Keep application behavior, replaceable
+  runtime data, local assets, and documentation in a clear package contract.
 ---
 
 # Create Sessio App
 
-Create small, inspectable HTML applications that open directly in a browser and
-preview safely in Sessio. The central contract is data separation:
+Create small, inspectable web applications that work in a browser and preview
+safely in Sessio. The application may be hand-written HTML/CSS/JavaScript or a
+production build from React, Vue, Svelte, or another framework. The central
+contract is data separation:
 
-Compatibility: Sessio HTML preview with optional inline JavaScript enabled; no
-server or network access required.
+Compatibility: a static production build loaded by Sessio's sandboxed iframe.
+Sessio supplies a scoped `sessio-app://` base for App-local resources, so the
+installed App does not need a development server or network access. A browser
+fallback is validated by serving the same output from a local static HTTP
+server.
 
 ```text
 <app-dir>/
   web/
     <app-slug>.html     # UI, styles, rendering, and interaction logic
+    assets/              # optional framework/bundler output and local assets
     <app-slug>-data.js  # the only runtime data source
     <app-slug>-migrations.js # optional schema migration and validation logic
     logo.<ext>          # optional app logo or brand asset
@@ -34,15 +41,98 @@ Use an existing directory when the user names one. Otherwise create
 otherwise. Use lowercase ASCII kebab-case for `<app-slug>` and do not overwrite
 existing files without explicit permission.
 
+## Framework builds
+
+React, Vue, Svelte, and other frameworks are supported after they are compiled
+to static files. Do not ship a Vite or other development server as the App
+runtime. The published `web/` directory must contain the generated HTML entry
+and every generated JavaScript, CSS, font, image, model, and media file it
+references.
+
+For Vite projects, use a relative base and keep the production output in the
+App web directory (or copy it there during packaging):
+
+```js
+// vite.config.js
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  base: "./",
+  build: {
+    outDir: "dist/web",
+    assetsDir: "assets",
+  },
+});
+```
+
+The same `base: "./"` rule applies to React, Vue, and Svelte Vite templates.
+For Vue CLI or another bundler, configure its equivalent relative public path.
+Do not leave emitted URLs such as `/assets/main.js`, `/models/book.glb`, or
+`https://cdn.example/...` when the App is expected to work offline in Sessio.
+If the output contains more than one HTML file, name the intended entry
+`web/<app-slug>.html`; Sessio otherwise selects the only HTML file or the file
+whose name matches the App slug.
+
+Framework routing must also work without a server-side history fallback. Use
+hash routing or keep navigation inside the single HTML entry unless the App
+provides its own fallback files. Dynamic imports and code-split chunks are
+supported when their generated URLs remain relative to the entry document.
+
+Keep the data separation contract below for data-driven Apps. A framework may
+render the data, but a replaceable `web/<app-slug>-data.js` must remain a
+separate script rather than being bundled into the view when later agents need
+to update it without rebuilding the UI.
+
+### Framework data integration
+
+Keep the replaceable data file outside the framework module graph. With Vite,
+place the source file at `public/<app-slug>-data.js`; Vite copies it unchanged
+to the root of the production output. Add a classic script tag to the HTML
+entry before the framework module entry:
+
+```html
+<script src="./<app-slug>-data.js"></script>
+<script type="module" src="./src/main.tsx"></script>
+```
+
+Vite rewrites the module entry during the build while preserving the data
+script as a separate file. React, Vue, and Svelte code can then read the
+already-initialized global without importing the file:
+
+```ts
+type AppData = {
+  schemaVersion: number;
+  records: Array<Record<string, unknown>>;
+};
+
+declare global {
+  interface Window {
+    SESSIO_APP_DATA?: AppData;
+  }
+}
+
+const data = window.SESSIO_APP_DATA;
+```
+
+Use the app-specific global name documented in AGENTS.md when it differs from
+`window.SESSIO_APP_DATA`. Do not put the data file under `src/`, import it from
+TypeScript/JavaScript, or replace it with a runtime `fetch()` if later updates
+must avoid rebuilding the bundle. A direct browser load executes the classic
+script before the deferred module entry; Sessio serves the same local data
+script through the scoped App resource protocol. Keep the data assignment
+JSON-compatible and free of rendering code.
+
 ## Required workflow
 
 1. **Clarify the app contract from the request.** Identify the app purpose,
    audience, expected inputs, visual outputs, interactions, language, and
    destination directory. Make reasonable defaults when the request is clear;
    ask only when a missing choice changes the data model or user workflow.
-2. **Inspect the repository.** Look for existing Sessio HTML preview behavior,
-   local style conventions, and related files. Reuse existing project patterns
-   rather than introducing a framework or build step for a small app.
+2. **Inspect the repository.** Look for existing Sessio preview behavior, local
+   style conventions, related files, and any existing framework/build setup.
+   Reuse the repository's established React, Vue, Svelte, Vite, or plain HTML
+   patterns. For a small app with no existing build, plain HTML remains the
+   simplest option; do not introduce a framework only for Sessio compatibility.
 3. **Plan optional visual assets.** If the request calls for a logo, generate
    or create a suitable local logo asset at `web/logo.<ext>` and reference it
    with a relative path from the HTML. If a screenshot is requested, capture a
@@ -99,25 +189,29 @@ existing files without explicit permission.
    when needed, but the HTML and AGENTS.md
    must state it exactly. Never duplicate records, labels derived from records,
    or default sample rows inside the HTML. Keep this as `.js` rather than
-   `.json`: direct `file://` pages and Sessio's inline-script preview can load a
-   same-directory script without `fetch`. A separate `.json` file would require
-   an asynchronous fetch or a host bridge that is unavailable in the portable
-   offline contract. The assigned value should remain JSON-compatible so agents
-   can parse and migrate it as data.
-7. **Create the HTML view.** Put it at `web/<app-slug>.html` and reference the
-   data file with a same-directory relative script tag such as
-   `<script src="./<app-slug>-data.js"></script>`. Read the global data
-   object after that script and render the empty state when it is missing or
-   invalid. Keep the page useful when opened as `file://`; do not require Vite,
-   a local server, `fetch`, XHR, WebSocket, CDN assets, npm imports, or a
-   backend. Inline CSS and JavaScript are preferred for portability.
-8. **Build for Sessio preview.** The view must work after the user enables
-   “Allow inline JavaScript”. Local scripts in the same directory and child
-   directories are supported by Sessio's preview; resolve them relative to
-   `web/`, using paths such as `./<app-slug>-data.js` or `scripts/data.js`. Do not depend on `document.currentScript`
-   or the original external script URL after it is inlined. Follow the Sessio
-   theme contract below so the app uses the current light or dark chat
-   background and updates without reloading when the Sessio theme changes.
+   `.json`: the same-directory script works in the browser fallback and can be
+   loaded as a classic local script by Sessio's App resource protocol without a
+   runtime fetch. A separate `.json` file
+   would require an asynchronous fetch and would not work when the output is
+   opened from a browser `file://` URL. The assigned value should remain
+   JSON-compatible so agents can parse and migrate it as data.
+7. **Create or build the view.** For a plain App, put the entry at
+   `web/<app-slug>.html` and reference the data file with a same-directory
+   relative script tag such as `<script src="./<app-slug>-data.js"></script>`.
+   For React, Vue, Svelte, or another framework, run its production build and
+   copy the generated entry HTML and complete asset tree into `web/`. Read the
+   global data object after its data script and render the empty state when it
+   is missing or invalid. Do not make the runtime depend on Vite, a development
+   server, CDN assets, npm imports, or a backend.
+8. **Build for Sessio preview.** The view must work with App scripts enabled.
+   Plain HTML previews may inline local scripts from a normal local file. App
+   previews keep compiled scripts and chunks as relative URLs and load them from
+   the scoped App resource protocol. Sessio injects the App resource base
+   described below before loading the document. Do not
+   depend on `document.currentScript` or on an original absolute script URL
+   after packaging. Follow the Sessio theme contract below so the app uses the
+   current light or dark chat background and updates without reloading when the
+   Sessio theme changes.
    When the App has meaningful mutable state that should survive switching to
    another App, Project Chat, Settings, or another Sessio view, read
    [references/state-persistence.md](references/state-persistence.md) and expose
@@ -132,12 +226,14 @@ existing files without explicit permission.
 10. **Validate before handing off.** Check that the HTML references the data JS,
    the data JS parses, the HTML contains no record literals, and AGENTS.md
    documents every top-level and record field, and that `web/config.json`
-   contains all required metadata fields. Exercise the initial render and
-   at least one requested interaction. Check a desktop width and a narrow width
-   when the app has a visual layout. Use the browser test method below for
-   visual and interaction verification. Do not start a persistent development
-   server; if temporary serving is essential for verification, stop it before
-   finishing.
+   contains all required metadata fields. For a framework App, run the
+   production build, verify that the entry and complete asset tree are under
+   `web/`, and scan emitted URLs for root-absolute paths or undeclared remote
+   dependencies. Exercise the initial render and at least one requested
+   interaction. Check a desktop width and a narrow width when the app has a
+   visual layout. Use the browser test method below for visual and interaction
+   verification. Do not start a persistent development server; if temporary
+   serving is essential for verification, stop it before finishing.
 11. **Publish the tested app to Sessio's app directory.** Only after all checks
    pass, read the absolute `SESSIO_APP_HOME` environment variable supplied by
    running Sessio process. Invoke the bundled publisher for the current shell:
@@ -174,6 +270,57 @@ existing files without explicit permission.
    If `SESSIO_APP_HOME` is missing, do not guess a profile or write to a
    hard-coded home directory; report that publishing is blocked. AGENTS.md
    should record the installed path and the source/development path.
+
+## App-local resources
+
+Sessio grants each App iframe a tokenized resource base similar to
+`sessio-app://localhost/<grant-token>/`. The host injects this base into the
+preview document and restricts every request to that App's installed `web/`
+directory. Relative URLs in HTML, CSS, JavaScript, dynamic imports, and
+framework-generated chunks therefore resolve against the App package:
+
+```js
+const modelUrl = new URL("assets/models/book.glb", document.baseURI).href;
+const imageUrl = new URL("assets/images/cover.webp", document.baseURI).href;
+```
+
+Prefer relative URLs such as `./assets/main.js`, `assets/cover.webp`, and
+`assets/audio/intro.mp3`. Do not use root-absolute paths such as `/assets/...`
+or filesystem paths. Vite projects should use `base: "./"`; other bundlers
+must use their equivalent relative public path. Do not manually inline local
+images or audio as Base64/data URLs just to make Sessio work. The old preview
+workaround that scanned JavaScript for mp3/wav/ogg references and converted
+them to data URLs is no longer part of the contract.
+
+The local protocol currently serves these resource classes: HTML, CSS,
+JavaScript/modules, JSON, PNG/JPEG/WebP/GIF/SVG images, GLB/GLTF/BIN/WASM
+assets, WOFF/WOFF2/TTF fonts, and MP3/WAV/OGG/M4A/AAC/WEBM audio. Individual
+resources are limited to 64 MiB. Unknown extensions, missing files, path
+traversal, symlinks outside `web/`, and requests outside the current App are
+rejected.
+
+The App entry HTML is also limited to 64 MiB. Compiled App scripts are kept as
+resource URLs and are not copied through Sessio's small local-text preview
+buffer, so Vite bundles and code-split chunks use the same 64 MiB per-resource
+limit.
+
+If an image is loaded with `Image` and then drawn into a Canvas or uploaded as
+a Three.js texture, set `image.crossOrigin = "anonymous"` before assigning
+`image.src`. The protocol supplies the corresponding non-credentialed CORS
+response. This does not grant access to another App or to the filesystem.
+
+Sessio App CSP permits App-local `sessio-app:` resources for images, media,
+styles, fonts, scripts, and connections. It does not permit arbitrary remote
+`http://` or `https://` images, audio, scripts, modules, or API requests; the
+only built-in remote exceptions are the existing Google Fonts sources. Do not
+make an App depend on CDN code, remote audio, remote images, or a remote API.
+If a browser-only enhancement uses a remote URL, provide a local/offline
+fallback and document that it is unavailable in Sessio.
+
+The browser fallback uses the same relative URLs when the output is served by
+a static HTTP server. Direct `file://` opening is not a reliable validation
+path for framework ES modules, GLB files, or runtime fetches; use a loopback
+server for browser verification.
 
 ## Data separation rules
 
@@ -224,7 +371,9 @@ Use this structure unless the user requests another documentation language:
 What the app shows and who uses it.
 
 ## Files
-- `web/<app-slug>.html`: view and interaction logic.
+- `web/<app-slug>.html`: plain or framework-generated view entry.
+- `web/assets/` (optional): framework/bundler output and other local runtime
+  resources referenced by the entry.
 - `web/<app-slug>-data.js`: only runtime data, exported as `window.<GLOBAL>`.
 - `web/<app-slug>-migrations.js`: optional non-mutating schema migration and
   validation functions used when `schemaVersion` changes.
@@ -405,7 +554,23 @@ path or naming rule, format, data source, maximum expected size, whether a later
 save may set `overwrite: true`, and the user action that starts the write.
 
 ## Run and preview
-Browser steps, Sessio preview steps, and whether inline JavaScript must be enabled.
+
+For a plain App, open the generated HTML through a loopback static server. For
+a framework App, build first and serve the build directory, not the framework's
+development server:
+
+```bash
+npm run build
+python3 -m http.server 8765 --bind 127.0.0.1 --directory dist/web
+```
+
+Open `http://127.0.0.1:8765/<app-slug>.html` and verify that the generated JS,
+CSS, fonts, images, models, and audio all load. Then publish the same `web/`
+output and open the App in Sessio. Sessio enables App scripts, injects the
+scoped `sessio-app://` base, and serves local assets through the App resource
+protocol; it does not use the framework development server. Stop temporary
+servers after verification. Direct `file://` opening is useful only for simple
+non-module documents and is not a complete validation of a Vite build.
 
 ## Data structure
 ### Root object: `window.<GLOBAL>`
@@ -630,8 +795,16 @@ test:
 python3 -m http.server 8765 --bind 127.0.0.1
 ```
 
-Open the app in Chrome or another available browser automation surface at
-`http://127.0.0.1:8765/<relative-app-path>/<app-slug>.html`. Read the
+For a framework build, serve its output directory instead, for example:
+
+```bash
+python3 -m http.server 8765 --bind 127.0.0.1 --directory dist/web
+```
+
+Open the app in Chrome or another available browser automation surface at the
+corresponding URL, such as
+`http://127.0.0.1:8765/<relative-app-path>/<app-slug>.html` for a source app or
+`http://127.0.0.1:8765/<app-slug>.html` for `dist/web`. Read the
 accessibility tree to confirm the page loaded, expected controls and content
 exist, and controls have useful accessible names. Exercise the primary workflow
 by clicking controls through their accessibility ids or semantic roles, then
@@ -660,14 +833,20 @@ conclusions from them.
 
 Before reporting completion, verify:
 
-- [ ] Exactly one HTML view, one data JS file, one `config.json`, and one
-      `AGENTS.md` exist for the app; include
+- [ ] Exactly one selected HTML entry, one data JS file for data-driven Apps,
+      one `config.json`, and one `AGENTS.md` exist for the app. Framework
+      builds may include any number of generated files under `web/assets/` and
+      other documented local asset directories. Include
       `web/<app-slug>-migrations.js` when a schema migration is required, and
       include `web/logo.<ext>` or
       `web/screenshot.<ext>` when requested and successfully generated, and
       omit each optional asset cleanly when unavailable.
 - [ ] The HTML references `web/<app-slug>-data.js` by a same-directory relative
-      path.
+      path when the App uses the data separation contract; framework code reads
+      the classic script's global and does not import or bundle that file.
+- [ ] A framework build uses a relative public base, includes its complete
+      production asset tree under `web/`, and contains no required root-absolute
+      or remote runtime URLs.
 - [ ] All runtime data is in the data JS; no duplicated rows are in the HTML.
 - [ ] The initial data JS contains no fabricated, demo, or personal-looking
       records; record collections are empty unless the user explicitly supplied
@@ -684,7 +863,10 @@ Before reporting completion, verify:
 - [ ] User-provided images, documents, and text are checked against the schema
       before extracting values into the data JS.
 - [ ] Missing/invalid data produces a visible, actionable empty/error state.
-- [ ] The page works offline and does not require a server.
+- [ ] Sessio can run the App offline without a server; browser fallback is
+      verified by serving the production output from a loopback static HTTP
+      server. Direct `file://` opening is not treated as sufficient for a
+      framework/module build.
 - [ ] An App with meaningful mutable state implements
       `references/state-persistence.md`; switching between Apps, Project Chat,
       Settings, and the App restores a validated snapshot without copying DOM,

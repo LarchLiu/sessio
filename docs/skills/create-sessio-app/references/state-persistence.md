@@ -63,8 +63,9 @@ versioned operation log. State exactly which approach is used in AGENTS.md.
 
 ## Sessio lifecycle
 
-Sessio probes for the adapter after the App iframe loads. Apps without the
-adapter continue normally and do not delay navigation. For a supported App,
+Sessio probes for the adapter after the App iframe loads and retries for up to
+five seconds so framework lifecycle code can finish registering the adapter.
+Apps without the adapter continue normally and do not delay navigation. For a supported App,
 Sessio requests one snapshot before a normal navigation unmounts the iframe,
 including App-to-App switches and transitions to Project Chat, Settings, Auto
 Tasks, or an App file preview. It also requests a snapshot before reloading the
