@@ -64,6 +64,7 @@ import StageSelectChip from "./StageSelectChip";
 import Tooltip from "./Tooltip";
 
 const SIDEBAR_SESSION_PREVIEW_LIMIT = 5;
+const SIDEBAR_APP_PREVIEW_LIMIT = 5;
 
 type SidebarSessionEntry = {
   kind: "session";
@@ -187,6 +188,8 @@ export default function AppSidebar({
   onError,
 }: AppSidebarProps) {
   const { lang, t } = useI18n();
+  const [appsListExpanded, setAppsListExpanded] = useState(false);
+  const visibleApps = appsListExpanded ? apps : apps.slice(0, SIDEBAR_APP_PREVIEW_LIMIT);
   const threadIndexByProject = useMemo(() => {
     const grouped = new Map<string, ThreadIndexItemInfo[]>();
     for (const item of threadIndexItems) {
@@ -262,9 +265,9 @@ export default function AppSidebar({
             }
           />
           {appsSectionExpanded && (
-            <div className="max-h-44 overflow-y-auto pr-1">
+            <div className="pr-1">
               {apps.length > 0 ? (
-                apps.map((app) => {
+                visibleApps.map((app) => {
                   const active = appsActive && selectedAppPath === app.directoryPath;
                   return (
                     <button
@@ -292,6 +295,16 @@ export default function AppSidebar({
                 <div className="px-2.5 py-1.5 text-caption text-ink/40">{t("apps.empty")}</div>
               )}
             </div>
+          )}
+          {appsSectionExpanded && apps.length > SIDEBAR_APP_PREVIEW_LIMIT && (
+            <button
+              type="button"
+              aria-expanded={appsListExpanded}
+              onClick={() => setAppsListExpanded((expanded) => !expanded)}
+              className="mt-0.5 ml-7 px-1 py-1 text-left text-body-sm text-ink/40 transition hover:text-ink/65"
+            >
+              {t(appsListExpanded ? "list.show_less" : "list.show_more")}
+            </button>
           )}
         </div>
         <div className="shrink-0 flex flex-col gap-0.5">
