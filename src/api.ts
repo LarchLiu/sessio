@@ -1487,6 +1487,16 @@ export async function listSessioApps(): Promise<SessioAppsCatalog> {
   return invoke<SessioAppsCatalog>("list_sessio_apps");
 }
 
+export async function createSessioAppResourceGrant(
+  appDirectoryPath: string,
+): Promise<string> {
+  return invoke<string>("create_sessio_app_resource_grant", { appDirectoryPath });
+}
+
+export async function revokeSessioAppResourceGrant(token: string): Promise<void> {
+  return invoke<void>("revoke_sessio_app_resource_grant", { token });
+}
+
 export interface SessioAppFileWriteRequest {
   appDirectoryPath: string;
   relativePath: string;
@@ -2543,10 +2553,6 @@ export async function updateSessionHistoryCount(
 
 export async function readLocalImageDataUrl(path: string): Promise<string> {
   return invoke<string>("read_local_image_data_url", { path });
-}
-
-export async function readLocalMediaDataUrl(path: string): Promise<string> {
-  return invoke<string>("read_local_media_data_url", { path });
 }
 
 export async function savePastedAttachment(

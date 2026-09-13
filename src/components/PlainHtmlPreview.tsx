@@ -7,7 +7,6 @@ import {
   useState,
 } from "react";
 import {
-  readLocalMediaDataUrl,
   readLocalTextFile,
   writeSessioAppFile,
   type SessioAppFileWriteRequest,
@@ -115,24 +114,22 @@ export const SESSIO_PREVIEW_BRIDGE_SCRIPT = `(() => {
   });
 })();`;
 
-const STATIC_PREVIEW_CSP = [
-  "default-src 'none'",
-  "img-src data: blob:",
-  "media-src data: blob:",
-  "style-src 'unsafe-inline' https://fonts.googleapis.com",
-  "font-src data: https://fonts.gstatic.com",
-  "script-src 'none'",
-  "connect-src 'none'",
-  "frame-src 'none'",
-  "object-src 'none'",
-  "base-uri 'none'",
-  "form-action 'none'",
-].join("; ");
-
-const SCRIPT_PREVIEW_CSP = STATIC_PREVIEW_CSP.replace(
-  "script-src 'none'",
-  "script-src 'unsafe-inline' blob: data:",
-);
+function previewCsp(scriptsEnabled: boolean, appResourceBase: string | null): string {
+  const appResourceSource = appResourceBase ? " sessio-app:" : "";
+  return [
+    "default-src 'none'",
+    `img-src data: blob:${appResourceSource}`,
+    `media-src data: blob:${appResourceSource}`,
+    `style-src 'unsafe-inline' https://fonts.googleapis.com${appResourceSource}`,
+    `font-src data: https://fonts.gstatic.com${appResourceSource}`,
+    `script-src ${scriptsEnabled ? "'unsafe-inline' blob: data:" : "'none'"}${appResourceSource}`,
+    `connect-src${appResourceSource || " 'none'"}`,
+    "frame-src 'none'",
+    "object-src 'none'",
+    `base-uri ${appResourceBase ? "sessio-app:" : "'none'"}`,
+    "form-action 'none'",
+  ].join("; ");
+}
 
 const APP_PERMISSION_POLICY: Record<
   SessioAppPermission,
@@ -328,6 +325,7 @@ export function buildPlainHtmlPreviewDocument(
   html: string,
   scriptsEnabled: boolean,
   theme: SessioPreviewTheme = "dark",
+  appResourceBase: string | null = null,
 ): string {
   const document = new DOMParser().parseFromString(html, "text/html");
 
@@ -339,6 +337,11 @@ export function buildPlainHtmlPreviewDocument(
   );
 
   document.querySelectorAll("base").forEach((element) => element.remove());
+  if (appResourceBase) {
+    const base = document.createElement("base");
+    base.href = appResourceBase.endsWith("/") ? appResourceBase : `${appResourceBase}/`;
+    document.head.prepend(base);
+  }
   document
     .querySelectorAll('meta[http-equiv="refresh" i]')
     .forEach((element) => element.remove());
@@ -349,7 +352,7 @@ export function buildPlainHtmlPreviewDocument(
 
   const securityPolicy = document.createElement("meta");
   securityPolicy.httpEquiv = "Content-Security-Policy";
-  securityPolicy.content = scriptsEnabled ? SCRIPT_PREVIEW_CSP : STATIC_PREVIEW_CSP;
+  securityPolicy.content = previewCsp(scriptsEnabled, appResourceBase);
   document.head.prepend(securityPolicy);
 
   if (scriptsEnabled) {
@@ -402,22 +405,7 @@ async function inlineLocalScripts(html: string, htmlPath: string): Promise<strin
       const scriptPath = resolveLocalScriptPath(script.getAttribute("src") ?? "", htmlPath);
       if (!scriptPath) return;
       try {
-        let source = await readLocalTextFile(scriptPath);
-        const mediaReferences = new Map<string, string>();
-        const mediaPattern = /(["'])(\.?\.?\/[^"']+\.(?:mp3|wav|ogg|m4a|aac|webm))(?:\?[^"']*)?\1/gi;
-        for (const match of source.matchAll(mediaPattern)) {
-          const reference = match[2];
-          const mediaPath = resolveLocalScriptPath(reference, scriptPath);
-          if (!mediaPath || mediaReferences.has(reference)) continue;
-          try {
-            mediaReferences.set(reference, await readLocalMediaDataUrl(mediaPath));
-          } catch {
-            // Leave unavailable media references unchanged so app code can handle the error.
-          }
-        }
-        for (const [reference, dataUrl] of mediaReferences) {
-          source = source.replaceAll(reference, dataUrl);
-        }
+        const source = await readLocalTextFile(scriptPath);
         script.removeAttribute("src");
         script.textContent = source;
       } catch {
@@ -436,6 +424,7 @@ interface PlainHtmlPreviewProps {
   showScriptsControl?: boolean;
   permissions?: readonly SessioAppPermission[];
   appDirectoryPath?: string | null;
+  appResourceBase?: string | null;
   appStateBridgeEnabled?: boolean;
   cachedAppState?: SessioAppStateSnapshot | null;
   onAppStateSnapshot?: (snapshot: SessioAppStateSnapshot) => void;
@@ -449,6 +438,7 @@ function PlainHtmlPreview({
   showScriptsControl = true,
   permissions = [],
   appDirectoryPath = null,
+  appResourceBase = null,
   appStateBridgeEnabled = false,
   cachedAppState = null,
   onAppStateSnapshot,
@@ -477,7 +467,7 @@ function PlainHtmlPreview({
   const scriptsEnabled =
     scriptPermission.filePath === filePath && scriptPermission.enabled;
   const [previewDocument, setPreviewDocument] = useState(() =>
-    buildPlainHtmlPreviewDocument(html, scriptsEnabled, themeType),
+    buildPlainHtmlPreviewDocument(html, scriptsEnabled, themeType, appResourceBase),
   );
 
   const settlePendingStateSave = useCallback(
@@ -543,7 +533,12 @@ function PlainHtmlPreview({
         : html;
       if (active) {
         setPreviewDocument(
-          buildPlainHtmlPreviewDocument(source, scriptsEnabled, themeTypeRef.current),
+          buildPlainHtmlPreviewDocument(
+            source,
+            scriptsEnabled,
+            themeTypeRef.current,
+            appResourceBase,
+          ),
         );
       }
     };
@@ -551,11 +546,11 @@ function PlainHtmlPreview({
     return () => {
       active = false;
     };
-  }, [filePath, html, scriptsEnabled]);
+  }, [appResourceBase, filePath, html, scriptsEnabled]);
 
   useEffect(() => {
     if (!scriptsEnabled) {
-      setPreviewDocument(buildPlainHtmlPreviewDocument(html, false, themeType));
+      setPreviewDocument(buildPlainHtmlPreviewDocument(html, false, themeType, appResourceBase));
       return;
     }
     iframeRef.current?.contentWindow?.postMessage(
@@ -567,7 +562,7 @@ function PlainHtmlPreview({
       },
       "*",
     );
-  }, [html, scriptsEnabled, themeType]);
+  }, [appResourceBase, html, scriptsEnabled, themeType]);
 
   useEffect(() => {
     if (!appStateBridgeEnabled || !scriptsEnabled) {

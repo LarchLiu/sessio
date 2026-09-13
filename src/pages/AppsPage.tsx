@@ -2,11 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch } from
 import { ArrowLeft, FileWarning, LoaderCircle } from "lucide-react";
 import {
   cancelAgentTurn,
+  createSessioAppResourceGrant,
   ensureAgentRuntimeSession,
   getSessionHistory,
   linkSessioAppSession,
   listSessioAppSessions,
   readLocalTextFile,
+  revokeSessioAppResourceGrant,
   respondAgentPermission,
   sendAgentInput,
   setComputerUseSessionApproval,
@@ -113,6 +115,7 @@ export default function AppsPage({
   const [previewImage, setPreviewImage] = useState<MarkdownImage | null>(null);
   const [previewFile, setPreviewFile] = useState<FilePreview | null>(null);
   const [filePreviewNotice, setFilePreviewNotice] = useState<string | null>(null);
+  const [appResourceGrant, setAppResourceGrant] = useState<string | null>(null);
   const linkedSessionKeysRef = useRef(new Set<string>());
   const reloadedTurnKeysRef = useRef(new Set<string>());
   const fallbackRuntimeSequenceRef = useRef(0);
@@ -135,6 +138,28 @@ export default function AppsPage({
   const saveAppState = useCallback(async () => {
     return await htmlPreviewRef.current?.saveAppState() ?? null;
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    let grant: string | null = null;
+    setAppResourceGrant(null);
+    createSessioAppResourceGrant(app.directoryPath)
+      .then((token) => {
+        if (!active) {
+          void revokeSessioAppResourceGrant(token);
+          return;
+        }
+        grant = token;
+        setAppResourceGrant(token);
+      })
+      .catch((error) => {
+        if (active) onError(String(error));
+      });
+    return () => {
+      active = false;
+      if (grant) void revokeSessioAppResourceGrant(grant);
+    };
+  }, [app.directoryPath, onError]);
 
   useEffect(() => {
     onAppStateSaveHandlerChange(saveAppState);
@@ -424,6 +449,9 @@ export default function AppsPage({
             showScriptsControl={false}
             permissions={app.permissions}
             appDirectoryPath={app.directoryPath}
+            appResourceBase={
+              appResourceGrant ? `sessio-app://localhost/${appResourceGrant}/` : null
+            }
             appStateBridgeEnabled
             cachedAppState={cachedAppState}
             onAppStateSnapshot={onAppStateSnapshot}

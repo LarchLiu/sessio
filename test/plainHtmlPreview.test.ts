@@ -40,6 +40,21 @@ describe("buildPlainHtmlPreviewDocument", () => {
     expect(enabled).toContain("connect-src 'none'");
   });
 
+  it("adds an App-scoped resource base and CSP source when requested", () => {
+    const document = buildPlainHtmlPreviewDocument(
+      '<html><head><base href="https://untrusted.example/"><link rel="stylesheet" href="assets/app.css"></head><body></body></html>',
+      true,
+      "dark",
+      "sessio-app://localhost/grant-1/",
+    );
+
+    expect(document).toContain('<base href="sessio-app://localhost/grant-1/">');
+    expect(document).toContain("style-src 'unsafe-inline' https://fonts.googleapis.com sessio-app:");
+    expect(document).toContain("connect-src sessio-app:");
+    expect(document).toContain("base-uri sessio-app:");
+    expect(document).not.toContain("https://untrusted.example");
+  });
+
   it("injects the Sessio theme contract and bridge", () => {
     const disabled = buildPlainHtmlPreviewDocument("<main>Static</main>", false, "light");
     const enabled = buildPlainHtmlPreviewDocument("<main>App</main>", true, "dark");
