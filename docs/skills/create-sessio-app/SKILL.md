@@ -252,12 +252,15 @@ JSON-compatible and free of rendering code.
    PowerShell) bypasses staging and replaces the installed data only after you
    have deliberately migrated and reviewed it into the new source schema; the
    publisher does not guess how arbitrary application data should be merged.
-   Other source paths replace matching destination paths, while destination-only
-   files such as runtime
-   screenshots, exports, and saved files remain in place. If a matching path
-   changes between a file and a directory, the source type wins and that
-   conflicting destination path is replaced. Update publishing is not a clean
-   reinstall and does not remove stale destination-only package files.
+   Other source paths replace matching destination paths. The publisher records
+   source-managed paths in a hidden `.sessio-publish-manifest`; on later
+   `--update` runs it removes only previously managed files that disappeared
+   from the source, while destination-only runtime files such as screenshots,
+   exports, and saved files remain in place. Existing installations without a
+   manifest keep unknown destination-only files and begin tracking paths after
+   the next update. If a matching path changes between a file and a directory,
+   the source type wins and that conflicting destination path is replaced.
+   App Store upgrades use the same reconciliation rule.
    The publisher is an execution step, not a completion message: run it after
    validation and then verify that the destination contains `web/<app-slug>.html`,
    `web/<app-slug>-data.js`, `web/config.json`, AGENTS.md, CLAUDE.md, and, when
@@ -895,7 +898,8 @@ Before reporting completion, verify:
       `$SESSIO_APP_HOME/apps/<app-slug>/` using the bundled platform publisher;
       `--update`/`-Update` preserves the existing installed
       `web/<app-slug>-data.js` as well as destination-only runtime screenshots,
-      exports, and saved files. Use `--update-data`/`-UpdateData` only with a
+      exports, and saved files, and removes only stale source-managed paths
+      recorded by `.sessio-publish-manifest`. Use `--update-data`/`-UpdateData` only with a
       reviewed, pre-merged data file after a documented schema migration; the
       publisher itself does not merge arbitrary JS data. When AGENTS.md exists,
       the destination also contains an independent CLAUDE.md copy.

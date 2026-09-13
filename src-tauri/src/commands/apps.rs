@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -72,6 +73,7 @@ pub(crate) struct SessioAppFileWriteResult {
 const MAX_APP_FILE_BYTES: usize = 25 * 1024 * 1024;
 const APP_STORE_RELEASE_PREFIX: &str = "https://github.com/LarchLiu/sessio-web/releases/";
 const MAX_APP_ARCHIVE_BYTES: u64 = 250 * 1024 * 1024;
+const APP_PUBLISH_MANIFEST: &str = ".sessio-publish-manifest";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -247,13 +249,16 @@ fn install_sessio_app_from_archive(
             .join("web")
             .join(format!("{slug}-migrations.js"))
             .is_file();
+        reconcile_published_paths(&source, destination, slug)?;
         copy_tree_merge(&source, destination, "", slug, stage_data_update)?;
         write_claude_instructions(destination)?;
+        write_publish_manifest(destination, &source, slug)?;
     } else {
         let staging = apps_dir.join(format!(".{slug}.publish-{}", Uuid::new_v4().simple()));
         let result = (|| {
             copy_tree_merge(&source, &staging, "", slug, false)?;
             write_claude_instructions(&staging)?;
+            write_publish_manifest(&staging, &source, slug)?;
             fs::rename(&staging, destination).map_err(|error| format!("publish app: {error}"))
         })();
         if result.is_err() {
@@ -262,6 +267,104 @@ fn install_sessio_app_from_archive(
         result?;
     }
     app_info(destination)
+}
+
+fn collect_published_paths(
+    root: &Path,
+    relative: &str,
+    paths: &mut BTreeSet<String>,
+) -> Result<(), String> {
+    for entry in fs::read_dir(root).map_err(|error| format!("read published app tree: {error}"))? {
+        let entry = entry.map_err(|error| format!("read published app entry: {error}"))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if relative.is_empty() && name == APP_PUBLISH_MANIFEST {
+            continue;
+        }
+        let entry_relative = if relative.is_empty() {
+            name.clone()
+        } else {
+            format!("{relative}/{name}")
+        };
+        let entry_path = entry.path();
+        let is_directory = fs::symlink_metadata(&entry_path)
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false);
+        if is_directory {
+            collect_published_paths(&entry_path, &entry_relative, paths)?;
+        } else {
+            paths.insert(entry_relative);
+        }
+    }
+    Ok(())
+}
+
+fn read_publish_manifest(path: &Path) -> Result<BTreeSet<String>, String> {
+    let contents =
+        fs::read_to_string(path).map_err(|error| format!("read publish manifest: {error}"))?;
+    contents
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with("version="))
+        .map(|line| {
+            let path = line.replace('\\', "/");
+            let relative = Path::new(&path);
+            if path == "."
+                || path.starts_with('/')
+                || relative.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                            | std::path::Component::CurDir
+                    )
+                })
+            {
+                return Err("publish manifest contains an unsafe path".to_string());
+            }
+            Ok(path)
+        })
+        .collect()
+}
+
+fn write_publish_manifest(target: &Path, source: &Path, slug: &str) -> Result<(), String> {
+    let mut paths = BTreeSet::new();
+    collect_published_paths(source, "", &mut paths)?;
+    if target.join("web").join(format!("{slug}-data.js")).is_file() {
+        paths.insert(format!("web/{slug}-data.js"));
+    }
+    if source.join("AGENTS.md").is_file() {
+        paths.insert("CLAUDE.md".to_string());
+    }
+    let mut contents = String::from("version=1\n");
+    for path in paths {
+        contents.push_str(&path);
+        contents.push('\n');
+    }
+    fs::write(target.join(APP_PUBLISH_MANIFEST), contents)
+        .map_err(|error| format!("write publish manifest: {error}"))
+}
+
+fn reconcile_published_paths(source: &Path, destination: &Path, slug: &str) -> Result<(), String> {
+    let manifest_path = destination.join(APP_PUBLISH_MANIFEST);
+    if !manifest_path.is_file() {
+        return Ok(());
+    }
+    let mut current = BTreeSet::new();
+    collect_published_paths(source, "", &mut current)?;
+    current.insert(format!("web/{slug}-data.js"));
+    if source.join("AGENTS.md").is_file() {
+        current.insert("CLAUDE.md".to_string());
+    }
+    for path in read_publish_manifest(&manifest_path)? {
+        if current.contains(&path) {
+            continue;
+        }
+        let target = destination.join(&path);
+        if fs::symlink_metadata(&target).is_ok() {
+            remove_path(&target)?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_app_slug(slug: &str) -> Result<(), String> {
@@ -386,7 +489,10 @@ fn write_claude_instructions(target: &Path) -> Result<(), String> {
 }
 
 fn remove_path(path: &Path) -> Result<(), String> {
-    if path.is_dir() {
+    let metadata = fs::symlink_metadata(path).map_err(|error| format!("inspect path: {error}"))?;
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        fs::remove_file(path)
+    } else if metadata.is_dir() {
         fs::remove_dir_all(path)
     } else {
         fs::remove_file(path)
@@ -851,6 +957,38 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove test apps");
+    }
+
+    #[test]
+    fn reconciles_removed_published_files_but_keeps_runtime_files() {
+        let root = test_root();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(source.join("web")).expect("create source web");
+        fs::create_dir_all(destination.join("web")).expect("create destination web");
+        fs::write(source.join("web/example.html"), "old entry").expect("write old entry");
+        fs::write(source.join("web/example-data.js"), "source data").expect("write source data");
+        fs::write(source.join("web/old.js"), "old asset").expect("write old source asset");
+        fs::write(destination.join("web/example.html"), "old entry").expect("copy old entry");
+        fs::write(destination.join("web/example-data.js"), "user data").expect("write user data");
+        fs::write(destination.join("web/old.js"), "old asset").expect("write old asset");
+        fs::create_dir_all(destination.join("web/exports")).expect("create exports");
+        fs::write(destination.join("web/exports/result.json"), "runtime")
+            .expect("write runtime file");
+        write_publish_manifest(&destination, &source, "example").expect("write manifest");
+
+        fs::remove_file(source.join("web/example.html")).expect("remove old source entry");
+        fs::remove_file(source.join("web/old.js")).expect("remove old source asset");
+        fs::write(source.join("web/new.html"), "new entry").expect("write new entry");
+
+        reconcile_published_paths(&source, &destination, "example").expect("reconcile files");
+
+        assert!(!destination.join("web/example.html").exists());
+        assert!(destination.join("web/example-data.js").exists());
+        assert!(destination.join("web/exports/result.json").exists());
+        assert!(!destination.join("web/old.js").exists());
+
+        fs::remove_dir_all(&root).expect("remove reconciliation test app");
     }
 
     #[test]

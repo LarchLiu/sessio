@@ -82,6 +82,7 @@ if ($AppSlug -notmatch '^[a-z0-9]+([.-][a-z0-9]+)*$') {
 $source = (Resolve-Path -LiteralPath $SourceAppDir).Path
 $appsDir = Join-Path $appHome 'apps'
 $destination = Join-Path $appsDir $AppSlug
+$manifestName = '.sessio-publish-manifest'
 if ($UpdateData) {
   $Update = $true
 }
@@ -97,9 +98,60 @@ if ((Test-Path -LiteralPath $destination) -and $Update) {
 }
 $stageDataUpdate = $Update -and -not $UpdateData -and (Test-Path -LiteralPath (Join-Path $source 'web' "${AppSlug}-migrations.js") -PathType Leaf)
 
+function Get-ManagedPaths([string]$Root) {
+  Get-ChildItem -LiteralPath $Root -Recurse -Force | Where-Object {
+    -not $_.PSIsContainer -and $_.Name -ne $manifestName
+  } | ForEach-Object {
+    $_.FullName.Substring($Root.Length).TrimStart([char]'\', [char]'/').Replace('\', '/')
+  } | Sort-Object
+}
+
+function Write-PublishManifest([string]$Target, [string]$Root) {
+  $paths = [System.Collections.Generic.List[string]]::new()
+  [void]$paths.Add('version=1')
+  foreach ($path in Get-ManagedPaths $Root) {
+    [void]$paths.Add($path)
+  }
+  if (-not $UpdateData -and (Test-Path -LiteralPath (Join-Path $Target 'web' "${AppSlug}-data.js") -PathType Leaf)) {
+    [void]$paths.Add("web/${AppSlug}-data.js")
+  }
+  if (Test-Path -LiteralPath (Join-Path $Root 'AGENTS.md') -PathType Leaf) {
+    [void]$paths.Add('CLAUDE.md')
+  }
+  $paths | Sort-Object -Unique | Set-Content -LiteralPath (Join-Path $Target $manifestName) -Encoding UTF8
+}
+
+function Reconcile-ManagedPaths([string]$Root, [string]$Destination) {
+  $oldManifest = Join-Path $Destination $manifestName
+  if (-not (Test-Path -LiteralPath $oldManifest -PathType Leaf)) {
+    return
+  }
+  $current = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($path in Get-ManagedPaths $Root) {
+    [void]$current.Add($path)
+  }
+  if (-not $UpdateData) {
+    [void]$current.Add("web/${AppSlug}-data.js")
+  }
+  if (Test-Path -LiteralPath (Join-Path $Root 'AGENTS.md') -PathType Leaf) {
+    [void]$current.Add('CLAUDE.md')
+  }
+  foreach ($oldPath in Get-Content -LiteralPath $oldManifest) {
+    if ([string]::IsNullOrWhiteSpace($oldPath) -or $oldPath -like 'version=*' -or $current.Contains($oldPath)) {
+      continue
+    }
+    $targetPath = Join-Path $Destination ($oldPath.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+    if (Test-Path -LiteralPath $targetPath) {
+      Remove-Item -LiteralPath $targetPath -Recurse -Force
+    }
+  }
+}
+
 New-Item -ItemType Directory -Path $appsDir -Force | Out-Null
 if ((Test-Path -LiteralPath $destination) -and $Update) {
+  Reconcile-ManagedPaths $source $destination
   Merge-AppTree $source $destination '' $stageDataUpdate
+  Write-PublishManifest $destination $source
   Write-ClaudeInstructions $destination
   [Console]::Out.WriteLine($destination)
   exit 0
@@ -111,6 +163,7 @@ try {
   New-Item -ItemType Directory -Path $staging -Force | Out-Null
   Merge-AppTree $source $staging '' $stageDataUpdate
   Write-ClaudeInstructions $staging
+  Write-PublishManifest $staging $source
   Move-Item -LiteralPath $staging -Destination $destination
   $staging = $null
   [Console]::Out.WriteLine($destination)

@@ -45,6 +45,7 @@ fi
 source_dir=$(cd "$source_dir" && pwd -P)
 apps_dir="$SESSIO_APP_HOME/apps"
 destination="$apps_dir/$app_slug"
+manifest_name='.sessio-publish-manifest'
 stage_data_update=false
 
 if [[ ( -e "$destination" || -L "$destination" ) && "$update" != true ]]; then
@@ -60,6 +61,63 @@ fi
 if [[ "$update" == true && "$update_data" != true && -f "$source_dir/web/$app_slug-migrations.js" ]]; then
   stage_data_update=true
 fi
+
+collect_managed_paths() {
+  local root=$1
+  (
+    cd "$root"
+    find . -mindepth 1 \( -type f -o -type l \) ! -name "$manifest_name" -print \
+      | sed 's#^\./##' \
+      | sort
+  )
+}
+
+write_manifest() {
+  local target=$1
+  local root=$2
+  local manifest_path="$target/$manifest_name"
+  {
+    printf 'version=1\n'
+    collect_managed_paths "$root"
+    if [[ "$update_data" != true && -f "$target/web/$app_slug-data.js" ]]; then
+      printf 'web/%s-data.js\n' "$app_slug"
+    fi
+    if [[ -f "$root/AGENTS.md" ]]; then
+      printf 'CLAUDE.md\n'
+    fi
+  } | awk 'NF && !seen[$0]++' > "$manifest_path"
+}
+
+reconcile_managed_paths() {
+  local old_manifest="$destination/$manifest_name"
+  local current_manifest
+  local old_path
+  local target_path
+  if [[ ! -f "$old_manifest" ]]; then
+    return
+  fi
+  current_manifest=$(mktemp)
+  trap 'rm -f "$current_manifest"' RETURN
+  collect_managed_paths "$source_dir" > "$current_manifest"
+  if [[ "$update_data" != true ]]; then
+    printf 'web/%s-data.js\n' "$app_slug" >> "$current_manifest"
+  fi
+  if [[ -f "$source_dir/AGENTS.md" ]]; then
+    printf 'CLAUDE.md\n' >> "$current_manifest"
+  fi
+  sort -u "$current_manifest" -o "$current_manifest"
+  while IFS= read -r old_path; do
+    [[ -z "$old_path" || "$old_path" == version=* ]] && continue
+    if ! grep -Fqx "$old_path" "$current_manifest"; then
+      target_path="$destination/$old_path"
+      if [[ -e "$target_path" || -L "$target_path" ]]; then
+        rm -rf -- "$target_path"
+      fi
+    fi
+  done < "$old_manifest"
+  rm -f "$current_manifest"
+  trap - RETURN
+}
 
 copy_tree_merge() {
   local source=$1
@@ -113,7 +171,9 @@ write_claude_instructions() {
 
 mkdir -p "$apps_dir"
 if [[ "$update" == true && -d "$destination" ]]; then
+  reconcile_managed_paths
   copy_tree_merge "$source_dir" "$destination"
+  write_manifest "$destination" "$source_dir"
   write_claude_instructions "$destination"
   printf '%s\n' "$destination"
   exit 0
@@ -127,6 +187,7 @@ trap cleanup EXIT
 
 copy_tree_merge "$source_dir" "$staging"
 write_claude_instructions "$staging"
+write_manifest "$staging" "$source_dir"
 mv "$staging" "$destination"
 trap - EXIT
 printf '%s\n' "$destination"
